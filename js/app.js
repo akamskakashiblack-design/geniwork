@@ -585,56 +585,68 @@ function _handleGoogleCredential(response) {
 /* Crée ou connecte un compte via Google */
 function _googleLogin(gUser) {
   _showGoogleLoading('Finalisation…');
+  var email = (gUser.email || '').toLowerCase();
 
-  var users   = getUsers();
-  var email   = (gUser.email || '').toLowerCase();
-  var existing = null;
+  /* Toujours vérifier Firebase en priorité pour éviter les doublons */
+  function _doGoogleLogin(users) {
+    var existing = null;
 
-  /* 1. Cherche par googleId (compte Google existant) */
-  existing = users.find(function(u) { return u.googleId === gUser.googleId; });
+    /* 1. Cherche par googleId */
+    existing = users.find(function(u) { return u.googleId === gUser.googleId; });
 
-  /* 2. Cherche par email (compte classique avec même email → lie le compte) */
-  if (!existing) {
-    existing = users.find(function(u) {
-      return u.email.toLowerCase() === email;
-    });
-    if (existing) {
-      /* Lie le compte existant à Google */
-      existing.googleId = gUser.googleId;
+    /* 2. Cherche par email */
+    if (!existing) {
+      existing = users.find(function(u) { return u.email.toLowerCase() === email; });
+      if (existing) {
+        existing.googleId = gUser.googleId;
+        saveUsers(users);
+      }
+    }
+
+    /* 3. Crée le compte si vraiment nouveau */
+    if (!existing) {
+      existing = {
+        nom:      gUser.nom,
+        email:    email,
+        password: null,
+        verified: true,
+        googleId: gUser.googleId,
+        loginMethod: 'google'
+      };
+      users.push(existing);
       saveUsers(users);
     }
+
+    /* Sync localStorage avec la liste Firebase */
+    try { localStorage.setItem('gw_users', JSON.stringify(users)); } catch(e){}
+
+    /* Importe/met à jour la photo Google dans le profil */
+    if (gUser.photo) _importGooglePhoto(email, gUser.nom, gUser.photo);
+
+    setTimeout(function() {
+      _hideGoogleLoading();
+      if (!_gwCheckBanOnLogin(existing.email)) return;
+      _currentUser = { nom: existing.nom, email: existing.email, loginMethod: 'google' };
+      _gwCreateSession(_currentUser);
+      goTo('screen-app');
+      initApp(_currentUser);
+      showToast('Bienvenue ' + existing.nom + ' !', 'ok');
+    }, 600);
   }
 
-  /* 3. Crée un nouveau compte Google */
-  if (!existing) {
-    existing = {
-      nom:      gUser.nom,
-      email:    email,
-      password: null,          /* Pas de mot de passe pour les comptes Google */
-      verified: true,
-      googleId: gUser.googleId,
-      loginMethod: 'google'
-    };
-    users.push(existing);
-    saveUsers(users);
+  /* Charge les utilisateurs depuis Firebase d'abord */
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/users').once('value').then(function(snap) {
+      var fbUsers = snap.val();
+      var users = Array.isArray(fbUsers) ? fbUsers : getUsers();
+      _doGoogleLogin(users);
+    }).catch(function() {
+      _doGoogleLogin(getUsers());
+    });
+  } else {
+    _doGoogleLogin(getUsers());
   }
 
-  /* Importe/met à jour la photo Google dans le profil */
-  if (gUser.photo) {
-    _importGooglePhoto(email, gUser.nom, gUser.photo);
-  }
-
-  /* Connexion */
-  setTimeout(function() {
-    _hideGoogleLoading();
-    /* Vérification du ban */
-    if (!_gwCheckBanOnLogin(existing.email)) return;
-    _currentUser = { nom: existing.nom, email: existing.email, loginMethod: 'google' };
-    _gwCreateSession(_currentUser);
-    goTo('screen-app');
-    initApp(_currentUser);
-    showToast('Bienvenue ' + existing.nom + ' !', 'ok');
-  }, 600);
 }
 
 /* Importe la photo Google → profil Geniwork (canvas resize) */
@@ -994,11 +1006,6 @@ function doRegister() {
   if (!email || !email.includes('@') || !email.includes('.')) {
     showToast('Adresse e-mail invalide', 'err'); return;
   }
-  /* Email déjà utilisé */
-  if (findUser(email)) {
-    setEmailError(true);
-    showToast('Cette adresse e-mail est déjà utilisée', 'err'); return;
-  }
   if (!isPasswordValid(pwd)) {
     showToast('Le mot de passe ne respecte pas les règles', 'err'); return;
   }
@@ -1006,17 +1013,38 @@ function doRegister() {
     showToast('Les mots de passe ne correspondent pas', 'err'); return;
   }
 
-  /* ─ Génère le code de vérification ─ */
-  _verifyCode  = generateCode();
-  _verifyEmail = email;
-  _verifyData  = { nom: nom, email: email, password: pwd, verified: false };
+  /* ─ Vérification email : d'abord localStorage, puis Firebase ─ */
+  if (findUser(email)) {
+    setEmailError(true);
+    showToast('Cette adresse e-mail est déjà utilisée', 'err'); return;
+  }
 
-  /* Affiche l'écran de vérification */
-  document.getElementById('verify-email-display').textContent = email;
-  document.getElementById('demo-code-display').textContent    = _verifyCode;
-  clearCodeInputs(['c1','c2','c3','c4']);
+  /* Vérifie aussi dans Firebase (au cas où localStorage pas encore chargé) */
+  function _proceedRegister() {
+    _verifyCode  = generateCode();
+    _verifyEmail = email;
+    _verifyData  = { nom: nom, email: email, password: pwd, verified: false };
+    document.getElementById('verify-email-display').textContent = email;
+    document.getElementById('demo-code-display').textContent    = _verifyCode;
+    clearCodeInputs(['c1','c2','c3','c4']);
+    goTo('screen-verify');
+  }
 
-  goTo('screen-verify');
+  if (_gwFbReady && _gwFbDB) {
+    showToast('Vérification en cours…', 'info');
+    _gwFbDB.ref('gw/users').once('value').then(function(snap) {
+      var fbUsers = snap.val();
+      if (Array.isArray(fbUsers) && fbUsers.find(function(u){ return u.email && u.email.toLowerCase() === email; })) {
+        setEmailError(true);
+        showToast('Cette adresse e-mail est déjà utilisée', 'err'); return;
+      }
+      _proceedRegister();
+    }).catch(function() {
+      _proceedRegister();
+    });
+  } else {
+    _proceedRegister();
+  }
 
   /* Code affiché à l'écran (démo) — production : envoi par email côté serveur */
 }
