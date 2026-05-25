@@ -285,6 +285,47 @@ function _gwFbSyncStart() {
   if (_currentUser) _gwFbWatchUserNotifs(_currentUser.email);
 }
 
+/* ── Merge un snapshot Firebase DM dans localStorage ── */
+function _gwMergeDM(snap) {
+  if (!_currentUser || !snap) return;
+  var dmKey = snap.key;
+  var data  = snap.val();
+  if (!data || !Array.isArray(data.messages)) return;
+  /* Ignorer les DMs qui ne concernent pas l'utilisateur connecté */
+  var myFbPart = _gwFbKey(_currentUser.email);
+  if (dmKey.indexOf(myFbPart) === -1) return;
+  /* Reconstituer la clé localStorage */
+  var lsKey = dmKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+  try {
+    var existing = null;
+    try { existing = JSON.parse(localStorage.getItem(lsKey)); } catch(e){}
+    var stored = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
+    var storedMap = {};
+    stored.forEach(function(m) { storedMap[String(m.id)] = true; });
+    var changed = false;
+    data.messages.forEach(function(m) {
+      if (m && m.id && !storedMap[String(m.id)]) {
+        stored.push(m);
+        changed = true;
+      }
+    });
+    if (changed) {
+      stored.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+      localStorage.setItem(lsKey, JSON.stringify({ messages: stored, lastMsg: data.lastMsg, lastAt: data.lastAt }));
+      /* Rafraîchit la conv si elle est ouverte */
+      try {
+        var openConv = _dmConvs.find(function(c) {
+          return !c.isGroup && _getDMKey(_currentUser.email, c.email) === lsKey;
+        });
+        if (openConv && document.getElementById('dm-messages-list')) {
+          _loadDMConv(openConv);
+          renderDMMessages(openConv);
+        }
+      } catch(e){}
+    }
+  } catch(e){}
+}
+
 /* ── Active le listener notifs pour un utilisateur ── */
 function _gwFbWatchUserNotifs(email) {
   if (!_gwFbReady || !_gwFbDB || !email) return;
@@ -1471,6 +1512,24 @@ function initApp(user) {
 
   /* ── Firebase : écoute les notifs en temps réel pour cet utilisateur ── */
   _gwFbWatchUserNotifs(user.email);
+
+  /* ── Firebase : sync DMs et inbox en temps réel ── */
+  if (_gwFbReady && _gwFbDB && user.email) {
+    var _myFbKey = _gwFbKey(user.email);
+
+    /* Inbox : quelqu'un m'a envoyé un message → je vois sa conv apparaître */
+    _gwFbDB.ref('gw/inboxes/' + _myFbKey).on('value', function(snap) {
+      var inbox = snap.val();
+      if (!inbox || !_currentUser) return;
+      var list = Array.isArray(inbox) ? inbox : Object.values(inbox);
+      try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(list)); } catch(e){}
+      try { _checkDMInbox(); } catch(e){}
+    });
+
+    /* DMs : écoute tous les nouveaux messages qui me concernent */
+    _gwFbDB.ref('gw/dms').on('child_added',   function(snap) { try { _gwMergeDM(snap); } catch(e){} });
+    _gwFbDB.ref('gw/dms').on('child_changed', function(snap) { try { _gwMergeDM(snap); } catch(e){} });
+  }
 
   /* Initiales de l'avatar */
   var initials = getInitials(user.nom);
@@ -10886,12 +10945,19 @@ function _saveDMConv(conv) {
       return m;
     });
 
-    localStorage.setItem(key, JSON.stringify({
+    var dmData = {
       messages: mergedForStorage,
       lastMsg:  conv.lastMsg,
       lastAt:   conv.lastAt || Date.now(),
       time:     conv.time
-    }));
+    };
+    localStorage.setItem(key, JSON.stringify(dmData));
+
+    /* ── Sync Firebase ── */
+    if (_gwFbReady && _gwFbDB) {
+      var _fbDmKey = key.replace(/\./g,'__d__').replace(/@/g,'__a__');
+      _gwFbDB.ref('gw/dms/' + _fbDmKey).set(dmData).catch(function(){});
+    }
   } catch(e) {}
 }
 
@@ -20357,6 +20423,12 @@ function _writeDMInbox(toEmail, fromEmail, fromName, fromRole, lastMsg) {
       });
     }
     localStorage.setItem(key, JSON.stringify(inbox));
+
+    /* ── Sync Firebase ── */
+    if (_gwFbReady && _gwFbDB) {
+      var _fbInboxKey = toEmail.replace(/\./g,'__d__').replace(/@/g,'__a__');
+      _gwFbDB.ref('gw/inboxes/' + _fbInboxKey).set(inbox).catch(function(){});
+    }
   } catch(e) {}
 }
 
