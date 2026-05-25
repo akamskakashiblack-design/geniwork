@@ -2079,9 +2079,8 @@ function initApp(user) {
       try { _checkDMInbox(); } catch(e){}
     });
 
-    /* DMs */
-    _gwFbDB.ref('gw/dms').on('child_added',   function(snap) { try { _gwMergeDM(snap); } catch(e){} });
-    _gwFbDB.ref('gw/dms').on('child_changed', function(snap) { try { _gwMergeDM(snap); } catch(e){} });
+    /* DMs : gw/dm_msgs (per-message, atomique) est l'unique source de vérité désormais.
+       Les anciens listeners gw/dms sont supprimés pour éviter les doublons et conflits. */
 
     /* Profils des autres utilisateurs — child_added charge tous les profils existants au login,
        child_changed met à jour en temps réel quand un profil change */
@@ -8986,13 +8985,22 @@ function openUserProfileView(userInfo) {
     : null;
   var isDemo    = !userInfo.email;
   var followers = _getTotalFollowers(profileKey, isDemo);
-  /* Projets et abonnements : données réelles ou base démo fixe */
-  var seedProj = _getSeedNum('proj_' + profileKey, 2, 50);
-  var seedFllw = _getSeedNum('fllw_' + profileKey, 5, 120);
-  _t('upv-stat-projects',  (profile && profile.projects) || seedProj);
+  /* Projets et abonnements : 0 pour les vrais utilisateurs, chiffres fixes pour les démos */
+  var dispProj = isDemo ? _getSeedNum('proj_' + profileKey, 2, 50)
+                        : (profile && profile.projects ? profile.projects : loadProjects(userInfo.email).length);
+  var dispFllw = isDemo ? _getSeedNum('fllw_' + profileKey, 5, 120)
+                        : getFollowing().filter(function(f) {
+                            return f.email === userInfo.email ||
+                                   (f.email && userInfo.email && f.email === userInfo.email);
+                          }).length;
+  /* Pour l'utilisateur courant, récupérer sa vraie liste d'abonnements */
+  if (!isDemo && _currentUser && userInfo.email === _currentUser.email) {
+    dispFllw = getFollowing().length;
+  }
+  _t('upv-stat-projects',  dispProj);
   _t('upv-stat-rating',    avg ? avg + ' ★' : '—');
   _t('upv-stat-followers', followers);
-  _t('upv-stat-following', (profile && profile.following) || seedFllw);
+  _t('upv-stat-following', dispFllw);
 
   /* Bio */
   var bioEl = document.getElementById('upv-bio');
@@ -9766,97 +9774,8 @@ function _newConvId() {
   return Date.now() * 1000 + (++_convIdCounter % 1000);
 }
 
-var DEMO_CONVERSATIONS = [
-  {
-    id: 1,
-    name: 'Marie Dupont',
-    role: 'Designer UI/UX',
-    verified: true, online: true,
-    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1494790108755-2616b612b786?w=120&q=80' },
-    lastAt: _D - 1800000,   /* il y a 30 min */
-    lastMsg: 'Bonjour ! J\'ai bien reçu votre brief, je vous propose qu\'on échange…',
-    unread: 2, archived: false,
-    messages: [
-      { id:1, from:'them', text:'Bonjour ! J\'ai bien reçu votre brief.',                                      at: _D - 5400000 },
-      { id:2, from:'me',   text:'Super, merci ! Vous avez des questions ?',                                    at: _D - 4800000 },
-      { id:3, from:'them', text:'Oui, quelques précisions sur les couleurs souhaitées.',                       at: _D - 3600000 },
-      { id:4, from:'them', text:'J\'ai bien reçu votre brief, je vous propose qu\'on échange rapidement.',     at: _D - 1800000 }
-    ]
-  },
-  {
-    id: 2,
-    name: 'Thomas Martin',
-    role: 'Développeur Fullstack',
-    verified: true, online: true,
-    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=120&q=80' },
-    lastAt: _D - 3600000,   /* il y a 1h */
-    lastMsg: 'Parfait, merci pour ces informations. Je vous envoie ça rapidement.',
-    unread: 1, archived: false,
-    messages: [
-      { id:1, from:'me',   text:'Bonjour Thomas, avez-vous pu consulter mon projet ?',                        at: _D - 7200000 },
-      { id:2, from:'them', text:'Oui, c\'est bien noté. Je travaille dessus ce matin.',                       at: _D - 5400000 },
-      { id:3, from:'me',   text:'Merci beaucoup ! Prenez le temps qu\'il faut.',                              at: _D - 4200000 },
-      { id:4, from:'them', text:'Parfait, merci pour ces informations. Je vous envoie ça rapidement.',        at: _D - 3600000 }
-    ]
-  },
-  {
-    id: 3,
-    name: 'Sophie Bernard',
-    role: 'Graphiste & Illustratrice',
-    verified: true, online: true,
-    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=120&q=80' },
-    lastAt: _D - 86400000,  /* hier */
-    lastMsg: 'Le design est prêt, j\'aimerais avoir votre avis.',
-    unread: 0, archived: false,
-    messages: [
-      { id:1, from:'them', text:'Bonjour ! J\'ai terminé la première version du design.',   at: _D - 104400000 },
-      { id:2, from:'me',   text:'Excellent, j\'ai hâte de voir ça !',                       at: _D - 100800000 },
-      { id:3, from:'them', text:'Le design est prêt, j\'aimerais avoir votre avis.',        at: _D - 86400000  }
-    ]
-  },
-  {
-    id: 4,
-    name: 'Julien Morel',
-    role: 'Consultant Marketing',
-    verified: false, online: true,
-    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=120&q=80' },
-    lastAt: _D - 90000000,  /* hier */
-    lastMsg: 'Merci pour votre confiance ! N\'hésitez pas si vous avez…',
-    unread: 0, archived: false,
-    messages: [
-      { id:1, from:'me',   text:'Merci pour votre travail Julien, très satisfait !',                                     at: _D - 97200000 },
-      { id:2, from:'them', text:'Merci pour votre confiance ! N\'hésitez pas si vous avez d\'autres besoins.',          at: _D - 90000000 }
-    ]
-  },
-  {
-    id: 5,
-    name: 'Agence Innovate',
-    role: 'Agence digitale',
-    verified: false, online: false,
-    avatar: { type: 'color', color: '#1E3A5F', initials: 'AI' },
-    lastAt: _D - 172800000, /* il y a 2 jours */
-    lastMsg: 'Nous serions ravis de collaborer avec vous sur ce projet.',
-    unread: 0, archived: false,
-    messages: [
-      { id:1, from:'them', text:'Bonjour, nous avons vu votre profil Geniwork.',                             at: _D - 180000000 },
-      { id:2, from:'them', text:'Nous serions ravis de collaborer avec vous sur ce projet.',                 at: _D - 172800000 }
-    ]
-  },
-  {
-    id: 6,
-    name: 'Camille Leroy',
-    role: 'Chef de projet',
-    verified: false, online: false,
-    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=120&q=80' },
-    lastAt: _D - 259200000, /* il y a 3 jours */
-    lastMsg: 'Pouvez-vous me partager le cahier des charges ?',
-    unread: 0, archived: false,
-    messages: [
-      { id:1, from:'them', text:'Bonjour, suite à notre échange, pouvez-vous me partager le cahier des charges ?',  at: _D - 266400000 },
-      { id:2, from:'me',   text:'Bien sûr, je vous l\'envoie dès aujourd\'hui.',                                    at: _D - 259200000 }
-    ]
-  }
-];
+/* Conversations réelles uniquement — plus de messages démo fictifs */
+var DEMO_CONVERSATIONS = [];
 
 var _msgTab          = 'all';
 var _chatConvId      = null;
@@ -15427,19 +15346,23 @@ function doLogout() {
   /* Nettoyage listeners Firebase pour éviter accumulation */
   try {
     if (_gwFbDB) {
-      if (_gwFbDB._prevInboxRef) { _gwFbDB._prevInboxRef.off(); _gwFbDB._prevInboxRef = null; }
+      if (_gwFbDB._prevInboxRef)    { _gwFbDB._prevInboxRef.off();    _gwFbDB._prevInboxRef    = null; }
       if (_gwFbDB._prevGrpInboxRef) { _gwFbDB._prevGrpInboxRef.off(); _gwFbDB._prevGrpInboxRef = null; }
-      _gwFbDB.ref('gw/dms').off('child_added');
-      _gwFbDB.ref('gw/dms').off('child_changed');
       _gwFbDB.ref('gw/profiles').off('child_added');
       _gwFbDB.ref('gw/profiles').off('child_changed');
       _gwFbDB.ref('gw/group_msgs').off('child_added');
       _gwFbDB.ref('gw/group_msgs').off('child_changed');
+      _gwFbDB.ref('gw/dm_msgs').off('child_added');
       if (_currentUser) {
         _gwFbDB.ref('gw/notifs/' + _gwFbKey(_currentUser.email)).off();
       }
     }
   } catch(e){}
+  /* Nettoyer le listener DM actif + mémoire des IDs synced */
+  if (_gwActiveDMRef) { try { _gwActiveDMRef.off(); } catch(e){} _gwActiveDMRef = null; }
+  _gwSyncedMsgIds = {};
+  /* Vider les conversations en mémoire — seront rechargées au prochain login */
+  DEMO_CONVERSATIONS.length = 0;
   _currentUser = null;
   localStorage.removeItem('gw_session');
   _pickedImages = [];
