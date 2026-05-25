@@ -723,10 +723,35 @@ function _gwPreloadUserData(user, callback) {
     var notifs = snaps[1].val();
     if (notifs) try { localStorage.setItem('gw_notifs_' + user.email, JSON.stringify(notifs)); } catch(e){}
     var profile = snaps[2].val();
-    if (profile) {
+    {
       var existing = loadUserProfile(user.email) || {};
-      var merged = Object.assign({}, profile, existing.photo ? { photo: existing.photo } : {});
-      try { localStorage.setItem('gw_profile_' + user.email, JSON.stringify(merged)); } catch(e){}
+      var merged;
+      if (profile) {
+        if (profile.photo) {
+          /* Firebase a une photo → c'est la plus récente (sync multi-appareils) */
+          merged = Object.assign({}, existing, profile);
+        } else if (existing.photo) {
+          /* Firebase n'a pas de photo mais locale si → on fusionne ET on renvoie vers Firebase */
+          merged = Object.assign({}, profile, { photo: existing.photo });
+          /* Ré-upload silencieux pour que les autres appareils voient la photo */
+          try {
+            if (_gwFbReady && _gwFbDB) {
+              _gwFbDB.ref('gw/profiles/' + fbKey).set(merged).catch(function(){});
+            }
+          } catch(e){}
+        } else {
+          merged = Object.assign({}, existing, profile);
+        }
+      } else {
+        /* Pas de profil Firebase du tout → crée-le depuis le local */
+        merged = Object.assign({}, existing);
+        if (merged && Object.keys(merged).length && _gwFbReady && _gwFbDB) {
+          try { _gwFbDB.ref('gw/profiles/' + fbKey).set(merged).catch(function(){}); } catch(e){}
+        }
+      }
+      if (merged && Object.keys(merged).length) {
+        try { localStorage.setItem('gw_profile_' + user.email, JSON.stringify(merged)); } catch(e){}
+      }
     }
     /* ── Conversations DM de cet utilisateur ── */
     var allDMs = snaps[3].val() || {};
@@ -1732,6 +1757,8 @@ function initApp(user) {
       if (_gwFbDB._prevInboxRef) _gwFbDB._prevInboxRef.off();
       _gwFbDB.ref('gw/dms').off('child_added');
       _gwFbDB.ref('gw/dms').off('child_changed');
+      _gwFbDB.ref('gw/profiles').off('child_added');
+      _gwFbDB.ref('gw/profiles').off('child_changed');
     }
   } catch(e){}
 
@@ -1757,21 +1784,32 @@ function initApp(user) {
     _gwFbDB.ref('gw/dms').on('child_added',   function(snap) { try { _gwMergeDM(snap); } catch(e){} });
     _gwFbDB.ref('gw/dms').on('child_changed', function(snap) { try { _gwMergeDM(snap); } catch(e){} });
 
-    /* Profils des autres utilisateurs */
-    _gwFbDB.ref('gw/profiles').on('child_changed', function(snap) {
+    /* Profils des autres utilisateurs — child_added charge tous les profils existants au login,
+       child_changed met à jour en temps réel quand un profil change */
+    function _onProfileSnap(snap) {
       try {
-        var fbKey = snap.key;
-        var data  = snap.val();
+        var pFbKey = snap.key;
+        var data   = snap.val();
         if (!data) return;
-        var email2 = fbKey.replace(/__d__/g,'.').replace(/__a__/g,'@');
-        var existing = loadUserProfile(email2) || {};
-        /* Merge sans écraser la photo locale si pas de photo Firebase */
-        var merged = Object.assign({}, existing, data);
-        localStorage.setItem('gw_profile_' + email2, JSON.stringify(merged));
-        /* Rafraîchit le feed pour mettre à jour les avatars */
-        if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e){} }
+        var email2 = pFbKey.replace(/__d__/g,'.').replace(/__a__/g,'@');
+        var existing2 = loadUserProfile(email2) || {};
+        /* Firebase est source de vérité — on prend la photo Firebase si elle existe,
+           sinon on garde la photo locale (et on re-pousse vers Firebase pour le propriétaire) */
+        var merged2;
+        if (data.photo) {
+          merged2 = Object.assign({}, existing2, data);
+        } else if (existing2.photo) {
+          merged2 = Object.assign({}, existing2, data, { photo: existing2.photo });
+        } else {
+          merged2 = Object.assign({}, existing2, data);
+        }
+        try { localStorage.setItem('gw_profile_' + email2, JSON.stringify(merged2)); } catch(e2){}
+        /* Rafraîchit le feed pour mettre à jour les avatars (debounce 300ms) */
+        if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e2){} }
       } catch(e){}
-    });
+    }
+    _gwFbDB.ref('gw/profiles').on('child_added',   _onProfileSnap);
+    _gwFbDB.ref('gw/profiles').on('child_changed', _onProfileSnap);
 
     /* Charge les posts depuis Firebase au login (correction BUG 3 & 7) */
     _gwFbDB.ref('gw/posts').once('value').then(function(snap) {
@@ -14841,6 +14879,7 @@ function doLogout() {
       if (_gwFbDB._prevInboxRef) { _gwFbDB._prevInboxRef.off(); _gwFbDB._prevInboxRef = null; }
       _gwFbDB.ref('gw/dms').off('child_added');
       _gwFbDB.ref('gw/dms').off('child_changed');
+      _gwFbDB.ref('gw/profiles').off('child_added');
       _gwFbDB.ref('gw/profiles').off('child_changed');
       if (_currentUser) {
         _gwFbDB.ref('gw/notifs/' + _gwFbKey(_currentUser.email)).off();
