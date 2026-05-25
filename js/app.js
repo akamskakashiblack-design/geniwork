@@ -244,6 +244,68 @@ function _gwFbSyncStart() {
   _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
   _gwFbDB.ref('gw/posts').on('child_changed', function(snap) { try { _gwMergePost(snap); } catch(e){} });
 
+  /* ── Likes (temps réel entre appareils) ── */
+  _gwFbDB.ref('gw/likes').on('child_changed', function(snap) {
+    try {
+      var postId = snap.key;
+      var likers = snap.val();
+      if (!Array.isArray(likers)) return;
+      localStorage.setItem('gw_likers_' + postId, JSON.stringify(likers));
+      var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+      if (post) {
+        post.likers = likers;
+        if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e){} }
+      }
+    } catch(e){}
+  });
+
+  /* ── Commentaires (temps réel entre appareils) ── */
+  _gwFbDB.ref('gw/comments').on('child_changed', function(snap) {
+    try {
+      var postId = snap.key;
+      var comments = snap.val();
+      if (!Array.isArray(comments)) return;
+      localStorage.setItem('gw_comments_' + postId, JSON.stringify(comments));
+      /* Rafraîchit le post ouvert si besoin */
+      var openDetail = document.getElementById('post-detail-wrap');
+      if (openDetail && openDetail.dataset && openDetail.dataset.postId === String(postId)) {
+        try { openPostDetail(parseInt(postId, 10)); } catch(e){}
+      }
+    } catch(e){}
+  });
+
+  /* ── Compteurs d'abonnés (temps réel) ── */
+  _gwFbDB.ref('gw/follow_counts').on('child_changed', function(snap) {
+    try {
+      var key = snap.key;
+      var count = snap.val();
+      if (typeof count !== 'number') return;
+      localStorage.setItem('gw_fc_' + key, count);
+      /* Rafraîchit le compteur si le profil est ouvert */
+      var countEl = document.getElementById('upv-stat-followers');
+      if (countEl && _upvTarget && getProfileKey(_upvTarget) === key) {
+        countEl.textContent = _getTotalFollowers(key, false);
+      }
+      /* Profil perso */
+      if (_currentUser) {
+        var myKey = getProfileKey({ nom: _currentUser.nom, email: _currentUser.email });
+        if (key === myKey) {
+          var follEl = document.getElementById('pstat-followers');
+          if (follEl) follEl.textContent = _getTotalFollowers(myKey, false);
+        }
+      }
+    } catch(e){}
+  });
+
+  /* ── Following (restaure la liste d'abonnements au login) ── */
+  _gwFbDB.ref('gw/follow_counts').on('child_added', function(snap) {
+    try {
+      var key = snap.key;
+      var count = snap.val();
+      if (typeof count === 'number') localStorage.setItem('gw_fc_' + key, count);
+    } catch(e){}
+  });
+
   /* ── Bans ── */
   _listen('bans', 'gw_bans', function() {
     if (_adminUser) { try { _admUpdateNavBadges(); } catch(e){} }
@@ -783,7 +845,9 @@ function _gwPreloadUserData(user, callback) {
     _gwFbDB.ref('gw/profiles/' + fbKey).once('value'),
     _gwFbDB.ref('gw/dms').once('value'),
     _gwFbDB.ref('gw/group_inboxes/' + fbKey).once('value'),
-    _gwFbDB.ref('gw/group_msgs').once('value')
+    _gwFbDB.ref('gw/group_msgs').once('value'),
+    _gwFbDB.ref('gw/following/' + fbKey).once('value'),
+    _gwFbDB.ref('gw/follow_counts').once('value')
   ]).then(function(snaps) {
     var inboxRaw = snaps[0].val();
     if (inboxRaw) {
@@ -877,6 +941,23 @@ function _gwPreloadUserData(user, callback) {
         localStorage.setItem(grpLsKey, JSON.stringify({ messages: mergedGrp, lastMsg: grpData.lastMsg, lastAt: grpData.lastAt }));
       } catch(e){}
     });
+
+    /* ── Following list (restaurée depuis Firebase au login) ── */
+    var followingFb = snaps[6] ? snaps[6].val() : null;
+    if (followingFb && Array.isArray(followingFb)) {
+      try { localStorage.setItem('gw_following_' + user.email, JSON.stringify(followingFb)); } catch(e){}
+    }
+
+    /* ── Compteurs d'abonnés de tous les utilisateurs ── */
+    var fcAll = snaps[7] ? snaps[7].val() : null;
+    if (fcAll && typeof fcAll === 'object') {
+      Object.keys(fcAll).forEach(function(key) {
+        var count = fcAll[key];
+        if (typeof count === 'number') {
+          localStorage.setItem('gw_fc_' + key, count);
+        }
+      });
+    }
 
     callback();
   }).catch(function() { callback(); });
@@ -5243,6 +5324,9 @@ function loadPostLikers(postId) {
 }
 function savePostLikers(postId, likers) {
   localStorage.setItem('gw_likers_' + postId, JSON.stringify(likers));
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/likes/' + postId).set(likers).catch(function(){});
+  }
 }
 
 function loadUserComments(postId) {
@@ -5250,6 +5334,9 @@ function loadUserComments(postId) {
 }
 function saveUserComments(postId, comments) {
   localStorage.setItem('gw_comments_' + postId, JSON.stringify(comments));
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/comments/' + postId).set(comments).catch(function(){});
+  }
 }
 
 /* Récupère réactions d'un commentaire (👍/👎) */
@@ -6344,10 +6431,13 @@ function _gwCapturePhoto() {
   canvas.getContext('2d').drawImage(vid, 0, 0);
   var dataUrl = canvas.toDataURL('image/jpeg', 0.92);
 
-  /* Ajoute à _pickedImages comme une photo normale */
+  /* Ajoute à _pickedImages comme une photo normale (compressée) */
   if (_pickedVideo) { _clearVideo(); }
   if (_pickedImages.length < 6) {
-    _pickedImages.push(dataUrl);
+    _compressImageForChat(dataUrl, 200000, function(compressed) {
+      _pickedImages.push(compressed);
+      renderImgPreviews();
+    });
   }
 
   /* Flash blanc */
@@ -6524,9 +6614,12 @@ function handleImgPick(input) {
   files.forEach(function(file) {
     var reader = new FileReader();
     reader.onload = function(e) {
-      _pickedImages.push(e.target.result);
-      loaded++;
-      if (loaded === files.length) renderImgPreviews();
+      /* Comprimer toutes les photos dès la sélection → petites en mémoire et dans Firebase */
+      _compressImageForChat(e.target.result, 200000, function(compressed) {
+        _pickedImages.push(compressed);
+        loaded++;
+        if (loaded === files.length) renderImgPreviews();
+      });
     };
     reader.readAsDataURL(file);
   });
@@ -8659,15 +8752,25 @@ function getFollowing() {
 function saveFollowing(list) {
   if (!_currentUser) return;
   localStorage.setItem('gw_following_' + _currentUser.email, JSON.stringify(list));
+  if (_gwFbReady && _gwFbDB) {
+    var _myFbKey = _gwFbKey(_currentUser.email);
+    _gwFbDB.ref('gw/following/' + _myFbKey).set(list).catch(function(){});
+  }
 }
 function isFollowing(profileKey) {
   return getFollowing().some(function(f) { return f.key === profileKey; });
 }
 
-/* ── Compteur d'abonnés dynamiques (vrais follows) ── */
+/* ── Compteur d'abonnés dynamiques (vrais follows) — synchronisé Firebase ── */
 function _getFCount(key)  { return parseInt(localStorage.getItem('gw_fc_' + key) || '0', 10); }
-function _incrFCount(key) { localStorage.setItem('gw_fc_' + key, _getFCount(key) + 1); }
-function _decrFCount(key) { var c = _getFCount(key); if (c > 0) localStorage.setItem('gw_fc_' + key, c - 1); }
+function _setFCount(key, val) {
+  localStorage.setItem('gw_fc_' + key, val);
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/follow_counts/' + key).set(val).catch(function(){});
+  }
+}
+function _incrFCount(key) { _setFCount(key, _getFCount(key) + 1); }
+function _decrFCount(key) { _setFCount(key, Math.max(0, _getFCount(key) - 1)); }
 
 /* ── Base fixe et persistante pour les utilisateurs démo ── */
 function _getSeedFollowers(profileKey, isDemo) {
