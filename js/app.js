@@ -4005,7 +4005,17 @@ function _buildMergedFeedPool(regularPosts) {
   return merged;
 }
 
+var _renderFeedTimer = null;
 function renderFeed(posts) {
+  /* Debounce : si appelé plusieurs fois rapidement (sync Firebase), attend 300ms */
+  if (_renderFeedTimer) {
+    clearTimeout(_renderFeedTimer);
+    _renderFeedTimer = setTimeout(function() { _renderFeedTimer = null; _renderFeedNow(posts); }, 300);
+    return;
+  }
+  _renderFeedNow(posts);
+}
+function _renderFeedNow(posts) {
   var list       = document.getElementById('feed-list');
   var feedScroll = document.getElementById('feed-scroll');
   if (!list) return;
@@ -4104,14 +4114,20 @@ function _feedAppendBatch(immediate) {
   setTimeout(function() {
     var frag = document.createDocumentFragment();
     batch.forEach(function(post) {
-      /* Post officiel → card dédiée ; post régulier → card normale */
-      if (post._isOfficialInFeed) {
-        frag.appendChild(_buildOfficialCard(post));
-      } else {
-        frag.appendChild(buildPostCard(post));
-      }
+      try {
+        if (post._isOfficialInFeed) {
+          frag.appendChild(_buildOfficialCard(post));
+        } else {
+          frag.appendChild(buildPostCard(post));
+        }
+      } catch(e) {}
     });
-    list.insertBefore(frag, loader);
+    /* Vérifier que loader est encore dans le DOM avant insertBefore */
+    if (loader && loader.parentNode === list) {
+      list.insertBefore(frag, loader);
+    } else {
+      list.appendChild(frag);
+    }
 
     _feedOffset += _FEED_PAGE;
     _feedBusy = false;
