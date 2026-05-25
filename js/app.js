@@ -374,7 +374,7 @@ function _gwMergeDM(snap) {
       localStorage.setItem(lsKey, JSON.stringify({ messages: stored, lastMsg: data.lastMsg, lastAt: data.lastAt }));
       /* Rafraîchit la conv si elle est ouverte */
       try {
-        var openConv = _dmConvs.find(function(c) {
+        var openConv = DEMO_CONVERSATIONS.find(function(c) {
           return !c.isGroup && _getDMKey(_currentUser.email, c.email) === lsKey;
         });
         if (openConv && document.getElementById('dm-messages-list')) {
@@ -715,7 +715,8 @@ function _gwPreloadUserData(user, callback) {
   Promise.all([
     _gwFbDB.ref('gw/inboxes/' + fbKey).once('value'),
     _gwFbDB.ref('gw/notifs/' + fbKey).once('value'),
-    _gwFbDB.ref('gw/profiles/' + fbKey).once('value')
+    _gwFbDB.ref('gw/profiles/' + fbKey).once('value'),
+    _gwFbDB.ref('gw/dms').once('value')
   ]).then(function(snaps) {
     var inbox = snaps[0].val();
     if (inbox) try { localStorage.setItem('gw_dm_inbox_' + user.email, JSON.stringify(inbox)); } catch(e){}
@@ -727,6 +728,27 @@ function _gwPreloadUserData(user, callback) {
       var merged = Object.assign({}, profile, existing.photo ? { photo: existing.photo } : {});
       try { localStorage.setItem('gw_profile_' + user.email, JSON.stringify(merged)); } catch(e){}
     }
+    /* ── Conversations DM de cet utilisateur ── */
+    var allDMs = snaps[3].val() || {};
+    Object.keys(allDMs).forEach(function(dmFbKey) {
+      if (dmFbKey.indexOf(fbKey) === -1) return; /* DM ne concerne pas cet utilisateur */
+      var dmData = allDMs[dmFbKey];
+      if (!dmData || !Array.isArray(dmData.messages)) return;
+      var lsKey = dmFbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+      try {
+        var existing2 = null;
+        try { existing2 = JSON.parse(localStorage.getItem(lsKey)); } catch(e2){}
+        var storedMsgs = (existing2 && Array.isArray(existing2.messages)) ? existing2.messages : [];
+        var storedMap = {};
+        storedMsgs.forEach(function(m) { storedMap[String(m.id)] = true; });
+        var merged2 = storedMsgs.slice();
+        dmData.messages.forEach(function(m) {
+          if (m && m.id && !storedMap[String(m.id)]) { merged2.push(m); }
+        });
+        merged2.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
+        localStorage.setItem(lsKey, JSON.stringify({ messages: merged2, lastMsg: dmData.lastMsg, lastAt: dmData.lastAt }));
+      } catch(e){}
+    });
     callback();
   }).catch(function() { callback(); });
 }
@@ -763,7 +785,8 @@ function _gwFbPreloadAndStart() {
     _gwFbDB.ref('gw/bans').once('value'),
     _gwFbDB.ref('gw/official_posts').once('value'),
     _gwFbDB.ref('gw/mk_listings').once('value'),
-    _gwFbDB.ref('gw/collab_requests').once('value')
+    _gwFbDB.ref('gw/collab_requests').once('value'),
+    _gwFbDB.ref('gw/profiles').once('value')
   ]).then(function(snaps) {
 
     /* ── Utilisateurs ── */
@@ -796,6 +819,21 @@ function _gwFbPreloadAndStart() {
     /* ── Collaborations ── */
     var collab = snaps[5].val();
     if (collab) try { localStorage.setItem('gw_collab_requests', JSON.stringify(collab)); } catch(e){}
+
+    /* ── Profils de tous les utilisateurs (photos comprises) ── */
+    var allProfiles = snaps[6].val() || {};
+    Object.keys(allProfiles).forEach(function(fbKey) {
+      var profile = allProfiles[fbKey];
+      if (!profile) return;
+      var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+      try {
+        var existing = null;
+        try { existing = JSON.parse(localStorage.getItem('gw_profile_' + email)); } catch(e2){}
+        /* Garde la photo locale si Firebase n'en a pas */
+        var merged = Object.assign({}, profile, (existing && existing.photo && !profile.photo) ? { photo: existing.photo } : {});
+        localStorage.setItem('gw_profile_' + email, JSON.stringify(merged));
+      } catch(e){}
+    });
 
     _gwStartApp();
   }).catch(function() {
@@ -7509,8 +7547,8 @@ function saveUserProfile(email, data) {
     if (_gwFbReady && _gwFbDB && !_gwFbSkip) {
       var _profileForFb = Object.assign({}, data);
       /* Ne pas stocker les images base64 trop lourdes en Firebase — stocker l'URL si disponible */
-      if (_profileForFb.photo && _profileForFb.photo.length > 50000) {
-        delete _profileForFb.photo; /* Trop lourd pour Firebase Realtime DB */
+      if (_profileForFb.photo && _profileForFb.photo.length > 500000) {
+        delete _profileForFb.photo; /* Trop lourd pour Firebase Realtime DB (>500 Ko) */
       }
       _gwFbDB.ref('gw/profiles/' + _gwFbKey(email)).set(_profileForFb).catch(function(){});
     }
