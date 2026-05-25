@@ -149,8 +149,10 @@ function _gwDeleteVideoBlob(id) {
 /* ── Init Firebase ─────────────────────────────────── */
 function _gwInitFirebase() {
   try {
-    if (typeof firebase === 'undefined') return;
-    /* Config non renseignée → mode localStorage uniquement */
+    if (typeof firebase === 'undefined') {
+      console.error('[GW Firebase] ❌ SDK Firebase non chargé !');
+      return;
+    }
     if (_GW_FIREBASE_CONFIG.apiKey.indexOf('REMPLACE') !== -1) {
       console.info('[GW] Firebase non configuré → mode local');
       return;
@@ -161,10 +163,19 @@ function _gwInitFirebase() {
     _gwFbDB    = firebase.database();
     _gwFbAuth  = firebase.auth();
     _gwFbReady = true;
-    console.log('[GW Firebase] ✓ Connecté');
+    console.log('[GW Firebase] ✅ Initialisé — URL:', _GW_FIREBASE_CONFIG.databaseURL);
+    /* Test de connexion */
+    _gwFbDB.ref('.info/connected').on('value', function(snap) {
+      if (snap.val() === true) {
+        console.log('[GW Firebase] 🟢 CONNECTÉ à Firebase');
+        showToast('Firebase connecté ✅', 'ok');
+      } else {
+        console.warn('[GW Firebase] 🔴 DÉCONNECTÉ de Firebase');
+      }
+    });
     _gwFbSyncStart();
   } catch(e) {
-    console.warn('[GW Firebase] Erreur init :', e);
+    console.error('[GW Firebase] ❌ Erreur init :', e);
   }
 }
 
@@ -178,10 +189,14 @@ function _gwFbKey(email) {
 
 /* ── Écriture vers Firebase ── */
 function _gwFbSet(path, data) {
-  if (!_gwFbReady || !_gwFbDB) return;
-  _gwFbDB.ref('gw/' + path).set(data).catch(function(e){
-    console.warn('[GW Firebase] Write error (' + path + '):', e.message);
-  });
+  if (!_gwFbReady || !_gwFbDB) {
+    console.warn('[GW Firebase] Write IGNORÉ — pas prêt. Path:', path);
+    return;
+  }
+  console.log('[GW Firebase] ✏️ Write →', path);
+  _gwFbDB.ref('gw/' + path).set(data)
+    .then(function(){ console.log('[GW Firebase] ✅ Write OK →', path); })
+    .catch(function(e){ console.error('[GW Firebase] ❌ Write ERREUR →', path, e.message); });
 }
 
 /* ── Listeners temps réel Firebase → localStorage → UI ── */
@@ -3750,7 +3765,12 @@ function savePersistedUserPosts(email, posts) {
   /* ── Sync Firebase ── */
   if (_gwFbReady && _gwFbDB && email) {
     var _fbPostKey = _gwFbKey(email);
-    _gwFbDB.ref('gw/posts/' + _fbPostKey).set(posts).catch(function(){});
+    console.log('[GW Firebase] 📝 Sauvegarde posts →', email, '(', posts.length, 'posts)');
+    _gwFbDB.ref('gw/posts/' + _fbPostKey).set(posts)
+      .then(function(){ console.log('[GW Firebase] ✅ Posts sauvegardés Firebase →', email); })
+      .catch(function(e){ console.error('[GW Firebase] ❌ Erreur posts →', e.message); });
+  } else {
+    console.warn('[GW Firebase] ⚠️ Posts sauvegardés LOCAL SEULEMENT (Firebase non prêt)');
   }
 }
 
