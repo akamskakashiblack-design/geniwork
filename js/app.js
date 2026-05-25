@@ -240,8 +240,10 @@ function _gwFbSyncStart() {
     } catch(e){}
   });
 
-  /* ── Messages DM par message (child_added atomique — sans race condition) ── */
-  _gwFbDB.ref('gw/dm_msgs').on('child_added', function(convSnap) {
+  /* ── Messages DM par message (child_added + child_changed — sans race condition) ── */
+  /* child_added  : nouvelle conversation (1er message)                               */
+  /* child_changed: messages suivants dans une conversation existante                  */
+  function _onDmMsgsSnap(convSnap) {
     /* convSnap.key = dmFbKey ; convSnap.val() = {msgId: msg, ...} */
     if (!_currentUser) return;
     var dmFbKey = convSnap.key;
@@ -279,7 +281,9 @@ function _gwFbSyncStart() {
         renderConversations();
       }
     } catch(e){}
-  });
+  }
+  _gwFbDB.ref('gw/dm_msgs').on('child_added',   function(snap) { try { _onDmMsgsSnap(snap); } catch(e){} });
+  _gwFbDB.ref('gw/dm_msgs').on('child_changed', function(snap) { try { _onDmMsgsSnap(snap); } catch(e){} });
 
   /* ── Posts utilisateurs (sync temps réel) ── */
   _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
@@ -570,6 +574,8 @@ function _gwMergeGroupMsg(snap) {
   var data  = snap.val();
   if (!data || !Array.isArray(data.messages)) return;
   var lsKey = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+  /* S'assurer que les conversations de groupe sont chargées avant la recherche */
+  if (!_groupConvsReady) { try { _loadGroupConvs(); } catch(e){} }
   /* Vérifier que ce groupe concerne l'utilisateur courant */
   var conv = DEMO_CONVERSATIONS.find(function(c) {
     return c.isGroup && _getGroupMsgKey(c.projId, c.projOwnerEmail) === lsKey;
@@ -973,27 +979,7 @@ function _gwPreloadUserData(user, callback) {
         try { localStorage.setItem('gw_profile_' + user.email, JSON.stringify(merged)); } catch(e){}
       }
     }
-    /* ── Conversations DM de cet utilisateur ── */
-    var allDMs = snaps[3].val() || {};
-    Object.keys(allDMs).forEach(function(dmFbKey) {
-      if (dmFbKey.indexOf(fbKey) === -1) return; /* DM ne concerne pas cet utilisateur */
-      var dmData = allDMs[dmFbKey];
-      if (!dmData || !Array.isArray(dmData.messages)) return;
-      var lsKey = dmFbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
-      try {
-        var existing2 = null;
-        try { existing2 = JSON.parse(localStorage.getItem(lsKey)); } catch(e2){}
-        var storedMsgs = (existing2 && Array.isArray(existing2.messages)) ? existing2.messages : [];
-        var storedMap = {};
-        storedMsgs.forEach(function(m) { storedMap[String(m.id)] = true; });
-        var merged2 = storedMsgs.slice();
-        dmData.messages.forEach(function(m) {
-          if (m && m.id && !storedMap[String(m.id)]) { merged2.push(m); }
-        });
-        merged2.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
-        localStorage.setItem(lsKey, JSON.stringify({ messages: merged2, lastMsg: dmData.lastMsg, lastAt: dmData.lastAt }));
-      } catch(e){}
-    });
+    /* snaps[3] = gw/dms (ancien chemin, remplacé par gw/dm_msgs — ignoré) */
 
     /* ── Inbox groupes (invitations reçues sur d'autres appareils) ── */
     var grpInbox = snaps[4].val();
@@ -15353,6 +15339,7 @@ function doLogout() {
       _gwFbDB.ref('gw/group_msgs').off('child_added');
       _gwFbDB.ref('gw/group_msgs').off('child_changed');
       _gwFbDB.ref('gw/dm_msgs').off('child_added');
+      _gwFbDB.ref('gw/dm_msgs').off('child_changed');
       if (_currentUser) {
         _gwFbDB.ref('gw/notifs/' + _gwFbKey(_currentUser.email)).off();
       }
