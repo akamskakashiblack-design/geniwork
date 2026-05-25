@@ -1,0 +1,3307 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <meta name="theme-color" content="#060D1F" />
+  <title>Geniwork</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- Firebase SDK — Synchronisation temps réel multi-admin -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+</head>
+<body>
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 1 — LANDING
+  ══════════════════════════════════════════ -->
+  <div id="screen-landing" class="screen active">
+    <div class="phone-frame">
+      <div class="landing-bg">
+        <img class="bg-photo" src="https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=800&q=80" alt=""/>
+        <div class="bg-overlay"></div>
+      </div>
+      <div class="landing-content">
+        <div class="logo-wrap">
+          <img src="./img/logo princ.svg" alt="Geniwork" class="logo-img" />
+          <span class="logo-text">Geni<strong>work</strong></span>
+        </div>
+        <div class="hero">
+          <h1>Le travail<br/>freelance<br/><span class="blue">réinventé.</span></h1>
+          <p class="hero-sub">Connectez-vous avec des talents,<br/>collaborez sur des projets<br/>et développez votre activité.</p>
+        </div>
+        <ul class="features">
+          <li class="feature">
+            <div class="feat-icon"><i class="fas fa-user-friends"></i></div>
+            <div class="feat-text">
+              <strong>Trouvez des talents qualifiés</strong>
+              <span>Découvrez des freelances<br/>pour tous vos projets.</span>
+            </div>
+          </li>
+          <li class="feature">
+            <div class="feat-icon"><i class="fas fa-briefcase"></i></div>
+            <div class="feat-text">
+              <strong>Collaborez facilement</strong>
+              <span>Communiquez, partagez et suivez<br/>vos projets en toute simplicité.</span>
+            </div>
+          </li>
+          <li class="feature">
+            <div class="feat-icon"><i class="fas fa-chart-line"></i></div>
+            <div class="feat-text">
+              <strong>Développez votre activité</strong>
+              <span>Plus de visibilité, plus d'opportunités,<br/>plus de croissance.</span>
+            </div>
+          </li>
+        </ul>
+        <div class="landing-btns">
+          <button class="btn-blue"    onclick="goTo('screen-register')">Créer un compte</button>
+          <button class="btn-outline" onclick="goTo('screen-login')">Se connecter</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 2 — CONNEXION
+  ══════════════════════════════════════════ -->
+  <div id="screen-login" class="screen">
+    <div class="phone-frame">
+      <div class="auth-screen">
+        <button class="btn-back" onclick="goTo('screen-landing')"><i class="fas fa-arrow-left"></i></button>
+
+        <div class="auth-logo">
+          <img src="./img/logo princ.svg" alt="Geniwork" class="logo-img" />
+          <span class="logo-text">Geni<strong>work</strong></span>
+        </div>
+
+        <div class="auth-header">
+          <h1>Connexion</h1>
+          <p>Bienvenue de retour ! Connectez-vous pour<br/>accéder à votre espace.</p>
+        </div>
+
+        <div class="auth-form">
+          <div class="field-group">
+            <label>Adresse e-mail</label>
+            <div class="field-box">
+              <i class="fas fa-envelope field-icon"></i>
+              <input type="email" id="login-email" placeholder="Entrez votre adresse e-mail" />
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label>Mot de passe</label>
+            <div class="field-box">
+              <i class="fas fa-lock field-icon"></i>
+              <input type="password" id="login-pwd" placeholder="Entrez votre mot de passe" />
+              <button class="eye-btn" onclick="togglePwd('login-pwd',this)"><i class="fas fa-eye"></i></button>
+            </div>
+            <div class="forgot-row">
+              <button class="link-blue" onclick="goTo('screen-forgot')">Mot de passe oublié ?</button>
+            </div>
+          </div>
+
+          <button class="btn-blue full" onclick="doLogin()">Se connecter</button>
+          <div class="divider"><span>ou</span></div>
+          <button class="btn-google" id="btn-google-login" onclick="startGoogleSignIn()">
+            <svg width="22" height="22" viewBox="0 0 48 48">
+              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+            </svg>
+            Continuer avec Google
+          </button>
+        </div>
+
+        <p class="auth-switch">
+          Vous n'avez pas encore de compte ?
+          <button class="link-blue" onclick="goTo('screen-register')">S'inscrire</button>
+        </p>
+
+        <!-- Accès administration (invisible) -->
+        <button onclick="_admTapLogo()" id="adm-tap-btn" style="opacity:0;position:absolute;width:40px;height:40px;border:none;background:transparent;cursor:default;" aria-hidden="true" tabindex="-1"></button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 3 — INSCRIPTION
+  ══════════════════════════════════════════ -->
+  <div id="screen-register" class="screen">
+    <div class="phone-frame">
+      <div class="auth-screen">
+        <button class="btn-back" onclick="goTo('screen-landing')"><i class="fas fa-arrow-left"></i></button>
+
+        <div class="auth-header no-logo">
+          <h1>Inscription</h1>
+          <p>Créez votre compte Geniwork</p>
+        </div>
+
+        <div class="auth-form">
+          <div class="field-group">
+            <label>Nom complet</label>
+            <div class="field-box">
+              <i class="fas fa-user field-icon"></i>
+              <input type="text" id="reg-nom" placeholder="Ex : Jean Dupont" />
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label>Adresse e-mail</label>
+            <div class="field-box" id="box-reg-email">
+              <i class="fas fa-envelope field-icon"></i>
+              <input type="email" id="reg-email" placeholder="exemple@email.com" />
+            </div>
+            <p class="field-error hidden" id="err-email">Cet e-mail est déjà utilisé.</p>
+          </div>
+
+          <div class="field-group">
+            <label>Mot de passe</label>
+            <div class="field-box">
+              <i class="fas fa-lock field-icon"></i>
+              <input type="password" id="reg-pwd" placeholder="••••••••"
+                     oninput="checkPwdStrength(this.value)" />
+              <button class="eye-btn" onclick="togglePwd('reg-pwd',this)"><i class="fas fa-eye"></i></button>
+            </div>
+            <!-- Indicateur de force -->
+            <div class="pwd-rules" id="pwd-rules">
+              <div class="rule" id="rule-len"><i class="fas fa-circle-xmark"></i> 8 caractères minimum</div>
+              <div class="rule" id="rule-maj"><i class="fas fa-circle-xmark"></i> Une lettre majuscule (A-Z)</div>
+              <div class="rule" id="rule-min"><i class="fas fa-circle-xmark"></i> Une lettre minuscule (a-z)</div>
+              <div class="rule" id="rule-num"><i class="fas fa-circle-xmark"></i> Un chiffre (0-9)</div>
+              <div class="rule" id="rule-sym"><i class="fas fa-circle-xmark"></i> Un symbole (!@#$%...)</div>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label>Confirmer le mot de passe</label>
+            <div class="field-box">
+              <i class="fas fa-lock field-icon"></i>
+              <input type="password" id="reg-pwd2" placeholder="••••••••" />
+              <button class="eye-btn" onclick="togglePwd('reg-pwd2',this)"><i class="fas fa-eye"></i></button>
+            </div>
+          </div>
+
+          <button class="btn-blue full" onclick="doRegister()">Créer mon compte</button>
+          <div class="divider"><span>ou continuer avec</span></div>
+          <button class="btn-google" id="btn-google-register" onclick="startGoogleSignIn()">
+            <svg width="22" height="22" viewBox="0 0 48 48">
+              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+            </svg>
+            Continuer avec Google
+          </button>
+        </div>
+
+        <p class="auth-switch">
+          Vous avez déjà un compte ?
+          <button class="link-blue" onclick="goTo('screen-login')">Se connecter</button>
+        </p>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 4 — VÉRIFICATION E-MAIL (inscription)
+  ══════════════════════════════════════════ -->
+  <div id="screen-verify" class="screen">
+    <div class="phone-frame">
+      <div class="auth-screen">
+        <button class="btn-back" onclick="goTo('screen-register')"><i class="fas fa-arrow-left"></i></button>
+
+        <div class="verify-top">
+          <div class="verify-icon"><i class="fas fa-envelope-open-text"></i></div>
+          <h1>Vérifiez votre e-mail</h1>
+          <p>Nous avons envoyé un code à 4 chiffres à<br/><strong id="verify-email-display">—</strong></p>
+          <!-- En mode démo : affiche le code simulé -->
+          <div class="demo-code-box">
+            <i class="fas fa-info-circle"></i>
+            Code de démo : <strong id="demo-code-display">—</strong>
+          </div>
+        </div>
+
+        <div class="auth-form">
+          <label class="code-label">Entrez le code reçu</label>
+          <div class="code-inputs">
+            <input class="code-box" id="c1" type="text" maxlength="1" inputmode="numeric"
+                   oninput="codeNext(this,'c2')" onkeydown="codePrev(event,this,'')"/>
+            <input class="code-box" id="c2" type="text" maxlength="1" inputmode="numeric"
+                   oninput="codeNext(this,'c3')" onkeydown="codePrev(event,this,'c1')"/>
+            <input class="code-box" id="c3" type="text" maxlength="1" inputmode="numeric"
+                   oninput="codeNext(this,'c4')" onkeydown="codePrev(event,this,'c2')"/>
+            <input class="code-box" id="c4" type="text" maxlength="1" inputmode="numeric"
+                   oninput="codeNext(this,'')"   onkeydown="codePrev(event,this,'c3')"/>
+          </div>
+
+          <button class="btn-blue full" onclick="doVerify()" style="margin-top:8px">Valider mon compte</button>
+
+          <div class="resend-row">
+            Vous n'avez pas reçu le code ?
+            <button class="link-blue" onclick="resendCode()">Renvoyer</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 5 — MOT DE PASSE OUBLIÉ (saisie e-mail)
+  ══════════════════════════════════════════ -->
+  <div id="screen-forgot" class="screen">
+    <div class="phone-frame">
+      <div class="auth-screen">
+        <button class="btn-back" onclick="goTo('screen-login')"><i class="fas fa-arrow-left"></i></button>
+
+        <div class="verify-top">
+          <div class="verify-icon orange"><i class="fas fa-lock"></i></div>
+          <h1>Mot de passe oublié ?</h1>
+          <p>Entrez l'adresse e-mail liée à votre compte.<br/>Nous vous enverrons un code de réinitialisation.</p>
+        </div>
+
+        <div class="auth-form">
+          <div class="field-group">
+            <label>Adresse e-mail du compte</label>
+            <div class="field-box">
+              <i class="fas fa-envelope field-icon"></i>
+              <input type="email" id="forgot-email" placeholder="exemple@email.com" />
+            </div>
+          </div>
+          <button class="btn-blue full" onclick="doForgot()">Envoyer le code</button>
+        </div>
+
+        <p class="auth-switch">
+          Vous vous souvenez ?
+          <button class="link-blue" onclick="goTo('screen-login')">Se connecter</button>
+        </p>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 6 — VÉRIFICATION CODE (reset mot de passe)
+  ══════════════════════════════════════════ -->
+  <div id="screen-reset-verify" class="screen">
+    <div class="phone-frame">
+      <div class="auth-screen">
+        <button class="btn-back" onclick="goTo('screen-forgot')"><i class="fas fa-arrow-left"></i></button>
+
+        <div class="verify-top">
+          <div class="verify-icon orange"><i class="fas fa-shield-halved"></i></div>
+          <h1>Code de vérification</h1>
+          <p>Un code a été envoyé à<br/><strong id="reset-email-display">—</strong></p>
+          <div class="demo-code-box">
+            <i class="fas fa-info-circle"></i>
+            Code de démo : <strong id="demo-reset-code">—</strong>
+          </div>
+        </div>
+
+        <div class="auth-form">
+          <label class="code-label">Entrez le code reçu</label>
+          <div class="code-inputs">
+            <input class="code-box" id="r1" type="text" maxlength="1" inputmode="numeric"
+                   oninput="codeNext(this,'r2')" onkeydown="codePrev(event,this,'')"/>
+            <input class="code-box" id="r2" type="text" maxlength="1" inputmode="numeric"
+                   oninput="codeNext(this,'r3')" onkeydown="codePrev(event,this,'r1')"/>
+            <input class="code-box" id="r3" type="text" maxlength="1" inputmode="numeric"
+                   oninput="codeNext(this,'r4')" onkeydown="codePrev(event,this,'r2')"/>
+            <input class="code-box" id="r4" type="text" maxlength="1" inputmode="numeric"
+                   oninput="codeNext(this,'')"   onkeydown="codePrev(event,this,'r3')"/>
+          </div>
+          <button class="btn-blue full" onclick="doResetVerify()" style="margin-top:8px">Confirmer</button>
+          <div class="resend-row">
+            Code expiré ?
+            <button class="link-blue" onclick="resendResetCode()">Renvoyer</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 7 — NOUVEAU MOT DE PASSE
+  ══════════════════════════════════════════ -->
+  <div id="screen-new-pwd" class="screen">
+    <div class="phone-frame">
+      <div class="auth-screen">
+        <button class="btn-back" onclick="goTo('screen-reset-verify')"><i class="fas fa-arrow-left"></i></button>
+
+        <div class="verify-top">
+          <div class="verify-icon green"><i class="fas fa-key"></i></div>
+          <h1>Nouveau mot de passe</h1>
+          <p>Choisissez un nouveau mot de passe sécurisé<br/>pour votre compte.</p>
+        </div>
+
+        <div class="auth-form">
+          <div class="field-group">
+            <label>Nouveau mot de passe</label>
+            <div class="field-box">
+              <i class="fas fa-lock field-icon"></i>
+              <input type="password" id="new-pwd" placeholder="••••••••"
+                     oninput="checkPwdStrength2(this.value)" />
+              <button class="eye-btn" onclick="togglePwd('new-pwd',this)"><i class="fas fa-eye"></i></button>
+            </div>
+            <div class="pwd-rules" id="pwd-rules-2">
+              <div class="rule" id="rule2-len"><i class="fas fa-circle-xmark"></i> 8 caractères minimum</div>
+              <div class="rule" id="rule2-maj"><i class="fas fa-circle-xmark"></i> Une majuscule (A-Z)</div>
+              <div class="rule" id="rule2-min"><i class="fas fa-circle-xmark"></i> Une minuscule (a-z)</div>
+              <div class="rule" id="rule2-num"><i class="fas fa-circle-xmark"></i> Un chiffre (0-9)</div>
+              <div class="rule" id="rule2-sym"><i class="fas fa-circle-xmark"></i> Un symbole (!@#$%...)</div>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label>Confirmer le nouveau mot de passe</label>
+            <div class="field-box">
+              <i class="fas fa-lock field-icon"></i>
+              <input type="password" id="new-pwd2" placeholder="••••••••" />
+              <button class="eye-btn" onclick="togglePwd('new-pwd2',this)"><i class="fas fa-eye"></i></button>
+            </div>
+          </div>
+
+          <button class="btn-blue full" onclick="doSaveNewPwd()">Enregistrer le mot de passe</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 8 — CGU (après vérification)
+  ══════════════════════════════════════════ -->
+  <div id="screen-cgu" class="screen">
+    <div class="phone-frame">
+      <div class="cgu-screen">
+
+        <!-- En-tête fixe -->
+        <div class="cgu-topbar">
+          <!-- Bouton retour (visible uniquement en mode lecture depuis les paramètres) -->
+          <button class="cgu-settings-back hidden" id="cgu-settings-back" onclick="closeCGUFromSettings()">
+            <i class="fas fa-arrow-left"></i>
+          </button>
+          <div class="cgu-logo" id="cgu-logo-wrap">
+            <img src="./img/logo princ.svg" alt="Geniwork" class="logo-img" />
+            <span class="logo-text cgu-logo-text">Geni<strong>work</strong></span>
+          </div>
+          <h2 class="cgu-title" id="cgu-screen-title">Conditions d'utilisation</h2>
+          <p class="cgu-subtitle" id="cgu-screen-subtitle">Veuillez lire et accepter avant de continuer</p>
+        </div>
+
+        <!-- Corps scrollable -->
+        <div class="cgu-body" id="cgu-body" onscroll="onCguScroll()">
+
+          <!-- ── CGU ── -->
+          <div class="cgu-section">
+            <h3>Conditions Générales d'Utilisation (CGU) – Geniwork</h3>
+            <p class="cgu-date">Dernière mise à jour : Mai 2026</p>
+          </div>
+
+          <div class="cgu-section">
+            <h4>1. Acceptation des conditions</h4>
+            <p>En créant un compte ou en utilisant la plateforme Geniwork, vous acceptez sans réserve les présentes conditions. Si vous n'êtes pas d'accord, vous ne devez pas utiliser nos services.</p>
+          </div>
+
+          <div class="cgu-section">
+            <h4>2. Description du service</h4>
+            <p>Geniwork est une plateforme de mise en relation professionnelle permettant de :</p>
+            <ul>
+              <li>Publier des services, des offres d'emploi et des projets.</li>
+              <li>Rechercher des profils d'entrepreneurs et de freelances.</li>
+              <li>Acheter ou vendre des prestations de services via notre marketplace.</li>
+              <li>Interagir via des publications, des commentaires et une messagerie intégrée.</li>
+            </ul>
+          </div>
+
+          <div class="cgu-section">
+            <h4>3. Inscription et Sécurité</h4>
+            <p>L'utilisateur s'engage à :</p>
+            <ul>
+              <li>Fournir des informations exactes, complètes et à jour.</li>
+              <li>Maintenir la confidentialité de ses identifiants de connexion.</li>
+              <li>Assumer la responsabilité de toute activité effectuée sous son compte.</li>
+            </ul>
+          </div>
+
+          <div class="cgu-section">
+            <h4>4. Règles de conduite et Contenu</h4>
+            <p>Vous restez propriétaire du contenu que vous publiez, mais vous accordez à Geniwork une licence pour l'afficher sur la plateforme. Il est strictement interdit de publier :</p>
+            <ul>
+              <li>Du contenu illégal, frauduleux ou incitant à la violence.</li>
+              <li>Des publicités intrusives (spam) ou des tentatives de phishing.</li>
+              <li>Du contenu portant atteinte aux droits de propriété intellectuelle de tiers.</li>
+            </ul>
+            <p>Geniwork se réserve le droit de supprimer tout contenu jugé inapproprié sans préavis.</p>
+          </div>
+
+          <div class="cgu-section">
+            <h4>5. Responsabilité de la Marketplace</h4>
+            <p>Geniwork agit en tant qu'intermédiaire technique. Les contrats de prestation sont conclus directement entre l'acheteur et le vendeur.</p>
+            <ul>
+              <li><strong>Litiges :</strong> Geniwork ne peut être tenu responsable de la qualité des services rendus ou du non-respect des engagements entre utilisateurs.</li>
+              <li><strong>Paiements :</strong> Les transactions effectuées hors de la plateforme ne sont pas couvertes par nos garanties de sécurité.</li>
+            </ul>
+          </div>
+
+          <div class="cgu-section">
+            <h4>6. Suspension et Résiliation</h4>
+            <p>En cas de violation de ces règles ou de comportement abusif, Geniwork se réserve le droit de suspendre ou de supprimer votre compte définitivement, sans indemnité.</p>
+          </div>
+
+          <!-- ── POLITIQUE DE CONFIDENTIALITÉ ── -->
+          <div class="cgu-divider"></div>
+
+          <div class="cgu-section">
+            <h3>Politique de Confidentialité – Geniwork</h3>
+            <p class="cgu-date">Dernière mise à jour : Mai 2026</p>
+          </div>
+
+          <div class="cgu-section">
+            <h4>1. Données collectées</h4>
+            <p>Nous collectons les informations nécessaires au bon fonctionnement du service :</p>
+            <ul>
+              <li><strong>Identité :</strong> Nom, prénom, adresse email, photo de profil.</li>
+              <li><strong>Profil professionnel :</strong> Compétences, portfolio, informations business.</li>
+              <li><strong>Interactions :</strong> Publications, messages internes, commentaires.</li>
+              <li><strong>Données techniques :</strong> Adresse IP, données de navigation (cookies).</li>
+            </ul>
+          </div>
+
+          <div class="cgu-section">
+            <h4>2. Utilisation de vos données</h4>
+            <p>Vos données sont utilisées pour :</p>
+            <ul>
+              <li>Gérer votre compte et sécuriser vos accès.</li>
+              <li>Faciliter la mise en relation entre freelances et clients.</li>
+              <li>Améliorer l'assistant AI de Geniwork (vos données personnelles ne sont pas revendues à des tiers pour l'entraînement de modèles IA externes).</li>
+              <li>Assurer le support technique.</li>
+            </ul>
+          </div>
+
+          <div class="cgu-section">
+            <h4>3. Partage et Stockage</h4>
+            <ul>
+              <li><strong>Confidentialité :</strong> Nous ne vendons jamais vos données personnelles.</li>
+              <li><strong>Prestataires :</strong> Nous utilisons des services tiers sécurisés (hébergement, analyse) qui respectent les normes de protection des données en vigueur.</li>
+            </ul>
+          </div>
+
+          <div class="cgu-section">
+            <h4>4. Vos Droits</h4>
+            <p>Conformément aux lois sur la protection des données, vous disposez d'un droit :</p>
+            <ul>
+              <li>D'accès et de modification de vos informations.</li>
+              <li>De suppression définitive de votre compte et de vos données.</li>
+              <li>D'opposition à l'utilisation de vos données à des fins marketing.</li>
+            </ul>
+            <p>Pour toute demande : <strong>support@geniwork.com</strong></p>
+          </div>
+
+          <div class="cgu-section">
+            <h4>5. Cookies</h4>
+            <p>Nous utilisons des cookies pour améliorer votre navigation et analyser l'audience de la plateforme. Vous pouvez configurer votre navigateur pour les refuser, bien que cela puisse limiter certaines fonctionnalités.</p>
+          </div>
+
+          <!-- Espace pour que le dernier paragraphe ne soit pas caché par le footer -->
+          <div style="height: 24px;"></div>
+
+        </div><!-- /cgu-body -->
+
+        <!-- Footer fixe : checkbox + bouton -->
+        <div class="cgu-footer">
+          <label class="cgu-check-label" id="cgu-check-wrap">
+            <input type="checkbox" id="cgu-checkbox" onchange="onCguCheck(this)" />
+            <span class="cgu-checkmark"></span>
+            <span class="cgu-check-text">
+              J'ai lu et j'accepte les <strong>CGU</strong> et la <strong>Politique de Confidentialité</strong> de Geniwork.
+            </span>
+          </label>
+
+          <button class="btn-blue full cgu-btn" id="cgu-accept-btn"
+                  onclick="acceptCGU()" disabled>
+            Accepter et continuer
+          </button>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 9 — APPLICATION (tableau de bord)
+  ══════════════════════════════════════════ -->
+  <div id="screen-app" class="screen">
+    <div class="phone-frame app-frame">
+
+      <!-- ── TOPBAR ── -->
+      <header class="app-topbar">
+        <button class="app-topbar-btn" onclick="toggleSidebar()">
+          <i class="fas fa-bars"></i>
+        </button>
+        <div class="app-brand" onclick="_admTapLogo()" style="cursor:default;user-select:none">
+          <img src="./img/logo princ.svg" alt="" class="app-brand-logo"/>
+          <span class="app-brand-name">Geni<strong>work</strong></span>
+        </div>
+        <div class="topbar-right">
+          <button class="app-topbar-btn" onclick="openSearch()">
+            <i class="fas fa-magnifying-glass"></i>
+          </button>
+          <button class="app-topbar-btn notif-btn" onclick="showPage('p-notifs');renderNotifs()">
+            <i class="fas fa-bell"></i>
+            <span class="notif-badge" id="notif-badge">3</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- ── SIDEBAR DRAWER ── -->
+      <div id="sidebar-overlay" class="sidebar-overlay" onclick="closeSidebar()"></div>
+      <aside id="app-sidebar" class="app-sidebar">
+
+        <!-- En-tête utilisateur -->
+        <div class="sidebar-user-header" onclick="closeSidebar();showPage('p-profil');renderProfilePage()">
+          <div class="sidebar-av" id="sidebar-av">
+            <span id="sidebar-av-initials">?</span>
+          </div>
+          <div class="sidebar-user-info">
+            <div class="sidebar-user-name">
+              <span id="sidebar-name">Utilisateur</span>
+              <span class="sidebar-verified-badge" id="sidebar-verified" style="display:none">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="12" fill="#2563EB"/>
+                  <path d="M7 12.5l3.5 3.5 6.5-7" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </div>
+            <div class="sidebar-user-role" id="sidebar-role">Membre</div>
+            <div class="sidebar-see-profile">Voir mon profil &rsaquo;</div>
+          </div>
+        </div>
+
+        <!-- Menu items -->
+        <nav class="sidebar-nav">
+
+          <button class="sidebar-item active" id="sdb-profil" onclick="closeSidebar();showPage('p-profil');renderProfilePage()">
+            <span class="sdb-icon"><i class="fas fa-user"></i></span>
+            <span class="sdb-label">Profil</span>
+          </button>
+
+          <button class="sidebar-item" id="sdb-dashboard" onclick="closeSidebar();openDashboard()">
+            <span class="sdb-icon"><i class="fas fa-border-all"></i></span>
+            <div class="sdb-text">
+              <span class="sdb-label">Tableau de bord</span>
+              <span class="sdb-desc">Vue d'ensemble de votre activité</span>
+            </div>
+          </button>
+
+          <button class="sidebar-item" onclick="closeSidebar();openSubPage()">
+            <span class="sdb-icon"><i class="fas fa-crown"></i></span>
+            <div class="sdb-text">
+              <span class="sdb-label">Abonnements</span>
+              <span class="sdb-desc">Gérez votre abonnement et profitez des avantages premium.</span>
+            </div>
+            <span class="sdb-plan-chip" id="sdb-plan-chip"></span>
+          </button>
+
+          <button class="sidebar-item" onclick="closeSidebar();openBadgePage()">
+            <span class="sdb-icon"><i class="fas fa-shield-halved"></i></span>
+            <div class="sdb-text">
+              <span class="sdb-label">Vérification du badge</span>
+              <span class="sdb-desc">Obtenez votre badge vérifié et renforcez votre crédibilité.</span>
+            </div>
+          </button>
+
+          <button class="sidebar-item" onclick="closeSidebar();openFavorisPage()">
+            <span class="sdb-icon"><i class="far fa-heart"></i></span>
+            <div class="sdb-text">
+              <span class="sdb-label" data-i18n="sdb.favorites">Favoris</span>
+              <span class="sdb-desc">Retrouvez vos services et freelances préférés rapidement.</span>
+            </div>
+          </button>
+
+          <div class="sdb-divider"></div>
+
+          <button class="sidebar-item" onclick="closeSidebar();openAppSettings()">
+            <span class="sdb-icon"><i class="fas fa-gear"></i></span>
+            <div class="sdb-text">
+              <span class="sdb-label" data-i18n="sdb.settings">Paramètres</span>
+              <span class="sdb-desc">Gérez votre compte, confidentialité, sécurité et préférences.</span>
+            </div>
+          </button>
+
+          <button class="sidebar-item" onclick="closeSidebar();openSupportScreen()">
+            <span class="sdb-icon"><i class="far fa-circle-question"></i></span>
+            <div class="sdb-text">
+              <span class="sdb-label" data-i18n="sdb.support">Support</span>
+              <span class="sdb-desc">FAQ, centre d'aide et contact avec notre équipe.</span>
+            </div>
+          </button>
+
+
+          <div class="sdb-divider"></div>
+
+          <button class="sidebar-item sidebar-item-logout" onclick="doLogout()">
+            <span class="sdb-icon"><i class="fas fa-right-from-bracket"></i></span>
+            <div class="sdb-text">
+              <span class="sdb-label" data-i18n="sdb.logout">Déconnexion</span>
+              <span class="sdb-desc">Se déconnecter de votre compte en toute sécurité.</span>
+            </div>
+          </button>
+
+        </nav>
+
+        <!-- Pied — Mode sombre -->
+        <div class="sidebar-footer">
+          <div class="sdb-darkmode-row">
+            <span class="sdb-darkmode-label"><i class="fas fa-moon"></i> <span data-i18n="sdb.darkmode">Mode sombre</span></span>
+            <label class="sdb-toggle">
+              <input type="checkbox" id="dark-mode-toggle" onchange="toggleDarkMode(this.checked)"/>
+              <span class="sdb-toggle-track"></span>
+            </label>
+          </div>
+        </div>
+
+      </aside><!-- /app-sidebar -->
+
+      <!-- ── PAGES ── -->
+      <div class="app-pages">
+
+        <!-- ▸ ACCUEIL (FEED) -->
+        <section id="p-home" class="app-page active">
+
+          <!-- Onglets (Abonnements & Découvrir à venir) -->
+
+          <div class="page-scroll" id="feed-scroll">
+            <!-- Bouton nouveaux posts (apparaît après refresh) -->
+            <div class="new-posts-btn hidden" id="new-posts-btn" onclick="loadNewPosts()">
+              <i class="fas fa-arrow-up"></i> Nouveaux posts
+            </div>
+
+            <!-- Compositeur de post -->
+            <div class="composer-card">
+              <div class="composer-row">
+                <div class="user-av" id="composer-av">
+                  <span id="composer-initials">?</span>
+                </div>
+                <button class="composer-placeholder" onclick="showPage('p-publish')" data-i18n="composer.ph">
+                  Quoi de neuf ?
+                </button>
+                <button class="composer-plus" onclick="showPage('p-publish')">
+                  <i class="fas fa-plus"></i>
+                </button>
+              </div>
+              <div class="composer-media">
+                <button onclick="showPage('p-publish')"><i class="fas fa-image"></i> Image</button>
+                <button onclick="showPage('p-publish')"><i class="fas fa-video"></i> Vidéo</button>
+                <button onclick="showPage('p-publish')"><i class="fas fa-file-alt"></i> Document</button>
+              </div>
+            </div>
+
+            <!-- Liste des posts -->
+            <div id="feed-list"></div>
+
+            <!-- Indicateur de chargement -->
+            <div class="feed-loading hidden" id="feed-loading">
+              <div class="loading-dot"></div>
+              <div class="loading-dot"></div>
+              <div class="loading-dot"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ▸ MARKETPLACE -->
+        <!-- ══ ÉCRAN ACHETER ══ -->
+        <div class="achat-screen hidden" id="achat-screen">
+          <div class="achat-topbar">
+            <button class="achat-back-btn" onclick="closeAchatScreen()"><i class="fas fa-arrow-left"></i></button>
+            <h2 class="achat-title">Marketplace</h2>
+          </div>
+          <!-- Recherche -->
+          <div class="achat-search-row">
+            <div class="achat-search-box">
+              <i class="fas fa-magnifying-glass"></i>
+              <input type="text" id="achat-search-input" placeholder="Rechercher un service ou produit…"
+                     oninput="filterAchatServices()" autocomplete="off">
+            </div>
+          </div>
+          <!-- Filtre Type : Services / Produits -->
+          <div class="achat-type-row">
+            <button class="achat-type-btn active" data-type="all"     onclick="selectAchatType(this)">
+              Tout
+            </button>
+            <button class="achat-type-btn" data-type="service" onclick="selectAchatType(this)">
+              <i class="fas fa-concierge-bell"></i> Services
+            </button>
+            <button class="achat-type-btn" data-type="produit" onclick="selectAchatType(this)">
+              <i class="fas fa-box"></i> Produits
+            </button>
+          </div>
+          <!-- Catégories (reconstruites dynamiquement) -->
+          <div class="achat-cats-row" id="achat-cats-row">
+            <button class="achat-cat active" data-cat="all" onclick="selectAchatCat(this)">Tous</button>
+            <button class="achat-cat" data-cat="dev"     onclick="selectAchatCat(this)">Dev</button>
+            <button class="achat-cat" data-cat="design"  onclick="selectAchatCat(this)">Design</button>
+            <button class="achat-cat" data-cat="redac"   onclick="selectAchatCat(this)">Rédaction</button>
+            <button class="achat-cat" data-cat="mkt"     onclick="selectAchatCat(this)">Marketing</button>
+            <button class="achat-cat" data-cat="video"   onclick="selectAchatCat(this)">Vidéo</button>
+            <button class="achat-cat" data-cat="conseil" onclick="selectAchatCat(this)">Conseil</button>
+            <button class="achat-cat" data-cat="autre"   onclick="selectAchatCat(this)">Autre</button>
+          </div>
+          <!-- Liste -->
+          <div class="achat-scroll">
+            <div id="achat-services-list"></div>
+          </div>
+        </div>
+
+        <!-- ══ ÉCRAN PANIER ══ -->
+        <div class="cart-screen hidden" id="cart-screen">
+          <div class="cart-topbar">
+            <button class="cart-back-btn" onclick="closeCartScreen()"><i class="fas fa-arrow-left"></i></button>
+            <h2 class="cart-title">Mon Panier</h2>
+            <span class="cart-count-label" id="cart-count-label">0 article</span>
+          </div>
+          <div class="cart-scroll" id="cart-list-wrap">
+            <!-- Articles rendus par JS -->
+          </div>
+          <div class="cart-footer hidden" id="cart-footer">
+            <div class="cart-summary">
+              <div class="cart-summary-row">
+                <span>Sous-total</span>
+                <span id="cart-subtotal">0 €</span>
+              </div>
+              <div class="cart-summary-row">
+                <span>Commission Geniwork (1%)</span>
+                <span id="cart-fees">0 €</span>
+              </div>
+              <div class="cart-summary-row cart-total-row">
+                <span>Total</span>
+                <span id="cart-total">0 €</span>
+              </div>
+            </div>
+            <!-- PayPal button container -->
+            <div id="cart-paypal-wrap" style="padding:0 16px 8px">
+              <div id="cart-paypal-btn-container"></div>
+              <div style="font-size:10.5px;color:#94A3B8;text-align:center;margin-top:6px">
+                <i class="fas fa-lock" style="margin-right:3px"></i>Paiement sécurisé PayPal
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <section id="p-marketplace" class="app-page">
+
+          <!-- Topbar marketplace -->
+          <div class="mk-topbar">
+            <h2 class="mk-title">Marketplace</h2>
+            <div class="mk-topbar-icons">
+              <button class="mk-icon-btn" onclick="openMkNotifs()" id="mk-bell-btn" style="position:relative">
+                <i class="fas fa-bell"></i>
+                <span class="mk-notif-badge hidden" id="mk-notif-badge">0</span>
+              </button>
+              <button class="mk-icon-btn" onclick="openCartScreen()" style="position:relative">
+                <i class="fas fa-cart-shopping"></i>
+                <span class="mk-cart-badge hidden" id="mk-cart-badge">0</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="page-scroll mk-scroll">
+
+            <!-- Barre de recherche -->
+            <div class="mk-search-row">
+              <div class="mk-search-box">
+                <i class="fas fa-magnifying-glass mk-search-ico"></i>
+                <input type="text" class="mk-search-input" placeholder="Rechercher un service, un produit..."
+                       oninput="filterMarketplace(this.value)" autocomplete="off"/>
+              </div>
+              <button class="mk-filter-btn" id="mk-filter-btn" onclick="openMkFilters()">
+                <i class="fas fa-sliders"></i> Filtres
+              </button>
+            </div>
+
+            <!-- Catégories -->
+            <div class="mk-cats-row">
+              <button class="mk-cat active" onclick="setMkCat(this,'all')">
+                <div class="mk-cat-ico"><i class="fas fa-border-all"></i></div>
+                <span>Tous</span>
+              </button>
+              <button class="mk-cat" onclick="setMkCat(this,'dev')">
+                <div class="mk-cat-ico"><i class="fas fa-code"></i></div>
+                <span>Développement</span>
+              </button>
+              <button class="mk-cat" onclick="setMkCat(this,'design')">
+                <div class="mk-cat-ico"><i class="fas fa-pen-ruler"></i></div>
+                <span>Design</span>
+              </button>
+              <button class="mk-cat" onclick="setMkCat(this,'redac')">
+                <div class="mk-cat-ico"><i class="fas fa-file-pen"></i></div>
+                <span>Rédaction</span>
+              </button>
+              <button class="mk-cat" onclick="setMkCat(this,'mkt')">
+                <div class="mk-cat-ico"><i class="fas fa-bullhorn"></i></div>
+                <span>Marketing</span>
+              </button>
+              <button class="mk-cat" onclick="setMkCat(this,'video')">
+                <div class="mk-cat-ico"><i class="fas fa-clapperboard"></i></div>
+                <span>Vidéo &amp; Audio</span>
+              </button>
+              <button class="mk-cat" onclick="setMkCat(this,'more')">
+                <div class="mk-cat-ico"><i class="fas fa-ellipsis"></i></div>
+                <span>Plus</span>
+              </button>
+            </div>
+
+            <!-- ══ CHERCHER UN COLLABORATEUR ══ -->
+            <div class="collab-banner" onclick="_collabOpenPost()">
+              <div class="collab-banner-left">
+                <div class="collab-banner-ico"><i class="fas fa-handshake"></i></div>
+                <div class="collab-banner-text">
+                  <strong>Chercher un collaborateur</strong>
+                  <span>Publiez votre projet, trouvez le bon partenaire</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right collab-banner-arrow"></i>
+            </div>
+
+            <!-- Liste des offres de collaboration -->
+            <div class="mk-section-head" style="margin-top:4px">
+              <h3>Offres de collaboration</h3>
+              <button class="mk-see-all" id="collab-refresh-btn" onclick="_collabRefresh(this)">Actualiser</button>
+            </div>
+            <div id="collab-list-wrap" style="padding:0 16px"></div>
+
+            <!-- Services populaires -->
+            <div class="mk-section-head" style="margin-top:16px">
+              <h3>Services populaires</h3>
+              <button class="mk-see-all" onclick="_mkOpenAllListings()">Voir tout</button>
+            </div>
+            <div class="mk-services-scroll">
+
+              <div class="mk-service-card">
+                <div class="mk-service-img" style="background:url('https://images.unsplash.com/photo-1461749280684-dccba630e2f6?w=400&q=80') center/cover">
+                  <span class="mk-service-badge">Service</span>
+                  <button class="mk-wish-btn" onclick="toggleMkWish(this)"><i class="far fa-heart"></i></button>
+                </div>
+                <div class="mk-service-body">
+                  <div class="mk-service-seller">
+                    <div class="mk-seller-av" style="background:#2563EB">AM</div>
+                    <span>Alexandre M.</span>
+                    <i class="fas fa-circle-check mk-verified"></i>
+                  </div>
+                  <p class="mk-service-title">Développement web</p>
+                  <p class="mk-service-desc">Sites web et applications sur mesure</p>
+                  <div class="mk-service-rating"><i class="fas fa-star"></i> 4.9 <span>(32)</span></div>
+                  <p class="mk-service-price">À partir de <strong>500€</strong></p>
+                </div>
+              </div>
+
+              <div class="mk-service-card">
+                <div class="mk-service-img" style="background:url('https://images.unsplash.com/photo-1626785774573-4b799315345d?w=400&q=80') center/cover">
+                  <span class="mk-service-badge">Service</span>
+                  <button class="mk-wish-btn" onclick="toggleMkWish(this)"><i class="far fa-heart"></i></button>
+                </div>
+                <div class="mk-service-body">
+                  <div class="mk-service-seller">
+                    <div class="mk-seller-av" style="background:#7C3AED">SL</div>
+                    <span>Sophie L.</span>
+                    <i class="fas fa-circle-check mk-verified"></i>
+                  </div>
+                  <p class="mk-service-title">Design de logo</p>
+                  <p class="mk-service-desc">Logos professionnels et identité visuelle</p>
+                  <div class="mk-service-rating"><i class="fas fa-star"></i> 4.8 <span>(18)</span></div>
+                  <p class="mk-service-price">À partir de <strong>150€</strong></p>
+                </div>
+              </div>
+
+              <div class="mk-service-card">
+                <div class="mk-service-img" style="background:url('https://images.unsplash.com/photo-1455390582262-044cdead277a?w=400&q=80') center/cover">
+                  <span class="mk-service-badge">Service</span>
+                  <button class="mk-wish-btn" onclick="toggleMkWish(this)"><i class="far fa-heart"></i></button>
+                </div>
+                <div class="mk-service-body">
+                  <div class="mk-service-seller">
+                    <div class="mk-seller-av" style="background:#0891B2">JD</div>
+                    <span>Julien D.</span>
+                    <i class="fas fa-circle-check mk-verified"></i>
+                  </div>
+                  <p class="mk-service-title">Rédaction SEO</p>
+                  <p class="mk-service-desc">Articles optimisés pour le référencement</p>
+                  <div class="mk-service-rating"><i class="fas fa-star"></i> 4.9 <span>(27)</span></div>
+                  <p class="mk-service-price">À partir de <strong>80€</strong></p>
+                </div>
+              </div>
+
+              <div class="mk-service-card">
+                <div class="mk-service-img" style="background:url('https://images.unsplash.com/photo-1611532736597-de2d4265fba3?w=400&q=80') center/cover">
+                  <span class="mk-service-badge">Service</span>
+                  <button class="mk-wish-btn" onclick="toggleMkWish(this)"><i class="far fa-heart"></i></button>
+                </div>
+                <div class="mk-service-body">
+                  <div class="mk-service-seller">
+                    <div class="mk-seller-av" style="background:#DC2626">YB</div>
+                    <span>Yasmine B.</span>
+                    <i class="fas fa-circle-check mk-verified"></i>
+                  </div>
+                  <p class="mk-service-title">Marketing digital</p>
+                  <p class="mk-service-desc">Stratégie et campagnes publicitaires</p>
+                  <div class="mk-service-rating"><i class="fas fa-star"></i> 4.7 <span>(41)</span></div>
+                  <p class="mk-service-price">À partir de <strong>200€</strong></p>
+                </div>
+              </div>
+
+            </div><!-- /mk-services-scroll -->
+
+            <!-- Services des membres -->
+            <div id="mk-user-services-section" style="display:none">
+              <div class="mk-section-head">
+                <h3>Services des membres</h3>
+              </div>
+              <div id="mk-user-services-list" class="mk-services-scroll"></div>
+            </div>
+
+            <!-- Acheter ou vendre -->
+            <h3 class="mk-section-title">Acheter ou vendre</h3>
+            <div class="mk-trade-row">
+              <div class="mk-trade-card" onclick="_mkOpenMyPurchases()">
+                <div class="mk-trade-ico blue-light">
+                  <i class="fas fa-cart-arrow-down"></i>
+                </div>
+                <div class="mk-trade-info">
+                  <strong>Mes achats</strong>
+                  <small id="mk-buy-count">Chargement…</small>
+                </div>
+                <i class="fas fa-chevron-right mk-trade-arrow"></i>
+              </div>
+              <div class="mk-trade-card" onclick="_mkOpenMySales()">
+                <div class="mk-trade-ico green-light">
+                  <i class="fas fa-bag-shopping"></i>
+                </div>
+                <div class="mk-trade-info">
+                  <strong>Mes ventes</strong>
+                  <small id="mk-sell-count">Chargement…</small>
+                </div>
+                <i class="fas fa-chevron-right mk-trade-arrow"></i>
+              </div>
+            </div>
+
+            <!-- Transactions récentes -->
+            <div class="mk-section-head" style="margin-top:24px">
+              <h3>Transactions récentes</h3>
+              <button class="mk-see-all" onclick="_mkRenderTxTabs()">Actualiser</button>
+            </div>
+
+            <!-- Tabs Achats / Ventes -->
+            <div class="mk-tx-tabs">
+              <button class="mk-tx-tab active" id="mk-tab-buy" onclick="switchMkTxTab(this,'buy')">Achats</button>
+              <button class="mk-tx-tab" id="mk-tab-sell" onclick="switchMkTxTab(this,'sell')">Ventes</button>
+            </div>
+
+            <!-- Listes transactions — remplies par JS -->
+            <div id="mk-tx-buy" class="mk-tx-list"></div>
+            <div id="mk-tx-sell" class="mk-tx-list hidden"></div>
+
+          </div><!-- /page-scroll -->
+
+          <!-- FAB Vendre -->
+          <button id="mk-sell-fab" onclick="_mkOpenCreate()"
+            style="position:absolute;bottom:80px;right:20px;z-index:200;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);border:none;box-shadow:0 4px 20px rgba(99,102,241,.45);color:#fff;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center"
+            title="Publier une annonce">
+            <i class="fas fa-plus"></i>
+          </button>
+
+        </section>
+
+        <!-- ▸ PUBLIER -->
+        <section id="p-publish" class="app-page">
+          <div class="inner-topbar">
+            <button class="back-btn-sm" onclick="showPage('p-home')">
+              <i class="fas fa-arrow-left"></i>
+            </button>
+            <h2>Créer un post</h2>
+            <button class="pub-send-btn" onclick="publierPost()" id="pub-send">Publier</button>
+          </div>
+          <div class="page-scroll pub-scroll">
+            <div class="pub-composer">
+              <div class="user-av lg" id="pub-av"><span id="pub-initials">?</span></div>
+              <div class="pub-right">
+                <p class="pub-name" id="pub-name">—</p>
+                <textarea id="pub-text" placeholder="Partagez une actualité, un projet, une idée..." rows="5"></textarea>
+              </div>
+            </div>
+
+            <!-- Aperçu image -->
+            <div id="pub-img-preview" class="pub-img-preview hidden"></div>
+
+            <!-- Aperçu vidéo -->
+            <div id="pub-video-preview" class="pub-video-preview hidden"></div>
+
+            <!-- Aperçu document -->
+            <div id="pub-doc-preview" class="pub-doc-preview hidden"></div>
+
+            <!-- Sélecteur de médias -->
+            <div class="pub-media-section">
+
+              <!-- Photos -->
+              <div class="pub-media-row">
+                <div class="pub-media-label">
+                  <i class="fas fa-image"></i><span>Photo</span>
+                </div>
+                <div class="pub-media-btns">
+                  <button class="pub-type-btn" onclick="triggerImgPick()">
+                    <i class="fas fa-images"></i> Galerie
+                  </button>
+                  <button class="pub-type-btn" onclick="triggerCameraPhoto()">
+                    <i class="fas fa-camera"></i> Caméra
+                  </button>
+                </div>
+              </div>
+
+              <!-- Vidéo -->
+              <div class="pub-media-row">
+                <div class="pub-media-label">
+                  <i class="fas fa-video"></i><span>Vidéo</span>
+                </div>
+                <div class="pub-media-btns">
+                  <button class="pub-type-btn" onclick="triggerVideoGallery()">
+                    <i class="fas fa-film"></i> Galerie
+                  </button>
+                  <button class="pub-type-btn" onclick="triggerCameraVideo()">
+                    <i class="fas fa-circle-dot"></i> Caméra
+                  </button>
+                </div>
+              </div>
+
+              <!-- Document -->
+              <div class="pub-media-row pub-media-row-doc">
+                <div class="pub-media-label">
+                  <i class="fas fa-file-alt"></i><span>Document</span>
+                </div>
+                <div class="pub-media-btns">
+                  <button class="pub-type-btn pub-doc-btn" onclick="triggerDocPick()">
+                    <i class="fas fa-folder-open"></i> Importer
+                  </button>
+                </div>
+              </div>
+
+            </div><!-- /pub-media-section -->
+
+            <!-- Infos specs vidéo -->
+            <div class="pub-video-specs">
+              <i class="fas fa-circle-info"></i>
+              <div>
+                <strong>Vidéo</strong> : MP4 · H.264 · AAC · 30 fps · <strong>max 10 min</strong><br/>
+                <span>Recommandé : 4:5 (1080×1350) ou 16:9 (1920×1080)</span>
+              </div>
+            </div>
+
+            <!-- Inputs cachés -->
+            <!-- Galerie -->
+            <input type="file" id="img-picker"        accept="image/*" multiple
+                   style="display:none" onchange="handleImgPick(this)"/>
+            <input type="file" id="video-picker"      accept="video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo,video/3gpp,video/*"
+                   style="display:none" onchange="handleVideoPick(this)"/>
+            <input type="file" id="doc-picker"
+                   accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.odt,.ods,.odp"
+                   style="display:none" onchange="handleDocPick(this)"/>
+            <!-- Caméra arrière (environnement) -->
+            <input type="file" id="cam-back-photo"    accept="image/*" capture="environment"
+                   style="display:none" onchange="handleImgPick(this)"/>
+            <input type="file" id="cam-back-video"    accept="video/mp4,video/quicktime,video/*" capture="environment"
+                   style="display:none" onchange="handleVideoPick(this)"/>
+            <!-- Caméra avant (selfie) -->
+            <input type="file" id="cam-front-photo"   accept="image/*" capture="user"
+                   style="display:none" onchange="handleImgPick(this)"/>
+            <input type="file" id="cam-front-video"   accept="video/mp4,video/quicktime,video/*" capture="user"
+                   style="display:none" onchange="handleVideoPick(this)"/>
+          </div>
+        </section>
+
+        <!-- ▸ MESSAGES -->
+        <section id="p-messages" class="app-page">
+
+          <!-- Topbar -->
+          <div class="msg-topbar">
+            <h2 class="msg-title">Messages</h2>
+            <button class="msg-compose-btn" onclick="showToast('Nouvelle conversation bientôt','')">
+              <i class="fas fa-pen-to-square"></i>
+            </button>
+          </div>
+
+          <!-- Recherche -->
+          <div class="msg-search-row">
+            <i class="fas fa-magnifying-glass msg-search-ico"></i>
+            <input type="text" class="msg-search-input" id="msg-search"
+                   placeholder="Rechercher une conversation..."
+                   oninput="filterConversations(this.value)" autocomplete="off"/>
+          </div>
+
+          <!-- Tabs -->
+          <div class="msg-tabs">
+            <button class="msg-tab active" onclick="switchMsgTab(this,'all')">Tous</button>
+            <button class="msg-tab" onclick="switchMsgTab(this,'unread')">
+              Non lus <span class="msg-unread-badge" id="msg-unread-count">3</span>
+            </button>
+            <button class="msg-tab" onclick="switchMsgTab(this,'archived')">Archivés</button>
+          </div>
+
+          <!-- Liste des conversations -->
+          <div class="page-scroll msg-scroll" id="conv-list">
+            <!-- Rendu par JS via renderConversations() -->
+          </div>
+
+        </section>
+
+        <!-- ▸ PROFIL -->
+        <section id="p-profil" class="app-page">
+          <div class="page-scroll profil-scroll" id="profil-scroll">
+
+            <!-- ── EN-TÊTE SOMBRE ── -->
+            <div class="profil-header">
+              <button class="profil-settings-btn" onclick="openProfileSettings()">
+                <i class="fas fa-gear"></i>
+              </button>
+
+              <div class="profil-top">
+                <!-- Photo -->
+                <div class="profil-photo-wrap" onclick="pickProfilePhoto()">
+                  <div class="profil-photo" id="profil-photo-el">
+                    <span id="profil-photo-initials">?</span>
+                    <img id="profil-photo-img" src="" alt="" style="display:none"/>
+                  </div>
+                  <div class="profil-photo-edit"><i class="fas fa-camera"></i></div>
+                </div>
+
+                <!-- Infos -->
+                <div class="profil-info">
+                  <div class="profil-name-row" onclick="openEditName()">
+                    <h2 id="profil-name-display">—</h2>
+                    <span id="profil-badge-display"></span>
+                    <i class="fas fa-pen profil-edit-inline"></i>
+                  </div>
+                  <p class="profil-domain" id="profil-domain-display"
+                     onclick="openEditDomain()">Ajouter votre domaine</p>
+                  <p class="profil-location" onclick="openEditLocation()">
+                    <i class="fas fa-location-dot"></i>
+                    <span id="profil-location-text">Ajouter une ville</span>
+                  </p>
+                  <button class="profil-badge-cta" id="profil-badge-cta" onclick="openBadgePage()" style="display:none"></button>
+                  <span class="google-account-badge" id="profil-google-badge" style="display:none">
+                    <svg width="13" height="13" viewBox="0 0 48 48">
+                      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                    </svg>
+                    Compte Google
+                  </span>
+                </div>
+              </div>
+
+              <!-- Stats -->
+              <div class="profil-stats-row">
+                <div class="profil-stat profil-stat-clickable" onclick="openSelfProjectsList()">
+                  <strong id="pstat-projects">0</strong><span data-i18n="stat.projects">Projets</span>
+                </div>
+                <div class="profil-stat">
+                  <strong id="pstat-rating">—</strong><span data-i18n="stat.rating">Note moy.</span>
+                </div>
+                <div class="profil-stat profil-stat-clickable" onclick="openSelfFollowersList()">
+                  <strong id="pstat-followers">0</strong><span data-i18n="stat.followers">Abonnés</span>
+                </div>
+                <div class="profil-stat profil-stat-clickable" onclick="openFollowingList()">
+                  <strong id="pstat-following">0</strong>
+                  <span><span data-i18n="stat.following">Abonnements</span> <i class="fas fa-chevron-right" style="font-size:9px;opacity:.5"></i></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── INVITATIONS COLLABORATION ── -->
+            <div id="collab-invites-banner" style="display:none"></div>
+
+
+            <!-- ── TABS ── -->
+            <div class="profil-tabs-bar">
+              <button class="profil-tab active" onclick="switchProfilTab(this,'about')" data-i18n="ptab.about">À propos</button>
+              <button class="profil-tab" onclick="switchProfilTab(this,'services')" data-i18n="ptab.services">Services</button>
+              <button class="profil-tab" onclick="switchProfilTab(this,'projects')" data-i18n="ptab.projects">Projets</button>
+              <button class="profil-tab" onclick="switchProfilTab(this,'reviews')" data-i18n="ptab.reviews">Avis</button>
+              <button class="profil-tab" onclick="switchProfilTab(this,'posts')" data-i18n="ptab.posts">Publications</button>
+            </div>
+
+            <!-- ── À PROPOS ── -->
+            <div id="ptab-about" class="profil-tab-panel">
+
+              <div class="profil-card">
+                <div class="profil-card-head">
+                  <h4>À propos</h4>
+                  <button class="profil-edit-btn" onclick="openEditBio()"><i class="fas fa-pen"></i></button>
+                </div>
+                <p class="profil-bio-text" id="profil-bio-display">Aucune description. Appuyez sur le crayon pour vous présenter.</p>
+                <div class="profil-meta-list">
+
+                  <!-- Membre depuis -->
+                  <div class="profil-meta-item">
+                    <i class="fas fa-calendar-days"></i>
+                    <span id="profil-member-since">Membre récent</span>
+                  </div>
+
+                  <!-- Téléphone (cliquable pour modifier + visibilité) -->
+                  <div class="profil-contact-row" id="profil-phone-row" onclick="openEditPhone()">
+                    <div class="profil-contact-left">
+                      <span class="profil-contact-ico"><i class="fas fa-phone"></i></span>
+                      <div class="profil-contact-info">
+                        <span class="profil-contact-label">Téléphone</span>
+                        <span class="profil-contact-value" id="profil-phone-display">Ajouter un numéro</span>
+                      </div>
+                      <span id="profil-phone-verified" style="display:none">
+                        <i class="fas fa-circle-check profil-contact-verified"></i>
+                      </span>
+                    </div>
+                    <div class="profil-contact-right">
+                      <span class="profil-visibility-badge" id="profil-phone-vis-badge">
+                        <i class="fas fa-lock"></i> Privé
+                      </span>
+                      <i class="fas fa-pen profil-contact-edit"></i>
+                    </div>
+                  </div>
+
+                  <!-- Email professionnel (cliquable pour modifier + visibilité) -->
+                  <div class="profil-contact-row" id="profil-email-row" onclick="openEditProEmail()">
+                    <div class="profil-contact-left">
+                      <span class="profil-contact-ico"><i class="fas fa-envelope"></i></span>
+                      <div class="profil-contact-info">
+                        <span class="profil-contact-label">Email professionnel</span>
+                        <span class="profil-contact-value" id="profil-email-display">Ajouter un email pro</span>
+                      </div>
+                    </div>
+                    <div class="profil-contact-right">
+                      <span class="profil-visibility-badge" id="profil-email-vis-badge">
+                        <i class="fas fa-lock"></i> Privé
+                      </span>
+                      <i class="fas fa-pen profil-contact-edit"></i>
+                    </div>
+                  </div>
+
+                  <div class="profil-meta-item">
+                    <i class="fas fa-clock"></i>
+                    <span>Répond généralement en quelques heures</span>
+                  </div>
+
+                </div>
+              </div>
+
+              <div class="profil-card">
+                <div class="profil-card-head">
+                  <h4>Compétences</h4>
+                  <button class="profil-edit-btn" onclick="openEditSkills()"><i class="fas fa-pen"></i></button>
+                </div>
+                <div class="profil-skills-wrap" id="profil-skills-display">
+                  <p class="profil-empty-hint">Aucune compétence. Appuyez sur le crayon pour en ajouter.</p>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- ── SERVICES ── -->
+            <div id="ptab-services" class="profil-tab-panel hidden">
+              <div class="profil-card">
+                <div class="profil-card-head">
+                  <h4>Mes services</h4>
+                  <button class="profil-edit-btn" onclick="openAddService()" title="Ajouter un service">
+                    <i class="fas fa-plus"></i>
+                  </button>
+                </div>
+                <div id="profil-services-list">
+                  <div class="profil-coming-soon-sm" id="profil-services-empty">
+                    <i class="fas fa-concierge-bell" style="font-size:28px;color:#6366F1;margin-bottom:8px"></i>
+                    <p style="font-weight:700;color:#1E293B;margin:0 0 4px">Aucun service ajouté</p>
+                    <small style="color:#64748B">Vos services seront visibles sur votre profil<br>par les autres utilisateurs.</small>
+                    <button onclick="openAddService()" style="margin-top:14px;padding:10px 22px;background:#6366F1;color:#fff;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer"><i class="fas fa-plus" style="margin-right:6px"></i>Ajouter un service</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── PROJETS ── -->
+            <div id="ptab-projects" class="profil-tab-panel hidden">
+              <div class="profil-card">
+                <div class="profil-card-head">
+                  <h4>Projets réalisés</h4>
+                  <button class="profil-edit-btn" onclick="openAddProject()">
+                    <i class="fas fa-plus"></i>
+                  </button>
+                </div>
+                <div id="profil-projects-list"></div>
+                <div id="profil-projects-empty" class="profil-coming-soon-sm">
+                  <i class="fas fa-folder-open"></i>
+                  <p>Aucun projet ajouté</p>
+                  <small>Appuyez sur + pour ajouter votre premier projet</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── AVIS ── -->
+            <div id="ptab-reviews" class="profil-tab-panel hidden">
+              <div class="profil-card">
+                <div class="profil-card-head">
+                  <h4>Avis clients</h4>
+                </div>
+                <div class="profil-coming-soon-sm">
+                  <i class="fas fa-star"></i>
+                  <p>Les avis clients apparaîtront ici</p>
+                  <small>Bientôt disponible</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── PUBLICATIONS ── -->
+            <div id="ptab-posts" class="profil-tab-panel hidden">
+            </div>
+
+          </div><!-- /page-scroll -->
+
+          <!-- Input caché pour la photo de profil -->
+          <input type="file" id="profil-photo-picker" accept="image/*"
+                 style="display:none" onchange="handleProfilePhoto(this)"/>
+        </section>
+
+        <!-- ▸ NOTIFICATIONS -->
+        <section id="p-notifs" class="app-page">
+          <div class="inner-topbar">
+            <button class="back-btn-sm" onclick="showPage('p-home')">
+              <i class="fas fa-arrow-left"></i>
+            </button>
+            <h2>Notifications</h2>
+            <button class="link-blue" style="font-size:13px" onclick="markAllRead()">Tout lire</button>
+          </div>
+          <div class="page-scroll" id="notifs-list"></div>
+        </section>
+
+      </div><!-- /app-pages -->
+
+      <!-- ── OVERLAY VÉRIFICATION BADGE ── -->
+      <div id="badge-screen" class="badge-screen hidden">
+
+        <!-- Topbar -->
+        <div class="badge-topbar">
+          <button class="badge-back-btn" onclick="closeBadgePage()">
+            <i class="fas fa-arrow-left"></i>
+          </button>
+          <span class="badge-topbar-title">Vérification du badge</span>
+        </div>
+
+        <div class="badge-scroll">
+
+          <!-- Statut actuel -->
+          <div class="badge-current-status hidden" id="badge-current-status">
+            <div class="badge-status-icon" id="badge-status-icon"></div>
+            <div>
+              <div class="badge-status-label" id="badge-status-label">—</div>
+              <div class="badge-status-sub" id="badge-status-sub">—</div>
+            </div>
+          </div>
+
+          <!-- ── BADGE BLEU (mérite) ── -->
+          <div class="badge-card" id="badge-card-verified">
+            <div class="badge-card-header">
+              <div class="badge-card-icon badge-card-icon-blue">
+                <i class="fas fa-circle-check"></i>
+              </div>
+              <div>
+                <div class="badge-card-title">Badge Vérifié <span class="badge-inline badge-inline-blue"><i class="fas fa-circle-check"></i></span></div>
+                <div class="badge-card-sub">Basé sur la qualité et la confiance</div>
+              </div>
+            </div>
+
+            <!-- Barre de progression -->
+            <div class="badge-progress-wrap">
+              <div class="badge-progress-bar">
+                <div class="badge-progress-fill" id="badge-progress-fill" style="width:0%"></div>
+              </div>
+              <span class="badge-progress-label" id="badge-progress-label">0 / 8</span>
+            </div>
+
+            <!-- Conditions -->
+            <ul class="badge-conditions" id="badge-conditions-list">
+              <!-- rempli par JS -->
+            </ul>
+
+            <!-- CTA -->
+            <button class="badge-cta-btn badge-cta-blue" id="badge-cta-verified" onclick="openBadgeDocModal()">
+              Demander la vérification
+            </button>
+            <p class="badge-cta-note" id="badge-cta-note">Remplissez toutes les conditions pour activer la demande</p>
+
+            <!-- Démo helper -->
+            <button class="badge-demo-btn" onclick="simulateBadgeConditions()">
+              <i class="fas fa-flask"></i> Mode démo — Simuler les conditions manquantes
+            </button>
+          </div>
+
+          <!-- ── BADGE PREMIUM (payant) ── -->
+          <div class="badge-card badge-card-premium-outer">
+            <div class="badge-card-header">
+              <div class="badge-card-icon badge-card-icon-gold">
+                <i class="fas fa-crown"></i>
+              </div>
+              <div>
+                <div class="badge-card-title">Badge Premium <span class="badge-inline badge-inline-gold"><i class="fas fa-crown"></i></span></div>
+                <div class="badge-card-sub">Abonnement actif + identité vérifiée</div>
+              </div>
+            </div>
+
+            <!-- Avantages -->
+            <ul class="badge-advantages">
+              <li><i class="fas fa-magnifying-glass"></i> Priorité dans les résultats de recherche</li>
+              <li><i class="fas fa-bullhorn"></i> Mise en avant du profil</li>
+              <li><i class="fas fa-chart-bar"></i> Statistiques avancées</li>
+              <li><i class="fas fa-paper-plane"></i> Plus de candidatures / messages</li>
+              <li><i class="fas fa-headset"></i> Support prioritaire</li>
+            </ul>
+
+            <!-- Conditions premium -->
+            <ul class="badge-conditions">
+              <li class="badge-cond" id="pcond-identity">
+                <span class="badge-cond-icon badge-cond-pending"><i class="fas fa-id-card"></i></span>
+                <div class="badge-cond-text">
+                  <span>Identité vérifiée obligatoire</span>
+                  <small>Requis également pour le badge standard</small>
+                </div>
+              </li>
+              <li class="badge-cond">
+                <span class="badge-cond-icon badge-cond-pending"><i class="fas fa-credit-card"></i></span>
+                <div class="badge-cond-text">
+                  <span>Paiement de l'abonnement</span>
+                  <small>Prix défini prochainement</small>
+                </div>
+              </li>
+            </ul>
+
+            <button class="badge-cta-btn badge-cta-gold" onclick="showToast('Abonnement Premium bientôt disponible 👑','')">
+              <i class="fas fa-crown"></i> Passer Premium
+            </button>
+            <p class="badge-cta-note">Prix de l'abonnement annoncé prochainement</p>
+          </div>
+
+          <!-- Différence visuelle -->
+          <div class="badge-legend">
+            <div class="badge-legend-row">
+              <span class="badge-inline badge-inline-blue"><i class="fas fa-circle-check"></i></span>
+              <div>
+                <strong>Badge Bleu</strong> — Vérifié par mérite<br/>
+                <small>Confiance basée sur la qualité de votre profil et vos missions</small>
+              </div>
+            </div>
+            <div class="badge-legend-row">
+              <span class="badge-inline badge-inline-gold"><i class="fas fa-crown"></i></span>
+              <div>
+                <strong>Badge Premium</strong> — Abonnement actif<br/>
+                <small>Visibilité accrue, outils avancés et support dédié</small>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /badge-scroll -->
+      </div><!-- /badge-screen -->
+
+      <!-- ══ ÉCRAN ABONNEMENTS ══ -->
+      <div id="sub-screen" class="sub-screen hidden">
+
+        <!-- Topbar -->
+        <div class="sub-topbar">
+          <button class="sub-back-btn" onclick="closeSubPage()">
+            <i class="fas fa-arrow-left"></i>
+          </button>
+          <span class="sub-topbar-title">Abonnements</span>
+          <div style="width:36px"></div><!-- spacer -->
+        </div>
+
+        <div class="sub-scroll">
+
+          <!-- Hero -->
+          <div class="sub-hero">
+            <div class="sub-hero-icon"><i class="fas fa-crown"></i></div>
+            <div class="sub-hero-title">Choisissez votre plan</div>
+            <div class="sub-hero-sub">Développez votre activité sur Geniwork</div>
+          </div>
+
+          <!-- Toggle Mensuel / Annuel -->
+          <div class="sub-billing-toggle">
+            <button class="sub-bill-btn active" id="sub-bill-month" onclick="_subSetBilling('month')">Mensuel</button>
+            <button class="sub-bill-btn"         id="sub-bill-year"  onclick="_subSetBilling('year')">
+              Annuel <span class="sub-save-badge">−17%</span>
+            </button>
+          </div>
+
+          <!-- ── PLAN GRATUIT ── -->
+          <div class="sub-plan-card sub-plan-free" id="sub-card-free">
+            <div class="sub-plan-header">
+              <div class="sub-plan-icon sub-icon-free"><i class="fas fa-user"></i></div>
+              <div>
+                <div class="sub-plan-name">Gratuit</div>
+                <div class="sub-plan-price-row">
+                  <span class="sub-plan-price">0 €</span>
+                  <span class="sub-plan-period">/ toujours</span>
+                </div>
+              </div>
+              <div class="sub-plan-badge-current hidden" id="sub-current-free">Votre plan</div>
+            </div>
+            <ul class="sub-features">
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Publier des services</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Acheter &amp; vendre</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Profil basique</li>
+              <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> Messages limités (10/jour)</li>
+              <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> Pas de badge vérifié</li>
+              <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> Visibilité standard</li>
+            </ul>
+            <button class="sub-cta-btn sub-cta-free" id="sub-btn-free" onclick="_subChoosePlan('free')">
+              Plan actuel
+            </button>
+          </div>
+
+          <!-- ── PLAN PREMIUM ── -->
+          <div class="sub-plan-card sub-plan-premium" id="sub-card-premium">
+            <div class="sub-plan-popular">⭐ Le plus populaire</div>
+            <div class="sub-plan-header">
+              <div class="sub-plan-icon sub-icon-premium"><i class="fas fa-crown"></i></div>
+              <div>
+                <div class="sub-plan-name">Premium</div>
+                <div class="sub-plan-price-row">
+                  <span class="sub-plan-price" id="sub-price-premium">4,99 €</span>
+                  <span class="sub-plan-period" id="sub-period-premium">/ mois</span>
+                </div>
+                <div class="sub-plan-annual-note hidden" id="sub-annual-note-premium">49,99 € / an — économisez 9,89 €</div>
+              </div>
+              <div class="sub-plan-badge-current hidden" id="sub-current-premium">Votre plan</div>
+            </div>
+            <ul class="sub-features">
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> <strong>Badge vérifié</strong> ✅</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Plus de visibilité profil &amp; services</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Publications mises en avant</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Messages illimités</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Statistiques avancées</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Support prioritaire</li>
+            </ul>
+            <button class="sub-cta-btn sub-cta-premium" id="sub-btn-premium" onclick="_subChoosePlan('premium')">
+              <i class="fas fa-crown"></i> Passer Premium
+            </button>
+          </div>
+
+          <!-- ── PLAN BUSINESS PRO ── -->
+          <div class="sub-plan-card sub-plan-business" id="sub-card-business">
+            <div class="sub-plan-header">
+              <div class="sub-plan-icon sub-icon-business"><i class="fas fa-briefcase"></i></div>
+              <div>
+                <div class="sub-plan-name">Business Pro</div>
+                <div class="sub-plan-price-row">
+                  <span class="sub-plan-price" id="sub-price-business">14,99 €</span>
+                  <span class="sub-plan-period" id="sub-period-business">/ mois</span>
+                </div>
+                <div class="sub-plan-annual-note hidden" id="sub-annual-note-business">149,99 € / an — économisez 29,89 €</div>
+              </div>
+              <div class="sub-plan-badge-current hidden" id="sub-current-business">Votre plan</div>
+            </div>
+            <ul class="sub-features">
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> <strong>Tout Premium inclus</strong></li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Multi-services (jusqu'à 20)</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Analytics business avancés</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Recrutement &amp; offres d'emploi</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Publicités sponsorisées</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Outils IA avancés</li>
+            </ul>
+            <button class="sub-cta-btn sub-cta-business" id="sub-btn-business" onclick="_subChoosePlan('business')">
+              <i class="fas fa-briefcase"></i> Passer Business Pro
+            </button>
+          </div>
+
+          <!-- Garantie -->
+          <div class="sub-guarantee">
+            <i class="fas fa-shield-halved"></i>
+            Paiement sécurisé · Annulation à tout moment · Remboursement 7 jours
+          </div>
+
+        </div><!-- /sub-scroll -->
+
+        <!-- Modal paiement (dans le cadre téléphone) -->
+        <div id="sub-pay-modal" class="sub-pay-overlay hidden" onclick="_subPayBackdrop(event)">
+          <div class="sub-pay-sheet">
+            <div class="sub-pay-title" id="sub-pay-title">Passer Premium</div>
+            <div class="sub-pay-sub"  id="sub-pay-sub">Profitez de tous les avantages</div>
+            <div class="sub-pay-amount">
+              <div class="sub-pay-amount-val" id="sub-pay-val">4,99 €</div>
+              <div class="sub-pay-amount-lbl" id="sub-pay-lbl">par mois · annulation à tout moment</div>
+            </div>
+            <!-- PayPal button injected here -->
+            <div id="sub-paypal-wrap" style="padding:0 2px 4px">
+              <div id="sub-paypal-btn-container"></div>
+            </div>
+            <button class="sub-pay-cancel" onclick="_subClosePayModal()">Annuler</button>
+            <p class="sub-pay-notice">
+              <i class="fas fa-shield-halved" style="color:#22C55E"></i>
+              Paiement sécurisé PayPal · Remboursement sous 7 jours · Annulable à tout moment.
+            </p>
+          </div>
+        </div>
+
+      </div><!-- /sub-screen -->
+
+      <!-- ══ ÉCRAN TABLEAU DE BORD UTILISATEUR ══ -->
+      <div id="dash-screen" class="dash-screen hidden">
+        <!-- Topbar -->
+        <div class="dash-topbar">
+          <button class="dash-back-btn" onclick="closeDashboard()">
+            <i class="fas fa-arrow-left"></i>
+          </button>
+          <h2 class="dash-title">Tableau de bord</h2>
+          <div id="dash-plan-chip" class="dash-plan-chip free">Gratuit</div>
+        </div>
+        <!-- Contenu dynamique -->
+        <div class="dash-scroll" id="dash-scroll"></div>
+      </div><!-- /dash-screen -->
+
+      <!-- ── SETTINGS SCREEN ── -->
+      <!-- ══ ÉCRAN FAVORIS ══ -->
+      <div class="favoris-screen hidden" id="favoris-screen">
+        <div class="favoris-topbar">
+          <button class="favoris-back-btn" onclick="closeFavorisScreen()">
+            <i class="fas fa-arrow-left"></i>
+          </button>
+          <h2 class="favoris-title">Mes Favoris</h2>
+        </div>
+        <div class="favoris-scroll">
+          <div id="favtab-posts" class="fav-tab-panel"></div>
+        </div>
+      </div>
+
+      <div class="settings-screen hidden" id="settings-screen">
+        <div class="settings-topbar">
+          <button class="settings-back-btn" onclick="closeAppSettings()">
+            <i class="fas fa-arrow-left"></i>
+          </button>
+          <h2 class="settings-title" data-i18n="set.title">Paramètres</h2>
+        </div>
+        <div class="settings-scroll" id="settings-scroll">
+
+          <!-- 1. Gérer votre compte -->
+          <div class="settings-section-label" data-i18n="set.s1">Gérer votre compte</div>
+          <div class="settings-group">
+            <button class="settings-row" onclick="closeAppSettings();openProfileSettings()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-user-pen"></i></span>
+                <div>
+                  <span class="settings-row-name">Modifier le profil</span>
+                  <span class="settings-row-sub">Nom, photo, bio, compétences…</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+            <div class="settings-row-sep"></div>
+            <button class="settings-row" onclick="openChangeMainEmail()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#F0FDF4;color:#16A34A"><i class="fas fa-at"></i></span>
+                <div>
+                  <span class="settings-row-name">Adresse email principale</span>
+                  <span class="settings-row-sub" id="s-main-email-display">—</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+            <div class="settings-row-sep"></div>
+            <button class="settings-row" onclick="openChangePassword()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#F5F3FF;color:#7C3AED"><i class="fas fa-lock"></i></span>
+                <div>
+                  <span class="settings-row-name">Mot de passe</span>
+                  <span class="settings-row-sub">Modifier votre mot de passe</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+          </div>
+
+          <!-- 2. Visibilité du compte -->
+          <div class="settings-section-label">Visibilité du compte</div>
+          <div class="settings-group">
+            <button class="settings-row" onclick="openPrivacySettings()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#F5F3FF;color:#7C3AED"><i class="fas fa-user-shield"></i></span>
+                <div>
+                  <span class="settings-row-name">Confidentialité &amp; Visibilité</span>
+                  <span class="settings-row-sub" id="s-privacy-summary">Compte public · Tout le monde</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+          </div>
+
+          <!-- 3. Confidentialité (légal) -->
+          <div class="settings-section-label">Confidentialité</div>
+          <div class="settings-group">
+            <button class="settings-row" onclick="closeAppSettings();openEditPhone()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#F0FDF4;color:#16A34A"><i class="fas fa-phone"></i></span>
+                <div>
+                  <span class="settings-row-name">Téléphone</span>
+                  <span class="settings-row-sub" id="s-phone-status">—</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+            <div class="settings-row-sep"></div>
+            <button class="settings-row" onclick="closeAppSettings();openEditProEmail()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#FFF7ED;color:#EA580C"><i class="fas fa-envelope"></i></span>
+                <div>
+                  <span class="settings-row-name">Email professionnel</span>
+                  <span class="settings-row-sub" id="s-email-status">—</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+            <div class="settings-row-sep"></div>
+            <button class="settings-row" onclick="openLegalScreen('cgu')">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-file-contract"></i></span>
+                <div>
+                  <span class="settings-row-name">CGU — Conditions d'utilisation</span>
+                  <span class="settings-row-sub">Lire les conditions générales</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+            <div class="settings-row-sep"></div>
+            <button class="settings-row" onclick="openLegalScreen('privacy')">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#F0FDF4;color:#16A34A"><i class="fas fa-shield-halved"></i></span>
+                <div>
+                  <span class="settings-row-name">Politique de confidentialité</span>
+                  <span class="settings-row-sub">Données personnelles &amp; cookies</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+          </div>
+
+          <!-- 3. Langue -->
+          <div class="settings-section-label" data-i18n="set.s3">Langue</div>
+          <div class="settings-group">
+            <button class="settings-row" onclick="openLanguagePicker()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#F0F9FF;color:#0284C7"><i class="fas fa-globe"></i></span>
+                <div>
+                  <span class="settings-row-name" data-i18n="set.lang_row">Langue de l'application</span>
+                  <span class="settings-row-sub" id="s-lang-label">Français</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+          </div>
+
+          <!-- 4. Historique -->
+          <div class="settings-section-label" data-i18n="set.s4">Historique</div>
+          <div class="settings-group">
+            <button class="settings-row" onclick="openHistorique()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#FFFBEB;color:#D97706"><i class="fas fa-clock-rotate-left"></i></span>
+                <div>
+                  <span class="settings-row-name" data-i18n="set.history">Historique d'activité</span>
+                  <span class="settings-row-sub" data-i18n="set.history_sub">Profils visités, publications vues</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow"></i>
+            </button>
+          </div>
+
+          <!-- 5. Zone de danger -->
+          <div class="settings-section-label" data-i18n="set.s5">Zone de danger</div>
+          <div class="settings-group">
+            <button class="settings-row" onclick="confirmDeactivateAccount()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#FFF7ED;color:#EA580C"><i class="fas fa-user-slash"></i></span>
+                <div>
+                  <span class="settings-row-name" style="color:#EA580C" data-i18n="set.deactivate">Désactiver le compte</span>
+                  <span class="settings-row-sub" data-i18n="set.deactivate_sub">Suspendre temporairement votre compte</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow" style="color:#EA580C"></i>
+            </button>
+            <div class="settings-row-sep"></div>
+            <button class="settings-row settings-row-danger" onclick="confirmDeleteAccount()">
+              <div class="settings-row-left">
+                <span class="settings-row-ico" style="background:#FEF2F2;color:#DC2626"><i class="fas fa-trash-can"></i></span>
+                <div>
+                  <span class="settings-row-name" style="color:#DC2626" data-i18n="set.delete">Supprimer le compte</span>
+                  <span class="settings-row-sub" data-i18n="set.delete_sub">Action définitive et irréversible</span>
+                </div>
+              </div>
+              <i class="fas fa-chevron-right settings-row-arrow" style="color:#DC2626"></i>
+            </button>
+          </div>
+
+          <div style="height:40px"></div>
+        </div>
+      </div>
+
+      <!-- ══ ÉCRAN CGU (LECTURE) ══ -->
+      <div class="legal-screen hidden" id="legal-cgu-screen">
+        <div class="legal-topbar">
+          <button class="legal-back-btn" onclick="closeLegalScreen('cgu')"><i class="fas fa-arrow-left"></i></button>
+          <div class="legal-topbar-info">
+            <h2 class="legal-topbar-title">Conditions d'utilisation</h2>
+            <span class="legal-topbar-sub">CGU — Geniwork</span>
+          </div>
+        </div>
+        <div class="legal-scroll">
+          <div class="legal-content">
+
+            <div class="legal-badge"><i class="fas fa-file-contract"></i> CGU</div>
+            <h3 class="legal-main-title">Conditions Générales d'Utilisation – Geniwork</h3>
+            <p class="legal-date"><i class="fas fa-calendar-days"></i> Dernière mise à jour : Mai 2026</p>
+
+            <div class="legal-section">
+              <h4>1. Acceptation des conditions</h4>
+              <p>En créant un compte ou en utilisant la plateforme Geniwork, vous acceptez sans réserve les présentes conditions. Si vous n'êtes pas d'accord, vous ne devez pas utiliser nos services.</p>
+            </div>
+
+            <div class="legal-section">
+              <h4>2. Description du service</h4>
+              <p>Geniwork est une plateforme de mise en relation professionnelle permettant de :</p>
+              <ul>
+                <li>Publier des services, des offres d'emploi et des projets.</li>
+                <li>Rechercher des profils d'entrepreneurs et de freelances.</li>
+                <li>Acheter ou vendre des prestations de services via notre marketplace.</li>
+                <li>Interagir via des publications, des commentaires et une messagerie intégrée.</li>
+              </ul>
+            </div>
+
+            <div class="legal-section">
+              <h4>3. Inscription et Sécurité</h4>
+              <p>L'utilisateur s'engage à :</p>
+              <ul>
+                <li>Fournir des informations exactes, complètes et à jour.</li>
+                <li>Maintenir la confidentialité de ses identifiants de connexion.</li>
+                <li>Assumer la responsabilité de toute activité effectuée sous son compte.</li>
+              </ul>
+            </div>
+
+            <div class="legal-section">
+              <h4>4. Règles de conduite et Contenu</h4>
+              <p>Vous restez propriétaire du contenu que vous publiez, mais vous accordez à Geniwork une licence pour l'afficher sur la plateforme. Il est strictement interdit de publier :</p>
+              <ul>
+                <li>Du contenu illégal, frauduleux ou incitant à la violence.</li>
+                <li>Des publicités intrusives (spam) ou des tentatives de phishing.</li>
+                <li>Du contenu portant atteinte aux droits de propriété intellectuelle de tiers.</li>
+              </ul>
+              <p>Geniwork se réserve le droit de supprimer tout contenu jugé inapproprié sans préavis.</p>
+            </div>
+
+            <div class="legal-section">
+              <h4>5. Responsabilité de la Marketplace</h4>
+              <p>Geniwork agit en tant qu'intermédiaire technique. Les contrats de prestation sont conclus directement entre l'acheteur et le vendeur.</p>
+              <ul>
+                <li><strong>Litiges :</strong> Geniwork ne peut être tenu responsable de la qualité des services rendus ou du non-respect des engagements entre utilisateurs.</li>
+                <li><strong>Paiements :</strong> Les transactions effectuées hors de la plateforme ne sont pas couvertes par nos garanties de sécurité.</li>
+              </ul>
+            </div>
+
+            <div class="legal-section">
+              <h4>6. Suspension et Résiliation</h4>
+              <p>En cas de violation de ces règles ou de comportement abusif, Geniwork se réserve le droit de suspendre ou de supprimer votre compte définitivement, sans indemnité.</p>
+            </div>
+
+            <div class="legal-section">
+              <h4>7. Propriété intellectuelle</h4>
+              <p>Tous les éléments de la plateforme Geniwork (logo, interface, code) sont protégés par le droit d'auteur. Toute reproduction non autorisée est interdite.</p>
+            </div>
+
+            <div class="legal-section">
+              <h4>8. Modification des CGU</h4>
+              <p>Geniwork se réserve le droit de modifier les présentes CGU à tout moment. Les utilisateurs seront informés de tout changement significatif via la plateforme.</p>
+            </div>
+
+            <div class="legal-footer-note">
+              <i class="fas fa-envelope"></i> Contact : <strong>support@geniwork.com</strong>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ ÉCRAN POLITIQUE DE CONFIDENTIALITÉ (LECTURE) ══ -->
+      <div class="legal-screen hidden" id="legal-privacy-screen">
+        <div class="legal-topbar">
+          <button class="legal-back-btn" onclick="closeLegalScreen('privacy')"><i class="fas fa-arrow-left"></i></button>
+          <div class="legal-topbar-info">
+            <h2 class="legal-topbar-title">Politique de confidentialité</h2>
+            <span class="legal-topbar-sub">Données &amp; vie privée — Geniwork</span>
+          </div>
+        </div>
+        <div class="legal-scroll">
+          <div class="legal-content">
+
+            <div class="legal-badge privacy"><i class="fas fa-shield-halved"></i> Confidentialité</div>
+            <h3 class="legal-main-title">Politique de Confidentialité – Geniwork</h3>
+            <p class="legal-date"><i class="fas fa-calendar-days"></i> Dernière mise à jour : Mai 2026</p>
+
+            <div class="legal-section">
+              <h4>1. Données collectées</h4>
+              <p>Nous collectons les informations nécessaires au bon fonctionnement du service :</p>
+              <ul>
+                <li><strong>Identité :</strong> Nom, prénom, adresse email, photo de profil.</li>
+                <li><strong>Profil professionnel :</strong> Compétences, portfolio, informations business.</li>
+                <li><strong>Interactions :</strong> Publications, messages internes, commentaires.</li>
+                <li><strong>Données techniques :</strong> Adresse IP, données de navigation (cookies).</li>
+              </ul>
+            </div>
+
+            <div class="legal-section">
+              <h4>2. Utilisation de vos données</h4>
+              <p>Vos données sont utilisées pour :</p>
+              <ul>
+                <li>Gérer votre compte et sécuriser vos accès.</li>
+                <li>Faciliter la mise en relation entre freelances et clients.</li>
+                <li>Améliorer l'assistant AI de Geniwork (vos données personnelles ne sont pas revendues à des tiers).</li>
+                <li>Assurer le support technique.</li>
+              </ul>
+            </div>
+
+            <div class="legal-section">
+              <h4>3. Partage et Stockage</h4>
+              <ul>
+                <li><strong>Confidentialité :</strong> Nous ne vendons jamais vos données personnelles.</li>
+                <li><strong>Prestataires :</strong> Nous utilisons des services tiers sécurisés (hébergement, analyse) qui respectent les normes de protection des données en vigueur.</li>
+                <li><strong>Durée :</strong> Vos données sont conservées tant que votre compte est actif. Elles sont supprimées sous 30 jours après clôture du compte.</li>
+              </ul>
+            </div>
+
+            <div class="legal-section">
+              <h4>4. Vos Droits</h4>
+              <p>Conformément aux lois sur la protection des données (RGPD), vous disposez d'un droit :</p>
+              <ul>
+                <li>D'accès et de modification de vos informations personnelles.</li>
+                <li>De suppression définitive de votre compte et de vos données.</li>
+                <li>D'opposition à l'utilisation de vos données à des fins marketing.</li>
+                <li>De portabilité de vos données.</li>
+              </ul>
+            </div>
+
+            <div class="legal-section">
+              <h4>5. Cookies</h4>
+              <p>Nous utilisons des cookies pour améliorer votre navigation et analyser l'audience de la plateforme. Vous pouvez configurer votre navigateur pour les refuser, bien que cela puisse limiter certaines fonctionnalités.</p>
+            </div>
+
+            <div class="legal-section">
+              <h4>6. Sécurité</h4>
+              <p>Geniwork met en œuvre des mesures techniques et organisationnelles pour protéger vos données contre tout accès non autorisé, perte ou destruction.</p>
+            </div>
+
+            <div class="legal-footer-note">
+              <i class="fas fa-envelope"></i> Pour toute demande : <strong>privacy@geniwork.com</strong>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ ÉCRAN MODIFIER MOT DE PASSE ══ -->
+      <div class="legal-screen hidden" id="change-pwd-screen">
+        <div class="legal-topbar">
+          <button class="legal-back-btn" onclick="closeChangePwdScreen()"><i class="fas fa-arrow-left"></i></button>
+          <div class="legal-topbar-info">
+            <h2 class="legal-topbar-title">Mot de passe</h2>
+            <span class="legal-topbar-sub">Modifier votre mot de passe</span>
+          </div>
+        </div>
+        <div class="legal-scroll cpwd-scroll">
+          <div class="cpwd-form-wrap">
+
+            <!-- Icône décorative -->
+            <div class="cpwd-header-ico">
+              <i class="fas fa-lock-open"></i>
+            </div>
+            <p class="cpwd-intro">Choisissez un mot de passe fort pour protéger votre compte.</p>
+
+            <!-- Mot de passe actuel -->
+            <div class="cpwd-field">
+              <label class="cpwd-label">Mot de passe actuel</label>
+              <div class="cpwd-input-wrap">
+                <i class="fas fa-lock cpwd-field-ico"></i>
+                <input class="cpwd-input" id="cpwd-current" type="password"
+                       placeholder="Votre mot de passe actuel"
+                       oninput="_cpwdClearErr()" autocomplete="current-password"/>
+                <button type="button" class="cpwd-eye" onclick="_cpwdToggleEye('cpwd-current',this)">
+                  <i class="far fa-eye"></i>
+                </button>
+              </div>
+            </div>
+
+            <!-- Nouveau mot de passe -->
+            <div class="cpwd-field">
+              <label class="cpwd-label">Nouveau mot de passe</label>
+              <div class="cpwd-input-wrap">
+                <i class="fas fa-key cpwd-field-ico"></i>
+                <input class="cpwd-input" id="cpwd-new" type="password"
+                       placeholder="8 caractères minimum"
+                       oninput="_cpwdCheckStrength()" autocomplete="new-password"/>
+                <button type="button" class="cpwd-eye" onclick="_cpwdToggleEye('cpwd-new',this)">
+                  <i class="far fa-eye"></i>
+                </button>
+              </div>
+              <!-- Barre de force -->
+              <div class="cpwd-strength-bar">
+                <div class="cpwd-strength-fill" id="cpwd-strength-fill"></div>
+              </div>
+              <p class="cpwd-strength-label" id="cpwd-strength-label"></p>
+              <!-- Règles -->
+              <ul class="cpwd-rules" id="cpwd-rules">
+                <li class="cpwd-rule" id="rule-len"><i class="fas fa-circle-xmark"></i> 8 caractères minimum</li>
+                <li class="cpwd-rule" id="rule-upper"><i class="fas fa-circle-xmark"></i> Une lettre majuscule</li>
+                <li class="cpwd-rule" id="rule-num"><i class="fas fa-circle-xmark"></i> Un chiffre</li>
+                <li class="cpwd-rule" id="rule-special"><i class="fas fa-circle-xmark"></i> Un caractère spécial (!@#$…)</li>
+              </ul>
+            </div>
+
+            <!-- Confirmer -->
+            <div class="cpwd-field">
+              <label class="cpwd-label">Confirmer le nouveau mot de passe</label>
+              <div class="cpwd-input-wrap">
+                <i class="fas fa-shield-check cpwd-field-ico"></i>
+                <input class="cpwd-input" id="cpwd-confirm" type="password"
+                       placeholder="Répétez le nouveau mot de passe"
+                       oninput="_cpwdCheckMatch()" autocomplete="new-password"/>
+                <button type="button" class="cpwd-eye" onclick="_cpwdToggleEye('cpwd-confirm',this)">
+                  <i class="far fa-eye"></i>
+                </button>
+              </div>
+              <p class="cpwd-match-label hidden" id="cpwd-match-label"></p>
+            </div>
+
+            <!-- Message d'erreur général -->
+            <p class="cpwd-error hidden" id="cpwd-error-main"></p>
+
+            <!-- Bouton enregistrer -->
+            <button class="cpwd-save-btn" id="cpwd-save-btn" onclick="_doChangePassword()">
+              <i class="fas fa-check"></i> Enregistrer le mot de passe
+            </button>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ ÉCRAN VISIBILITÉ & CONFIDENTIALITÉ ══ -->
+      <div class="legal-screen hidden" id="privacy-settings-screen">
+        <div class="legal-topbar">
+          <button class="legal-back-btn" onclick="closePrivacySettings()"><i class="fas fa-arrow-left"></i></button>
+          <div class="legal-topbar-info">
+            <h2 class="legal-topbar-title">Visibilité &amp; Confidentialité</h2>
+            <span class="legal-topbar-sub">Gérez qui peut voir votre compte</span>
+          </div>
+        </div>
+
+        <div class="legal-scroll">
+          <div class="priv-content">
+
+            <!-- ══ TYPE DE COMPTE ══ -->
+            <div class="priv-section-label">TYPE DE COMPTE</div>
+            <div class="priv-group">
+
+              <div class="priv-row priv-row-main" id="priv-row-isPrivate">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#F5F3FF;color:#7C3AED"><i class="fas fa-lock"></i></span>
+                  <div>
+                    <span class="priv-name">Compte privé</span>
+                    <span class="priv-desc">Seuls vos abonnés approuvés voient vos publications et votre profil</span>
+                  </div>
+                </div>
+                <label class="sdb-toggle">
+                  <input type="checkbox" id="priv-isPrivate" onchange="_privToggle('isPrivate',this.checked)">
+                  <span class="sdb-toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="priv-row-sep"></div>
+
+              <div class="priv-row" id="priv-row-requireApproval">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-user-check"></i></span>
+                  <div>
+                    <span class="priv-name">Approuver les abonnements</span>
+                    <span class="priv-desc">Valider manuellement chaque demande d'abonnement</span>
+                  </div>
+                </div>
+                <label class="sdb-toggle">
+                  <input type="checkbox" id="priv-requireApproval" onchange="_privToggle('requireApproval',this.checked)">
+                  <span class="sdb-toggle-track"></span>
+                </label>
+              </div>
+
+            </div>
+
+            <!-- ══ QUI PEUT ME VOIR ══ -->
+            <div class="priv-section-label">QUI PEUT ME VOIR</div>
+            <div class="priv-group">
+
+              <div class="priv-row">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#F0FDF4;color:#16A34A"><i class="fas fa-eye"></i></span>
+                  <div>
+                    <span class="priv-name">Profil visible</span>
+                    <span class="priv-desc">Autoriser les autres à consulter votre profil</span>
+                  </div>
+                </div>
+                <label class="sdb-toggle">
+                  <input type="checkbox" id="priv-profileVisible" onchange="_privToggle('profileVisible',this.checked)">
+                  <span class="sdb-toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="priv-row-sep"></div>
+
+              <div class="priv-row">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#FFFBEB;color:#D97706"><i class="fas fa-magnifying-glass"></i></span>
+                  <div>
+                    <span class="priv-name">Apparaître dans les recherches</span>
+                    <span class="priv-desc">Être trouvé par d'autres utilisateurs</span>
+                  </div>
+                </div>
+                <label class="sdb-toggle">
+                  <input type="checkbox" id="priv-showInSearch" onchange="_privToggle('showInSearch',this.checked)">
+                  <span class="sdb-toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="priv-row-sep"></div>
+
+              <div class="priv-row">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#FFF7ED;color:#EA580C"><i class="fas fa-images"></i></span>
+                  <div>
+                    <span class="priv-name">Publications visibles</span>
+                    <span class="priv-desc">Permettre à tous de voir vos posts et contenus</span>
+                  </div>
+                </div>
+                <label class="sdb-toggle">
+                  <input type="checkbox" id="priv-postsVisible" onchange="_privToggle('postsVisible',this.checked)">
+                  <span class="sdb-toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="priv-row-sep"></div>
+
+              <div class="priv-row">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#F0F9FF;color:#0284C7"><i class="fas fa-store"></i></span>
+                  <div>
+                    <span class="priv-name">Visible dans le Marketplace</span>
+                    <span class="priv-desc">Afficher vos services et produits au grand public</span>
+                  </div>
+                </div>
+                <label class="sdb-toggle">
+                  <input type="checkbox" id="priv-showInMarketplace" onchange="_privToggle('showInMarketplace',this.checked)">
+                  <span class="sdb-toggle-track"></span>
+                </label>
+              </div>
+
+            </div>
+
+            <!-- ══ INTERACTIONS ══ -->
+            <div class="priv-section-label">INTERACTIONS</div>
+            <div class="priv-group">
+
+              <!-- Qui peut m'envoyer des messages -->
+              <div class="priv-row priv-row-select">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-comment-dots"></i></span>
+                  <div>
+                    <span class="priv-name">Recevoir des messages de</span>
+                    <span class="priv-desc">Choisir qui peut vous envoyer un message</span>
+                  </div>
+                </div>
+                <select class="priv-select" id="priv-messagesFrom" onchange="_privSet('messagesFrom',this.value)">
+                  <option value="all">Tout le monde</option>
+                  <option value="followers">Abonnés uniquement</option>
+                  <option value="none">Personne</option>
+                </select>
+              </div>
+
+              <div class="priv-row-sep"></div>
+
+              <!-- Qui peut commenter -->
+              <div class="priv-row priv-row-select">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#F0FDF4;color:#16A34A"><i class="fas fa-comment"></i></span>
+                  <div>
+                    <span class="priv-name">Autoriser les commentaires</span>
+                    <span class="priv-desc">Qui peut commenter vos publications</span>
+                  </div>
+                </div>
+                <select class="priv-select" id="priv-commentsFrom" onchange="_privSet('commentsFrom',this.value)">
+                  <option value="all">Tout le monde</option>
+                  <option value="followers">Abonnés uniquement</option>
+                  <option value="none">Désactivés</option>
+                </select>
+              </div>
+
+            </div>
+
+            <!-- ══ ACTIVITÉ ══ -->
+            <div class="priv-section-label">ACTIVITÉ</div>
+            <div class="priv-group">
+
+              <div class="priv-row">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#F0FDF4;color:#16A34A"><i class="fas fa-circle" style="font-size:10px"></i></span>
+                  <div>
+                    <span class="priv-name">Afficher le statut en ligne</span>
+                    <span class="priv-desc">Les autres voient si vous êtes connecté</span>
+                  </div>
+                </div>
+                <label class="sdb-toggle">
+                  <input type="checkbox" id="priv-showOnline" onchange="_privToggle('showOnline',this.checked)">
+                  <span class="sdb-toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="priv-row-sep"></div>
+
+              <div class="priv-row">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-check-double"></i></span>
+                  <div>
+                    <span class="priv-name">Accusés de lecture</span>
+                    <span class="priv-desc">Afficher les doubles coches bleues dans les messages</span>
+                  </div>
+                </div>
+                <label class="sdb-toggle">
+                  <input type="checkbox" id="priv-readReceipts" onchange="_privToggle('readReceipts',this.checked)">
+                  <span class="sdb-toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="priv-row-sep"></div>
+
+              <div class="priv-row">
+                <div class="priv-row-left">
+                  <span class="priv-ico" style="background:#FFFBEB;color:#D97706"><i class="fas fa-chart-bar"></i></span>
+                  <div>
+                    <span class="priv-name">Statistiques de profil visibles</span>
+                    <span class="priv-desc">Afficher vos vues et statistiques publiquement</span>
+                  </div>
+                </div>
+                <label class="sdb-toggle">
+                  <input type="checkbox" id="priv-showStats" onchange="_privToggle('showStats',this.checked)">
+                  <span class="sdb-toggle-track"></span>
+                </label>
+              </div>
+
+            </div>
+
+            <!-- Note info -->
+            <div class="priv-info-note">
+              <i class="fas fa-circle-info"></i>
+              <p>Ces paramètres s'appliquent immédiatement. Un compte privé masque votre contenu aux non-abonnés.</p>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ ÉCRAN SUPPORT ══ -->
+      <div class="legal-screen hidden" id="support-screen">
+        <div class="legal-topbar">
+          <button class="legal-back-btn" onclick="closeSupportScreen()"><i class="fas fa-arrow-left"></i></button>
+          <div class="legal-topbar-info">
+            <h2 class="legal-topbar-title">Support &amp; Aide</h2>
+            <span class="legal-topbar-sub">Centre d'aide Geniwork</span>
+          </div>
+        </div>
+
+        <div class="legal-scroll">
+          <div class="legal-content support-content">
+
+            <!-- Bannière -->
+            <div class="support-hero">
+              <div class="support-hero-ico"><i class="fas fa-headset"></i></div>
+              <h3>Comment pouvons-nous vous aider ?</h3>
+              <p>Consultez notre FAQ ou contactez directement notre équipe.</p>
+            </div>
+
+            <!-- Contact rapide -->
+            <div class="support-contact-row">
+              <a class="support-contact-btn" href="mailto:support@geniwork.com">
+                <i class="fas fa-envelope"></i>
+                <span>Email</span>
+                <small>support@geniwork.com</small>
+              </a>
+              <a class="support-contact-btn support-contact-wa" href="https://wa.me/message/geniwork" target="_blank">
+                <i class="fab fa-whatsapp"></i>
+                <span>WhatsApp</span>
+                <small>Réponse rapide</small>
+              </a>
+            </div>
+
+            <!-- FAQ -->
+            <p class="support-faq-title"><i class="fas fa-circle-question"></i> Questions fréquentes</p>
+
+            <div class="faq-list">
+
+              <div class="faq-item">
+                <button class="faq-header" onclick="_toggleFaq(this)">
+                  <span>Comment créer mon profil freelance ?</span>
+                  <i class="fas fa-plus faq-ico"></i>
+                </button>
+                <div class="faq-body">
+                  <p>Après inscription, allez dans <strong>Profil → Modifier</strong>. Ajoutez votre photo, votre rôle, vos compétences et une biographie. Plus votre profil est complet, plus vous serez visible dans les recherches.</p>
+                </div>
+              </div>
+
+              <div class="faq-item">
+                <button class="faq-header" onclick="_toggleFaq(this)">
+                  <span>Comment publier un service ou un produit ?</span>
+                  <i class="fas fa-plus faq-ico"></i>
+                </button>
+                <div class="faq-body">
+                  <p>Dans votre profil, appuyez sur le bouton <strong>+ Ajouter</strong> dans la section Services. Choisissez le type (service ou produit), remplissez les informations et activez l'option <strong>Visible dans le marketplace</strong> pour le rendre public.</p>
+                </div>
+              </div>
+
+              <div class="faq-item">
+                <button class="faq-header" onclick="_toggleFaq(this)">
+                  <span>Comment obtenir le badge vérifié ?</span>
+                  <i class="fas fa-plus faq-ico"></i>
+                </button>
+                <div class="faq-body">
+                  <p>Accédez à <strong>Menu → Vérification du badge</strong>. Complétez les étapes de vérification (identité, compétences). Une fois validé, le badge bleu apparaît sur votre profil et vos publications.</p>
+                </div>
+              </div>
+
+              <div class="faq-item">
+                <button class="faq-header" onclick="_toggleFaq(this)">
+                  <span>Comment ajouter un article au panier et payer ?</span>
+                  <i class="fas fa-plus faq-ico"></i>
+                </button>
+                <div class="faq-body">
+                  <p>Dans le <strong>Marketplace</strong>, appuyez sur <strong>Ajouter au panier</strong> sur un service ou produit. Ensuite, cliquez sur l'icône panier en haut à droite, choisissez votre moyen de paiement (carte, Mobile Money ou virement) et validez votre commande.</p>
+                </div>
+              </div>
+
+              <div class="faq-item">
+                <button class="faq-header" onclick="_toggleFaq(this)">
+                  <span>Comment changer mon mot de passe ou mon email ?</span>
+                  <i class="fas fa-plus faq-ico"></i>
+                </button>
+                <div class="faq-body">
+                  <p>Allez dans <strong>Menu → Paramètres → Gérer votre compte</strong>. Vous pouvez y modifier votre adresse email principale ou votre mot de passe. Pour les comptes Google, ces informations sont gérées par Google.</p>
+                </div>
+              </div>
+
+              <div class="faq-item">
+                <button class="faq-header" onclick="_toggleFaq(this)">
+                  <span>Comment supprimer ou désactiver mon compte ?</span>
+                  <i class="fas fa-plus faq-ico"></i>
+                </button>
+                <div class="faq-body">
+                  <p><strong>Désactiver</strong> suspend temporairement votre compte — vous pouvez le réactiver en vous reconnectant. <strong>Supprimer</strong> efface définitivement toutes vos données. Ces options se trouvent dans <strong>Paramètres → Zone de danger</strong>.</p>
+                </div>
+              </div>
+
+              <div class="faq-item">
+                <button class="faq-header" onclick="_toggleFaq(this)">
+                  <span>Je n'arrive pas à me connecter, que faire ?</span>
+                  <i class="fas fa-plus faq-ico"></i>
+                </button>
+                <div class="faq-body">
+                  <p>Vérifiez votre adresse email et votre mot de passe. Si vous avez oublié votre mot de passe, utilisez <strong>Mot de passe oublié</strong> sur l'écran de connexion. Si le problème persiste, contactez-nous à <strong>support@geniwork.com</strong>.</p>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- Signaler un problème -->
+            <div class="support-report-box">
+              <i class="fas fa-bug"></i>
+              <div>
+                <strong>Signaler un bug ou un problème</strong>
+                <p>Décrivez votre problème en détail et nous vous répondrons dans les 24h.</p>
+              </div>
+              <button class="support-report-btn" type="button">Signaler</button>
+            </div>
+
+            <!-- Mes tickets -->
+            <div id="user-tickets-section" style="margin-bottom:20px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                <p class="support-faq-title" style="margin:0"><i class="fas fa-inbox"></i> Mes signalements</p>
+                <button onclick="_renderUserTickets()" style="border:none;background:none;color:#2563EB;font-size:12px;font-weight:600;cursor:pointer">
+                  <i class="fas fa-rotate-right"></i> Actualiser
+                </button>
+              </div>
+              <div id="user-tickets-wrap">
+                <p style="font-size:12px;color:#9CA3AF;text-align:center;padding:12px 0">Aucun signalement envoyé pour l'instant.</p>
+              </div>
+            </div>
+
+            <!-- Version -->
+            <p class="support-version">Geniwork v1.0.0 — © 2025 Geniwork</p>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- ── PROJECT FORM MODAL ── -->
+      <div id="project-form-modal" class="project-form-modal hidden">
+        <div class="proj-form-topbar">
+          <button class="proj-form-back" onclick="closeProjectForm()"><i class="fas fa-arrow-left"></i></button>
+          <span class="proj-form-title-label" id="proj-form-title">Nouveau projet</span>
+          <button class="proj-form-save" onclick="_submitProject()">Publier</button>
+        </div>
+        <div class="proj-form-scroll">
+
+          <!-- Icône -->
+          <div class="svc-field">
+            <label class="svc-label">Icône du projet</label>
+            <div class="proj-icon-form-row">
+              <div class="proj-icon-form-preview" id="proj-icon-form-preview">
+                <i class="fas fa-code" style="color:#2563EB;font-size:26px"></i>
+              </div>
+              <div class="proj-icon-form-btns">
+                <button type="button" class="proj-icon-opt-btn active" id="proj-icon-auto-btn"
+                        onclick="_projIconDefault()">
+                  <i class="fas fa-palette"></i> Auto
+                </button>
+                <label class="proj-icon-opt-btn" id="proj-icon-photo-btn">
+                  <i class="fas fa-image"></i> Photo
+                  <input type="file" id="proj-icon-file" accept="image/*" style="display:none"
+                         onchange="handleProjIconFile(this)">
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="svc-field">
+            <label class="svc-label">Titre du projet <span class="svc-req">*</span></label>
+            <input id="proj-title" class="svc-input" type="text" maxlength="80" placeholder="Ex : Refonte site e-commerce">
+          </div>
+
+          <div class="svc-field">
+            <label class="svc-label">Catégorie</label>
+            <select id="proj-category" class="svc-input svc-select" onchange="_updateProjIconPreview()">
+              <option value="dev">Développement</option>
+              <option value="design">Design</option>
+              <option value="redac">Rédaction</option>
+              <option value="mkt">Marketing</option>
+              <option value="video">Vidéo &amp; Audio</option>
+              <option value="conseil">Conseil</option>
+              <option value="autre">Autre</option>
+            </select>
+          </div>
+
+          <div class="svc-field">
+            <label class="svc-label">Statut du projet</label>
+            <div class="proj-status-picker" id="proj-status-picker">
+              <button type="button" class="proj-status-btn active" data-status="encours" onclick="_selectProjStatus(this)">
+                <i class="fas fa-circle-play"></i> En cours
+              </button>
+              <button type="button" class="proj-status-btn" data-status="pause" onclick="_selectProjStatus(this)">
+                <i class="fas fa-circle-pause"></i> En pause
+              </button>
+              <button type="button" class="proj-status-btn" data-status="termine" onclick="_selectProjStatus(this)">
+                <i class="fas fa-circle-check"></i> Terminé
+              </button>
+            </div>
+          </div>
+
+          <div class="svc-field">
+            <label class="svc-label">Description</label>
+            <textarea id="proj-desc" class="svc-input svc-textarea" rows="4" maxlength="400" placeholder="Décrivez votre projet…"></textarea>
+          </div>
+
+          <div class="svc-field">
+            <label class="svc-label">Lien du projet <span style="opacity:.5;font-weight:400">(optionnel)</span></label>
+            <input id="proj-link" class="svc-input" type="url" placeholder="https://…">
+          </div>
+
+          <div class="svc-field">
+            <label class="svc-label">Date de réalisation</label>
+            <div style="display:flex;gap:8px">
+              <select id="proj-month" class="svc-input svc-select" style="flex:1">
+                <option value="">Mois</option>
+                <option value="01">Janvier</option><option value="02">Février</option>
+                <option value="03">Mars</option><option value="04">Avril</option>
+                <option value="05">Mai</option><option value="06">Juin</option>
+                <option value="07">Juillet</option><option value="08">Août</option>
+                <option value="09">Septembre</option><option value="10">Octobre</option>
+                <option value="11">Novembre</option><option value="12">Décembre</option>
+              </select>
+              <select id="proj-year" class="svc-input svc-select" style="width:110px"></select>
+            </div>
+          </div>
+
+          <div class="svc-field">
+            <label class="svc-label">Technologies / Mots-clés <span style="opacity:.5;font-weight:400">(séparés par virgules)</span></label>
+            <input id="proj-tags" class="svc-input" type="text" placeholder="React, Figma, Node.js…">
+          </div>
+
+          <div class="svc-field">
+            <label class="svc-label">Documents <span style="opacity:.5;font-weight:400">(PDF, Word, Excel, PPT…)</span></label>
+            <div id="proj-docs-preview" class="proj-docs-preview"></div>
+            <label class="proj-doc-add-btn">
+              <i class="fas fa-paperclip"></i> Joindre un fichier
+              <input type="file" id="proj-doc-file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" multiple style="display:none" onchange="handleProjDocFile(this)">
+            </label>
+          </div>
+
+          <div style="height:30px"></div>
+        </div>
+      </div>
+
+      <!-- ── CROP PHOTO MODAL ── -->
+      <div id="photo-crop-modal" style="display:none;position:fixed;inset:0;z-index:600;background:#0d0d0d;flex-direction:column;align-items:center;justify-content:center;gap:20px;padding:24px">
+        <p style="color:#fff;font-weight:700;font-size:17px;margin:0">Recadrer la photo</p>
+        <div id="crop-viewport" style="position:relative;width:280px;height:280px;overflow:hidden;background:#000;border-radius:10px;touch-action:none;flex-shrink:0">
+          <img id="crop-img-el" src="" alt="" draggable="false"
+               style="position:absolute;transform-origin:0 0;cursor:grab;-webkit-user-drag:none;user-select:none;max-width:none"/>
+          <div style="position:absolute;inset:0;background:radial-gradient(circle 120px at center,transparent 120px,rgba(0,0,0,.62) 120px);pointer-events:none"></div>
+          <div style="position:absolute;top:50%;left:50%;width:240px;height:240px;transform:translate(-50%,-50%);border:2px solid rgba(255,255,255,.75);border-radius:50%;pointer-events:none"></div>
+        </div>
+        <div style="width:280px;display:flex;align-items:center;gap:10px">
+          <i class="fas fa-magnifying-glass-minus" style="color:#6B7280;font-size:14px"></i>
+          <input type="range" id="crop-zoom-range" min="0.1" max="5" step="0.01" value="1"
+                 style="flex:1;accent-color:#2563EB;height:4px">
+          <i class="fas fa-magnifying-glass-plus" style="color:#6B7280;font-size:14px"></i>
+        </div>
+        <p style="color:#9CA3AF;font-size:12px;margin:0;text-align:center">Glissez pour recadrer · Pincez ou utilisez le curseur pour zoomer</p>
+        <div style="width:280px;display:flex;gap:12px">
+          <button onclick="_cropCancel()" style="flex:1;padding:13px;border-radius:10px;border:1.5px solid #374151;background:transparent;color:#fff;font-size:15px;font-weight:600;cursor:pointer">Annuler</button>
+          <button onclick="_cropApply()" style="flex:1;padding:13px;border-radius:10px;border:none;background:#2563EB;color:#fff;font-size:15px;font-weight:600;cursor:pointer">Valider</button>
+        </div>
+      </div>
+
+      <!-- ── VIDEO PLAYER MODAL ── -->
+      <div id="video-player-modal" style="display:none;position:fixed;inset:0;z-index:700;background:#000;flex-direction:column">
+
+        <!-- Topbar -->
+        <div class="vp-topbar">
+          <button class="vp-close-btn" onclick="closeVideoPlayer()">
+            <i class="fas fa-arrow-left"></i>
+          </button>
+          <span class="vp-topbar-title" id="vp-title">Vidéo</span>
+          <button class="vp-fullscreen-topbtn" onclick="vpFullscreen()">
+            <i class="fas fa-expand"></i>
+          </button>
+        </div>
+
+        <!-- Zone vidéo -->
+        <div class="vp-video-area" id="vp-area" onclick="vpTogglePlay()">
+          <video id="vp-video" playsinline webkit-playsinline preload="auto" x-webkit-airplay="allow"
+                 style="width:100%;height:100%;object-fit:contain;display:block"></video>
+          <div class="vp-play-flash" id="vp-play-flash"></div>
+        </div>
+
+        <!-- Contrôles -->
+        <div class="vp-controls" id="vp-controls">
+
+          <!-- Barre de progression -->
+          <div class="vp-progress-row">
+            <span class="vp-time" id="vp-cur">0:00</span>
+            <input type="range" class="vp-seek" id="vp-seek" min="0" max="100" step="0.01" value="0"
+                   oninput="vpSeek(this.value)" onchange="vpSeek(this.value)"/>
+            <span class="vp-time" id="vp-dur">0:00</span>
+          </div>
+
+          <!-- Boutons -->
+          <div class="vp-btns-row">
+
+            <!-- Recul 10s -->
+            <button class="vp-ctrl-btn" onclick="vpSkip(-10)">
+              <i class="fas fa-rotate-left"></i>
+              <span class="vp-skip-label">10</span>
+            </button>
+
+            <!-- Play / Pause -->
+            <button class="vp-play-btn" id="vp-play-btn" onclick="vpTogglePlay()">
+              <i class="fas fa-play" id="vp-play-ico"></i>
+            </button>
+
+            <!-- Avance 10s -->
+            <button class="vp-ctrl-btn" onclick="vpSkip(10)">
+              <i class="fas fa-rotate-right"></i>
+              <span class="vp-skip-label">10</span>
+            </button>
+
+            <!-- Vitesse -->
+            <div class="vp-speed-group">
+              <button class="vp-speed active" onclick="vpSetSpeed(1,this)">1×</button>
+              <button class="vp-speed" onclick="vpSetSpeed(1.5,this)">1.5×</button>
+              <button class="vp-speed" onclick="vpSetSpeed(2,this)">2×</button>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- ── BOTTOM NAV ── -->
+      <nav class="app-bottom-nav">
+        <button class="bnav-item active" data-page="p-home" onclick="navTo(this,'p-home')">
+          <i class="fas fa-home"></i><span data-i18n="nav.home">Accueil</span>
+        </button>
+        <button class="bnav-item" data-page="p-marketplace" onclick="navTo(this,'p-marketplace')">
+          <i class="fas fa-store"></i><span>Marketplace</span>
+        </button>
+        <button class="bnav-center" onclick="navToPublish()">
+          <i class="fas fa-plus"></i>
+        </button>
+        <button class="bnav-item" data-page="p-messages" onclick="navTo(this,'p-messages');renderConversations()" style="position:relative">
+          <i class="fas fa-comment-dots"></i>
+          <span class="msg-nav-badge hidden" id="msg-nav-badge">0</span>
+          <span data-i18n="nav.messages">Messages</span>
+        </button>
+        <button class="bnav-item" data-page="p-profil" onclick="navTo(this,'p-profil');renderProfilePage()">
+          <i class="fas fa-user"></i><span data-i18n="nav.profile">Profil</span>
+        </button>
+      </nav>
+
+    </div>
+  </div>
+
+  <!-- SIDEBAR déplacé dans #screen-app -->
+
+  <!-- ── PANNEAU COMMENTAIRES ── -->
+  <div id="comments-overlay" class="comments-overlay hidden" onclick="closeComments()"></div>
+  <div id="comments-panel" class="comments-panel hidden">
+    <div class="comments-handle"></div>
+    <div class="comments-head">
+      <h3>Commentaires <span id="comments-count" class="comments-count"></span></h3>
+      <button onclick="closeComments()"><i class="fas fa-times"></i></button>
+    </div>
+    <div class="comments-list" id="comments-list"></div>
+    <div class="comments-input-area">
+      <!-- Indicateur de réponse (masqué par défaut) -->
+      <div id="reply-indicator" class="reply-indicator hidden">
+        <i class="fas fa-reply"></i>
+        <span>Réponse à <strong id="reply-to-name"></strong></span>
+        <button onclick="cancelReply()"><i class="fas fa-times"></i></button>
+      </div>
+      <input type="hidden" id="reply-parent-id" value=""/>
+      <div class="comments-input-row">
+        <div class="user-av sm" id="comment-av"><span id="comment-initials">?</span></div>
+        <div class="comments-input-wrap">
+          <input type="text" id="comment-input" placeholder="Écrire un commentaire..."
+                 onkeydown="if(event.key==='Enter') submitComment()"/>
+          <button onclick="submitComment()"><i class="fas fa-paper-plane"></i></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── VUE PROFIL UTILISATEUR (lecture seule, slide depuis la droite) ── -->
+  <div id="user-profile-view" class="upv-screen hidden">
+
+    <!-- Topbar -->
+    <div class="upv-topbar">
+      <button class="upv-back-btn" onclick="closeUserProfileView()">
+        <i class="fas fa-arrow-left"></i>
+      </button>
+      <h3 class="upv-title" id="upv-title">Profil</h3>
+      <div class="upv-topbar-actions">
+        <button class="upv-msg-btn" id="upv-msg-btn" onclick="openChatWithUser()" title="Envoyer un message">
+          <i class="fas fa-paper-plane"></i>
+        </button>
+        <button class="upv-follow-btn" id="upv-follow-btn" onclick="toggleFollowUser()">
+          <i class="fas fa-user-plus"></i> Suivre
+        </button>
+      </div>
+    </div>
+
+    <!-- Contenu scrollable -->
+    <div class="upv-content">
+
+      <!-- Header sombre (réutilise les styles du profil perso) -->
+      <div class="profil-header">
+        <div class="profil-top">
+          <div class="profil-photo-wrap" style="cursor:default">
+            <div class="profil-photo" id="upv-photo-el">
+              <span id="upv-initials">?</span>
+              <img id="upv-photo-img" src="" alt="" style="display:none"/>
+            </div>
+          </div>
+          <div class="profil-info">
+            <div class="profil-name-row" style="cursor:default">
+              <h2 id="upv-name">—</h2>
+              <span id="upv-badge-display"></span>
+            </div>
+            <p class="profil-domain" id="upv-domain" style="cursor:default">—</p>
+            <p class="profil-location" style="cursor:default">
+              <i class="fas fa-location-dot"></i>
+              <span id="upv-location">—</span>
+            </p>
+          </div>
+        </div>
+        <div class="profil-stats-row">
+          <div class="profil-stat profil-stat-clickable" onclick="upvOpenProjectsList()"><strong id="upv-stat-projects">0</strong><span data-i18n="stat.projects">Projets</span></div>
+          <div class="profil-stat"><strong id="upv-stat-rating">—</strong><span data-i18n="stat.rating">Note moy.</span></div>
+          <div class="profil-stat profil-stat-clickable" onclick="upvOpenFollowersList()"><strong id="upv-stat-followers">0</strong><span data-i18n="stat.followers">Abonnés</span></div>
+          <div class="profil-stat profil-stat-clickable" onclick="upvOpenFollowingList()"><strong id="upv-stat-following">0</strong><span data-i18n="stat.following">Abonnements</span></div>
+        </div>
+      </div>
+
+      <!-- Boutons d'action -->
+      <div class="upv-action-bar" id="upv-action-bar">
+        <button class="upv-action-msg" onclick="openChatWithUser()">
+          <i class="fas fa-paper-plane"></i> <span data-i18n="upv.message">Message</span>
+        </button>
+        <button class="upv-action-follow" id="upv-action-follow-btn" onclick="toggleFollowUser()">
+          <i class="fas fa-user-plus"></i> <span id="upv-action-follow-label" data-i18n="upv.follow">Suivre</span>
+        </button>
+      </div>
+
+      <!-- Tabs -->
+      <div class="profil-tabs-bar">
+        <button class="profil-tab active" onclick="switchUpvTab(this,'about')" data-i18n="upv.about">À propos</button>
+        <button class="profil-tab" onclick="switchUpvTab(this,'services')">Services</button>
+        <button class="profil-tab" onclick="switchUpvTab(this,'projects')" data-i18n="stat.projects">Projets</button>
+        <button class="profil-tab" onclick="switchUpvTab(this,'reviews')">
+          <span data-i18n="upv.reviews">Avis</span> <span id="upv-reviews-badge"></span>
+        </button>
+        <button class="profil-tab" onclick="switchUpvTab(this,'posts')" data-i18n="upv.posts">Publications</button>
+      </div>
+
+      <!-- ── À PROPOS ── -->
+      <div id="upvtab-about" class="profil-tab-panel">
+        <div class="profil-card">
+          <div class="profil-card-head"><h4>À propos</h4></div>
+          <p class="profil-bio-text empty-bio" id="upv-bio">Aucune description renseignée.</p>
+          <div class="profil-meta-list">
+            <div class="profil-meta-item">
+              <i class="fas fa-calendar-days"></i>
+              <span id="upv-since">—</span>
+            </div>
+            <!-- Téléphone public uniquement -->
+            <div class="profil-contact-row profil-contact-row-view" id="upv-phone-row" style="display:none" onclick="upvCallPhone()">
+              <div class="profil-contact-left">
+                <span class="profil-contact-ico profil-contact-ico-green"><i class="fas fa-phone"></i></span>
+                <div class="profil-contact-info">
+                  <span class="profil-contact-label">Téléphone</span>
+                  <span class="profil-contact-value" id="upv-phone-display">—</span>
+                </div>
+              </div>
+              <span class="profil-visibility-badge profil-vis-public"><i class="fas fa-earth-europe"></i> Public</span>
+            </div>
+            <!-- Email public uniquement -->
+            <div class="profil-contact-row profil-contact-row-view" id="upv-email-row" style="display:none" onclick="upvCopyEmail()">
+              <div class="profil-contact-left">
+                <span class="profil-contact-ico profil-contact-ico-blue"><i class="fas fa-envelope"></i></span>
+                <div class="profil-contact-info">
+                  <span class="profil-contact-label">Email professionnel</span>
+                  <span class="profil-contact-value" id="upv-email-display">—</span>
+                </div>
+              </div>
+              <div class="profil-contact-right">
+                <span class="profil-visibility-badge profil-vis-public"><i class="fas fa-earth-europe"></i> Public</span>
+                <i class="fas fa-copy" style="font-size:13px;color:#9CA3AF"></i>
+              </div>
+            </div>
+            <div class="profil-meta-item">
+              <i class="fas fa-clock"></i>
+              <span>Répond généralement en quelques heures</span>
+            </div>
+          </div>
+        </div>
+        <div class="profil-card">
+          <div class="profil-card-head"><h4>Compétences</h4></div>
+          <div class="profil-skills-wrap" id="upv-skills">
+            <p class="profil-empty-hint">Aucune compétence renseignée.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── AVIS ── -->
+      <div id="upvtab-reviews" class="profil-tab-panel hidden">
+
+        <!-- Formulaire de notation -->
+        <div class="profil-card" id="upv-rate-card">
+          <div class="profil-card-head"><h4>Donner une note</h4></div>
+          <div class="upv-stars-row" id="upv-stars-input">
+            <button class="upv-star" onclick="setRatingStar(1)"><i class="fas fa-star"></i></button>
+            <button class="upv-star" onclick="setRatingStar(2)"><i class="fas fa-star"></i></button>
+            <button class="upv-star" onclick="setRatingStar(3)"><i class="fas fa-star"></i></button>
+            <button class="upv-star" onclick="setRatingStar(4)"><i class="fas fa-star"></i></button>
+            <button class="upv-star" onclick="setRatingStar(5)"><i class="fas fa-star"></i></button>
+          </div>
+          <p class="upv-rating-label" id="upv-rating-label">Appuyez sur une étoile</p>
+          <textarea id="upv-review-text" class="edit-textarea" rows="3"
+                    placeholder="Partagez votre expérience (optionnel)..."
+                    maxlength="300" style="margin-top:10px"></textarea>
+          <button class="btn-blue full" style="margin-top:10px" onclick="submitReview()">
+            <i class="fas fa-paper-plane" style="margin-right:6px"></i>Publier l'avis
+          </button>
+        </div>
+
+        <!-- Liste des avis existants -->
+        <div id="upv-reviews-list"></div>
+
+      </div>
+
+      <!-- ── SERVICES (visiteur) ── -->
+      <div id="upvtab-services" class="profil-tab-panel hidden">
+        <div id="upv-services-list"></div>
+      </div>
+
+      <!-- ── PROJETS (visiteur) ── -->
+      <div id="upvtab-projects" class="profil-tab-panel hidden">
+        <div id="upv-projects-list"></div>
+      </div>
+
+      <!-- ── PUBLICATIONS (visiteur) ── -->
+      <div id="upvtab-posts" class="profil-tab-panel hidden">
+      </div>
+
+    </div><!-- /upv-content -->
+  </div>
+
+  <!-- ── CHAT SCREEN ── -->
+  <div id="chat-screen" class="chat-screen hidden">
+
+    <!-- Topbar chat -->
+    <div class="chat-topbar">
+      <button class="chat-back-btn" onclick="closeChat()">
+        <i class="fas fa-arrow-left"></i>
+      </button>
+      <div class="chat-contact-info" id="chat-contact-info" onclick="openChatProfilePanel()" style="cursor:pointer">
+        <div class="chat-contact-av" id="chat-contact-av"></div>
+        <div>
+          <div class="chat-contact-name" id="chat-contact-name">—</div>
+          <div class="chat-contact-status" id="chat-contact-status">En ligne</div>
+        </div>
+      </div>
+      <!-- Menu 3 points -->
+      <button class="chat-menu-btn" id="chat-menu-btn" onclick="openChatMenu()">
+        <i class="fas fa-ellipsis-vertical"></i>
+      </button>
+    </div>
+
+    <!-- Messages -->
+    <div class="chat-messages" id="chat-messages"></div>
+
+    <!-- Bandeau de réponse (citation) -->
+    <div class="chat-reply-bar hidden" id="chat-reply-bar">
+      <div class="crb-accent"></div>
+      <div class="crb-content">
+        <span class="crb-author" id="crb-author"></span>
+        <span class="crb-text"   id="crb-text"></span>
+      </div>
+      <button class="crb-close" onclick="cancelChatReply()">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>
+
+    <!-- Emoji Picker -->
+    <div class="emoji-picker" id="emoji-picker">
+      <!-- Tabs catégories -->
+      <div class="ep-tabs" id="ep-tabs"></div>
+      <!-- Grille -->
+      <div class="ep-grid" id="ep-grid"></div>
+    </div>
+
+    <!-- Input -->
+    <div class="chat-input-bar">
+      <input type="file" id="chat-attach-input" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx"
+             style="display:none" onchange="handleChatAttach(this)"/>
+      <button class="chat-attach-btn" onclick="document.getElementById('chat-attach-input').click()">
+        <i class="fas fa-paperclip"></i>
+      </button>
+      <div class="chat-input-wrap">
+        <input type="text" id="chat-input" class="chat-input"
+               placeholder="Écrire un message..."
+               onkeydown="if(event.key==='Enter')sendChatMessage()"
+               onfocus="_closeEmojiPicker()"
+               autocomplete="off"/>
+      </div>
+      <button class="chat-emoji-btn" id="chat-emoji-btn" onclick="toggleEmojiPicker(event)">
+        <i class="far fa-face-smile"></i>
+      </button>
+      <button class="chat-send-btn" onclick="sendChatMessage()" id="chat-send-btn">
+        <i class="fas fa-paper-plane"></i>
+      </button>
+    </div>
+
+  </div><!-- /chat-screen -->
+
+  <!-- ── RECHERCHE OVERLAY ── -->
+  <div id="search-overlay" class="search-overlay hidden">
+    <div class="search-header">
+      <div class="search-input-row">
+        <i class="fas fa-magnifying-glass srch-icon-left"></i>
+        <input type="text" id="search-input" placeholder="Rechercher utilisateurs, publications..."
+               oninput="doSearch(this.value)" autocomplete="off" autocorrect="off"
+               autocapitalize="off" spellcheck="false"/>
+        <button class="srch-clear-btn hidden" id="search-clear" onclick="clearSearch()">
+          <i class="fas fa-times-circle"></i>
+        </button>
+      </div>
+      <button class="srch-cancel-btn" onclick="closeSearch()">Annuler</button>
+    </div>
+    <div class="srch-filters-row">
+      <button class="srch-filter active" onclick="setSearchFilter(this,'all')">Tout</button>
+      <button class="srch-filter" onclick="setSearchFilter(this,'users')">Utilisateurs</button>
+      <button class="srch-filter" onclick="setSearchFilter(this,'posts')">Publications</button>
+    </div>
+    <div class="srch-results" id="srch-results">
+      <div class="srch-empty-state">
+        <i class="fas fa-magnifying-glass"></i>
+        <p>Rechercher des utilisateurs<br/>ou des publications</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ TOAST ══ -->
+  <div id="toast" class="toast"></div>
+
+  <!-- ══ OVERLAY CHARGEMENT GOOGLE ══ -->
+  <div id="google-loading" class="google-loading hidden">
+    <div class="google-loading-card">
+      <svg width="40" height="40" viewBox="0 0 48 48">
+        <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+        <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+      </svg>
+      <div class="google-loading-spinner"></div>
+      <p id="google-loading-msg">Connexion avec Google…</p>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN ADMIN — CONNEXION (FORMAT DESKTOP)
+  ══════════════════════════════════════════ -->
+  <div id="screen-admin-login" class="screen adm-desktop-screen">
+    <div class="adm-login-desktop">
+
+      <!-- Panneau gauche décoratif -->
+      <div class="adm-login-left">
+        <div class="adm-login-left-inner">
+          <div class="adm-login-shield-lg"><i class="fas fa-shield-halved"></i></div>
+          <h1 class="adm-login-brand">Geniwork</h1>
+          <p class="adm-login-brand-sub">Panneau d'administration</p>
+          <div class="adm-login-features">
+            <div class="adm-login-feat"><i class="fas fa-users"></i> Gestion des utilisateurs</div>
+            <div class="adm-login-feat"><i class="fas fa-flag"></i> Traitement des signalements</div>
+            <div class="adm-login-feat"><i class="fas fa-circle-check"></i> Vérification des badges</div>
+            <div class="adm-login-feat"><i class="fas fa-bullhorn"></i> Publications officielles</div>
+            <div class="adm-login-feat"><i class="fas fa-user-tie"></i> Gestion de l'équipe</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panneau droit — formulaire -->
+      <div class="adm-login-right">
+
+        <!-- Setup (1ère fois) -->
+        <div id="adm-setup-form" class="adm-login-card hidden">
+          <div class="adm-login-card-logo">
+            <div class="adm-login-shield-sm"><i class="fas fa-shield-halved"></i></div>
+            <div>
+              <div class="adm-login-card-title">Créer le Super Admin</div>
+              <div class="adm-login-card-sub">Première configuration du panneau</div>
+            </div>
+          </div>
+          <div class="adm-field">
+            <label>Nom complet</label>
+            <input type="text" id="adm-setup-nom" placeholder="Votre nom complet" autocomplete="off"/>
+          </div>
+          <div class="adm-field">
+            <label>Adresse email admin</label>
+            <input type="email" id="adm-setup-email" placeholder="admin@geniwork.app" autocomplete="off"/>
+          </div>
+          <div class="adm-field-row">
+            <div class="adm-field">
+              <label>Mot de passe</label>
+              <input type="password" id="adm-setup-pwd" placeholder="Min. 8 caractères"/>
+            </div>
+            <div class="adm-field">
+              <label>Confirmer</label>
+              <input type="password" id="adm-setup-pwd2" placeholder="••••••••"/>
+            </div>
+          </div>
+          <button class="adm-btn-primary" onclick="_admSetup()"><i class="fas fa-rocket"></i> Créer le compte administrateur</button>
+          <button class="adm-btn-ghost" onclick="goTo('screen-login')"><i class="fas fa-arrow-left"></i> Retour à l'application</button>
+        </div>
+
+        <!-- Login -->
+        <div id="adm-login-form" class="adm-login-card hidden">
+          <div class="adm-login-card-logo">
+            <div class="adm-login-shield-sm"><i class="fas fa-shield-halved"></i></div>
+            <div>
+              <div class="adm-login-card-title">Connexion sécurisée</div>
+              <div class="adm-login-card-sub">Accès réservé aux administrateurs</div>
+            </div>
+          </div>
+          <div class="adm-field">
+            <label>Email administrateur</label>
+            <input type="email" id="adm-login-email" placeholder="admin@geniwork.app" autocomplete="off"/>
+          </div>
+          <div class="adm-field">
+            <label>Votre rôle</label>
+            <select id="adm-login-role" class="adm-role-select">
+              <option value="">— Sélectionner votre rôle —</option>
+              <option value="Super Admin">Super Admin</option>
+              <option value="Admin">Admin</option>
+              <option value="Modérateur">Modérateur</option>
+              <option value="Éditeur">Éditeur</option>
+              <option value="Support">Support</option>
+            </select>
+          </div>
+          <div class="adm-field">
+            <label>Mot de passe</label>
+            <input type="password" id="adm-login-pwd" placeholder="••••••••"
+              onkeydown="if(event.key==='Enter') _admLogin()"/>
+          </div>
+          <div id="adm-login-error" class="adm-login-error hidden"></div>
+          <button class="adm-btn-primary" onclick="_admLogin()"><i class="fas fa-unlock-keyhole"></i> Se connecter</button>
+          <button class="adm-btn-ghost" onclick="goTo('screen-login')"><i class="fas fa-arrow-left"></i> Retour à l'application</button>
+          <div class="adm-login-divider"><span>Pas encore de compte ?</span></div>
+          <button class="adm-btn-register" onclick="_admShowRegisterForm()"><i class="fas fa-user-plus"></i> Faire une demande d'accès</button>
+        </div>
+
+        <!-- Inscription admin (demande d'accès) -->
+        <div id="adm-register-form" class="adm-login-card hidden">
+          <div class="adm-login-card-logo">
+            <div class="adm-login-shield-sm" style="background:linear-gradient(135deg,#059669,#10B981)"><i class="fas fa-user-plus"></i></div>
+            <div>
+              <div class="adm-login-card-title">Demande d'accès</div>
+              <div class="adm-login-card-sub">Votre demande sera examinée par le Super Admin</div>
+            </div>
+          </div>
+          <div class="adm-field">
+            <label>Nom complet</label>
+            <input type="text" id="adm-reg-nom" placeholder="Votre nom complet" autocomplete="off"/>
+          </div>
+          <div class="adm-field">
+            <label>Email professionnel</label>
+            <input type="email" id="adm-reg-email" placeholder="vous@exemple.com" autocomplete="off"/>
+          </div>
+          <div class="adm-field">
+            <label>Rôle souhaité</label>
+            <select id="adm-reg-role" class="adm-role-select">
+              <option value="">— Choisir un rôle —</option>
+              <option value="Admin">Admin</option>
+              <option value="Modérateur">Modérateur</option>
+              <option value="Éditeur">Éditeur</option>
+              <option value="Support">Support</option>
+            </select>
+          </div>
+          <div class="adm-field">
+            <label>Mot de passe souhaité</label>
+            <input type="password" id="adm-reg-pwd" placeholder="••••••••"/>
+          </div>
+          <div class="adm-field">
+            <label>Confirmer le mot de passe</label>
+            <input type="password" id="adm-reg-pwd2" placeholder="••••••••"/>
+          </div>
+          <div id="adm-reg-error" class="adm-login-error hidden"></div>
+          <button class="adm-btn-primary" style="background:linear-gradient(135deg,#059669,#10B981)" onclick="_admSubmitRequest()"><i class="fas fa-paper-plane"></i> Envoyer la demande</button>
+          <button class="adm-btn-ghost" onclick="_admShowLoginForm()"><i class="fas fa-arrow-left"></i> Retour à la connexion</button>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN ADMIN — PANNEAU PRINCIPAL (FORMAT DESKTOP)
+  ══════════════════════════════════════════ -->
+  <div id="screen-admin-panel" class="screen adm-desktop-screen">
+    <div class="adm-desktop-layout">
+
+      <!-- ── SIDEBAR GAUCHE ── -->
+      <aside class="adm-sidebar">
+
+        <!-- Logo -->
+        <div class="adm-sidebar-logo">
+          <div class="adm-sidebar-logo-ico"><i class="fas fa-shield-halved"></i></div>
+          <div>
+            <div class="adm-sidebar-brand">Geniwork</div>
+            <div class="adm-sidebar-brand-sub">Administration</div>
+          </div>
+        </div>
+
+        <!-- Navigation -->
+        <nav class="adm-sidebar-nav">
+
+          <!-- ── Vue d'ensemble ── -->
+          <div class="adm-sidebar-nav-label">Vue d'ensemble</div>
+          <button class="adm-sidebar-item active" id="adm-nav-dashboard" onclick="_admSwitchTab('dashboard')">
+            <i class="fas fa-gauge-high"></i><span>Tableau de bord</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-analytics" onclick="_admSwitchTab('analytics')">
+            <i class="fas fa-chart-line"></i><span>Analytics</span>
+          </button>
+
+          <!-- ── Membres ── -->
+          <div class="adm-sidebar-nav-label">Membres</div>
+          <button class="adm-sidebar-item" id="adm-nav-users" onclick="_admSwitchTab('users')">
+            <i class="fas fa-users"></i><span>Utilisateurs</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-badges" onclick="_admSwitchTab('badges')">
+            <i class="fas fa-circle-check"></i><span>Badge vérifié</span>
+            <span class="adm-sidebar-badge hidden" id="adm-badge-badges">0</span>
+          </button>
+
+          <!-- ── Contenu ── -->
+          <div class="adm-sidebar-nav-label">Contenu</div>
+          <button class="adm-sidebar-item" id="adm-nav-publi" onclick="_admSwitchTab('publi')">
+            <i class="fas fa-bullhorn"></i><span>Publications</span>
+            <span class="adm-sidebar-badge hidden" id="adm-badge-publi">0</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-marketplace" onclick="_admSwitchTab('marketplace')">
+            <i class="fas fa-store"></i><span>Marketplace</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-reports" onclick="_admSwitchTab('reports')">
+            <i class="fas fa-flag"></i><span>Signalements</span>
+            <span class="adm-sidebar-badge hidden" id="adm-badge-reports">0</span>
+          </button>
+
+          <!-- ── Finance ── -->
+          <div class="adm-sidebar-nav-label">Finance</div>
+          <button class="adm-sidebar-item" id="adm-nav-payments" onclick="_admSwitchTab('payments')">
+            <i class="fas fa-credit-card"></i><span>Paiements</span>
+            <span class="adm-sidebar-badge hidden" id="adm-badge-payments">0</span>
+          </button>
+
+          <!-- ── Communication ── -->
+          <div class="adm-sidebar-nav-label">Communication</div>
+          <button class="adm-sidebar-item" id="adm-nav-notifs" onclick="_admSwitchTab('notifs')">
+            <i class="fas fa-bell"></i><span>Notifications</span>
+          </button>
+
+          <!-- ── Gestion ── -->
+          <div class="adm-sidebar-nav-label">Gestion</div>
+          <button class="adm-sidebar-item" id="adm-nav-team" onclick="_admSwitchTab('team')">
+            <i class="fas fa-user-tie"></i><span>Équipe & Tâches</span>
+            <span class="adm-nav-badge hidden" id="adm-badge-team"></span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-settings" onclick="_admSwitchTab('settings')">
+            <i class="fas fa-sliders"></i><span>Paramètres</span>
+          </button>
+
+        </nav>
+
+        <!-- Profil admin en bas -->
+        <div class="adm-sidebar-footer">
+          <div class="adm-sidebar-user">
+            <!-- Avatar cliquable → changer photo -->
+            <div class="adm-panel-avatar adm-avatar-clickable" id="adm-panel-avatar"
+                 onclick="document.getElementById('adm-avatar-input').click()"
+                 title="Changer la photo de profil">SA
+              <div class="adm-avatar-edit-hint"><i class="fas fa-camera"></i></div>
+            </div>
+            <!-- Input fichier caché pour la photo admin -->
+            <input type="file" id="adm-avatar-input" accept="image/*" style="display:none"
+                   onchange="_admAvatarChange(this)">
+            <div class="adm-sidebar-user-info">
+              <div class="adm-panel-name" id="adm-panel-name">Super Admin</div>
+              <div class="adm-panel-role" id="adm-panel-role">Super Administrateur</div>
+            </div>
+          </div>
+          <button class="adm-sidebar-logout" onclick="_admLogout()">
+            <i class="fas fa-right-from-bracket"></i> Déconnexion
+          </button>
+        </div>
+
+      </aside>
+
+      <!-- ── ZONE PRINCIPALE ── -->
+      <main class="adm-main">
+
+        <!-- Top bar -->
+        <div class="adm-topbar">
+          <div class="adm-topbar-left">
+            <h1 class="adm-topbar-title" id="adm-topbar-title">Tableau de bord</h1>
+            <span class="adm-topbar-date" id="adm-topbar-date"></span>
+          </div>
+          <div class="adm-topbar-right">
+            <div class="adm-topbar-stat" id="adm-topbar-stat">
+              <i class="fas fa-circle" style="color:#22C55E;font-size:8px"></i> Panneau actif
+            </div>
+          </div>
+        </div>
+
+        <!-- Contenu de l'onglet -->
+        <div class="adm-main-content" id="adm-panel-content">
+          <!-- Rendu par JS -->
+        </div>
+
+      </main>
+
+    </div>
+  </div>
+
+  <script src="js/app.js"></script>
+
+  <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
+  <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">
+    <div class="bdm-sheet">
+      <div class="bdm-header">
+        <div class="bdm-title"><i class="fas fa-file-shield"></i> Documents d'identité</div>
+        <button class="bdm-close-btn" onclick="_closeBadgeDocModal()"><i class="fas fa-xmark"></i></button>
+      </div>
+      <div class="bdm-body">
+        <p class="bdm-intro">
+          Téléversez votre pièce d'identité (CNI, passeport) pour finaliser la demande.<br>
+          <strong>Formats acceptés :</strong> JPG · PNG · PDF — Max 5 Mo par fichier.
+        </p>
+
+        <!-- Zone de drop / clic -->
+        <div class="bdm-upload-zone" onclick="document.getElementById('bdm-file-input').click()">
+          <i class="fas fa-cloud-arrow-up bdm-upload-ico"></i>
+          <span class="bdm-upload-label">Appuyer pour ajouter un document</span>
+          <small class="bdm-upload-hint">JPG · PNG · PDF · Max 5 Mo</small>
+        </div>
+        <input type="file" id="bdm-file-input" accept="image/*,.pdf"
+               multiple style="display:none" onchange="_bdmAddFiles(this)">
+
+        <!-- Aperçu des fichiers sélectionnés -->
+        <div id="bdm-preview-list" class="bdm-preview-list"></div>
+
+        <!-- Compteur -->
+        <div id="bdm-file-count" class="bdm-file-count hidden"></div>
+
+        <!-- Message optionnel -->
+        <textarea id="bdm-message" class="bdm-textarea"
+                  placeholder="Message optionnel pour l'équipe Geniwork…"
+                  maxlength="300"></textarea>
+      </div>
+      <div class="bdm-footer">
+        <button class="bdm-cancel-btn" onclick="_closeBadgeDocModal()">Annuler</button>
+        <button class="bdm-submit-btn" id="bdm-submit-btn" onclick="_bdmSubmit()">
+          <i class="fas fa-paper-plane"></i> Envoyer la demande
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ VISIONNEUSE DOCUMENTS (ADMIN) ══ -->
+  <div id="adm-doc-viewer" class="adm-dv-overlay hidden" onclick="_admDocViewerBackdrop(event)">
+    <div class="adm-dv-panel">
+      <div class="adm-dv-header">
+        <div class="adm-dv-title" id="adm-dv-title">Documents</div>
+        <button class="adm-dv-close" onclick="document.getElementById('adm-doc-viewer').classList.add('hidden')">
+          <i class="fas fa-xmark"></i>
+        </button>
+      </div>
+      <div class="adm-dv-body" id="adm-dv-body"></div>
+    </div>
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,22006 @@
+﻿/* ═══════════════════════════════════════════
+   GENIWORK — JavaScript complet
+   ═══════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════
+   FIREBASE — SYNCHRONISATION TEMPS RÉEL MULTI-ADMIN
+   ══════════════════════════════════════════════════════════════
+   ▶  CONFIGURATION (à remplir UNE SEULE FOIS) :
+      1. Va sur https://console.firebase.google.com
+      2. Crée un projet  →  "Geniwork"
+      3. Active "Realtime Database"  →  démarre en mode test
+      4. Dans Paramètres du projet  →  "Ajouter une appli Web"
+      5. Copie les valeurs ci-dessous depuis la config affichée
+   ══════════════════════════════════════════════════════════════ */
+var _GW_FIREBASE_CONFIG = {
+  apiKey:            'AIzaSyBodK0Tg5BSIYfLfhT-1ggV2kWXONsR3Ow',
+  authDomain:        'geniwork-be35c.firebaseapp.com',
+  databaseURL:       'https://geniwork-be35c-default-rtdb.europe-west1.firebasedatabase.app',
+  projectId:         'geniwork-be35c',
+  storageBucket:     'geniwork-be35c.firebasestorage.app',
+  messagingSenderId: '180664489098',
+  appId:             '1:180664489098:web:6c80d5ebd5f60d8c554973'
+};
+
+/* ══════════════════════════════════════════
+   MARKETPLACE — CONSTANTES GLOBALES
+══════════════════════════════════════════ */
+var _GW_PAYPAL_CLIENT_ID = 'AQYA1UIAx8tFF4EoP-LT9yhIs6N-0fu9JRXOxZzDcI6rjKiiVZzj-F98lzCD069-aoAdLcQ3isZ1TYTh';
+var _GW_PAYPAL_EMAIL     = 'geniwork.admin@gmail.com';
+var _GW_COMMISSION_RATE  = 0.01;
+
+var _MK_PLAN_LIMITS = {
+  free:     { maxListings: 5,        canAd: false, priority: false, durationDays: 30 },
+  premium:  { maxListings: Infinity, canAd: true,  priority: false, durationDays: 60 },
+  business: { maxListings: Infinity, canAd: true,  priority: true,  durationDays: 60 }
+};
+
+var _MK_RADIUS_BY_COUNTRY = {
+  'France':[5,10,25,50,100,200], 'Belgique':[5,10,25,50,100], 'Suisse':[5,10,25,50,100],
+  'Canada':[25,50,100,200,500], 'Maroc':[10,25,50,100,300], 'Algérie':[10,25,50,100,300],
+  'Tunisie':[10,25,50,100], 'Sénégal':[10,25,50,100,300], "Côte d'Ivoire":[10,25,50,100,300],
+  'Cameroun':[10,25,50,100,300], 'default':[10,25,50,100,200,500]
+};
+
+var _MK_SVC_CATS  = { dev:'💻 Développement', design:'🎨 Design', redac:'✍️ Rédaction', mkt:'📣 Marketing', video:'🎬 Vidéo', photo:'📷 Photo', conseil:'🧠 Conseil', support:'🛠️ Support', autre:'📦 Autre' };
+var _MK_PROD_CATS = { electronique:'📱 Électronique', vetements:'👗 Vêtements', maison:'🏠 Maison', vehicule:'🚗 Véhicules', sport:'⚽ Sport', beaute:'💄 Beauté', livre:'📚 Livres', bebe:'👶 Bébé', jardin:'🌿 Jardin', autre:'📦 Autre' };
+
+var _mkCurrentListing = null;
+var _mkUserLocation   = null;
+var _mkPaypalLoaded   = false;
+var _mkPickedImages   = [];
+var _mkCurrentType    = 'service';
+
+/* ── État Firebase ── */
+var _gwFbDB    = null;   /* Instance Realtime Database */
+var _gwFbAuth  = null;   /* Instance Firebase Auth */
+var _gwFbReady = false;  /* true quand Firebase est connecté */
+var _gwFbSkip  = false;  /* Pause les listeners pour éviter les boucles */
+
+/* ══════════════════════════════════════════
+   INDEXEDDB — STOCKAGE VIDÉO PERSISTANT
+   Les blob: URLs disparaissent à la fermeture
+   → on stocke le Blob réel dans IndexedDB
+══════════════════════════════════════════ */
+var _gwVideoDB = null;
+
+function _gwInitVideoDB() {
+  try {
+    var req = indexedDB.open('gw_video_store', 2); /* v2 : ajout store 'docs' */
+    req.onupgradeneeded = function(e) {
+      var db = e.target.result;
+      if (!db.objectStoreNames.contains('videos')) {
+        db.createObjectStore('videos', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('docs')) {
+        db.createObjectStore('docs', { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = function(e) {
+      _gwVideoDB = e.target.result;
+    };
+    req.onerror = function() { _gwVideoDB = null; };
+  } catch(e) { _gwVideoDB = null; }
+}
+
+/* ── Stockage documents dans IndexedDB (store 'docs') ── */
+function _gwSaveDocBlob(id, blob, cb) {
+  if (!_gwVideoDB || !blob) { cb && cb(false); return; }
+  try {
+    var tx  = _gwVideoDB.transaction('docs', 'readwrite');
+    var req = tx.objectStore('docs').put({ id: id, blob: blob });
+    req.onsuccess = function() { cb && cb(true); };
+    req.onerror   = function() { cb && cb(false); };
+  } catch(e) { cb && cb(false); }
+}
+
+function _gwLoadDocBlob(id, cb) {
+  if (!_gwVideoDB) { cb(null); return; }
+  try {
+    var tx  = _gwVideoDB.transaction('docs', 'readonly');
+    var req = tx.objectStore('docs').get(id);
+    req.onsuccess = function() {
+      var r = req.result;
+      cb(r && r.blob ? r.blob : null);
+    };
+    req.onerror = function() { cb(null); };
+  } catch(e) { cb(null); }
+}
+
+function _gwDeleteDocBlob(id) {
+  if (!_gwVideoDB || !id) return;
+  try {
+    var tx = _gwVideoDB.transaction('docs', 'readwrite');
+    tx.objectStore('docs').delete(id);
+  } catch(e) {}
+}
+
+function _gwSaveVideoBlob(id, blob, cb) {
+  if (!_gwVideoDB || !blob) { cb && cb(false); return; }
+  try {
+    var tx  = _gwVideoDB.transaction('videos', 'readwrite');
+    var req = tx.objectStore('videos').put({ id: id, blob: blob });
+    req.onsuccess = function() { cb && cb(true); };
+    req.onerror   = function() { cb && cb(false); };
+  } catch(e) { cb && cb(false); }
+}
+
+function _gwLoadVideoBlob(id, cb) {
+  if (!_gwVideoDB) { cb(null); return; }
+  try {
+    var tx  = _gwVideoDB.transaction('videos', 'readonly');
+    var req = tx.objectStore('videos').get(id);
+    req.onsuccess = function() {
+      var r = req.result;
+      cb(r && r.blob ? r.blob : null);
+    };
+    req.onerror = function() { cb(null); };
+  } catch(e) { cb(null); }
+}
+
+function _gwDeleteVideoBlob(id) {
+  if (!_gwVideoDB || !id) return;
+  try {
+    var tx = _gwVideoDB.transaction('videos', 'readwrite');
+    tx.objectStore('videos').delete(id);
+  } catch(e) {}
+}
+
+/* ── Init Firebase ─────────────────────────────────── */
+function _gwInitFirebase() {
+  try {
+    if (typeof firebase === 'undefined') return;
+    /* Config non renseignée → mode localStorage uniquement */
+    if (_GW_FIREBASE_CONFIG.apiKey.indexOf('REMPLACE') !== -1) {
+      console.info('[GW] Firebase non configuré → mode local');
+      return;
+    }
+    if (!firebase.apps || !firebase.apps.length) {
+      firebase.initializeApp(_GW_FIREBASE_CONFIG);
+    }
+    _gwFbDB    = firebase.database();
+    _gwFbAuth  = firebase.auth();
+    _gwFbReady = true;
+    console.log('[GW Firebase] ✓ Connecté');
+    _gwFbSyncStart();
+  } catch(e) {
+    console.warn('[GW Firebase] Erreur init :', e);
+  }
+}
+
+/* ── Sanitize email → clé Firebase (. # $ [ ] / interdits) ── */
+function _gwFbKey(email) {
+  return (email || '').toLowerCase()
+    .replace(/\./g, '__d__')
+    .replace(/@/g, '__a__')
+    .replace(/[#$\[\]\/]/g, '_');
+}
+
+/* ── Écriture vers Firebase ── */
+function _gwFbSet(path, data) {
+  if (!_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/' + path).set(data).catch(function(e){
+    console.warn('[GW Firebase] Write error (' + path + '):', e.message);
+  });
+}
+
+/* ── Listeners temps réel Firebase → localStorage → UI ── */
+function _gwFbSyncStart() {
+  if (!_gwFbDB) return;
+
+  /* Helper : écoute un chemin Firebase et met à jour localStorage */
+  function _listen(fbPath, lsKey, onSync) {
+    _gwFbDB.ref('gw/' + fbPath).on('value', function(snap) {
+      if (_gwFbSkip) return;
+      var val = snap.val();
+      if (val === null || val === undefined) return;
+      _gwFbSkip = true;
+      localStorage.setItem(lsKey, JSON.stringify(val));
+      _gwFbSkip = false;
+      try { if (typeof onSync === 'function') onSync(val); } catch(e){}
+    });
+  }
+
+  /* ── Utilisateurs ── */
+  _listen('users', 'gw_users');
+
+  /* ── Bans ── */
+  _listen('bans', 'gw_bans', function() {
+    if (_adminUser) { try { _admUpdateNavBadges(); } catch(e){} }
+  });
+
+  /* ── Appels de ban (recours) ── */
+  _listen('ban_appeals', 'gw_ban_appeals', function() {
+    if (_adminUser) { try { _admUpdateNavBadges(); } catch(e){} }
+  });
+
+  /* ── Admins secondaires ── */
+  _listen('admins', 'gw_admins');
+
+  /* ── Super admin ── */
+  _listen('sadmin', 'gw_sadmin');
+
+  /* ── Publications officielles ── */
+  _listen('official_posts', 'gw_official_posts', function() {
+    if (document.getElementById('feed-list')) {
+      try { _injectOfficialPosts(); } catch(e){}
+    }
+  });
+
+  /* ── Logo officiel ── */
+  _listen('settings_logo', 'gw_official_logo');
+
+  /* ── Log admin ── */
+  _listen('admin_log', 'gw_admin_log');
+
+  /* ── Demandes d'accès admin ── */
+  _listen('admin_requests', 'gw_admin_requests', function() {
+    if (_adminUser) { try { _admUpdateNavBadges(); } catch(e){} }
+  });
+
+  /* ── Permissions déléguées (admin_extra_perms) ── */
+  _listen('admin_extra_perms', 'gw_admin_extra_perms', function() {
+    /* Si un admin est connecté, re-vérifier sa sidebar au cas où SA vient de modifier ses perms */
+    if (_adminUser) {
+      try { _admApplySidebarPerms(); } catch(e){}
+    }
+  });
+
+  /* ── Signalements (tous les utilisateurs) ── */
+  _gwFbDB.ref('gw/reports').on('value', function(snap) {
+    if (_gwFbSkip) return;
+    var all = snap.val() || {};
+    _gwFbSkip = true;
+    Object.keys(all).forEach(function(fbKey) {
+      var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+      localStorage.setItem('gw_reports_' + email, JSON.stringify(all[fbKey]));
+    });
+    _gwFbSkip = false;
+    if (_adminUser && _adminTab === 'reports') {
+      try { _admRender(); } catch(e){}
+    }
+  });
+
+  /* ── Marketplace listings ── auto-sync toutes les sections ── */
+  _listen('mk_listings', 'gw_mk_listings', function() {
+    try { _mkCheckExpired(); } catch(e){}
+    /* Rafraîchit tous les endroits qui affichent des annonces */
+    if (document.getElementById('mk-user-services-section'))  { try { renderMarketplaceUserServices(); } catch(e){} }
+    if (document.getElementById('mk-annonces-list'))          { try { _mkRenderSystemListings(); } catch(e){} }
+    if (document.getElementById('mk-all-listings-wrap'))      { try { _mkRefreshAllListings(); }   catch(e){} }
+    try { _mkRenderTxTabs(); } catch(e){}
+  });
+
+  /* ── Marketplace transactions ── */
+  _listen('mk_txns', 'gw_mk_txns', function() {
+    try { _mkRenderTxTabs(); } catch(e){}
+  });
+
+  /* ── Demandes de collaboration ── */
+  _listen('collab_requests', 'gw_collab_requests', function() {
+    if (document.getElementById('collab-list-wrap')) { try { _collabRender(); } catch(e){} }
+  });
+
+  /* ── Notifications de l'utilisateur connecté ── */
+  if (_currentUser) _gwFbWatchUserNotifs(_currentUser.email);
+}
+
+/* ── Active le listener notifs pour un utilisateur ── */
+function _gwFbWatchUserNotifs(email) {
+  if (!_gwFbReady || !_gwFbDB || !email) return;
+  _gwFbDB.ref('gw/notifs/' + _gwFbKey(email)).on('value', function(snap) {
+    if (_gwFbSkip) return;
+    var data = snap.val();
+    if (data === null) return;
+    _gwFbSkip = true;
+    localStorage.setItem('gw_notifs_' + email, JSON.stringify(data));
+    _gwFbSkip = false;
+    try { renderNotifs(); updateNotifBadge(); } catch(e){}
+  });
+}
+
+/* ── Upload initial : envoie le localStorage existant vers Firebase ── */
+function _gwFbUploadAll() {
+  if (!_gwFbReady) { showToast('Firebase non connecté', 'err'); return; }
+  if (!confirm('Envoyer toutes les données locales vers Firebase ?')) return;
+  var pairs = [
+    ['users',          'gw_users'],
+    ['bans',           'gw_bans'],
+    ['ban_appeals',    'gw_ban_appeals'],
+    ['admins',         'gw_admins'],
+    ['sadmin',         'gw_sadmin'],
+    ['official_posts', 'gw_official_posts'],
+    ['admin_log',      'gw_admin_log'],
+    ['settings_logo',  'gw_official_logo'],
+  ];
+  pairs.forEach(function(p) {
+    var raw = localStorage.getItem(p[1]);
+    if (raw) { try { _gwFbSet(p[0], JSON.parse(raw)); } catch(e){} }
+  });
+  /* Reports + Notifs par utilisateur */
+  Object.keys(localStorage).forEach(function(k) {
+    if (k.startsWith('gw_reports_')) {
+      var em = k.replace('gw_reports_', '');
+      try { _gwFbSet('reports/' + _gwFbKey(em), JSON.parse(localStorage.getItem(k))); } catch(e){}
+    }
+    if (k.startsWith('gw_notifs_')) {
+      var em = k.replace('gw_notifs_', '');
+      try { _gwFbSet('notifs/' + _gwFbKey(em), JSON.parse(localStorage.getItem(k))); } catch(e){}
+    }
+  });
+  showToast('Données envoyées vers Firebase ✓', 'ok');
+}
+
+/* ── Indicateur de statut Firebase (retourne HTML) ── */
+function _gwFbStatusHtml() {
+  if (!_gwFbReady) {
+    return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#EF4444">' +
+           '<i class="fas fa-circle" style="font-size:8px"></i> Non connecté (mode local)</span>';
+  }
+  return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#10B981">' +
+         '<i class="fas fa-circle" style="font-size:8px"></i> Firebase connecté — Sync temps réel actif</span>';
+}
+
+/* ══════════════════════════════════════════
+   GOOGLE SIGN-IN
+   ─────────────────────────────────────────
+   IMPORTANT : remplacez la valeur ci-dessous
+   par votre Client ID Google Cloud Console.
+   https://console.cloud.google.com/
+   → APIs & Services → Credentials → OAuth 2.0
+══════════════════════════════════════════ */
+var GW_GOOGLE_CLIENT_ID = '180664489098-gljui5ih2883jv3f6744c6t65ce650kh.apps.googleusercontent.com';
+
+/* ── Email par défaut suggéré pour le compte super admin ── */
+var GW_SUPER_ADMIN_EMAIL = 'admin@geniwork.app';
+
+/* Initialise GIS dès que la bibliothèque est prête */
+function _initGoogleSignIn() {
+  if (typeof google === 'undefined' || !google.accounts) return;
+  /* Désactive le One Tap automatique — on utilise le sélecteur de compte OAuth2 */
+  if (google.accounts.id) {
+    google.accounts.id.initialize({
+      client_id         : GW_GOOGLE_CLIENT_ID,
+      callback          : _handleGoogleCredential,
+      auto_select       : false,
+      cancel_on_tap_outside: true,
+      ux_mode           : 'popup',
+      itp_support       : true
+    });
+    /* Désactive le One Tap automatique pour éviter qu'il apparaisse tout seul */
+    google.accounts.id.cancel();
+  }
+}
+
+/* Décode un JWT sans bibliothèque (partie payload seulement) */
+function _decodeJWT(token) {
+  try {
+    var parts   = token.split('.');
+    var payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    /* Padding base64 */
+    while (payload.length % 4) payload += '=';
+    return JSON.parse(atob(payload));
+  } catch (e) {
+    return null;
+  }
+}
+
+/* ── Verrou anti-double-clic ── */
+var _gwGoogleRunning = false;
+
+/* Lance Google Sign-In via Firebase Auth (pas d'origin_mismatch, localhost autorisé par défaut) */
+function startGoogleSignIn() {
+  if (_gwGoogleRunning) return;
+
+  /* ── Vérifie que Firebase Auth est disponible ── */
+  var authInstance = _gwFbAuth || (typeof firebase !== 'undefined' && firebase.apps && firebase.apps.length ? firebase.auth() : null);
+  if (!authInstance) {
+    showToast('Service Google non disponible', 'err');
+    return;
+  }
+
+  _gwGoogleRunning = true;
+  _showGoogleLoading('Ouverture Google…');
+
+  var provider = new firebase.auth.GoogleAuthProvider();
+  /* Force l'affichage du sélecteur de compte même si déjà connecté */
+  provider.setCustomParameters({ prompt: 'select_account' });
+  /* Demande email + profil */
+  provider.addScope('email');
+  provider.addScope('profile');
+
+  authInstance.signInWithPopup(provider)
+    .then(function(result) {
+      _gwGoogleRunning = false;
+      var user = result.user;
+      if (!user || !user.email) {
+        _hideGoogleLoading();
+        showToast('Impossible de récupérer le profil Google', 'err');
+        return;
+      }
+      _showGoogleLoading('Connexion en cours…');
+      _googleLogin({
+        googleId : user.uid,
+        email    : user.email,
+        nom      : user.displayName || user.email,
+        photo    : user.photoURL    || null,
+        verified : user.emailVerified
+      });
+    })
+    .catch(function(error) {
+      _gwGoogleRunning = false;
+      _hideGoogleLoading();
+      /* Popup fermée par l'utilisateur → silencieux */
+      if (error.code === 'auth/popup-closed-by-user' ||
+          error.code === 'auth/cancelled-popup-request') return;
+      /* Popup bloquée */
+      if (error.code === 'auth/popup-blocked') {
+        showToast('Popup bloquée — autorisez les popups pour ce site', 'err');
+        return;
+      }
+      showToast('Erreur Google : ' + (error.message || error.code), 'err');
+    });
+}
+
+/* Récupère le profil via l'API userinfo Google */
+function _fetchGoogleUserProfile(accessToken) {
+  fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    headers: { Authorization: 'Bearer ' + accessToken }
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(info) {
+    if (!info || !info.email) {
+      _hideGoogleLoading();
+      showToast('Impossible de récupérer le profil Google', 'err');
+      return;
+    }
+    _googleLogin({
+      googleId : info.sub,
+      email    : info.email,
+      nom      : info.name    || info.email,
+      photo    : info.picture || null,
+      verified : info.email_verified
+    });
+  })
+  .catch(function() {
+    _hideGoogleLoading();
+    showToast('Erreur réseau. Réessayez.', 'err');
+  });
+}
+
+/* Callback GIS token (fallback) */
+function _handleGoogleToken(tokenResponse) {
+  if (!tokenResponse || tokenResponse.error) { _hideGoogleLoading(); return; }
+  _showGoogleLoading('Connexion en cours…');
+  _fetchGoogleUserProfile(tokenResponse.access_token);
+}
+
+/* Callback GIS One Tap : reçoit un credential JWT */
+function _handleGoogleCredential(response) {
+  var payload = _decodeJWT(response.credential);
+  if (!payload) {
+    _hideGoogleLoading();
+    showToast('Réponse Google invalide', 'err');
+    return;
+  }
+  _googleLogin({
+    googleId: payload.sub,
+    email:    payload.email,
+    nom:      payload.name,
+    photo:    payload.picture,
+    verified: payload.email_verified
+  });
+}
+
+/* Crée ou connecte un compte via Google */
+function _googleLogin(gUser) {
+  _showGoogleLoading('Finalisation…');
+
+  var users   = getUsers();
+  var email   = (gUser.email || '').toLowerCase();
+  var existing = null;
+
+  /* 1. Cherche par googleId (compte Google existant) */
+  existing = users.find(function(u) { return u.googleId === gUser.googleId; });
+
+  /* 2. Cherche par email (compte classique avec même email → lie le compte) */
+  if (!existing) {
+    existing = users.find(function(u) {
+      return u.email.toLowerCase() === email;
+    });
+    if (existing) {
+      /* Lie le compte existant à Google */
+      existing.googleId = gUser.googleId;
+      saveUsers(users);
+    }
+  }
+
+  /* 3. Crée un nouveau compte Google */
+  if (!existing) {
+    existing = {
+      nom:      gUser.nom,
+      email:    email,
+      password: null,          /* Pas de mot de passe pour les comptes Google */
+      verified: true,
+      googleId: gUser.googleId,
+      loginMethod: 'google'
+    };
+    users.push(existing);
+    saveUsers(users);
+  }
+
+  /* Importe/met à jour la photo Google dans le profil */
+  if (gUser.photo) {
+    _importGooglePhoto(email, gUser.nom, gUser.photo);
+  }
+
+  /* Connexion */
+  setTimeout(function() {
+    _hideGoogleLoading();
+    /* Vérification du ban */
+    if (!_gwCheckBanOnLogin(existing.email)) return;
+    _currentUser = { nom: existing.nom, email: existing.email, loginMethod: 'google' };
+    _gwCreateSession(_currentUser);
+    goTo('screen-app');
+    initApp(_currentUser);
+    showToast('Bienvenue ' + existing.nom + ' !', 'ok');
+  }, 600);
+}
+
+/* Importe la photo Google → profil Geniwork (canvas resize) */
+function _importGooglePhoto(email, nom, photoUrl) {
+  var profile = loadUserProfile(email) || getDefaultProfile({ nom: nom, email: email });
+  /* Ne remplace que si aucune photo personnalisée n'existe déjà */
+  if (profile.photo && !profile._googlePhoto) return;
+  var img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = function() {
+    var canvas = document.createElement('canvas');
+    var maxSz  = 180;
+    var ratio  = Math.min(maxSz / img.width, maxSz / img.height, 1);
+    canvas.width  = Math.round(img.width  * ratio);
+    canvas.height = Math.round(img.height * ratio);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    profile.photo       = canvas.toDataURL('image/jpeg', 0.72);
+    profile._googlePhoto = true;  /* marqueur : photo vient de Google */
+    saveUserProfile(email, profile);
+    /* Rafraîchit les avatars si l'utilisateur est déjà connecté */
+    if (_currentUser && _currentUser.email === email) {
+      _onProfileSaved();
+    }
+  };
+  img.onerror = function() {
+    /* Impossible de charger la photo (CORS) — on ignore */
+  };
+  img.src = photoUrl;
+}
+
+/* Overlay chargement */
+function _showGoogleLoading(msg) {
+  var ov = document.getElementById('google-loading');
+  var msgEl = document.getElementById('google-loading-msg');
+  if (ov)    ov.classList.remove('hidden');
+  if (msgEl) msgEl.textContent = msg || 'Connexion avec Google…';
+}
+function _hideGoogleLoading() {
+  var ov = document.getElementById('google-loading');
+  if (ov) ov.classList.add('hidden');
+}
+
+/* Lance l'initialisation GIS quand la page est prête */
+window.addEventListener('load', function() {
+  /* ── IndexedDB vidéo ── */
+  _gwInitVideoDB();
+  /* ── Firebase : init sync temps réel ── */
+  _gwInitFirebase();
+  /* ── Restauration de session sécurisée ── */
+  var session = _gwLoadSession();
+  if (session) {
+    /* Vérifie que l'utilisateur existe encore dans gw_users et n'est pas banni */
+    var storedUser = findUser(session.email);
+    if (storedUser && !_admIsBanned(session.email)) {
+      _currentUser = { nom: storedUser.nom, email: storedUser.email, loginMethod: storedUser.loginMethod || 'email' };
+      /* Renouvelle le token de session */
+      _gwCreateSession(_currentUser);
+      setTimeout(function() {
+        initApp(_currentUser);
+        scheduleNewPosts();
+        goTo('screen-app');
+      }, 0);
+    } else {
+      localStorage.removeItem('gw_session');
+    }
+  }
+
+  /* GIS se charge de manière async — on attend qu'il soit dispo */
+  var _gisTimer = setInterval(function() {
+    if (typeof google !== 'undefined' && google.accounts) {
+      clearInterval(_gisTimer);
+      _initGoogleSignIn();
+    }
+  }, 200);
+  /* Abandon après 10s */
+  setTimeout(function() { clearInterval(_gisTimer); }, 10000);
+});
+
+/* ══════════════════════════════════════════
+   NAVIGATION
+══════════════════════════════════════════ */
+function goTo(screenId) {
+  /* ── Vérification ban en temps réel (si ban appliqué pendant session) ── */
+  if (_currentUser && screenId === 'screen-app') {
+    var activeBan = _admGetBanInfo(_currentUser.email);
+    if (activeBan) {
+      /* Invalide la session et redirige vers écran ban */
+      localStorage.removeItem('gw_session');
+      _currentUser = null;
+      document.querySelectorAll('.screen').forEach(function(s){ s.classList.remove('active'); });
+      document.getElementById('screen-login').classList.add('active');
+      setTimeout(function() { _gwShowLoginBanScreen(activeBan.email || '', activeBan); }, 200);
+      return;
+    }
+  }
+  document.querySelectorAll('.screen').forEach(function(s) {
+    s.classList.remove('active');
+  });
+  document.getElementById(screenId).classList.add('active');
+}
+
+/* ══════════════════════════════════════════
+   STOCKAGE UTILISATEURS (localStorage)
+   Structure : [{ nom, email, password, verified }]
+══════════════════════════════════════════ */
+function getUsers() {
+  return JSON.parse(localStorage.getItem('gw_users') || '[]');
+}
+function saveUsers(users) {
+  localStorage.setItem('gw_users', JSON.stringify(users));
+  if (!_gwFbSkip) _gwFbSet('users', users);
+}
+function findUser(email) {
+  return getUsers().find(function(u) {
+    return u.email.toLowerCase() === email.toLowerCase();
+  });
+}
+
+/* ══════════════════════════════════════════
+   MODULE SÉCURITÉ — GENIWORK
+   • Hachage PBKDF2 (Web Crypto API)
+   • Protection brute-force (5 essais / 60 s)
+   • Session sécurisée (token aléatoire + expiration 7 j)
+   • Sanitisation des entrées
+══════════════════════════════════════════ */
+
+/* ── Sanitisation ── */
+function _gwSanitize(str, maxLen) {
+  if (typeof str !== 'string') return '';
+  str = str.replace(/[<>"'`\\]/g, '');      // retire les caractères dangereux
+  return str.trim().slice(0, maxLen || 512);
+}
+
+/* ── Génère un sel hexadécimal aléatoire (16 octets = 32 hex) ── */
+function _gwSalt() {
+  var buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  return Array.from(buf).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+}
+
+/* ── Génère un token de session aléatoire (32 octets) ── */
+function _gwToken() {
+  var buf = new Uint8Array(32);
+  crypto.getRandomValues(buf);
+  return Array.from(buf).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+}
+
+/* ── Hachage PBKDF2 asynchrone ──
+   Format stocké : "pbkdf2:<sel_hex>:<hash_hex>"
+   50 000 itérations, SHA-256, 256 bits
+*/
+function _gwHashPwd(password, salt) {
+  return new Promise(function(resolve, reject) {
+    try {
+      var enc = new TextEncoder();
+      crypto.subtle.importKey(
+        'raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveBits']
+      ).then(function(key) {
+        var saltBuf = new Uint8Array(salt.match(/.{2}/g).map(function(h) { return parseInt(h, 16); }));
+        return crypto.subtle.deriveBits(
+          { name: 'PBKDF2', salt: saltBuf, iterations: 50000, hash: 'SHA-256' },
+          key, 256
+        );
+      }).then(function(bits) {
+        var hashHex = Array.from(new Uint8Array(bits))
+          .map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+        resolve('pbkdf2:' + salt + ':' + hashHex);
+      }).catch(reject);
+    } catch (e) { reject(e); }
+  });
+}
+
+/* ── Vérifie un mot de passe face au hash stocké ──
+   Gère automatiquement l'ancien format texte brut (migration transparente).
+*/
+function _gwVerifyPwd(password, stored) {
+  return new Promise(function(resolve) {
+    if (!stored) { resolve(false); return; }
+
+    /* Ancien mot de passe en texte clair → comparaison directe */
+    if (stored.indexOf('pbkdf2:') !== 0) {
+      resolve(stored === password);
+      return;
+    }
+
+    /* Nouveau format PBKDF2 */
+    var parts = stored.split(':');
+    if (parts.length !== 3) { resolve(false); return; }
+    var salt = parts[1];
+    _gwHashPwd(password, salt).then(function(computed) {
+      /* Comparaison sécurisée (longueur constante simulée en JS) */
+      var a = computed, b = stored;
+      var diff = a.length ^ b.length;
+      for (var i = 0; i < Math.min(a.length, b.length); i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+      resolve(diff === 0);
+    }).catch(function() { resolve(false); });
+  });
+}
+
+/* ── Protection brute-force ──
+   Clé = "login:<email>" ou "reset:<email>"
+   Max 5 tentatives en 60 secondes, puis blocage 60 s.
+*/
+var _gwAttempts = {};  /* { "login:email": { count: 0, lockedUntil: 0 } } */
+
+function _gwCheckBrute(key) {
+  /* Retourne true si l'accès est autorisé, false si bloqué */
+  var now = Date.now();
+  var rec = _gwAttempts[key];
+  if (!rec) return true;
+  if (rec.lockedUntil && now < rec.lockedUntil) return false;
+  return true;
+}
+
+function _gwRecordFail(key) {
+  var now = Date.now();
+  if (!_gwAttempts[key]) _gwAttempts[key] = { count: 0, lockedUntil: 0 };
+  var rec = _gwAttempts[key];
+
+  /* Réinitialise le compteur si le blocage précédent est expiré */
+  if (rec.lockedUntil && now >= rec.lockedUntil) {
+    rec.count = 0; rec.lockedUntil = 0;
+  }
+  rec.count++;
+  if (rec.count >= 5) {
+    rec.lockedUntil = now + 60000;  /* bloqué 60 secondes */
+    rec.count = 0;
+  }
+}
+
+function _gwResetBrute(key) {
+  delete _gwAttempts[key];
+}
+
+function _gwLockedSeconds(key) {
+  var rec = _gwAttempts[key];
+  if (!rec || !rec.lockedUntil) return 0;
+  var remaining = Math.ceil((rec.lockedUntil - Date.now()) / 1000);
+  return remaining > 0 ? remaining : 0;
+}
+
+/* ── Session sécurisée ──
+   Stocke { token, email, nom, loginMethod, expires, deviceId } dans gw_session.
+   Expiration : 365 jours — renouvelée à chaque ouverture.
+   deviceId : identifiant unique de l'appareil — si changement de téléphone, session invalide.
+*/
+
+/* ── Identifiant unique de l'appareil (généré une seule fois, stocké en localStorage) ── */
+function _gwGetDeviceId() {
+  var key = 'gw_device_id';
+  var id  = localStorage.getItem(key);
+  if (!id) {
+    /* Génère un ID aléatoire lié à cet appareil */
+    id = 'dev_' + Math.random().toString(36).slice(2) + '_' + Date.now().toString(36);
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
+
+function _gwCreateSession(user) {
+  var session = {
+    token:       _gwToken(),
+    email:       user.email,
+    nom:         user.nom,
+    loginMethod: user.loginMethod || 'email',
+    deviceId:    _gwGetDeviceId(),
+    expires:     Date.now() + 365 * 24 * 3600 * 1000   /* 1 an */
+  };
+  localStorage.setItem('gw_session', JSON.stringify(session));
+  return session;
+}
+
+function _gwLoadSession() {
+  try {
+    var raw = localStorage.getItem('gw_session');
+    if (!raw) return null;
+    var s = JSON.parse(raw);
+    if (!s || !s.token || !s.email || !s.expires) { localStorage.removeItem('gw_session'); return null; }
+    /* Session expirée */
+    if (Date.now() > s.expires) { localStorage.removeItem('gw_session'); return null; }
+    /* Vérifie que c'est le même appareil */
+    if (s.deviceId && s.deviceId !== _gwGetDeviceId()) { localStorage.removeItem('gw_session'); return null; }
+    /* ── Renouvelle automatiquement la session à chaque ouverture ── */
+    s.expires = Date.now() + 365 * 24 * 3600 * 1000;
+    localStorage.setItem('gw_session', JSON.stringify(s));
+    return s;
+  } catch (e) { localStorage.removeItem('gw_session'); return null; }
+}
+
+/* ══════════════════════════════════════════
+   VALIDATION MOT DE PASSE
+   Règles : 8 cars, maj, min, chiffre, symbole
+══════════════════════════════════════════ */
+var PWD_RULES = {
+  len: function(p) { return p.length >= 8; },
+  maj: function(p) { return /[A-Z]/.test(p); },
+  min: function(p) { return /[a-z]/.test(p); },
+  num: function(p) { return /[0-9]/.test(p); },
+  sym: function(p) { return /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?`~]/.test(p); }
+};
+
+function isPasswordValid(pwd) {
+  return Object.values(PWD_RULES).every(function(fn) { return fn(pwd); });
+}
+
+/* Met à jour visuellement les règles (inscription) */
+function checkPwdStrength(pwd) {
+  updateRules(pwd, 'rule');
+}
+
+/* Met à jour visuellement les règles (reset password) */
+function checkPwdStrength2(pwd) {
+  updateRules(pwd, 'rule2');
+}
+
+function updateRules(pwd, prefix) {
+  var keys = ['len','maj','min','num','sym'];
+  keys.forEach(function(k) {
+    var el = document.getElementById(prefix + '-' + k);
+    if (!el) return;
+    var ok = PWD_RULES[k](pwd);
+    el.className = 'rule ' + (ok ? 'ok' : (pwd.length > 0 ? 'fail' : ''));
+  });
+}
+
+/* ══════════════════════════════════════════
+   GÉNÉRATEUR CODE 4 CHIFFRES
+══════════════════════════════════════════ */
+function generateCode() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+/* Codes temporaires en mémoire */
+var _verifyCode = '';       // code inscription
+var _verifyEmail = '';      // email en attente de vérification
+var _verifyData  = null;    // données utilisateur temporaires
+
+var _resetCode  = '';       // code reset
+var _resetEmail = '';       // email en cours de reset
+
+/* ══════════════════════════════════════════
+   INSCRIPTION
+══════════════════════════════════════════ */
+function doRegister() {
+  var nom   = _gwSanitize(document.getElementById('reg-nom').value.trim(), 100);
+  var email = _gwSanitize(document.getElementById('reg-email').value.trim().toLowerCase(), 320);
+  var pwd   = document.getElementById('reg-pwd').value;
+  var pwd2  = document.getElementById('reg-pwd2').value;
+
+  // Réinitialise l'erreur email
+  setEmailError(false);
+
+  /* ─ Validations ─ */
+  if (!nom) {
+    showToast('Veuillez entrer votre nom complet', 'err'); return;
+  }
+  if (!email || !email.includes('@') || !email.includes('.')) {
+    showToast('Adresse e-mail invalide', 'err'); return;
+  }
+  /* Email déjà utilisé */
+  if (findUser(email)) {
+    setEmailError(true);
+    showToast('Cette adresse e-mail est déjà utilisée', 'err'); return;
+  }
+  if (!isPasswordValid(pwd)) {
+    showToast('Le mot de passe ne respecte pas les règles', 'err'); return;
+  }
+  if (pwd !== pwd2) {
+    showToast('Les mots de passe ne correspondent pas', 'err'); return;
+  }
+
+  /* ─ Génère le code de vérification ─ */
+  _verifyCode  = generateCode();
+  _verifyEmail = email;
+  _verifyData  = { nom: nom, email: email, password: pwd, verified: false };
+
+  /* Affiche l'écran de vérification */
+  document.getElementById('verify-email-display').textContent = email;
+  document.getElementById('demo-code-display').textContent    = _verifyCode;
+  clearCodeInputs(['c1','c2','c3','c4']);
+
+  goTo('screen-verify');
+
+  /* Code affiché à l'écran (démo) — production : envoi par email côté serveur */
+}
+
+function setEmailError(show) {
+  var err = document.getElementById('err-email');
+  var box = document.getElementById('box-reg-email');
+  if (show) {
+    err.classList.remove('hidden');
+    box.classList.add('error');
+  } else {
+    err.classList.add('hidden');
+    box.classList.remove('error');
+  }
+}
+
+/* ══════════════════════════════════════════
+   VÉRIFICATION CODE (inscription)
+══════════════════════════════════════════ */
+function doVerify() {
+  var entered = getCodeValue(['c1','c2','c3','c4']);
+
+  if (entered.length < 4) {
+    showToast('Entrez les 4 chiffres du code', 'err'); return;
+  }
+  if (entered !== _verifyCode) {
+    showToast('Code incorrect. Vérifiez et réessayez.', 'err');
+    shakeCodeInputs(['c1','c2','c3','c4']); return;
+  }
+
+  /* ─ Code correct : hache le mot de passe et enregistre ─ */
+  _verifyData.verified = true;
+  var pwdToHash = _verifyData.password;
+  var salt = _gwSalt();
+  _gwHashPwd(pwdToHash, salt).then(function(hashed) {
+    _verifyData.password = hashed;
+    var users = getUsers();
+    /* Double vérification : email toujours libre au moment de l'écriture */
+    if (users.some(function(u) { return u.email.toLowerCase() === _verifyData.email.toLowerCase(); })) {
+      showToast('Cette adresse e-mail est déjà utilisée', 'err');
+      goTo('screen-login'); return;
+    }
+    users.push(_verifyData);
+    saveUsers(users);
+
+    _verifyCode = '';
+    /* On garde _verifyData.nom pour l'accueil — on le vide après CGU */
+
+    showToast('Compte vérifié ✓ Lisez les CGU pour continuer', 'ok');
+    setTimeout(function() {
+      openCGU();
+    }, 1000);
+  }).catch(function() {
+    /* Fallback si crypto non disponible (rare) */
+    var users = getUsers();
+    if (users.some(function(u) { return u.email.toLowerCase() === _verifyData.email.toLowerCase(); })) {
+      showToast('Cette adresse e-mail est déjà utilisée', 'err');
+      goTo('screen-login'); return;
+    }
+    users.push(_verifyData);
+    saveUsers(users);
+    _verifyCode = '';
+    showToast('Compte vérifié ✓ Lisez les CGU pour continuer', 'ok');
+    setTimeout(function() { openCGU(); }, 1000);
+  });
+}
+
+function resendCode() {
+  if (!_verifyEmail) return;
+  _verifyCode = generateCode();
+  document.getElementById('demo-code-display').textContent = _verifyCode;
+  clearCodeInputs(['c1','c2','c3','c4']);
+  showToast('Nouveau code envoyé ✓', 'ok');
+}
+
+/* ══════════════════════════════════════════
+   CONNEXION
+══════════════════════════════════════════ */
+function doLogin() {
+  var email = _gwSanitize(document.getElementById('login-email').value.trim().toLowerCase(), 320);
+  var pwd   = document.getElementById('login-pwd').value;
+
+  if (!email) {
+    showToast('Veuillez entrer votre adresse e-mail', 'err'); return;
+  }
+  if (!email.includes('@')) {
+    showToast('Adresse e-mail invalide', 'err'); return;
+  }
+  if (!pwd) {
+    showToast('Veuillez entrer votre mot de passe', 'err'); return;
+  }
+
+  /* ── Protection brute-force ── */
+  var bruteKey = 'login:' + email;
+  if (!_gwCheckBrute(bruteKey)) {
+    var secs = _gwLockedSeconds(bruteKey);
+    showToast('Trop de tentatives. Réessayez dans ' + secs + ' s.', 'err'); return;
+  }
+
+  var user = findUser(email);
+
+  /* Message générique : ne révèle pas si l'email existe */
+  if (!user) {
+    _gwRecordFail(bruteKey);
+    showToast('Email ou mot de passe incorrect', 'err'); return;
+  }
+  /* Compte Google → inviter à utiliser le bouton Google */
+  if (user.loginMethod === 'google' && !user.password) {
+    showToast('Ce compte utilise Google. Cliquez sur "Continuer avec Google".', 'err'); return;
+  }
+  /* Compte banni */
+  if (!_gwCheckBanOnLogin(email)) return;
+  /* Compte non vérifié */
+  if (!user.verified) {
+    showToast('Compte non vérifié. Vérifiez votre e-mail.', 'err'); return;
+  }
+
+  /* ── Vérification asynchrone du mot de passe (PBKDF2) ── */
+  var loginBtn = document.querySelector('#screen-login .auth-btn') || document.querySelector('#screen-login button[onclick="doLogin()"]');
+  if (loginBtn) { loginBtn.disabled = true; loginBtn.textContent = 'Vérification…'; }
+
+  _gwVerifyPwd(pwd, user.password).then(function(ok) {
+    if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = 'Se connecter'; }
+
+    if (!ok) {
+      _gwRecordFail(bruteKey);
+      var remaining = 5 - ((_gwAttempts[bruteKey] || {}).count || 0);
+      showToast('Email ou mot de passe incorrect' + (remaining <= 2 ? ' (' + remaining + ' essai(s) restant)' : ''), 'err');
+      return;
+    }
+
+    /* ── Connexion réussie ── */
+    _gwResetBrute(bruteKey);
+
+    /* Migration transparente : si mot de passe en texte clair → rehache maintenant */
+    if (user.password && user.password.indexOf('pbkdf2:') !== 0) {
+      var salt = _gwSalt();
+      _gwHashPwd(pwd, salt).then(function(hashed) {
+        var users = getUsers();
+        var idx = users.findIndex(function(u) { return u.email.toLowerCase() === email; });
+        if (idx !== -1) { users[idx].password = hashed; saveUsers(users); }
+      });
+    }
+
+    /* Crée une session sécurisée */
+    var session = _gwCreateSession(user);
+    _currentUser = { nom: user.nom, email: user.email, loginMethod: user.loginMethod || 'email' };
+
+    showToast('Connexion réussie ✓', 'ok');
+    setTimeout(function() {
+      initApp(_currentUser);
+      scheduleNewPosts();
+      goTo('screen-app');
+    }, 900);
+  });
+}
+
+/* ══════════════════════════════════════════
+   CGU — LOGIQUE
+══════════════════════════════════════════ */
+
+function openCGU() {
+  /* Réinitialise la page CGU : décocher, désactiver bouton, remettre en haut */
+  var checkbox = document.getElementById('cgu-checkbox');
+  var btn      = document.getElementById('cgu-accept-btn');
+  var body     = document.getElementById('cgu-body');
+
+  if (checkbox) checkbox.checked = false;
+  if (btn)      btn.disabled = true;
+  if (body)     body.scrollTop = 0;
+
+  goTo('screen-cgu');
+}
+
+/* Appelé quand l'utilisateur coche/décoche */
+function onCguCheck(checkbox) {
+  var btn = document.getElementById('cgu-accept-btn');
+  btn.disabled = !checkbox.checked;
+}
+
+/* Appelé quand l'utilisateur clique "Accepter et continuer" */
+function acceptCGU() {
+  var checkbox = document.getElementById('cgu-checkbox');
+  if (!checkbox.checked) return;
+
+  /* Marque la CGU comme acceptée pour cet utilisateur */
+  if (_verifyData) {
+    var users = getUsers();
+    var idx   = users.findIndex(function(u) {
+      return u.email.toLowerCase() === _verifyData.email.toLowerCase();
+    });
+    if (idx !== -1) {
+      users[idx].cguAccepted = true;
+      saveUsers(users);
+    }
+    _verifyData = null;
+  }
+
+  /* _verifyEmail reste disponible même après _verifyData = null */
+  var registeredEmail = _verifyEmail;
+
+  showToast('Bienvenue sur Geniwork ✓', 'ok');
+  setTimeout(function() {
+    var newUser = registeredEmail ? findUser(registeredEmail) : null;
+    if (newUser) {
+      var sessionUser = { nom: newUser.nom, email: newUser.email, loginMethod: newUser.loginMethod || 'email' };
+      _currentUser = sessionUser;
+      _gwCreateSession(sessionUser);
+      initApp(sessionUser);
+      scheduleNewPosts();
+    }
+    goTo('screen-app');
+  }, 1200);
+}
+
+/* ══════════════════════════════════════════
+   MOT DE PASSE OUBLIÉ
+══════════════════════════════════════════ */
+function doForgot() {
+  var email = _gwSanitize(document.getElementById('forgot-email').value.trim().toLowerCase(), 320);
+
+  if (!email || !email.includes('@')) {
+    showToast('Adresse e-mail invalide', 'err'); return;
+  }
+
+  /* ── Compte banni → impossible de réinitialiser ── */
+  var banInfo = _admGetBanInfo(email);
+  if (banInfo) {
+    goTo('screen-login');
+    setTimeout(function() { _gwShowLoginBanScreen(email, banInfo); }, 150);
+    return;
+  }
+
+  var user = findUser(email);
+
+  /* Email non enregistré — message générique (sécurité) */
+  if (!user) {
+    showToast('Si ce compte existe, un code a été envoyé.', '');
+    /* On simule quand même pour ne pas révéler si l'email existe */
+    setTimeout(function() { goTo('screen-login'); }, 2000);
+    return;
+  }
+
+  /* Génère le code de réinitialisation */
+  _resetCode  = generateCode();
+  _resetEmail = email;
+
+  document.getElementById('reset-email-display').textContent = email;
+  document.getElementById('demo-reset-code').textContent     = _resetCode;
+  clearCodeInputs(['r1','r2','r3','r4']);
+
+  goTo('screen-reset-verify');
+  showToast('Code envoyé à ' + email, 'ok');
+  /* Code affiché à l'écran (démo) — production : envoi par email côté serveur */
+}
+
+/* ══════════════════════════════════════════
+   VÉRIFICATION CODE (reset)
+══════════════════════════════════════════ */
+function doResetVerify() {
+  var entered = getCodeValue(['r1','r2','r3','r4']);
+
+  if (entered.length < 4) {
+    showToast('Entrez les 4 chiffres du code', 'err'); return;
+  }
+  if (entered !== _resetCode) {
+    showToast('Code incorrect. Vérifiez et réessayez.', 'err');
+    shakeCodeInputs(['r1','r2','r3','r4']); return;
+  }
+
+  /* Réinitialise les champs du nouveau mot de passe */
+  document.getElementById('new-pwd').value  = '';
+  document.getElementById('new-pwd2').value = '';
+  updateRules('', 'rule2');
+
+  goTo('screen-new-pwd');
+}
+
+function resendResetCode() {
+  if (!_resetEmail) return;
+  _resetCode = generateCode();
+  document.getElementById('demo-reset-code').textContent = _resetCode;
+  clearCodeInputs(['r1','r2','r3','r4']);
+  showToast('Nouveau code envoyé ✓', 'ok');
+}
+
+/* ══════════════════════════════════════════
+   ENREGISTRER NOUVEAU MOT DE PASSE
+══════════════════════════════════════════ */
+function doSaveNewPwd() {
+  var pwd  = document.getElementById('new-pwd').value;
+  var pwd2 = document.getElementById('new-pwd2').value;
+
+  if (!isPasswordValid(pwd)) {
+    showToast('Le mot de passe ne respecte pas les règles', 'err'); return;
+  }
+  if (pwd !== pwd2) {
+    showToast('Les mots de passe ne correspondent pas', 'err'); return;
+  }
+
+  /* ── Compte banni → bloquer même si le code était valide ── */
+  if (_resetEmail) {
+    var banInfo = _admGetBanInfo(_resetEmail);
+    if (banInfo) {
+      var e = _resetEmail; _resetCode = ''; _resetEmail = '';
+      goTo('screen-login');
+      setTimeout(function() { _gwShowLoginBanScreen(e, banInfo); }, 150);
+      return;
+    }
+  }
+
+  /* ── Hache le nouveau mot de passe avant de sauvegarder ── */
+  var salt = _gwSalt();
+  _gwHashPwd(pwd, salt).then(function(hashed) {
+    var users = getUsers();
+    var idx   = users.findIndex(function(u) {
+      return u.email.toLowerCase() === _resetEmail.toLowerCase();
+    });
+    if (idx !== -1) {
+      users[idx].password = hashed;
+      saveUsers(users);
+    }
+
+    /* Réinitialise aussi le brute-force pour cet email */
+    _gwResetBrute('login:' + _resetEmail.toLowerCase());
+
+    _resetCode  = '';
+    _resetEmail = '';
+
+    showToast('Mot de passe mis à jour ✓', 'ok');
+    setTimeout(function() {
+      goTo('screen-login');
+    }, 1200);
+  }).catch(function() {
+    showToast('Erreur lors de la mise à jour. Réessayez.', 'err');
+  });
+}
+
+/* ══════════════════════════════════════════
+   UTILITAIRES CODE 4 CHIFFRES
+══════════════════════════════════════════ */
+
+/* Avance automatiquement au champ suivant */
+function codeNext(input, nextId) {
+  input.value = input.value.replace(/[^0-9]/g, '');
+  if (input.value.length === 1) {
+    input.classList.add('filled');
+    if (nextId) {
+      var next = document.getElementById(nextId);
+      if (next) next.focus();
+    }
+  } else {
+    input.classList.remove('filled');
+  }
+}
+
+/* Retour arrière vers le champ précédent */
+function codePrev(event, input, prevId) {
+  if (event.key === 'Backspace' && input.value === '' && prevId) {
+    var prev = document.getElementById(prevId);
+    if (prev) { prev.focus(); prev.value = ''; prev.classList.remove('filled'); }
+  }
+}
+
+/* Lit les 4 chiffres */
+function getCodeValue(ids) {
+  return ids.map(function(id) {
+    return document.getElementById(id).value;
+  }).join('');
+}
+
+/* Vide les 4 champs */
+function clearCodeInputs(ids) {
+  ids.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) { el.value = ''; el.classList.remove('filled'); }
+  });
+}
+
+/* Animation secousse si code incorrect */
+function shakeCodeInputs(ids) {
+  ids.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.classList.add('shake');
+    el.style.borderColor = '#EF4444';
+    setTimeout(function() {
+      el.classList.remove('shake');
+      el.style.borderColor = '';
+    }, 600);
+  });
+}
+
+/* ══════════════════════════════════════════
+   AFFICHER / CACHER MOT DE PASSE
+══════════════════════════════════════════ */
+function togglePwd(inputId, btn) {
+  var input = document.getElementById(inputId);
+  var icon  = btn.querySelector('i');
+  if (input.type === 'password') {
+    input.type     = 'text';
+    icon.className = 'fas fa-eye-slash';
+  } else {
+    input.type     = 'password';
+    icon.className = 'fas fa-eye';
+  }
+}
+
+/* ══════════════════════════════════════════
+   TOAST
+══════════════════════════════════════════ */
+var _toastTimer = null;
+function showToast(message, type) {
+  var el = document.getElementById('toast');
+  el.textContent = message;
+  el.className   = 'toast show' + (type ? ' ' + type : '');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(function() {
+    el.classList.remove('show');
+  }, 3000);
+}
+
+/* ══════════════════════════════════════════
+   APPLICATION — ÉTAT GLOBAL
+══════════════════════════════════════════ */
+var _currentUser = null;   /* utilisateur connecté */
+var _currentPostId = null; /* post dont les commentaires sont ouverts */
+var _feedTab = 'accueil';  /* onglet actif du feed */
+var _pickedImgData = null; /* image choisie pour publier */
+
+/* ══════════════════════════════════════════
+   DONNÉES DÉMO (posts simulés)
+══════════════════════════════════════════ */
+var DEMO_POSTS = [
+  {
+    id: 1,
+    author: 'Sophie Lefebvre',
+    role: 'Designer UI/UX · Freelance',
+    verified: true,
+    time: 'Il y a 5 min',
+    text: '🎨 Nouveau projet : refonte complète de l\'identité visuelle pour une startup fintech !\n\nSuper challenge d\'allier clarté, confiance et modernité dans un secteur très codifié. Hâte de vous montrer le résultat final 🚀',
+    images: ['https://images.unsplash.com/photo-1561070791-2526d30994b5?w=600&q=80'],
+    baseLikes: 47,
+    likers: [],
+    comments: [
+      { author: 'Marc D.', text: 'Magnifique travail, bravo !' },
+      { author: 'Julie R.', text: 'Trop hâte de voir le résultat ✨' }
+    ]
+  },
+  {
+    id: 2,
+    author: 'Thomas Kone',
+    role: 'Développeur Full-Stack',
+    verified: true,
+    time: 'Il y a 23 min',
+    text: '🚀 Je viens de lancer mon SaaS de gestion de projets freelance après 8 mois de dev solo.\n\nPremiers retours : 50 inscrits en 48h. Merci à la communauté Geniwork ! 💙',
+    images: [],
+    baseLikes: 134,
+    likers: [],
+    comments: [
+      { author: 'Anna S.', text: 'Félicitations Thomas !' },
+      { author: 'Yves B.', text: '50 inscrits en 48h c\'est incroyable 🔥' },
+      { author: 'Sophie L.', text: 'Partagez le lien !' }
+    ]
+  },
+  {
+    id: 3,
+    author: 'Amina Traoré',
+    role: 'Consultante Marketing Digital',
+    verified: false,
+    time: 'Il y a 1h',
+    text: '📊 Astuce du jour : utilisez le storytelling dans vos publications LinkedIn pour augmenter votre taux d\'engagement de 3x.\n\nLes gens achètent des émotions avant d\'acheter un service. 💡',
+    images: [
+      'https://images.unsplash.com/photo-1611532736597-de2d4265fba3?w=600&q=80',
+      'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=600&q=80'
+    ],
+    baseLikes: 89,
+    likers: [],
+    comments: [
+      { author: 'Paul M.', text: 'Merci pour ce conseil !' }
+    ]
+  },
+  {
+    id: 4,
+    author: 'Julien Moreau',
+    role: 'Photographe & Vidéaste',
+    verified: true,
+    time: 'Il y a 2h',
+    text: '📸 Shooting corporate terminé pour une grande enseigne parisienne. Quelques shots behind the scenes 👇',
+    images: [
+      'https://images.unsplash.com/photo-1542038784456-1ea8e935640e?w=600&q=80',
+      'https://images.unsplash.com/photo-1493863641943-9b68992a8d07?w=600&q=80',
+      'https://images.unsplash.com/photo-1502982720700-bfff97f2ecac?w=600&q=80',
+      'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=600&q=80'
+    ],
+    baseLikes: 212,
+    likers: [],
+    comments: []
+  },
+  {
+    id: 5,
+    author: 'Fatou Diallo',
+    role: 'Rédactrice Web & SEO',
+    verified: false,
+    time: 'Il y a 3h',
+    text: '✍️ Besoin de contenu de qualité pour votre site ou blog ?\n\nJe propose des textes SEO-optimisés, engageants et livrés dans les délais. N\'hésitez pas à me contacter via la marketplace ! 📬',
+    images: [],
+    baseLikes: 31,
+    likers: [],
+    comments: [
+      { author: 'Kevin L.', text: 'Je vais te contacter pour un projet !' }
+    ]
+  }
+];
+
+/* Posts en attente (simulés pour le bouton "Nouveaux posts") */
+var PENDING_POSTS = [
+  {
+    id: 100,
+    author: 'Lucas Bernard',
+    role: 'Développeur Mobile',
+    verified: true,
+    at: Date.now(), time: 'À l\'instant',
+    text: '📱 Application Geniwork disponible sur Android ! Téléchargez-la et donnez-moi vos retours 🙌',
+    images: [],
+    baseLikes: 5,
+    likers: [],
+    comments: []
+  }
+];
+
+/* ══════════════════════════════════════════
+   INITIALISATION DE L'APPLICATION
+══════════════════════════════════════════ */
+function initApp(user) {
+  _currentUser = user;
+
+  /* Crée / renouvelle la session sécurisée */
+  if (!_gwLoadSession()) {
+    _gwCreateSession(user);
+  }
+
+  /* ── Firebase : écoute les notifs en temps réel pour cet utilisateur ── */
+  _gwFbWatchUserNotifs(user.email);
+
+  /* Initiales de l'avatar */
+  var initials = getInitials(user.nom);
+
+  var els = ['composer-initials','pub-initials','sb-initials','comment-initials'];
+  els.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = initials;
+  });
+
+  /* Nom / email dans la sidebar */
+  var sbName  = document.getElementById('sb-name');
+  var sbEmail = document.getElementById('sb-email');
+  var pubName = document.getElementById('pub-name');
+  if (sbName)  sbName.textContent  = user.nom;
+  if (sbEmail) sbEmail.textContent = user.email;
+  if (pubName) pubName.textContent = user.nom;
+
+  /* Génère des notifs de bienvenue si c'est la première connexion */
+  seedDemoNotifs(user);
+
+  /* Charge les notifications personnelles */
+  renderNotifs();
+
+  /* Charge les posts persistés des utilisateurs inscrits */
+  _loadAllPersistedPosts();
+
+  /* Charge les likes persistés pour tous les posts */
+  getAllPosts().forEach(function(post) {
+    post.likers = loadPostLikers(post.id);
+  });
+
+  /* Rend les posts du feed — _buildMergedFeedPool intègre les posts officiels automatiquement */
+  var _initAllPosts = getAllPosts();
+  _feedLastPostCount = _initAllPosts.length;
+  renderFeed(_initAllPosts.length ? _initAllPosts : DEMO_POSTS);
+
+  /* Démarre l'auto-refresh du feed toutes les 30s */
+  _feedStartAutoRefresh();
+
+  /* Active le pull-to-refresh sur le feed */
+  _initPullToRefresh();
+
+  /* Affiche le bouton éditeur dans la sidebar si autorisé */
+  _offUpdateSidebarBtn();
+
+  /* Initialise le profil si c'est la première connexion (sans signal de changement) */
+  try {
+    var _initProfile = loadUserProfile(_currentUser.email);
+    if (!_initProfile) {
+      _initProfile = getDefaultProfile(_currentUser);
+      try { localStorage.setItem('gw_profile_' + _currentUser.email, JSON.stringify(_initProfile)); } catch(e) {}
+    }
+    _subUpdateSidebarChip(_initProfile.planType || 'free');
+  } catch(e) {}
+
+  /* Vérifie le renouvellement / expiration / rappel 14j */
+  setTimeout(function() {
+    try { _subCheckRenewalAndExpiry(); } catch(e) {}
+  }, 1500);
+
+  /* Rend la page profil (pré-chargement des données) */
+  renderProfilePage();
+
+  /* Met à jour les avatars du compte courant (photo si définie) */
+  _refreshCurrentUserAvatars();
+
+  /* Restaure le mode sombre */
+  if (localStorage.getItem('gw_dark_mode') === '1') {
+    document.body.classList.add('dark-mode');
+    var dmToggle = document.getElementById('dark-mode-toggle');
+    if (dmToggle) dmToggle.checked = true;
+  }
+
+  /* Applique la langue sauvegardée */
+  applyLang();
+
+  /* Restaure les conversations DM dynamiques sauvegardées (survit au refresh) */
+  try { _loadDMConvList(); } catch(e) {}
+
+  /* Vérifie l'inbox DM au démarrage pour restaurer les convs reçues hors connexion */
+  setTimeout(function() {
+    try { _checkDMInbox(); } catch(e) {}
+    /* Premier poll immédiat pour synchro des messages */
+    try { _globalMsgPoll(); } catch(e) {}
+  }, 800);
+}
+
+function getInitials(nom) {
+  var parts = nom.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return nom.slice(0, 2).toUpperCase();
+}
+
+/* ── Avatar HTML : photo si dispo, sinon initiales ── */
+function getAvatarHtml(email, nom, extraClass) {
+  var cls = 'user-av' + (extraClass ? ' ' + extraClass : '');
+  var dataAttr = email ? ' data-email="' + escHtml(email) + '"' : '';
+  var profile = email ? loadUserProfile(email) : null;
+  /* Nom live depuis profil */
+  var liveName = (profile && profile.nom) ? profile.nom : (nom || '?');
+  if (profile && profile.photo) {
+    return '<div class="' + cls + ' av-photo"' + dataAttr + '>' +
+             '<img src="' + escHtml(profile.photo) + '" alt=""/>' +
+           '</div>';
+  }
+  return '<div class="' + cls + '"' + dataAttr + '><span>' +
+           escHtml(getInitials(liveName)) +
+         '</span></div>';
+}
+
+/* ── Nom affiché toujours à jour depuis le profil ── */
+function getDisplayName(email, fallback) {
+  if (!email) return fallback || '?';
+  var p = loadUserProfile(email);
+  return (p && p.nom) ? p.nom : (fallback || '?');
+}
+
+/* ── Domaine/rôle toujours à jour depuis le profil ── */
+function getDisplayRole(email, fallback) {
+  if (!email) return fallback || '';
+  var p = loadUserProfile(email);
+  return (p && p.domain) ? p.domain : (fallback || '');
+}
+
+/* ── Synchronise _currentUser et gw_users avec le profil modifié ── */
+function _syncUserRecord(email, newNom) {
+  /* Met à jour la session en cours */
+  if (_currentUser && _currentUser.email === email) {
+    _currentUser.nom = newNom;
+    var sbN = document.getElementById('sb-name');  if (sbN) sbN.textContent = newNom;
+    var pnN = document.getElementById('pub-name'); if (pnN) pnN.textContent = newNom;
+  }
+  /* Persiste dans gw_users */
+  var users = getUsers();
+  var u = users.find(function(x) { return x.email.toLowerCase() === email.toLowerCase(); });
+  if (u) { u.nom = newNom; saveUsers(users); }
+  /* Rafraîchit le feed (noms des posts), les notifs et les initiales */
+  if (document.getElementById('feed-list')) renderFeed(getAllPosts());
+  _refreshCurrentUserAvatars();
+}
+
+/* ── Rafraîchit les avatars du compte courant partout ── */
+function _refreshCurrentUserAvatars() {
+  if (!_currentUser) return;
+  var profile = loadUserProfile(_currentUser.email);
+  var photo   = profile && profile.photo ? profile.photo : null;
+  var initials = getInitials(_currentUser.nom);
+
+  /* Liste des conteneurs avatar courant */
+  var containers = ['composer-av', 'pub-av', 'comment-av', 'sb-av'];
+  containers.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (photo) {
+      el.className = el.className.replace(/\bav-photo\b/g, '').trim() + ' av-photo';
+      el.innerHTML = '<img src="' + escHtml(photo) + '" alt=""/>';
+    } else {
+      el.className = el.className.replace(/\bav-photo\b/g, '').trim();
+      el.innerHTML = '<span>' + escHtml(initials) + '</span>';
+    }
+  });
+
+  /* Rafraîchit aussi le drawer sidebar */
+  _refreshSidebar();
+
+  /* Si la page notifications est active, rafraîchit les avatars en temps réel */
+  var notifsPage = document.getElementById('p-notifs');
+  if (notifsPage && notifsPage.classList.contains('active')) {
+    renderNotifs();
+  }
+}
+
+/* ── Appelé après que la photo du user courant a été sauvegardée ── */
+function _onProfileSaved() {
+  renderProfilePage();
+  _refreshCurrentUserAvatars(); /* inclut déjà _refreshSidebar() */
+  if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e) {} }
+}
+
+/* ── Refresh global déclenché par changement de profil (n'importe quel user) ──
+   Appelé depuis _globalMsgPoll quand gw_profile_changed est détecté          ── */
+var _lastProfileChangeAt = 0;
+function _checkProfileChanges() {
+  try {
+    var sig = JSON.parse(localStorage.getItem('gw_profile_changed') || 'null');
+    if (!sig || sig.at <= _lastProfileChangeAt) return;
+    _lastProfileChangeAt = sig.at;
+    var changedEmail = sig.email;
+
+    /* Met à jour les images <img> qui affichent ce profil dans toute la page */
+    _refreshProfileInDOM(changedEmail);
+
+    /* Re-rend la page active si elle contient des données de cet utilisateur */
+    var activePage = document.querySelector('.app-page.active');
+    var pageId = activePage ? activePage.id : '';
+
+    if (pageId === 'p-home') {
+      try { renderFeed(getAllPosts()); } catch(e) {}
+    } else if (pageId === 'p-messages') {
+      try { renderConversations(); } catch(e) {}
+      /* Si chat de groupe ouvert, re-render les messages */
+      if (_chatConvId) {
+        var openConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+        if (openConv && openConv.isGroup) {
+          try { _renderChatMessages(openConv); } catch(e) {}
+        }
+      }
+    } else if (pageId === 'p-notifs') {
+      try { renderNotifs(); } catch(e) {}
+    } else if (pageId === 'p-marketplace') {
+      try { renderMarketplaceUserServices(); } catch(e) {}
+    } else if (pageId === 'p-profil') {
+      /* Re-render les avatars des collaborateurs / membres visibles */
+      try { _collabRender(); } catch(e) {}
+    }
+
+    /* Si c'est notre propre profil qui a changé */
+    if (_currentUser && changedEmail === _currentUser.email) {
+      var p = loadUserProfile(changedEmail);
+      if (p && p.nom && p.nom !== _currentUser.nom) _currentUser.nom = p.nom;
+      _refreshCurrentUserAvatars(); /* inclut _refreshSidebar() */
+      try { renderProfilePage(); } catch(e2) {}
+    }
+  } catch(e) {}
+}
+
+/* Parcourt le DOM et met à jour tous les éléments visuels liés à cet email */
+function _refreshProfileInDOM(email) {
+  if (!email) return;
+  var profile = loadUserProfile(email);
+  if (!profile) return;
+  var photo = profile.photo || null;
+  var nom   = profile.nom   || email;
+  var safeEmail = email.replace(/"/g, '');
+
+  /* Avatars `.user-av[data-email]` (getAvatarHtml) */
+  document.querySelectorAll('.user-av[data-email="' + safeEmail + '"]').forEach(function(el) {
+    if (photo) {
+      el.className = (el.className || '').replace(/\bav-photo\b/g, '').trim() + ' av-photo';
+      el.innerHTML = '<img src="' + escHtml(photo) + '" alt=""/>';
+    } else {
+      el.className = (el.className || '').replace(/\bav-photo\b/g, '').trim();
+      el.innerHTML = '<span>' + escHtml(getInitials(nom)) + '</span>';
+    }
+  });
+
+  /* Avatars conv DM `.conv-av-img[data-email]` */
+  document.querySelectorAll('[data-email="' + safeEmail + '"]').forEach(function(el) {
+    if (el.tagName === 'IMG' && photo) el.src = photo;
+  });
+
+  /* Noms `.user-name[data-email]` */
+  document.querySelectorAll('.user-name[data-email="' + safeEmail + '"]').forEach(function(el) {
+    el.textContent = nom;
+  });
+
+  /* Photo dans l'en-tête du chat ouvert si c'est ce contact */
+  var chatAvWrap = document.getElementById('chat-contact-av');
+  if (chatAvWrap && _chatConvId) {
+    var openConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+    if (openConv && !openConv.isGroup && openConv.email === email) {
+      chatAvWrap.innerHTML = _convAvatar(openConv, 38);
+      var nameEl = document.getElementById('chat-contact-name');
+      if (nameEl) nameEl.innerHTML = escHtml(nom);
+    }
+  }
+}
+
+/* ══════════════════════════════════════════
+   NAVIGATION INTERNE (pages de l'app)
+══════════════════════════════════════════ */
+
+/* Change de page dans l'application + met à jour la bottom nav */
+/* ── Auto-refresh du feed ── */
+var _feedRefreshTimer  = null;
+var _feedLastPostCount = 0;
+var _feedCurrentPage   = 'p-home';
+
+function _feedStartAutoRefresh() {
+  _feedStopAutoRefresh();
+  _feedRefreshTimer = setInterval(function() {
+    if (_feedCurrentPage !== 'p-home') return;
+    var feedList = document.getElementById('feed-list');
+    if (!feedList) return;
+    var allPosts  = getAllPosts();
+    var newCount  = allPosts.length;
+    if (newCount > _feedLastPostCount) {
+      /* Nouveaux posts détectés → badge discret en haut du feed */
+      _feedShowNewBadge(newCount - _feedLastPostCount);
+    }
+  }, 30000); /* toutes les 30 secondes */
+}
+
+function _feedStopAutoRefresh() {
+  if (_feedRefreshTimer) { clearInterval(_feedRefreshTimer); _feedRefreshTimer = null; }
+}
+
+function _feedShowNewBadge(count) {
+  var existing = document.getElementById('feed-new-badge');
+  if (existing) existing.remove();
+  var badge = document.createElement('div');
+  badge.id = 'feed-new-badge';
+  badge.innerHTML = '<i class="fas fa-arrow-up" style="margin-right:5px"></i>' + count + ' nouveau' + (count > 1 ? 'x' : '') + ' post' + (count > 1 ? 's' : '');
+  badge.style.cssText = 'position:fixed;top:68px;left:50%;transform:translateX(-50%);' +
+    'background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;' +
+    'padding:8px 18px;border-radius:20px;font-size:13px;font-weight:700;' +
+    'cursor:pointer;z-index:500;box-shadow:0 4px 16px rgba(99,102,241,.35);' +
+    'animation:feedBadgePop .3s cubic-bezier(.22,1,.36,1);white-space:nowrap';
+  badge.onclick = function() {
+    _feedDoRefresh();
+    badge.remove();
+  };
+  document.body.appendChild(badge);
+  /* Auto-disparaît après 8s */
+  setTimeout(function(){ if (badge.parentNode) badge.remove(); }, 8000);
+}
+
+function _feedDoRefresh() {
+  /* Scroll to top */
+  var feedScroll = document.getElementById('feed-scroll');
+  if (feedScroll) feedScroll.scrollTo({ top: 0, behavior: 'smooth' });
+  /* Re-render */
+  var allPosts = getAllPosts();
+  _feedLastPostCount = allPosts.length;
+  renderFeed(allPosts);
+  /* Supprimer badge si présent */
+  var badge = document.getElementById('feed-new-badge');
+  if (badge) badge.remove();
+}
+
+function navTo(btn, pageId) {
+  var previousPage = _feedCurrentPage;
+  _feedCurrentPage = pageId;
+
+  /* Si on retape Accueil alors qu'on y est déjà → refresh immédiat */
+  if (pageId === 'p-home' && previousPage === 'p-home') {
+    _feedDoRefresh();
+    return;
+  }
+
+  /* Masque toutes les pages */
+  document.querySelectorAll('.app-page').forEach(function(p) {
+    p.classList.remove('active');
+  });
+  document.getElementById(pageId).classList.add('active');
+
+  /* Met à jour la bottom nav */
+  document.querySelectorAll('.bnav-item').forEach(function(b) {
+    b.classList.remove('active');
+  });
+  if (btn) btn.classList.add('active');
+
+  /* Refresh feed au retour sur Accueil */
+  if (pageId === 'p-home') {
+    _feedDoRefresh();
+  }
+
+  if (pageId === 'p-marketplace') { renderMarketplaceUserServices(); _updateMkNotifBadge(); _updateCartBadge(); try { _collabRender(); } catch(e){} try { _mkRenderTxTabs(); } catch(e){} }
+
+  /* Recalcule les temps relatifs à l'ouverture de la page notifications */
+  if (pageId === 'p-notifs') {
+    try { renderNotifs(); } catch(e) {}
+  }
+
+  /* Sync immédiat des messages non lus à l'ouverture de la page Messages */
+  if (pageId === 'p-messages') {
+    _globalMsgPoll();
+    renderConversations();
+  }
+}
+
+/* Affiche une page interne sans changer la bottom nav (ex: notifications) */
+function showPage(pageId) {
+  document.querySelectorAll('.app-page').forEach(function(p) {
+    p.classList.remove('active');
+  });
+  document.getElementById(pageId).classList.add('active');
+}
+
+/* Bouton + central → page publier */
+function navToPublish() {
+  showPage('p-publish');
+}
+
+/* ══════════════════════════════════════════
+   SIDEBAR DRAWER
+══════════════════════════════════════════ */
+function openSidebar() {
+  document.getElementById('app-sidebar').classList.add('open');
+  document.getElementById('sidebar-overlay').classList.add('open');
+  _refreshSidebar();
+}
+
+function closeSidebar() {
+  document.getElementById('app-sidebar').classList.remove('open');
+  document.getElementById('sidebar-overlay').classList.remove('open');
+}
+
+function toggleSidebar() {
+  var sb = document.getElementById('app-sidebar');
+  if (sb.classList.contains('open')) {
+    closeSidebar();
+  } else {
+    openSidebar();
+  }
+}
+
+function _refreshSidebar() {
+  if (!_currentUser) return;
+  var profile = loadUserProfile(_currentUser.email);
+  var nom = profile && profile.nom ? profile.nom : _currentUser.nom;
+  var role = profile && profile.domain ? profile.domain : '';
+
+  /* Nom */
+  var nameEl = document.getElementById('sidebar-name');
+  if (nameEl) nameEl.textContent = nom;
+
+  /* Badge dans la sidebar */
+  var sdbBadge = document.getElementById('sidebar-verified');
+  if (sdbBadge) {
+    var bHtml = getBadgeHtml(_currentUser.email);
+    if (bHtml) {
+      sdbBadge.innerHTML = bHtml;
+      sdbBadge.style.display = 'flex';
+    } else {
+      sdbBadge.style.display = 'none';
+    }
+  }
+
+  /* Rôle */
+  var roleEl = document.getElementById('sidebar-role');
+  if (roleEl) roleEl.textContent = role || 'Membre Geniwork';
+
+  /* Badge vérifié (si compte Google ou badge manuel) */
+  var badgeEl = document.getElementById('sidebar-verified');
+  if (badgeEl) {
+    badgeEl.style.display = (profile && profile.verified) ? 'flex' : 'none';
+  }
+
+  /* Avatar */
+  var avEl = document.getElementById('sidebar-av');
+  if (avEl) {
+    if (profile && profile.photo) {
+      avEl.innerHTML = '<img src="' + escHtml(profile.photo) + '" alt=""/>';
+    } else {
+      avEl.innerHTML = '<span>' + escHtml(getInitials(nom)) + '</span>';
+    }
+  }
+}
+
+function toggleDarkMode(enabled) {
+  if (enabled) {
+    document.body.classList.add('dark-mode');
+    localStorage.setItem('gw_dark_mode', '1');
+  } else {
+    document.body.classList.remove('dark-mode');
+    localStorage.setItem('gw_dark_mode', '0');
+  }
+}
+
+function openFavorisPage() {
+  /* Ouvre le feed filtré sur les favoris */
+  var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
+  navTo(homeBtn, 'p-home');
+  /* Filtre l'affichage sur les posts favoris */
+  var favs = getFavorites();
+  if (!favs.length) {
+    showToast('Aucun favori pour l\'instant', '');
+    return;
+  }
+  var favIds = favs.map(function(f) { return f.postId; });
+  var filtered = getAllPosts().filter(function(p) { return favIds.indexOf(p.id) !== -1; });
+  renderFeed(filtered);
+  showToast('Affichage de vos ' + filtered.length + ' favori(s)', 'ok');
+}
+
+/* ══════════════════════════════════════════
+   SYSTÈME DE BADGES
+══════════════════════════════════════════ */
+
+/* Clés localStorage */
+// profile.badgeType    : null | 'verified' | 'premium'
+// profile.badgeStatus  : null | 'pending' | 'approved' | 'rejected'
+// profile.identityVerified : bool
+// profile.phoneVerified    : bool
+// profile.missionsCompleted: number
+
+/* ── Calcul de la complétion du profil (max 7 points) ── */
+function getProfileCompletion(email) {
+  var p = loadUserProfile(email);
+  if (!p) return 0;
+  var score = 0;
+  if (p.nom)                                            score++;
+  if (p.photo)                                          score++;
+  if (p.bio && p.bio.trim().length > 10)                score++;
+  if (p.domain && p.domain.trim().length > 1)           score++;
+  if (p.location && p.location.trim().length > 1)       score++;
+  if (p.skills && p.skills.length >= 1)                 score++;
+  if (p.phone && p.phone.trim().length >= 8)            score++;
+  return score; /* max 7 */
+}
+
+/* ── Badge HTML à insérer en ligne à côté d'un nom ── */
+function getBadgeHtml(email) {
+  if (!email) return '';
+  var p = loadUserProfile(email);
+  if (!p) return '';
+  if (p.badgeType === 'premium') {
+    return '<span class="badge-inline badge-inline-gold" title="Badge Premium"><i class="fas fa-crown"></i></span>';
+  }
+  if (p.badgeType === 'verified') {
+    return '<span class="badge-inline badge-inline-blue" title="Profil vérifié"><i class="fas fa-circle-check"></i></span>';
+  }
+  return '';
+}
+
+/* ── Vérifie toutes les conditions pour le badge standard ── */
+function checkVerifiedConditions(email) {
+  var p = loadUserProfile(email) || {};
+  var user = getUsers().find(function(u) { return u.email === email; }) || {};
+  var reviews = loadReviews(email);
+
+  /* Note moyenne */
+  var avgRating = reviews.length
+    ? reviews.reduce(function(s, r) { return s + (r.rating || 0); }, 0) / reviews.length
+    : 0;
+
+  var missions = p.missionsCompleted || 0;
+
+  var conditions = [
+    {
+      key:   'identity',
+      label: 'Identité vérifiée (CNI / passeport)',
+      hint:  'Soumettez une pièce d\'identité valide',
+      met:   !!p.identityVerified
+    },
+    {
+      key:   'profile',
+      label: 'Profil complété à 100 %',
+      hint:  'Photo, bio, domaine, ville, compétences, téléphone',
+      met:   getProfileCompletion(email) >= 7
+    },
+    {
+      key:   'email',
+      label: 'Email vérifié',
+      hint:  'L\'email de votre compte doit être validé',
+      met:   !!(user.verified || user.loginMethod === 'google')
+    },
+    {
+      key:   'phone',
+      label: 'Téléphone vérifié',
+      hint:  'Ajoutez et vérifiez votre numéro de téléphone',
+      met:   !!(p.phone && p.phoneVerified)
+    },
+    {
+      key:   'missions',
+      label: 'Minimum 5 missions terminées',
+      hint:  missions + ' / 5 missions complétées',
+      met:   missions >= 5
+    },
+    {
+      key:   'rating',
+      label: 'Note moyenne ≥ 4,5 / 5',
+      hint:  reviews.length ? 'Note actuelle : ' + avgRating.toFixed(1) + ' / 5' : 'Aucun avis reçu',
+      met:   avgRating >= 4.5
+    },
+    {
+      key:   'reviews',
+      label: 'Au moins 3 avis clients',
+      hint:  reviews.length + ' avis reçu(s)',
+      met:   reviews.length >= 3
+    },
+    {
+      key:   'disputes',
+      label: 'Aucun litige grave ou fraude',
+      hint:  'Votre compte ne doit pas avoir de signalement',
+      met:   !p.hasDispute
+    }
+  ];
+
+  var metCount = conditions.filter(function(c) { return c.met; }).length;
+  return { conditions: conditions, metCount: metCount, total: conditions.length };
+}
+
+/* ── Ouvre la page badge ── */
+/* ══════════════════════════════════════════
+   SETTINGS SCREEN
+══════════════════════════════════════════ */
+function openAppSettings() {
+  if (!_currentUser) return;
+  var screen = document.getElementById('settings-screen');
+  if (!screen) return;
+  screen.classList.remove('hidden');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+  _refreshSettingsPrivacy();
+  _initSettingsEmailDisplay();
+}
+
+function closeAppSettings() {
+  var screen = document.getElementById('settings-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  screen.addEventListener('transitionend', function h() {
+    screen.removeEventListener('transitionend', h);
+    screen.classList.add('hidden');
+    openSidebar();
+  });
+}
+
+function _refreshSettingsPrivacy() {
+  if (!_currentUser) return;
+  var profile = loadUserProfile(_currentUser.email) || {};
+
+  var phoneSub = document.getElementById('s-phone-status');
+  if (phoneSub) {
+    phoneSub.textContent = profile.phone
+      ? (profile.phonePublic !== false ? 'Public' : 'Privé') + ' · ' + profile.phone
+      : 'Non renseigné';
+  }
+
+  var emailSub = document.getElementById('s-email-status');
+  if (emailSub) {
+    emailSub.textContent = profile.proEmail
+      ? (profile.proEmailPublic !== false ? 'Public' : 'Privé') + ' · ' + profile.proEmail
+      : 'Non renseigné';
+  }
+
+  var langEl = document.getElementById('s-lang-label');
+  if (langEl) langEl.textContent = _getLangLabel();
+}
+
+/* ══════════════════════════════════════════
+   MODIFIER LE MOT DE PASSE — ÉCRAN DÉDIÉ
+══════════════════════════════════════════ */
+function openChangePassword() {
+  if (!_currentUser) return;
+
+  var isGoogle = _currentUser.loginMethod === 'google';
+  if (isGoogle) {
+    showToast('Compte Google — le mot de passe est géré par Google', '');
+    return;
+  }
+
+  var screen = document.getElementById('change-pwd-screen');
+  if (!screen) return;
+
+  /* Remet les champs à zéro */
+  ['cpwd-current','cpwd-new','cpwd-confirm'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.value = '';
+  });
+  _cpwdReset();
+
+  screen.classList.remove('hidden');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+  setTimeout(function() {
+    var el = document.getElementById('cpwd-current'); if (el) el.focus();
+  }, 300);
+}
+
+function closeChangePwdScreen() {
+  var screen = document.getElementById('change-pwd-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  setTimeout(function() {
+    screen.classList.add('hidden');
+    openAppSettings();
+  }, 280);
+}
+
+/* ── Afficher / Masquer mot de passe ── */
+function _cpwdToggleEye(inputId, btn) {
+  var inp = document.getElementById(inputId);
+  if (!inp) return;
+  var show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  var ico  = btn.querySelector('i');
+  if (ico) ico.className = show ? 'fas fa-eye-slash' : 'far fa-eye';
+}
+
+/* ── Calcule la force du mot de passe ── */
+function _cpwdGetStrength(pwd) {
+  var score = 0;
+  if (pwd.length >= 8)               score++;
+  if (/[A-Z]/.test(pwd))             score++;
+  if (/[0-9]/.test(pwd))             score++;
+  if (/[^A-Za-z0-9]/.test(pwd))      score++;
+  if (pwd.length >= 12)              score++;
+  return score; /* 0-5 */
+}
+
+/* ── Met à jour la barre de force + règles ── */
+function _cpwdCheckStrength() {
+  var pwd  = (document.getElementById('cpwd-new') || {}).value || '';
+  var fill = document.getElementById('cpwd-strength-fill');
+  var lbl  = document.getElementById('cpwd-strength-label');
+  var score = _cpwdGetStrength(pwd);
+
+  var levels = [
+    { pct: 0,   color: '#E5E7EB', text: '' },
+    { pct: 20,  color: '#EF4444', text: 'Très faible' },
+    { pct: 40,  color: '#F97316', text: 'Faible' },
+    { pct: 60,  color: '#EAB308', text: 'Moyen' },
+    { pct: 80,  color: '#22C55E', text: 'Fort' },
+    { pct: 100, color: '#16A34A', text: 'Très fort 🔒' }
+  ];
+  var lv = levels[Math.min(score, 5)];
+  if (fill) { fill.style.width = lv.pct + '%'; fill.style.background = lv.color; }
+  if (lbl)  { lbl.textContent = lv.text; lbl.style.color = lv.color; }
+
+  /* Règles */
+  _cpwdUpdateRule('rule-len',     pwd.length >= 8);
+  _cpwdUpdateRule('rule-upper',   /[A-Z]/.test(pwd));
+  _cpwdUpdateRule('rule-num',     /[0-9]/.test(pwd));
+  _cpwdUpdateRule('rule-special', /[^A-Za-z0-9]/.test(pwd));
+
+  /* Vérifie aussi la correspondance si confirm déjà rempli */
+  _cpwdCheckMatch();
+}
+
+function _cpwdUpdateRule(id, ok) {
+  var li = document.getElementById(id);
+  if (!li) return;
+  li.className = 'cpwd-rule' + (ok ? ' ok' : '');
+  var ico = li.querySelector('i');
+  if (ico) ico.className = ok ? 'fas fa-circle-check' : 'fas fa-circle-xmark';
+}
+
+/* ── Vérifie la correspondance ── */
+function _cpwdCheckMatch() {
+  var pwd  = (document.getElementById('cpwd-new')     || {}).value || '';
+  var conf = (document.getElementById('cpwd-confirm') || {}).value || '';
+  var lbl  = document.getElementById('cpwd-match-label');
+  if (!lbl || !conf) { if (lbl) lbl.classList.add('hidden'); return; }
+  lbl.classList.remove('hidden');
+  if (pwd === conf) {
+    lbl.textContent = '✓ Les mots de passe correspondent';
+    lbl.className   = 'cpwd-match-label cpwd-match-ok';
+  } else {
+    lbl.textContent = '✗ Les mots de passe ne correspondent pas';
+    lbl.className   = 'cpwd-match-label cpwd-match-err';
+  }
+}
+
+function _cpwdClearErr() {
+  var el = document.getElementById('cpwd-error-main');
+  if (el) { el.classList.add('hidden'); el.textContent = ''; }
+}
+
+function _cpwdReset() {
+  _cpwdClearErr();
+  var fill = document.getElementById('cpwd-strength-fill');
+  var lbl  = document.getElementById('cpwd-strength-label');
+  var matchLbl = document.getElementById('cpwd-match-label');
+  if (fill) { fill.style.width = '0%'; }
+  if (lbl)  { lbl.textContent = ''; }
+  if (matchLbl) { matchLbl.classList.add('hidden'); matchLbl.textContent = ''; }
+  ['rule-len','rule-upper','rule-num','rule-special'].forEach(function(id) { _cpwdUpdateRule(id, false); });
+  /* Remet tous les champs en type password */
+  ['cpwd-current','cpwd-new','cpwd-confirm'].forEach(function(id) {
+    var inp = document.getElementById(id); if (inp) inp.type = 'password';
+  });
+  document.querySelectorAll('.cpwd-eye i').forEach(function(ico) { ico.className = 'far fa-eye'; });
+}
+
+/* ── Validation et sauvegarde ── */
+function _doChangePassword() {
+  var current = (document.getElementById('cpwd-current') || {}).value || '';
+  var next    = (document.getElementById('cpwd-new')     || {}).value || '';
+  var confirm = (document.getElementById('cpwd-confirm') || {}).value || '';
+  var errEl   = document.getElementById('cpwd-error-main');
+
+  function showErr(msg) {
+    if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); }
+  }
+
+  if (!current)            { showErr('Veuillez saisir votre mot de passe actuel.'); return; }
+  if (next.length < 8)     { showErr('Le nouveau mot de passe doit contenir au moins 8 caractères.'); return; }
+  if (next !== confirm)    { showErr('Les mots de passe ne correspondent pas.'); return; }
+
+  var users = getUsers();
+  var idx   = users.findIndex(function(u) { return u.email === _currentUser.email; });
+  if (idx === -1) return;
+
+  var saveBtn = document.getElementById('cpwd-save-btn');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Vérification…'; }
+
+  _gwVerifyPwd(current, users[idx].password).then(function(ok) {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Enregistrer'; }
+    if (!ok) {
+      showErr('Mot de passe actuel incorrect.');
+      var inp = document.getElementById('cpwd-current');
+      if (inp) { inp.focus(); inp.select(); }
+      return;
+    }
+
+    /* Hache le nouveau mot de passe */
+    var salt = _gwSalt();
+    _gwHashPwd(next, salt).then(function(hashed) {
+      users[idx].password = hashed;
+      saveUsers(users);
+      closeChangePwdScreen();
+      showToast('Mot de passe mis à jour ✓', 'ok');
+    }).catch(function() {
+      showErr('Erreur de chiffrement. Réessayez.');
+    });
+  });
+}
+
+/* ══════════════════════════════════════════
+   CHANGER L'ADRESSE EMAIL PRINCIPALE
+══════════════════════════════════════════ */
+function openChangeMainEmail() {
+  if (!_currentUser) return;
+  var isGoogle = _currentUser.loginMethod === 'google';
+
+  _closeGenericSheet('change-email');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'change-email-bg';
+  bg.onclick = function(e) { if (e.target === bg) _closeGenericSheet('change-email'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card change-pwd-card'; card.id = 'change-email-card';
+
+  if (isGoogle) {
+    card.innerHTML =
+      '<div class="cam-sheet-handle"></div>' +
+      '<p class="change-pwd-title"><i class="fab fa-google" style="color:#EA4335;margin-right:8px"></i>Compte Google</p>' +
+      '<p style="font-size:13px;color:#6B7280;margin:0;line-height:1.6">Votre adresse email est gérée par Google.<br>Pour la modifier, rendez-vous dans les paramètres de votre compte Google.</p>' +
+      '<div class="change-pwd-btns">' +
+        '<button class="change-pwd-cancel" onclick="_closeGenericSheet(\'change-email\')">Fermer</button>' +
+      '</div>';
+  } else {
+    var curEmail = _currentUser.email || '';
+    card.innerHTML =
+      '<div class="cam-sheet-handle"></div>' +
+      '<p class="change-pwd-title"><i class="fas fa-at" style="color:#16A34A;margin-right:8px"></i>Changer l\'email principal</p>' +
+      '<p style="font-size:12px;color:#6B7280;margin:0 0 14px;line-height:1.5">Email actuel : <strong>' + escHtml(curEmail) + '</strong></p>' +
+      '<div class="change-pwd-field">' +
+        '<label>Nouvelle adresse email</label>' +
+        '<input class="change-pwd-input" id="cemail-new" type="email" placeholder="nouveau@exemple.com" autocomplete="off"/>' +
+      '</div>' +
+      '<div class="change-pwd-field">' +
+        '<label>Confirmer l\'email</label>' +
+        '<input class="change-pwd-input" id="cemail-confirm" type="email" placeholder="nouveau@exemple.com" autocomplete="off"/>' +
+      '</div>' +
+      '<div class="change-pwd-field">' +
+        '<label>Mot de passe actuel (confirmation)</label>' +
+        '<input class="change-pwd-input" id="cemail-pwd" type="password" placeholder="••••••••"/>' +
+      '</div>' +
+      '<p class="change-pwd-error" id="cemail-error"></p>' +
+      '<div class="change-pwd-btns">' +
+        '<button class="change-pwd-cancel" onclick="_closeGenericSheet(\'change-email\')">Annuler</button>' +
+        '<button class="change-pwd-save" onclick="_doChangeMainEmail()">Changer</button>' +
+      '</div>';
+  }
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+  setTimeout(function() {
+    var inp = document.getElementById('cemail-new');
+    if (inp) inp.focus();
+  }, 150);
+}
+
+function _doChangeMainEmail() {
+  var newEmail  = ((document.getElementById('cemail-new')     || {}).value || '').trim().toLowerCase();
+  var confEmail = ((document.getElementById('cemail-confirm') || {}).value || '').trim().toLowerCase();
+  var pwd       = ((document.getElementById('cemail-pwd')     || {}).value || '');
+  var errEl     = document.getElementById('cemail-error');
+
+  function showErr(msg) {
+    if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; }
+  }
+
+  /* Validations */
+  if (!newEmail || !newEmail.includes('@')) { showErr('Veuillez saisir une adresse email valide.'); return; }
+  if (newEmail !== confEmail)               { showErr('Les adresses email ne correspondent pas.'); return; }
+  if (newEmail === _currentUser.email)      { showErr('C\'est déjà votre adresse email actuelle.'); return; }
+
+  var users = getUsers();
+  var idx   = users.findIndex(function(u) { return u.email === _currentUser.email; });
+  if (idx === -1) return;
+
+  /* Vérifie le mot de passe (async PBKDF2) */
+  _gwVerifyPwd(pwd, users[idx].password).then(function(ok) {
+    if (!ok) { showErr('Mot de passe incorrect.'); return; }
+
+    /* Vérifie que le nouvel email n'est pas déjà utilisé */
+    var alreadyExists = users.some(function(u) { return u.email === newEmail; });
+    if (alreadyExists) { showErr('Cette adresse email est déjà utilisée.'); return; }
+
+    /* ── Migration des données liées à l'ancien email ── */
+    var oldEmail = _currentUser.email;
+
+    /* Profil */
+    var profileData = localStorage.getItem('gw_profile_' + oldEmail);
+    if (profileData) { localStorage.setItem('gw_profile_' + newEmail, profileData); localStorage.removeItem('gw_profile_' + oldEmail); }
+
+    /* Services */
+    var svcData = localStorage.getItem('gw_services_' + oldEmail);
+    if (svcData) { localStorage.setItem('gw_services_' + newEmail, svcData); localStorage.removeItem('gw_services_' + oldEmail); }
+
+    /* Projets, favoris, etc. */
+    ['gw_projects_', 'gw_favorites_', 'gw_saved_svcs_', 'gw_mk_notifs_', 'gw_cart_'].forEach(function(prefix) {
+      var d = localStorage.getItem(prefix + oldEmail);
+      if (d) { localStorage.setItem(prefix + newEmail, d); localStorage.removeItem(prefix + oldEmail); }
+    });
+
+    /* Met à jour l'utilisateur dans gw_users */
+    users[idx].email = newEmail;
+    saveUsers(users);
+
+    /* Met à jour la session courante et régénère le token */
+    _currentUser.email = newEmail;
+    _gwCreateSession(_currentUser);
+
+    _closeGenericSheet('change-email');
+    /* Rafraîchit l'affichage email dans les paramètres */
+    var sDisplay = document.getElementById('s-main-email-display');
+    if (sDisplay) sDisplay.textContent = newEmail;
+
+    showToast('Email mis à jour ✓ — ' + newEmail, 'ok');
+  });
+}
+
+/* ══════════════════════════════════════════
+   ÉCRANS LÉGAUX (CGU / CONFIDENTIALITÉ)
+   Slide-in depuis les paramètres
+══════════════════════════════════════════ */
+function openLegalScreen(type) {
+  /* type = 'cgu' | 'privacy' */
+  var id = type === 'privacy' ? 'legal-privacy-screen' : 'legal-cgu-screen';
+  var screen = document.getElementById(id);
+  if (!screen) return;
+  /* Scrolle en haut */
+  var scroll = screen.querySelector('.legal-scroll');
+  if (scroll) scroll.scrollTop = 0;
+  screen.classList.remove('hidden');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+}
+
+function closeLegalScreen(type) {
+  var id = type === 'privacy' ? 'legal-privacy-screen' : 'legal-cgu-screen';
+  var screen = document.getElementById(id);
+  if (!screen) return;
+  screen.classList.remove('open');
+  setTimeout(function() { screen.classList.add('hidden'); }, 280);
+  /* Rouvre les paramètres */
+  setTimeout(function() { openAppSettings(); }, 290);
+}
+
+/* ── Initialise l'email dans les paramètres ── */
+function _initSettingsEmailDisplay() {
+  var el = document.getElementById('s-main-email-display');
+  if (el && _currentUser) el.textContent = _currentUser.email || '—';
+}
+
+/* ── Sélection du motif (désactivation / suppression) ── */
+function _selectMotif(type, value, btn) {
+  var grid = btn.closest('.acct-motif-grid');
+  if (!grid) return;
+  var pills = grid.querySelectorAll('.acct-motif-pill');
+  var already = btn.classList.contains('selected');
+  pills.forEach(function(p) { p.classList.remove('selected'); });
+  if (!already) {
+    btn.classList.add('selected');
+    if (type === 'delete')     _deleteMotif     = value;
+    if (type === 'deactivate') _deactivateMotif = value;
+  } else {
+    if (type === 'delete')     _deleteMotif     = '';
+    if (type === 'deactivate') _deactivateMotif = '';
+  }
+}
+
+/* ── Supprimer le compte ── */
+var _deleteMotif = '';
+function confirmDeleteAccount() {
+  _deleteMotif = '';
+  _closeGenericSheet('delete-acct');
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg change-pwd-modal'; bg.id = 'delete-acct-bg';
+  bg.onclick = function(e) { if (e.target === bg) _closeGenericSheet('delete-acct'); };
+
+  var card = document.createElement('div');
+  card.className = 'delete-acct-card'; card.id = 'delete-acct-card';
+
+  var motifs = [
+    { id:'unused',    ico:'fa-ghost',          label:"Je n'utilise plus l'appli" },
+    { id:'newacct',   ico:'fa-rotate',         label:'Je crée un nouveau compte' },
+    { id:'privacy',   ico:'fa-shield-halved',  label:'Confidentialité / sécurité' },
+    { id:'badexp',    ico:'fa-face-frown',      label:'Mauvaise expérience' },
+    { id:'novalue',   ico:'fa-chart-line',     label:"L'appli ne me convient pas" },
+    { id:'other',     ico:'fa-comment-dots',   label:'Autre raison' }
+  ];
+
+  var pillsHtml = motifs.map(function(m) {
+    return '<button class="acct-motif-pill" data-motif="' + m.id + '" ' +
+           'onclick="_selectMotif(\'delete\',\'' + m.id + '\',this)">' +
+           '<i class="fas ' + m.ico + '"></i> ' + m.label + '</button>';
+  }).join('');
+
+  card.innerHTML =
+    /* ── En-tête ── */
+    '<div class="acct-modal-header acct-modal-header-danger">' +
+      '<div class="acct-modal-ico-wrap"><i class="fas fa-trash-can"></i></div>' +
+      '<div>' +
+        '<p class="acct-modal-title">Supprimer le compte</p>' +
+        '<p class="acct-modal-sub">Action définitive et irréversible</p>' +
+      '</div>' +
+    '</div>' +
+    /* ── Motif (optionnel) ── */
+    '<div class="acct-motif-section">' +
+      '<p class="acct-motif-label"><i class="fas fa-circle-question"></i> Pourquoi supprimez-vous votre compte ? <span class="acct-motif-opt">(optionnel)</span></p>' +
+      '<div class="acct-motif-grid">' + pillsHtml + '</div>' +
+    '</div>' +
+    /* ── Avertissement ── */
+    '<div class="acct-warn-box acct-warn-box-danger">' +
+      '<i class="fas fa-triangle-exclamation"></i>' +
+      '<div>' +
+        '<strong>Cette action est irréversible.</strong>' +
+        '<p>Profil, publications, messages et abonnements seront définitivement supprimés.</p>' +
+      '</div>' +
+    '</div>' +
+    /* ── Confirmation email ── */
+    '<div class="acct-confirm-section">' +
+      '<p class="acct-confirm-label">Pour confirmer, saisissez votre adresse email :</p>' +
+      '<input class="delete-acct-input" id="dacct-email" type="email" placeholder="' + escHtml(_currentUser.email) + '" autocomplete="off"/>' +
+      '<p class="change-pwd-error" id="dacct-error" style="display:none"></p>' +
+    '</div>' +
+    /* ── Boutons ── */
+    '<div class="delete-acct-btns">' +
+      '<button class="delete-acct-cancel" onclick="_closeGenericSheet(\'delete-acct\')">Annuler</button>' +
+      '<button class="delete-acct-confirm" onclick="_doDeleteAccount()"><i class="fas fa-trash-can" style="margin-right:6px"></i>Supprimer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _doDeleteAccount() {
+  var input = (document.getElementById('dacct-email') || {}).value || '';
+  var errEl = document.getElementById('dacct-error');
+
+  if (input.trim().toLowerCase() !== _currentUser.email.toLowerCase()) {
+    if (errEl) { errEl.textContent = 'Email incorrect. Veuillez réessayer.'; errEl.style.display = 'block'; }
+    return;
+  }
+  /* Enregistrer le motif si sélectionné */
+  if (_deleteMotif) {
+    try { localStorage.setItem('gw_delete_motif_' + _currentUser.email, _deleteMotif); } catch(e){}
+  }
+
+  /* Suppression de toutes les données */
+  var email = _currentUser.email;
+  var keys  = [];
+  for (var i = 0; i < localStorage.length; i++) {
+    var k = localStorage.key(i);
+    if (k && k.indexOf(email) !== -1) keys.push(k);
+  }
+  keys.forEach(function(k) { localStorage.removeItem(k); });
+
+  /* Retire de gw_users */
+  var users = getUsers().filter(function(u) { return u.email !== email; });
+  saveUsers(users);
+
+  /* Déconnexion */
+  _currentUser = null;
+  localStorage.removeItem('gw_session');
+
+  _closeGenericSheet('delete-acct');
+  showToast('Compte supprimé.', '');
+  setTimeout(function() { goTo('screen-login'); }, 1000);
+}
+
+/* ══════════════════════════════════════════
+   INTERNATIONALISATION (FR / EN)
+══════════════════════════════════════════ */
+var _LANGUAGES = [
+  { code: 'fr', label: 'Français', flag: '🇫🇷' },
+  { code: 'en', label: 'English',  flag: '🇬🇧' }
+];
+
+var _STRINGS = {
+  fr: {
+    /* Navigation */
+    'nav.home':        'Accueil',
+    'nav.messages':    'Messages',
+    'nav.profile':     'Profil',
+    /* Tabs feed */
+    'tab.home':        'Accueil',
+    'tab.following':   'Abonnements',
+    'tab.discover':    'Découvrir',
+    /* Compositeur */
+    'composer.ph':     'Quoi de neuf ?',
+    /* Sidebar */
+    'sdb.favorites':   'Favoris',
+    'sdb.settings':    'Paramètres',
+    'sdb.support':     'Support',
+    'sdb.logout':      'Déconnexion',
+    'sdb.darkmode':    'Mode sombre',
+    /* Stats profil */
+    'stat.projects':   'Projets',
+    'stat.rating':     'Note moy.',
+    'stat.followers':  'Abonnés',
+    'stat.following':  'Abonnements',
+    /* Onglets profil */
+    'ptab.about':      'À propos',
+    'ptab.services':   'Services',
+    'ptab.projects':   'Projets',
+    'ptab.reviews':    'Avis',
+    'ptab.posts':      'Publications',
+    /* Actions post */
+    'post.share':       'Partager',
+    'post.translate':   'Traduire',
+    'post.see_orig':    "Voir l'original",
+    'post.translating': 'Traduction…',
+    /* UPV */
+    'upv.follow':      'Suivre',
+    'upv.following':   'Abonné(e)',
+    'upv.message':     'Message',
+    'upv.about':       'À propos',
+    'upv.reviews':     'Avis',
+    'upv.posts':       'Publications',
+    /* Paramètres */
+    'set.title':            'Paramètres',
+    'set.s1':               'Gérer votre compte',
+    'set.edit_profile':     'Modifier le profil',
+    'set.edit_profile_sub': 'Nom, photo, bio, compétences…',
+    'set.password':         'Mot de passe',
+    'set.password_sub':     'Modifier votre mot de passe',
+    'set.s2':               'Centre de confidentialité',
+    'set.phone':            'Téléphone',
+    'set.pro_email':        'Email professionnel',
+    'set.s3':               'Langue',
+    'set.lang_row':         "Langue de l'application",
+    'set.s4':               'Historique',
+    'set.history':          "Historique d'activité",
+    'set.history_sub':      'Profils visités, publications vues',
+    'set.s5':               'Zone de danger',
+    'set.deactivate':       'Désactiver le compte',
+    'set.deactivate_sub':   'Suspendre temporairement votre compte',
+    'set.delete':           'Supprimer le compte',
+    'set.delete_sub':       'Action définitive et irréversible'
+  },
+  en: {
+    /* Navigation */
+    'nav.home':        'Home',
+    'nav.messages':    'Messages',
+    'nav.profile':     'Profile',
+    /* Tabs feed */
+    'tab.home':        'Home',
+    'tab.following':   'Following',
+    'tab.discover':    'Discover',
+    /* Compositeur */
+    'composer.ph':     "What's new?",
+    /* Sidebar */
+    'sdb.favorites':   'Favorites',
+    'sdb.settings':    'Settings',
+    'sdb.support':     'Support',
+    'sdb.logout':      'Log out',
+    'sdb.darkmode':    'Dark mode',
+    /* Stats profil */
+    'stat.projects':   'Projects',
+    'stat.rating':     'Avg. rating',
+    'stat.followers':  'Followers',
+    'stat.following':  'Following',
+    /* Onglets profil */
+    'ptab.about':      'About',
+    'ptab.services':   'Services',
+    'ptab.projects':   'Projects',
+    'ptab.reviews':    'Reviews',
+    'ptab.posts':      'Posts',
+    /* Actions post */
+    'post.share':       'Share',
+    'post.translate':   'Translate',
+    'post.see_orig':    'See original',
+    'post.translating': 'Translating…',
+    /* UPV */
+    'upv.follow':      'Follow',
+    'upv.following':   'Following',
+    'upv.message':     'Message',
+    'upv.about':       'About',
+    'upv.reviews':     'Reviews',
+    'upv.posts':       'Posts',
+    /* Paramètres */
+    'set.title':            'Settings',
+    'set.s1':               'Manage your account',
+    'set.edit_profile':     'Edit profile',
+    'set.edit_profile_sub': 'Name, photo, bio, skills…',
+    'set.password':         'Password',
+    'set.password_sub':     'Change your password',
+    'set.s2':               'Privacy center',
+    'set.phone':            'Phone',
+    'set.pro_email':        'Professional email',
+    'set.s3':               'Language',
+    'set.lang_row':         'App language',
+    'set.s4':               'History',
+    'set.history':          'Activity history',
+    'set.history_sub':      'Visited profiles, viewed posts',
+    'set.s5':               'Danger zone',
+    'set.deactivate':       'Deactivate account',
+    'set.deactivate_sub':   'Temporarily suspend your account',
+    'set.delete':           'Delete account',
+    'set.delete_sub':       'This action is permanent and irreversible'
+  }
+};
+
+function _getCurrentLang() {
+  return localStorage.getItem('gw_lang') || 'fr';
+}
+
+function t(key) {
+  var lang = _getCurrentLang();
+  var dict = _STRINGS[lang] || _STRINGS.fr;
+  return dict[key] !== undefined ? dict[key] : key;
+}
+
+function applyLang() {
+  document.querySelectorAll('[data-i18n]').forEach(function(el) {
+    var key = el.getAttribute('data-i18n');
+    var val = t(key);
+    if (val !== key) el.textContent = val;
+  });
+  /* Label langue dans les paramètres */
+  var sl = document.getElementById('s-lang-label');
+  if (sl) sl.textContent = _getLangLabel();
+}
+
+function _getLangLabel() {
+  var code = _getCurrentLang();
+  var l = _LANGUAGES.find(function(x) { return x.code === code; });
+  return l ? l.flag + ' ' + l.label : 'Français';
+}
+
+function openLanguagePicker() {
+  _closeGenericSheet('lang-picker');
+  var current = _getCurrentLang();
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'lang-picker-bg';
+  bg.onclick = function() { _closeGenericSheet('lang-picker'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card'; card.id = 'lang-picker-card';
+
+  var items = _LANGUAGES.map(function(l) {
+    var isCurrent = l.code === current;
+    return '<button class="settings-lang-row' + (isCurrent ? ' lang-active' : '') + '" ' +
+           'onclick="_selectLang(\'' + l.code + '\')">' +
+      '<span class="settings-lang-flag">' + l.flag + '</span>' +
+      '<span class="settings-lang-name">' + l.label + '</span>' +
+      (isCurrent ? '<i class="fas fa-check settings-lang-check"></i>' : '') +
+    '</button>';
+  }).join('');
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="cam-sheet-title">Choisir la langue</p>' +
+    '<div style="padding:0 16px 8px">' + items + '</div>' +
+    '<div style="padding:8px 16px 24px">' +
+      '<button class="btn-outline full" onclick="_closeGenericSheet(\'lang-picker\')">Annuler</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _selectLang(code) {
+  localStorage.setItem('gw_lang', code);
+  _closeGenericSheet('lang-picker');
+  applyLang();
+  /* Re-render les zones dynamiques qui utilisent t() */
+  if (document.getElementById('feed-list')) renderFeed(getAllPosts());
+  renderProfilePage();
+  var l = _LANGUAGES.find(function(x) { return x.code === code; });
+  showToast((l ? l.flag + ' ' + l.label : code), 'ok');
+}
+
+/* ── Historique ── */
+function openHistorique() {
+  _closeGenericSheet('historique');
+
+  var history = [];
+  try {
+    history = JSON.parse(localStorage.getItem('gw_history_' + _currentUser.email) || '[]');
+  } catch(e) {}
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'historique-bg';
+  bg.onclick = function() { _closeGenericSheet('historique'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card following-list-card'; card.id = 'historique-card';
+
+  var listHtml = '';
+  if (!history.length) {
+    listHtml =
+      '<div class="following-empty">' +
+        '<i class="fas fa-clock-rotate-left"></i>' +
+        '<p>Aucun historique</p>' +
+        '<small>Les profils et publications que vous consultez apparaîtront ici</small>' +
+      '</div>';
+  } else {
+    listHtml = '<div class="following-list-scroll">';
+    history.slice(0, 40).forEach(function(item) {
+      var date = new Date(item.ts);
+      var dateStr = date.toLocaleDateString('fr-FR', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+      if (item.type === 'profile') {
+        listHtml +=
+          '<div class="following-item">' +
+            '<div class="following-item-left" ' +
+                 'onclick="_closeGenericSheet(\'historique\');openUserProfileView({nom:\'' +
+                   item.nom.replace(/'/g,"\\'") + '\',email:\'' + (item.email||'') + '\'})">' +
+              getAvatarHtml(item.email || null, item.nom, 'sm') +
+              '<div class="following-item-info">' +
+                '<strong>' + escHtml(item.nom) + '</strong>' +
+                '<small><i class="fas fa-user" style="margin-right:4px;color:#9CA3AF"></i>' + dateStr + '</small>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+      }
+    });
+    listHtml += '</div>';
+    listHtml +=
+      '<div style="padding:8px 16px 4px;text-align:center">' +
+        '<button class="btn-outline full" style="color:#DC2626;border-color:#FECACA" ' +
+                'onclick="_clearHistorique()">Effacer l\'historique</button>' +
+      '</div>';
+  }
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="cam-sheet-title">Historique d\'activité</p>' +
+    listHtml +
+    '<div style="padding:10px 16px 24px">' +
+      '<button class="btn-outline full" onclick="_closeGenericSheet(\'historique\')">Fermer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _clearHistorique() {
+  if (!_currentUser) return;
+  localStorage.removeItem('gw_history_' + _currentUser.email);
+  _closeGenericSheet('historique');
+  showToast('Historique effacé', 'ok');
+}
+
+/* Enregistre une visite de profil dans l'historique */
+function _pushHistory(type, data) {
+  if (!_currentUser) return;
+  var key = 'gw_history_' + _currentUser.email;
+  var list = [];
+  try { list = JSON.parse(localStorage.getItem(key) || '[]'); } catch(e) {}
+  list.unshift(Object.assign({ type: type, ts: Date.now() }, data));
+  if (list.length > 50) list = list.slice(0, 50);
+  localStorage.setItem(key, JSON.stringify(list));
+}
+
+/* ── Désactiver le compte temporairement ── */
+var _deactivateMotif = '';
+function confirmDeactivateAccount() {
+  _deactivateMotif = '';
+  _closeGenericSheet('deactivate-acct');
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg change-pwd-modal'; bg.id = 'deactivate-acct-bg';
+  bg.onclick = function(e) { if (e.target === bg) _closeGenericSheet('deactivate-acct'); };
+
+  var card = document.createElement('div');
+  card.className = 'delete-acct-card'; card.id = 'deactivate-acct-card';
+
+  var motifs = [
+    { id:'pause',     ico:'fa-mug-hot',         label:'Je veux faire une pause' },
+    { id:'notifs',    ico:'fa-bell-slash',       label:'Trop de notifications' },
+    { id:'travel',    ico:'fa-plane-departure',  label:'Voyage / indisponibilité' },
+    { id:'work',      ico:'fa-briefcase',        label:'Raisons professionnelles' },
+    { id:'privacy',   ico:'fa-user-lock',        label:'Confidentialité' },
+    { id:'other',     ico:'fa-comment-dots',     label:'Autre raison' }
+  ];
+
+  var pillsHtml = motifs.map(function(m) {
+    return '<button class="acct-motif-pill" data-motif="' + m.id + '" ' +
+           'onclick="_selectMotif(\'deactivate\',\'' + m.id + '\',this)">' +
+           '<i class="fas ' + m.ico + '"></i> ' + m.label + '</button>';
+  }).join('');
+
+  card.innerHTML =
+    /* ── En-tête ── */
+    '<div class="acct-modal-header acct-modal-header-warn">' +
+      '<div class="acct-modal-ico-wrap acct-modal-ico-warn"><i class="fas fa-user-slash"></i></div>' +
+      '<div>' +
+        '<p class="acct-modal-title acct-modal-title-warn">Désactiver le compte</p>' +
+        '<p class="acct-modal-sub">Suspension temporaire</p>' +
+      '</div>' +
+    '</div>' +
+    /* ── Motif (optionnel) ── */
+    '<div class="acct-motif-section">' +
+      '<p class="acct-motif-label"><i class="fas fa-circle-question"></i> Pourquoi désactivez-vous votre compte ? <span class="acct-motif-opt">(optionnel)</span></p>' +
+      '<div class="acct-motif-grid">' + pillsHtml + '</div>' +
+    '</div>' +
+    /* ── Ce qui se passe ── */
+    '<div class="acct-effects-box">' +
+      '<p class="acct-effects-title">Ce qui se passera :</p>' +
+      '<ul class="acct-effects-list">' +
+        '<li><i class="fas fa-eye-slash"></i> Votre profil ne sera plus visible</li>' +
+        '<li><i class="fas fa-image-slash"></i> Vos publications seront masquées</li>' +
+        '<li><i class="fas fa-heart"></i> Vos abonnements sont conservés</li>' +
+        '<li><i class="fas fa-rotate-left"></i> Réactivation en vous reconnectant</li>' +
+      '</ul>' +
+    '</div>' +
+    /* ── Boutons ── */
+    '<div class="delete-acct-btns">' +
+      '<button class="delete-acct-cancel" onclick="_closeGenericSheet(\'deactivate-acct\')">Annuler</button>' +
+      '<button class="delete-acct-confirm" style="background:#EA580C" onclick="_doDeactivateAccount()"><i class="fas fa-user-slash" style="margin-right:6px"></i>Désactiver</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _doDeactivateAccount() {
+  if (!_currentUser) return;
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  profile.deactivated = true;
+  if (_deactivateMotif) profile.deactivateMotif = _deactivateMotif;
+  saveUserProfile(_currentUser.email, profile);
+
+  _currentUser = null;
+  localStorage.removeItem('gw_session');
+
+  _closeGenericSheet('deactivate-acct');
+  showToast('Compte désactivé. À bientôt !', '');
+  setTimeout(function() { goTo('screen-login'); }, 1200);
+}
+
+/* ══════════════════════════════════════════
+   VISIBILITÉ & CONFIDENTIALITÉ DU COMPTE
+══════════════════════════════════════════ */
+
+/* Valeurs par défaut */
+var _PRIV_DEFAULTS = {
+  isPrivate:         false,
+  requireApproval:   false,
+  profileVisible:    true,
+  showInSearch:      true,
+  postsVisible:      true,
+  showInMarketplace: true,
+  messagesFrom:      'all',
+  commentsFrom:      'all',
+  showOnline:        true,
+  readReceipts:      true,
+  showStats:         true
+};
+
+function _privLoad() {
+  if (!_currentUser) return Object.assign({}, _PRIV_DEFAULTS);
+  try {
+    var saved = JSON.parse(localStorage.getItem('gw_privacy_' + _currentUser.email) || 'null');
+    return Object.assign({}, _PRIV_DEFAULTS, saved || {});
+  } catch(e) { return Object.assign({}, _PRIV_DEFAULTS); }
+}
+
+function _privSave(data) {
+  if (!_currentUser) return;
+  try { localStorage.setItem('gw_privacy_' + _currentUser.email, JSON.stringify(data)); } catch(e) {}
+}
+
+function openPrivacySettings() {
+  var screen = document.getElementById('privacy-settings-screen');
+  if (!screen) return;
+  var data = _privLoad();
+  /* Applique les valeurs sur les toggles */
+  var boolKeys = ['isPrivate','requireApproval','profileVisible','showInSearch',
+                  'postsVisible','showInMarketplace','showOnline','readReceipts','showStats'];
+  boolKeys.forEach(function(k) {
+    var el = document.getElementById('priv-' + k);
+    if (el) el.checked = !!data[k];
+  });
+  /* Selects */
+  ['messagesFrom','commentsFrom'].forEach(function(k) {
+    var el = document.getElementById('priv-' + k);
+    if (el) el.value = data[k] || 'all';
+  });
+  /* Mise à jour visuelle du compte privé */
+  _privRefreshPrivateUI(data.isPrivate);
+
+  screen.classList.remove('hidden');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+}
+
+function closePrivacySettings() {
+  var screen = document.getElementById('privacy-settings-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  setTimeout(function() {
+    screen.classList.add('hidden');
+    _privUpdateSummary();
+    openAppSettings();
+  }, 280);
+}
+
+/* Toggle booléen */
+function _privToggle(key, value) {
+  var data = _privLoad();
+  data[key] = value;
+  _privSave(data);
+  if (key === 'isPrivate') {
+    _privRefreshPrivateUI(value);
+    /* Cascade : si privé → on désactive automatiquement showInSearch */
+    if (value) {
+      data.showInSearch = false;
+      var el = document.getElementById('priv-showInSearch');
+      if (el) el.checked = false;
+      _privSave(data);
+    }
+  }
+  _privShowFeedback(key, value);
+}
+
+/* Valeur select */
+function _privSet(key, value) {
+  var data = _privLoad();
+  data[key] = value;
+  _privSave(data);
+}
+
+/* Feedback visuel inline */
+function _privShowFeedback(key, value) {
+  var labels = {
+    isPrivate:         value ? 'Compte privé activé 🔒' : 'Compte public activé 🌐',
+    requireApproval:   value ? 'Approbation manuelle activée' : 'Abonnements automatiques',
+    profileVisible:    value ? 'Profil visible' : 'Profil masqué',
+    showInSearch:      value ? 'Visible dans les recherches' : 'Masqué des recherches',
+    postsVisible:      value ? 'Publications visibles' : 'Publications masquées',
+    showInMarketplace: value ? 'Visible dans le Marketplace' : 'Masqué du Marketplace',
+    showOnline:        value ? 'Statut en ligne activé' : 'Statut en ligne masqué',
+    readReceipts:      value ? 'Accusés de lecture activés' : 'Accusés de lecture désactivés',
+    showStats:         value ? 'Statistiques visibles' : 'Statistiques masquées'
+  };
+  showToast(labels[key] || 'Paramètre mis à jour', 'ok');
+}
+
+/* UI : si compte privé → met en évidence la ligne */
+function _privRefreshPrivateUI(isPrivate) {
+  var row = document.getElementById('priv-row-isPrivate');
+  if (row) {
+    row.style.background = isPrivate ? 'linear-gradient(135deg,#F5F3FF,#EDE9FE)' : '';
+    var name = row.querySelector('.priv-name');
+    if (name) name.style.color = isPrivate ? '#7C3AED' : '';
+  }
+  /* Affiche le bouton approuver seulement si privé */
+  var approvalRow = document.getElementById('priv-row-requireApproval');
+  if (approvalRow) approvalRow.style.opacity = isPrivate ? '1' : '0.45';
+}
+
+/* Met à jour le résumé affiché dans Settings */
+function _privUpdateSummary() {
+  var el = document.getElementById('s-privacy-summary');
+  if (!el || !_currentUser) return;
+  var data = _privLoad();
+  var parts = [];
+  parts.push(data.isPrivate ? '🔒 Compte privé' : '🌐 Compte public');
+  if (!data.profileVisible)    parts.push('Profil masqué');
+  if (!data.showInSearch)      parts.push('Hors recherches');
+  if (data.messagesFrom === 'none')      parts.push('Messages bloqués');
+  else if (data.messagesFrom === 'followers') parts.push('Messages : abonnés');
+  el.textContent = parts.join(' · ');
+}
+
+/* Initialise le résumé au chargement des paramètres */
+function _refreshSettingsPrivacy() {
+  _privUpdateSummary();
+}
+
+/* ══════════════════════════════════════════
+   SUPPORT SCREEN
+══════════════════════════════════════════ */
+function openSupportScreen() {
+  var screen = document.getElementById('support-screen');
+  if (!screen) return;
+  screen.classList.remove('hidden');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+  /* Attache l'événement du bouton Signaler */
+  var btn = screen.querySelector('.support-report-btn');
+  if (btn) {
+    btn.onclick = null;
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      _openBugReportModal();
+    });
+  }
+  /* Charge les tickets de l'utilisateur */
+  setTimeout(function() { try { _renderUserTickets(); } catch(e) {} }, 100);
+}
+
+function closeSupportScreen() {
+  var screen = document.getElementById('support-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  setTimeout(function() { screen.classList.add('hidden'); openSidebar(); }, 280);
+}
+
+function _toggleFaq(el) {
+  var item = el.closest('.faq-item');
+  if (!item) return;
+  var body = item.querySelector('.faq-body');
+  var ico  = item.querySelector('.faq-ico');
+  var open = item.classList.contains('open');
+  /* Ferme tous les autres */
+  document.querySelectorAll('.faq-item.open').forEach(function(i) {
+    i.classList.remove('open');
+    var b = i.querySelector('.faq-body'); if (b) b.style.maxHeight = '0';
+    var ic = i.querySelector('.faq-ico'); if (ic) ic.style.transform = 'rotate(0)';
+  });
+  if (!open) {
+    item.classList.add('open');
+    if (body) body.style.maxHeight = body.scrollHeight + 'px';
+    if (ico)  ico.style.transform  = 'rotate(45deg)';
+  }
+}
+
+/* ══════════════════════════════════════════
+   BADGE PAGE
+══════════════════════════════════════════ */
+function openBadgePage() {
+  if (!_currentUser) return;
+  var screen = document.getElementById('badge-screen');
+  if (!screen) return;
+  screen.classList.remove('hidden');
+  screen.classList.add('show');
+  /* Forcer un reflow puis déclencher l'animation */
+  requestAnimationFrame(function() {
+    screen.classList.add('open');
+  });
+  _renderBadgePage();
+}
+
+function closeBadgePage() {
+  var screen = document.getElementById('badge-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  screen.addEventListener('transitionend', function handler() {
+    screen.removeEventListener('transitionend', handler);
+    screen.classList.add('hidden');
+    screen.classList.remove('show');
+    openSidebar();
+  });
+}
+
+/* ── Rendu complet de la page badge ── */
+function _renderBadgePage() {
+  if (!_currentUser) return;
+  var email = _currentUser.email;
+  var profile = loadUserProfile(email) || {};
+  var check = checkVerifiedConditions(email);
+
+  /* ── Statut actuel ── */
+  var statusEl = document.getElementById('badge-current-status');
+  var statusIcon = document.getElementById('badge-status-icon');
+  var statusLabel = document.getElementById('badge-status-label');
+  var statusSub = document.getElementById('badge-status-sub');
+
+  if (profile.badgeType === 'premium') {
+    statusEl.className = 'badge-current-status status-premium';
+    statusEl.classList.remove('hidden');
+    statusIcon.innerHTML = '<span class="badge-inline badge-inline-gold" style="width:36px;height:36px;font-size:18px"><i class="fas fa-crown"></i></span>';
+    statusLabel.textContent = 'Badge Premium actif 👑';
+    statusSub.textContent = 'Votre profil bénéficie de tous les avantages Premium.';
+  } else if (profile.badgeType === 'verified') {
+    statusEl.className = 'badge-current-status status-verified';
+    statusEl.classList.remove('hidden');
+    statusIcon.innerHTML = '<span class="badge-inline badge-inline-blue" style="width:36px;height:36px;font-size:18px"><i class="fas fa-circle-check"></i></span>';
+    statusLabel.textContent = 'Badge Vérifié actif ✅';
+    statusSub.textContent = 'Votre profil est certifié par mérite. Continuez comme ça !';
+  } else if (profile.badgeStatus === 'pending') {
+    statusEl.className = 'badge-current-status status-pending';
+    statusEl.classList.remove('hidden');
+    statusIcon.innerHTML = '<i class="fas fa-hourglass-half" style="color:#8B5CF6;font-size:24px"></i>';
+    statusLabel.textContent = 'Demande en cours de vérification';
+    statusSub.textContent = 'Notre équipe examine votre dossier. Sous 48–72h.';
+  } else {
+    statusEl.classList.add('hidden');
+  }
+
+  /* ── Barre de progression ── */
+  var fill  = document.getElementById('badge-progress-fill');
+  var label = document.getElementById('badge-progress-label');
+  if (fill)  fill.style.width = Math.round(check.metCount / check.total * 100) + '%';
+  if (label) label.textContent = check.metCount + ' / ' + check.total;
+
+  /* ── Liste des conditions ── */
+  var list = document.getElementById('badge-conditions-list');
+  if (list) {
+    list.innerHTML = check.conditions.map(function(c) {
+      var iconClass = c.met ? 'badge-cond-ok' : 'badge-cond-fail';
+      var icon      = c.met ? 'fa-check' : 'fa-xmark';
+      var textClass = c.met ? 'cond-ok' : 'cond-fail';
+      return '<li class="badge-cond">' +
+        '<span class="badge-cond-icon ' + iconClass + '"><i class="fas ' + icon + '"></i></span>' +
+        '<div class="badge-cond-text">' +
+          '<span class="' + textClass + '">' + escHtml(c.label) + '</span>' +
+          '<small>' + escHtml(c.hint) + '</small>' +
+        '</div>' +
+      '</li>';
+    }).join('');
+  }
+
+  /* ── Bouton CTA ── */
+  var ctaBtn  = document.getElementById('badge-cta-verified');
+  var ctaNote = document.getElementById('badge-cta-note');
+  var allMet  = check.metCount === check.total;
+  var pending = profile.badgeStatus === 'pending';
+  var approved = !!profile.badgeType;
+
+  if (ctaBtn) {
+    ctaBtn.disabled = !allMet || pending || approved;
+    if (approved) {
+      ctaBtn.textContent = '✅ Badge déjà actif';
+    } else if (pending) {
+      ctaBtn.textContent = '⏳ Demande en cours…';
+    } else {
+      ctaBtn.textContent = 'Demander la vérification';
+    }
+  }
+  if (ctaNote) {
+    if (allMet && !pending && !approved) {
+      ctaNote.textContent = 'Toutes les conditions sont remplies !';
+      ctaNote.style.color = '#059669';
+    } else if (!approved && !pending) {
+      var remaining = check.total - check.metCount;
+      ctaNote.textContent = remaining + ' condition(s) manquante(s) pour activer la demande';
+      ctaNote.style.color = '';
+    } else {
+      ctaNote.textContent = '';
+    }
+  }
+
+  /* ── Condition identité dans le panneau premium ── */
+  var pCondIdentity = document.getElementById('pcond-identity');
+  if (pCondIdentity) {
+    var hasCond = !!(profile.identityVerified);
+    pCondIdentity.querySelector('.badge-cond-icon').className =
+      'badge-cond-icon ' + (hasCond ? 'badge-cond-ok' : 'badge-cond-pending');
+    pCondIdentity.querySelector('.badge-cond-icon').innerHTML =
+      '<i class="fas ' + (hasCond ? 'fa-check' : 'fa-id-card') + '"></i>';
+  }
+}
+
+/* ── Simulation démo : remplit toutes les conditions ── */
+function simulateBadgeConditions() {
+  if (!_currentUser) return;
+  var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+
+  /* Simule identité + missions + reviews + no dispute */
+  p.identityVerified  = true;
+  p.missionsCompleted = 8;
+  p.hasDispute        = false;
+  if (!p.phone) p.phone = '+33 6 00 00 00 00';
+  p.phoneVerified = true;
+
+  /* Simule 4 avis 5 étoiles dans le storage */
+  var reviewKey = _currentUser.email;
+  var demoReviews = [
+    { id: 'dr1', authorName: 'Alice Martin',   rating: 5, text: 'Excellent travail !',   time: 'il y a 2 semaines' },
+    { id: 'dr2', authorName: 'Bob Dupont',     rating: 5, text: 'Très professionnel.',    time: 'il y a 1 mois'    },
+    { id: 'dr3', authorName: 'Clara Lemaire',  rating: 4, text: 'Très bonne expérience.', time: 'il y a 1 mois'    },
+    { id: 'dr4', authorName: 'David Roux',     rating: 5, text: 'Je recommande vivement.', time: 'il y a 2 mois'  }
+  ];
+  var existing = loadReviews(reviewKey);
+  var merged = demoReviews.filter(function(dr) {
+    return !existing.find(function(er) { return er.id === dr.id; });
+  }).concat(existing);
+  localStorage.setItem('gw_reviews_' + reviewKey, JSON.stringify(merged));
+
+  /* Complète le profil si des champs manquent */
+  if (!p.bio || p.bio.length < 11)    p.bio      = 'Passionné(e) par mon métier, je propose des services de qualité.';
+  if (!p.domain)                       p.domain   = 'Freelance';
+  if (!p.location)                     p.location = 'Paris, France';
+  if (!p.skills || !p.skills.length)   p.skills   = ['HTML', 'CSS', 'JavaScript'];
+  p.rating = 4.8;
+
+  saveUserProfile(_currentUser.email, p);
+  renderProfilePage();
+  _renderBadgePage();
+  showToast('Conditions simulées ✅ — Vous pouvez maintenant demander le badge !', 'ok');
+}
+
+/* ══════════════════════════════════════════
+   MODAL UPLOAD DOCUMENTS BADGE
+══════════════════════════════════════════ */
+var _bdmFiles = []; /* [{name, type, data}] */
+
+/* Ouvre le modal upload documents */
+function openBadgeDocModal() {
+  if (!_currentUser) return;
+  var check = checkVerifiedConditions(_currentUser.email);
+  if (check.metCount < check.total) {
+    showToast('Certaines conditions ne sont pas encore remplies', 'err'); return;
+  }
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  if (profile.badgeStatus === 'pending') {
+    showToast('Votre demande est déjà en cours de vérification…', ''); return;
+  }
+  if (profile.badgeStatus === 'approved' && profile.badgeType) {
+    showToast('Vous avez déjà un badge actif ✓', 'ok'); return;
+  }
+  _bdmFiles = [];
+  _bdmRenderPreview();
+  var ta = document.getElementById('bdm-message');
+  if (ta) ta.value = '';
+  var btn = document.getElementById('bdm-submit-btn');
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Envoyer la demande'; }
+  var modal = document.getElementById('badge-doc-modal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+function _closeBadgeDocModal() {
+  var modal = document.getElementById('badge-doc-modal');
+  if (modal) modal.classList.add('hidden');
+  _bdmFiles = [];
+}
+
+function _bdmBackdropClick(e) {
+  if (e.target.id === 'badge-doc-modal') _closeBadgeDocModal();
+}
+
+/* Ajoute des fichiers à la liste */
+function _bdmAddFiles(input) {
+  if (!input.files) return;
+  var files = Array.from(input.files);
+  if (_bdmFiles.length + files.length > 5) {
+    showToast('Maximum 5 documents autorisés', 'err'); input.value = ''; return;
+  }
+  var remaining = files.length;
+  files.forEach(function(file) {
+    if (file.size > 5 * 1024 * 1024) {
+      showToast(file.name.slice(0,20) + ' trop lourd (max 5 Mo)', 'err'); remaining--; return;
+    }
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      _bdmFiles.push({ name: file.name, type: file.type, data: e.target.result });
+      remaining--;
+      if (remaining <= 0) _bdmRenderPreview();
+    };
+    reader.readAsDataURL(file);
+  });
+  input.value = '';
+}
+
+function _bdmRemoveFile(idx) {
+  _bdmFiles.splice(idx, 1);
+  _bdmRenderPreview();
+}
+
+/* Affiche les aperçus */
+function _bdmRenderPreview() {
+  var list  = document.getElementById('bdm-preview-list');
+  var count = document.getElementById('bdm-file-count');
+  if (!list) return;
+  if (!_bdmFiles.length) {
+    list.innerHTML = '';
+    if (count) count.classList.add('hidden');
+    return;
+  }
+  if (count) {
+    count.textContent = _bdmFiles.length + ' fichier(s) sélectionné(s)';
+    count.classList.remove('hidden');
+  }
+  list.innerHTML = _bdmFiles.map(function(f, i) {
+    var isPdf = f.type === 'application/pdf';
+    var preview = isPdf
+      ? '<div class="bdm-preview-pdf"><i class="fas fa-file-pdf"></i>' + escHtml(f.name.slice(0,20)) + '</div>'
+      : '<img src="' + f.data + '" class="bdm-preview-img" alt="doc">';
+    return '<div class="bdm-file-item">' +
+      preview +
+      '<button class="bdm-file-remove" onclick="_bdmRemoveFile(' + i + ')"><i class="fas fa-xmark"></i></button>' +
+      '<div class="bdm-file-name">' + escHtml(f.name.slice(0,18)) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+/* Soumet la demande avec documents */
+function _bdmSubmit() {
+  if (!_currentUser) return;
+  if (!_bdmFiles.length) {
+    showToast('Ajoutez au moins un document (CNI, passeport…)', 'err'); return;
+  }
+  var btn = document.getElementById('bdm-submit-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Envoi en cours…'; }
+
+  var message = _gwSanitize((document.getElementById('bdm-message') || {}).value || '', 300).trim();
+
+  /* Retire les anciennes demandes refusées, garde les pending */
+  var reqs = _admGetBadgeReqs();
+  reqs = reqs.filter(function(r) {
+    return !(r.email === _currentUser.email && r.status !== 'pending');
+  });
+  var existsPending = reqs.some(function(r) {
+    return r.email === _currentUser.email && r.status === 'pending';
+  });
+
+  if (!existsPending) {
+    reqs.push({
+      id:          'badge_' + Date.now(),
+      email:       _currentUser.email,
+      nom:         _currentUser.nom,
+      type:        'verified',
+      requestedAt: new Date().toISOString(),
+      status:      'pending',
+      documents:   _bdmFiles,   /* [{name, type, data}] */
+      message:     message
+    });
+    _admSaveBadgeReqs(reqs);
+  }
+
+  /* Marque le profil comme en attente */
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  profile.badgeStatus = 'pending';
+  saveUserProfile(_currentUser.email, profile);
+
+  /* ── Notifie TOUS les admins ── */
+  var adminNotif = {
+    id:       genNotifId(),
+    type:     'badge_request',
+    at:       Date.now(),
+    msg:      '🔍 Demande de badge de ' + (_currentUser.nom || _currentUser.email) +
+              (message ? ' — "' + message.slice(0,60) + '"' : ''),
+    unread:   true,
+    fromUser: { nom: _currentUser.nom, email: _currentUser.email }
+  };
+  try {
+    var sa = _admGetSuperAdmin();
+    if (sa) { var n = getNotifs(sa.email); n.unshift(adminNotif); saveNotifs(sa.email, n); }
+    _admGetAdmins().forEach(function(a) {
+      var n = getNotifs(a.email); n.unshift(adminNotif); saveNotifs(a.email, n);
+    });
+    _admUpdateNavBadges();
+  } catch(e) {}
+
+  _closeBadgeDocModal();
+  showToast('Demande envoyée avec vos documents ! Notre équipe examine sous 48–72h 🔍', 'ok');
+  _renderBadgePage();
+}
+
+/* ── Compatibilité : ancienne fonction (si appelée ailleurs) ── */
+function requestVerifiedBadge() { openBadgeDocModal(); }
+
+/* ══════════════════════════════════════════
+   ONGLETS DU FEED
+══════════════════════════════════════════ */
+function switchFeedTab(btn, tab) {
+  _feedTab = tab;
+  document.querySelectorAll('.feed-tab').forEach(function(t) { t.classList.remove('active'); });
+  btn.classList.add('active');
+
+  if (tab === 'abonnements' && _currentUser) {
+    var following = getFollowing();
+    var feedList  = document.getElementById('feed-list');
+    if (!following.length) {
+      if (feedList) feedList.innerHTML =
+        '<div class="feed-empty-subs">' +
+          '<i class="fas fa-user-group"></i>' +
+          '<p>Vous ne suivez personne encore</p>' +
+          '<small>Suivez des utilisateurs pour voir leurs publications ici</small>' +
+          '<button class="btn-blue" onclick="switchFeedTab(document.querySelector(\'.feed-tab\'),\'accueil\')">' +
+            'Découvrir des profils' +
+          '</button>' +
+        '</div>';
+      return;
+    }
+    var followedNames  = following.map(function(f) { return f.nom.toLowerCase(); });
+    var followedEmails = following.filter(function(f) { return f.email; }).map(function(f) { return f.email; });
+    var filtered = getAllPosts().filter(function(p) {
+      return followedNames.indexOf((p.author || '').toLowerCase()) !== -1 ||
+             (p.ownerEmail && followedEmails.indexOf(p.ownerEmail) !== -1);
+    });
+    if (!filtered.length) {
+      if (feedList) feedList.innerHTML =
+        '<div class="feed-empty-subs">' +
+          '<i class="fas fa-newspaper"></i>' +
+          '<p>Aucune publication pour l\'instant</p>' +
+          '<small>Les personnes que vous suivez n\'ont pas encore publié</small>' +
+        '</div>';
+      return;
+    }
+    renderFeed(filtered);
+  } else {
+    renderFeed(DEMO_POSTS);
+  }
+}
+
+/* ══════════════════════════════════════════
+   PERSISTANCE DES POSTS UTILISATEURS
+══════════════════════════════════════════ */
+function _userPostsKey(email) { return 'gw_userposts_' + email; }
+
+function loadPersistedUserPosts(email) {
+  return JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
+}
+
+function savePersistedUserPosts(email, posts) {
+  localStorage.setItem(_userPostsKey(email), JSON.stringify(posts));
+}
+
+function persistNewPost(post) {
+  if (!post.ownerEmail) return;
+  var posts = loadPersistedUserPosts(post.ownerEmail);
+  /* Évite les doublons (double-publish) */
+  if (posts.find(function(p) { return p.id === post.id; })) return;
+  posts.unshift(post);
+  savePersistedUserPosts(post.ownerEmail, posts);
+}
+
+function deletePersistedPost(postId, email) {
+  if (!email) return;
+  var posts = loadPersistedUserPosts(email);
+  savePersistedUserPosts(email, posts.filter(function(p) { return p.id !== postId; }));
+}
+
+/* Charge tous les posts persistés des utilisateurs inscrits dans DEMO_POSTS
+   (appelé une seule fois au démarrage) */
+var _persistedPostsLoaded = false;
+function _loadAllPersistedPosts() {
+  if (_persistedPostsLoaded) return;
+  _persistedPostsLoaded = true;
+  getUsers().forEach(function(u) {
+    var stored = loadPersistedUserPosts(u.email);
+    stored.forEach(function(p) {
+      /* Ne pas insérer si déjà présent */
+      if (!DEMO_POSTS.find(function(d) { return d.id === p.id; })) {
+        /* Restaure les likers depuis localStorage */
+        p.likers = loadPostLikers(p.id);
+        DEMO_POSTS.push(p);
+      }
+    });
+  });
+  /* Tri par id décroissant (plus récent en premier) */
+  DEMO_POSTS.sort(function(a, b) { return b.id - a.id; });
+}
+
+/* ══════════════════════════════════════════
+   HELPER — tous les posts
+══════════════════════════════════════════ */
+function getAllPosts() {
+  return DEMO_POSTS.concat(PENDING_POSTS);
+}
+
+/* Posts publiés par un auteur donné (email ou nom) */
+function getPostsByAuthor(email, nom) {
+  return getAllPosts().filter(function(p) {
+    if (email && p.ownerEmail) return p.ownerEmail === email;
+    if (nom) return (p.author || '').toLowerCase() === nom.toLowerCase();
+    return false;
+  }).sort(function(a, b) { return b.id - a.id; });
+}
+
+/* ══════════════════════════════════════════
+   AUTOPLAY VIDÉO AU SCROLL (feed)
+══════════════════════════════════════════ */
+var _feedVideoObserver = null;
+
+function _initFeedVideoObserver() {
+  if (!('IntersectionObserver' in window)) return;
+
+  /* Crée l'observer une seule fois — gère posts normaux, officiels ET reposts */
+  if (!_feedVideoObserver) {
+    _feedVideoObserver = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        var video   = entry.target;
+        var isOff   = video.id.indexOf('off-fv-') === 0;
+        var isRp    = video.id.indexOf('rp-fv-')  === 0;
+        var rawId   = isOff ? video.id.replace('off-fv-', '')
+                    : isRp  ? video.id.replace('rp-fv-', '')
+                    :          video.id.replace('fv-', '');
+        var overlay    = isRp ? null : document.getElementById((isOff ? 'off-fvo-' : 'fvo-') + rawId);
+        var mutedBadge = isRp ? null : document.getElementById((isOff ? 'off-fvm-' : 'fvm-') + rawId);
+
+        if (entry.isIntersecting) {
+          /* Pause toutes les autres vidéos du feed */
+          document.querySelectorAll('[id^="fv-"],[id^="off-fv-"],[id^="rp-fv-"]').forEach(function(v) {
+            if (v !== video && !v.paused) {
+              v.pause();
+              var vOff = v.id.indexOf('off-fv-') === 0;
+              var vRp  = v.id.indexOf('rp-fv-')  === 0;
+              if (!vRp) {
+                var pid = vOff ? v.id.replace('off-fv-', '') : v.id.replace('fv-', '');
+                var ov  = document.getElementById((vOff ? 'off-fvo-' : 'fvo-') + pid);
+                var mb  = document.getElementById((vOff ? 'off-fvm-' : 'fvm-') + pid);
+                if (ov) ov.style.opacity = '1';
+                if (mb) mb.style.opacity = '0';
+              }
+            }
+          });
+          video.play().catch(function() {});
+          if (overlay)    overlay.style.opacity    = '0';
+          if (mutedBadge) mutedBadge.style.opacity = '1';
+        } else {
+          video.pause();
+          if (overlay)    overlay.style.opacity    = '1';
+          if (mutedBadge) mutedBadge.style.opacity = '0';
+        }
+      });
+    }, { threshold: 0.5 });
+  }
+
+  /* Observe toutes les nouvelles vidéos non encore trackées (normales + officielles + reposts) */
+  document.querySelectorAll('[id^="fv-"],[id^="off-fv-"],[id^="rp-fv-"]').forEach(function(vid) {
+    if (!vid._gwVidTracked && vid.src) {
+      vid._gwVidTracked = true;
+      _feedVideoObserver.observe(vid);
+    }
+  });
+}
+
+/* ══════════════════════════════════════════
+   PULL-TO-REFRESH
+══════════════════════════════════════════ */
+function _initPullToRefresh() {
+  var scroll = document.getElementById('feed-scroll');
+  if (!scroll || scroll._ptrInit) return;
+  scroll._ptrInit = true;
+
+  var _ptrStartY   = 0;
+  var _ptrActive   = false;
+  var _ptrIndicator = null;
+  var _PTR_THRESHOLD = 65; /* pixels à tirer pour déclencher */
+
+  function _ptrCreate() {
+    if (_ptrIndicator) return;
+    _ptrIndicator = document.createElement('div');
+    _ptrIndicator.className = 'ptr-indicator';
+    _ptrIndicator.innerHTML = '<i class="fas fa-sync-alt ptr-spin"></i><span>Tirer pour actualiser…</span>';
+    scroll.insertBefore(_ptrIndicator, scroll.firstChild);
+  }
+
+  function _ptrRemove() {
+    if (_ptrIndicator && _ptrIndicator.parentNode) {
+      _ptrIndicator.parentNode.removeChild(_ptrIndicator);
+    }
+    _ptrIndicator = null;
+  }
+
+  function _ptrTrigger() {
+    if (_ptrIndicator) {
+      _ptrIndicator.innerHTML = '<i class="fas fa-sync-alt ptr-spin spinning"></i><span>Actualisation…</span>';
+    }
+    setTimeout(function() {
+      _ptrRemove();
+      /* Recharge le feed + posts officiels */
+      renderFeed(getAllPosts());
+      var feedScroll = document.getElementById('feed-scroll');
+      if (feedScroll) feedScroll.scrollTop = 0;
+      showToast('Feed actualisé ✓', 'ok');
+    }, 600);
+  }
+
+  scroll.addEventListener('touchstart', function(e) {
+    if (scroll.scrollTop <= 0) {
+      _ptrStartY  = e.touches[0].clientY;
+      _ptrActive  = true;
+    }
+  }, { passive: true });
+
+  scroll.addEventListener('touchmove', function(e) {
+    if (!_ptrActive) return;
+    var dy = e.touches[0].clientY - _ptrStartY;
+    if (dy > 10 && scroll.scrollTop <= 0) {
+      _ptrCreate();
+      if (_ptrIndicator) {
+        var ratio = Math.min(dy / _PTR_THRESHOLD, 1);
+        _ptrIndicator.style.opacity = ratio;
+        _ptrIndicator.style.transform = 'translateY(' + Math.min(dy * 0.4, 28) + 'px)';
+        _ptrIndicator.querySelector('span').textContent =
+          dy >= _PTR_THRESHOLD ? 'Relâcher pour actualiser ↑' : 'Tirer pour actualiser…';
+      }
+    }
+  }, { passive: true });
+
+  scroll.addEventListener('touchend', function(e) {
+    if (!_ptrActive) return;
+    _ptrActive = false;
+    var dy = (e.changedTouches[0] ? e.changedTouches[0].clientY : _ptrStartY) - _ptrStartY;
+    if (dy >= _PTR_THRESHOLD && scroll.scrollTop <= 0) {
+      _ptrTrigger();
+    } else {
+      _ptrRemove();
+    }
+  }, { passive: true });
+}
+
+/* ══════════════════════════════════════════
+   SCROLL INFINI + RENDU DU FEED
+══════════════════════════════════════════ */
+var _FEED_PAGE          = 10;   /* posts par lot                         */
+var _feedPool           = [];   /* tous les posts disponibles             */
+var _feedOffset         = 0;    /* index de lecture dans _feedPool        */
+var _feedCycleOff       = 0;    /* décalage lors du recyclage infini      */
+var _feedBusy           = false;/* chargement en cours                    */
+var _feedInfObs         = null; /* IntersectionObserver (backup)          */
+var _feedScrollHandler  = null; /* listener scroll actif                  */
+
+/* ── Mélange les posts officiels dans le feed régulier (1 officiel / 4 réguliers) ── */
+function _buildMergedFeedPool(regularPosts) {
+  var officialPosts = _offGetPosts();
+  if (!officialPosts.length) return regularPosts;
+
+  /* Trie les posts officiels du plus récent au plus ancien */
+  var offs = officialPosts.slice().sort(function(a, b) {
+    return new Date(b.publishedAt) - new Date(a.publishedAt);
+  });
+
+  var INTERVAL = 4; /* 1 post officiel toutes les 4 posts réguliers */
+  var merged   = [];
+  var offIdx   = 0;
+
+  for (var i = 0; i < regularPosts.length; i++) {
+    merged.push(regularPosts[i]);
+    /* Toutes les INTERVAL positions, insère le prochain post officiel */
+    if ((i + 1) % INTERVAL === 0 && offIdx < offs.length) {
+      var offPost = Object.assign({}, offs[offIdx]);
+      offPost._isOfficialInFeed = true; /* flag pour le rendu */
+      merged.push(offPost);
+      offIdx++;
+    }
+  }
+  /* Si moins de INTERVAL posts réguliers, insérer quand même le 1er officiel à la fin */
+  if (offIdx === 0 && offs.length && regularPosts.length > 0) {
+    var fp = Object.assign({}, offs[0]);
+    fp._isOfficialInFeed = true;
+    merged.push(fp);
+  }
+
+  return merged;
+}
+
+function renderFeed(posts) {
+  var list       = document.getElementById('feed-list');
+  var feedScroll = document.getElementById('feed-scroll');
+  if (!list) return;
+
+  /* ── Filtre les posts des comptes bannis — complètement invisibles ── */
+  posts = (posts || []).filter(function(p) {
+    if (!p.ownerEmail) return true;
+    return !_admIsBanned(p.ownerEmail);
+  });
+
+  /* ── Réinitialise tout l'état ── */
+  _feedPool     = _buildMergedFeedPool(posts); /* posts officiels mélangés toutes les 4 positions */
+  _feedOffset   = 0;
+  _feedCycleOff = 0;
+  _feedBusy     = false;
+
+  /* Débranche les anciens listeners */
+  if (_feedInfObs) { _feedInfObs.disconnect(); _feedInfObs = null; }
+  if (_feedScrollHandler && feedScroll) {
+    feedScroll.removeEventListener('scroll', _feedScrollHandler);
+    _feedScrollHandler = null;
+  }
+  if (_feedVideoObserver) { _feedVideoObserver.disconnect(); _feedVideoObserver = null; }
+
+  list.innerHTML = '';
+
+  /* ── Spinner en fin de liste ── */
+  var loader = document.createElement('div');
+  loader.id        = 'feed-inf-loader';
+  loader.className = 'feed-inf-loader';
+  loader.innerHTML = '<span class="feed-inf-spinner"></span>';
+  loader.style.display = 'none';
+  list.appendChild(loader);
+
+  /* ── Premier lot immédiat ── */
+  _feedAppendBatch(true);
+
+  /* ── Scroll listener sur le conteneur (méthode la plus fiable) ──
+     Déclenche un nouveau lot dès qu'il reste < 400px avant le bas   */
+  if (feedScroll) {
+    _feedScrollHandler = function() {
+      var remaining = feedScroll.scrollHeight - feedScroll.scrollTop - feedScroll.clientHeight;
+      if (remaining < 400 && !_feedBusy) {
+        _feedAppendBatch(false);
+      }
+    };
+    feedScroll.addEventListener('scroll', _feedScrollHandler, { passive: true });
+  }
+
+  /* ── IntersectionObserver sur le bon root (backup) ── */
+  if ('IntersectionObserver' in window && feedScroll) {
+    try {
+      _feedInfObs = new IntersectionObserver(function(entries) {
+        if (entries[0].isIntersecting && !_feedBusy) _feedAppendBatch(false);
+      }, { root: feedScroll, rootMargin: '300px', threshold: 0 });
+      _feedInfObs.observe(loader);
+    } catch(e) {}
+  }
+
+  _initFeedVideoObserver();
+}
+
+/* ── Ajoute le prochain lot de posts ── */
+function _feedAppendBatch(immediate) {
+  if (_feedBusy) return;
+  var list   = document.getElementById('feed-list');
+  var loader = document.getElementById('feed-inf-loader');
+  if (!list) return;
+
+  /* Lot suivant dans le pool */
+  var batch = _feedPool.slice(_feedOffset, _feedOffset + _FEED_PAGE);
+
+  /* Pool épuisé → recyclage infini avec nouveaux IDs */
+  if (!batch.length) {
+    var base = _feedPool.length ? _feedPool : getAllPosts();
+    if (!base.length) return;
+    var start = _feedCycleOff % base.length;
+    batch = base.slice(start, start + _FEED_PAGE);
+    if (batch.length < _FEED_PAGE) {
+      batch = batch.concat(base.slice(0, _FEED_PAGE - batch.length));
+    }
+    batch = batch.map(function(p) {
+      return Object.assign({}, p, {
+        id: 'inf_' + Date.now() + '_' + Math.floor(Math.random() * 9999)
+      });
+    });
+    _feedCycleOff += _FEED_PAGE;
+  }
+
+  if (!batch.length) return;
+
+  _feedBusy = true;
+  if (loader) loader.style.display = '';
+
+  /* Délai minimal pour laisser le DOM respirer */
+  setTimeout(function() {
+    var frag = document.createDocumentFragment();
+    batch.forEach(function(post) {
+      /* Post officiel → card dédiée ; post régulier → card normale */
+      if (post._isOfficialInFeed) {
+        frag.appendChild(_buildOfficialCard(post));
+      } else {
+        frag.appendChild(buildPostCard(post));
+      }
+    });
+    list.insertBefore(frag, loader);
+
+    _feedOffset += _FEED_PAGE;
+    _feedBusy = false;
+    if (loader) loader.style.display = 'none';
+    _initFeedVideoObserver();
+
+    /* Si le scroll container est encore rempli, charger tout de suite le suivant */
+    var feedScroll = document.getElementById('feed-scroll');
+    if (feedScroll) {
+      var remaining = feedScroll.scrollHeight - feedScroll.scrollTop - feedScroll.clientHeight;
+      if (remaining < 400 && !immediate) _feedAppendBatch(false);
+    }
+  }, immediate ? 0 : 120);
+}
+
+function buildPostCard(post) {
+  var card = document.createElement('div');
+
+  /* Mise en avant Premium : bordure dorée si l'auteur a un badge Premium */
+  var ownerProfile = post.ownerEmail ? (loadUserProfile(post.ownerEmail) || {}) : {};
+  var isPremiumAuthor = ownerProfile.badgeType === 'premium';
+  card.className = 'post-card' + (isPremiumAuthor ? ' post-card-premium' : '');
+  card.id = 'post-' + post.id;
+
+  /* Like par utilisateur courant */
+  var userEmail = _currentUser ? _currentUser.email : '';
+  var liked     = post.likers.indexOf(userEmail) !== -1;
+  var likeCount = post.baseLikes + post.likers.length;
+
+  /* Bouton Suivre — masqué si c'est notre propre post */
+  var isOwnPost  = _currentUser && post.ownerEmail && post.ownerEmail === _currentUser.email;
+  var authorInfo = { nom: post.author, email: post.ownerEmail || null, role: post.role || '' };
+  var authorKey  = getProfileKey(authorInfo);
+  var fllwing    = isFollowing(authorKey);
+  var followBtn  = isOwnPost ? '' :
+    '<button class="post-follow-btn' + (fllwing ? ' following' : '') + '" ' +
+      'data-fkey="' + escHtml(authorKey) + '" ' +
+      'onclick="event.stopPropagation();toggleFollowFromPost(' + post.id + ')">' +
+      (fllwing ? '✓ ' + t('upv.following') : '+ ' + t('upv.follow')) +
+    '</button>';
+
+  /* Texte tronqué si > 200 chars */
+  var shortText = post.text;
+  var needMore  = post.text.length > 200;
+  if (needMore) shortText = post.text.slice(0, 200);
+
+  /* Vidéo HTML */
+  var videoHtml = '';
+  if (post.video && (post.video.idbId || post.video.url)) {
+    var vDur  = escHtml(formatDuration(post.video.duration || 0));
+    var vidId = 'fv-' + post.id;
+    var vSrc  = post.video.url ? escHtml(post.video.url) : '';
+
+    var vViews = _getVideoViews(post.id);
+    videoHtml =
+      '<div class="post-video-wrap" id="pvw-' + post.id + '" onclick="_openVideoFromPost(\'' + post.id + '\',' + (post.video.duration || 0) + ')">' +
+        '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + ' preload="metadata" muted playsinline loop ' +
+          'style="width:100%;display:block;max-height:320px;pointer-events:none"></video>' +
+        '<div class="post-video-thumb-overlay" id="fvo-' + post.id + '">' +
+          '<div class="post-video-play-ico"><i class="fas fa-play"></i></div>' +
+        '</div>' +
+        '<div class="post-video-muted-badge" id="fvm-' + post.id + '">' +
+          '<i class="fas fa-volume-mute"></i>' +
+        '</div>' +
+        /* Badge durée — bas droite */
+        '<span class="post-video-dur-badge"><i class="fas fa-clock" style="margin-right:4px"></i>' + vDur + '</span>' +
+        /* Badge vues — bas gauche */
+        '<span class="post-video-views-badge" id="vid-views-' + post.id + '">' +
+          '<i class="fas fa-eye"></i> <span>' + (vViews > 0 ? _fmtViews(vViews) : '0') + '</span>' +
+        '</span>' +
+      '</div>';
+
+    /* Si IndexedDB disponible + pas de blob URL valide → charge depuis IndexedDB */
+    if (post.video.idbId && !post.video.url) {
+      (function(pid, idbId, dur) {
+        _gwLoadVideoBlob(idbId, function(blob) {
+          if (!blob) return;
+          var bUrl = URL.createObjectURL(blob);
+          /* Met à jour la source vidéo dans le DOM */
+          var el = document.getElementById('fv-' + pid);
+          if (el) { el.src = bUrl; }
+          /* Met à jour le onclick pour le player plein écran */
+          var wrap = document.getElementById('pvw-' + pid);
+          if (wrap) {
+            wrap.onclick = function() { openVideoPlayer(bUrl, dur); };
+          }
+          /* Stocke l'URL temporaire dans le post en mémoire pour l'IntersectionObserver */
+          var p = DEMO_POSTS.find(function(x) { return x.id == pid; });
+          if (p && p.video) p.video.url = bUrl;
+        });
+      })(post.id, post.video.idbId, post.video.duration || 0);
+    }
+  }
+
+  /* Document HTML */
+  var docHtml = '';
+  if (post.doc && (post.doc.idbId || post.doc.url)) {
+    var d     = post.doc;
+    var dExt  = d.ext || (d.name ? d.name.split('.').pop().toLowerCase() : 'file');
+    var di    = _docIcon(d.name || 'document');
+    var dShort= (d.name || 'Document').length > 32 ? (d.name).slice(0, 30) + '…' : (d.name || 'Document');
+    var dMb   = d.size ? (d.size / (1024*1024)).toFixed(2) + ' Mo' : '';
+    var safeId= String(post.id).replace(/'/g,"\\'");
+
+    docHtml =
+      '<div class="post-doc-card" onclick="_openPostDoc(\'' + safeId + '\')">' +
+        '<div class="post-doc-icon"><i class="fas ' + di.ico + '" style="color:' + di.color + '"></i></div>' +
+        '<div class="post-doc-info">' +
+          '<div class="post-doc-name">' + escHtml(dShort) + '</div>' +
+          '<div class="post-doc-meta">' + escHtml(dExt.toUpperCase()) + (dMb ? ' · ' + dMb : '') + '</div>' +
+        '</div>' +
+        '<div class="post-doc-open"><i class="fas fa-chevron-right"></i></div>' +
+      '</div>';
+
+    /* Si pas d'URL valide → charge depuis IndexedDB dès le rendu */
+    if (!d.url && d.idbId) {
+      (function(pid) {
+        _gwLoadDocBlob(d.idbId, function(blob) {
+          if (!blob) return;
+          var bUrl = URL.createObjectURL(blob);
+          var p2 = DEMO_POSTS.find(function(x) { return String(x.id) === String(pid); });
+          if (p2 && p2.doc) p2.doc.url = bUrl;
+        });
+      })(post.id);
+    }
+  }
+
+  /* Images HTML (jusqu'à 6) */
+  var imagesHtml   = '';
+  var downloadHtml = '';
+  if (post.images && post.images.length > 0) {
+    var count     = Math.min(post.images.length, 6);
+    var gridClass = 'grid-' + count;
+    imagesHtml = '<div class="post-images ' + gridClass + '">';
+    post.images.slice(0, count).forEach(function(src, i) {
+      imagesHtml += '<img class="post-img" src="' + escHtml(src) + '" alt="" loading="lazy"' +
+        ' onclick="openPhotoViewer(' + post.id + ',' + i + ')"/>';
+    });
+    imagesHtml += '</div>';
+
+    downloadHtml =
+      '<button class="post-dl-btn" onclick="downloadAllPhotos(' + post.id + ')">' +
+        '<i class="fas fa-download"></i> Télécharger les photos (' + count + ')' +
+      '</button>';
+  }
+
+  /* Nombre de commentaires réels (demo + localStorage) */
+  var commentCount = getAllComments(post.id).length;
+
+  /* État favori */
+  var fav = isFavorite(post.id);
+
+  /* ── Si c'est un repost → bannière + carte originale ── */
+  var repostBannerHtml = '';
+  var repostCardHtml   = '';
+  if (post.type === 'repost' && post.repostOf) {
+    var ro = post.repostOf;
+    /* Média original */
+    var roMedia = '';
+    if (ro.images && ro.images[0]) {
+      roMedia = '<img class="rp-orig-img" src="' + escHtml(ro.images[0]) + '" alt=""/>';
+    } else if (ro.video) {
+      var roVidSrc = typeof ro.video === 'string' ? ro.video : (ro.video.url || ro.video.src || '');
+      /* Affiche toujours le lecteur — le src sera rempli par l'IDB si vide */
+      roMedia = '<video id="rp-fv-' + post.id + '" class="rp-orig-video" muted loop playsinline preload="metadata"' +
+                (roVidSrc ? ' src="' + escHtml(roVidSrc) + '"' : '') + '></video>';
+    }
+    var roDoc = ro.doc
+      ? '<div class="rp-orig-doc"><i class="fas fa-file"></i> ' + escHtml(ro.doc.name || 'Document') + '</div>'
+      : '';
+    repostBannerHtml =
+      '<div class="post-repost-banner">' +
+        '<i class="fas fa-retweet"></i> ' +
+        escHtml(getDisplayName(post.ownerEmail, post.author)) + ' a republié' +
+      '</div>';
+    /* Résout l'email de l'auteur original : champ stocké ou recherche par nom */
+    var roEmail = ro.ownerEmail || null;
+    if (!roEmail && ro.author) {
+      var roUser = getUsers().find(function(u) {
+        return (u.nom || '').toLowerCase() === ro.author.toLowerCase() ||
+               getDisplayName(u.email, u.nom).toLowerCase() === ro.author.toLowerCase();
+      });
+      if (roUser) roEmail = roUser.email;
+    }
+    /* Avatar spécial pour les posts officiels Geniwork */
+    var roAvatarHtml;
+    if (!roEmail && ro.author === 'Geniwork') {
+      var offLogo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
+      roAvatarHtml = offLogo
+        ? '<div class="user-av xs av-photo"><img src="' + offLogo + '" alt="Geniwork"/></div>'
+        : '<div class="user-av xs" style="background:linear-gradient(135deg,#6366F1,#2563EB)">' +
+            '<span><i class="fas fa-star" style="font-size:11px"></i></span></div>';
+    } else {
+      roAvatarHtml = getAvatarHtml(roEmail, ro.author, 'xs');
+    }
+    repostCardHtml =
+      '<div class="post-repost-orig">' +
+        '<div class="rp-orig-header">' +
+          roAvatarHtml +
+          '<div class="rp-orig-meta">' +
+            '<strong>' + escHtml(ro.author) + '</strong>' +
+            (ro.role ? '<small>' + escHtml(ro.role) + '</small>' : '') +
+          '</div>' +
+        '</div>' +
+        (ro.text ? '<p class="rp-orig-text">' + escHtml(ro.text.slice(0, 200)) + (ro.text.length > 200 ? '…' : '') + '</p>' : '') +
+        roMedia + roDoc +
+      '</div>';
+  }
+
+  /* ── Chargement IDB différé pour la vidéo de repost ── */
+  var _rpVideoIdbId = (post.type === 'repost' && post.repostOf && post.repostOf.video &&
+                       typeof post.repostOf.video === 'object' && post.repostOf.video.idbId &&
+                       !post.repostOf.video.url)
+    ? post.repostOf.video.idbId : null;
+
+  card.innerHTML =
+    repostBannerHtml +
+    '<div class="post-header">' +
+      '<div class="post-author-area" onclick="openAuthorProfile(' + post.id + ')">' +
+        getAvatarHtml(post.ownerEmail, getDisplayName(post.ownerEmail, post.author)) +
+        '<div class="post-meta">' +
+          '<div class="post-name">' + escHtml(getDisplayName(post.ownerEmail, post.author)) +
+            getBadgeHtml(post.ownerEmail) +
+          '</div>' +
+          '<div class="post-time">' + escHtml(getDisplayRole(post.ownerEmail, post.role)) + ' · ' + escHtml(post.time) + '</div>' +
+        '</div>' +
+      '</div>' +
+      followBtn +
+      '<button class="post-menu-btn" onclick="openPostMenu(' + post.id + ')"><i class="fas fa-ellipsis-h"></i></button>' +
+    '</div>' +
+    '<div class="post-body">' +
+      (post.type === 'repost' && post.repostOf
+        ? (shortText ? '<p class="post-text" id="ptxt-' + post.id + '">' + escHtml(shortText) + '</p>' : '') +
+          repostCardHtml
+        : '<p class="post-text" id="ptxt-' + post.id + '">' + escHtml(shortText) +
+          (needMore ? '… <button class="see-more" onclick="expandPost(' + post.id + ')">Voir plus</button>' : '') +
+          '</p>' +
+          videoHtml + imagesHtml + docHtml
+      ) +
+    '</div>' +
+    (function() {
+      var dislikers = loadPostDislikers(post.id);
+      var disliked  = _currentUser && dislikers.indexOf(_currentUser.email) !== -1;
+      var dcount    = dislikers.length;
+      return '<div class="post-actions">' +
+        '<button class="act-btn' + (liked ? ' liked' : '') + '" id="like-btn-' + post.id + '" onclick="likePost(' + post.id + ')">' +
+          '<i class="' + (liked ? 'fas' : 'far') + ' fa-heart"></i>' +
+          ' <span id="like-count-' + post.id + '">' + likeCount + '</span>' +
+        '</button>' +
+        '<button class="act-btn' + (disliked ? ' disliked' : '') + '" id="dislike-btn-' + post.id + '" onclick="dislikePost(' + post.id + ')">' +
+          '<i class="' + (disliked ? 'fas' : 'far') + ' fa-thumbs-down"></i>' +
+          (dcount > 0 ? ' <span id="dislike-count-' + post.id + '">' + dcount + '</span>' : '<span id="dislike-count-' + post.id + '" style="display:none">' + dcount + '</span>') +
+        '</button>' +
+        '<button class="act-btn" onclick="openComments(' + post.id + ')">' +
+          '<i class="far fa-comment"></i>' +
+          ' <span class="comment-count-span" id="ccount-' + post.id + '">' +
+            (commentCount > 0 ? commentCount : '') +
+          '</span>' +
+        '</button>' +
+        (function() {
+          var rcount  = _getRepostCount(post.id);
+          var rdone   = _hasReposted(post.id);
+          return '<button class="act-btn repost-act-btn' + (rdone ? ' reposted' : '') + '" ' +
+                     'id="repost-btn-' + post.id + '" ' +
+                     'onclick="openRepostSheet(' + post.id + ')">' +
+                   '<i class="fas fa-retweet"></i>' +
+                   ' <span id="rcount-' + post.id + '">' + (rcount > 0 ? rcount : '') + '</span>' +
+                 '</button>';
+        })() +
+        /* Boutons cachés — gardent l'état pour toggleFavorite et translatePost */
+        '<button style="display:none" class="fav-btn' + (fav ? ' favorited' : '') + '" id="fav-btn-' + post.id + '" onclick="toggleFavorite(' + post.id + ')"></button>' +
+        (post.text && post.text.length > 0
+          ? '<button style="display:none" id="translate-btn-' + post.id + '" data-translated="0"></button>'
+          : '') +
+      '</div>';
+    })();
+
+  /* Charge la vidéo de repost depuis IndexedDB si l'URL n'est pas encore disponible */
+  if (_rpVideoIdbId) {
+    (function(pid, idbId) {
+      _gwLoadVideoBlob(idbId, function(blob) {
+        if (!blob) return;
+        var bUrl = URL.createObjectURL(blob);
+        var el = document.getElementById('rp-fv-' + pid);
+        if (el) {
+          el.src = bUrl;
+          /* Met en cache l'URL dans l'objet repostOf pour les rendus suivants */
+          var stored = DEMO_POSTS.find(function(p) { return String(p.id) === String(pid); }) ||
+                       PENDING_POSTS.find(function(p) { return String(p.id) === String(pid); });
+          if (stored && stored.repostOf && stored.repostOf.video && typeof stored.repostOf.video === 'object') {
+            stored.repostOf.video.url = bUrl;
+          }
+          _initFeedVideoObserver();
+        }
+      });
+    })(post.id, _rpVideoIdbId);
+  }
+
+  return card;
+}
+
+/* Échappe le HTML pour éviter les injections */
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+/* Expand post text */
+function expandPost(postId) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post) return;
+  var el = document.getElementById('ptxt-' + postId);
+  if (el) el.innerHTML = escHtml(post.text);
+}
+
+/* ══════════════════════════════════════════
+   LIKE
+══════════════════════════════════════════ */
+function likePost(postId) {
+  if (!_currentUser) { showToast('Connectez-vous pour liker', 'err'); return; }
+
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post) return;
+
+  var email = _currentUser.email;
+  var idx   = post.likers.indexOf(email);
+
+  if (idx === -1) {
+    post.likers.push(email);           /* like */
+    /* Retire le dislike si présent */
+    var dList = loadPostDislikers(postId);
+    var dIdx  = dList.indexOf(email);
+    if (dIdx !== -1) {
+      dList.splice(dIdx, 1);
+      savePostDislikers(postId, dList);
+      document.querySelectorAll('[id="dislike-btn-' + postId + '"]').forEach(function(b) {
+        b.className = 'act-btn';
+        var i = b.querySelector('i'); if (i) i.className = 'far fa-thumbs-down';
+        var c = b.querySelector('span'); if (c) { c.textContent = dList.length; c.style.display = dList.length > 0 ? '' : 'none'; }
+      });
+    }
+  } else {
+    post.likers.splice(idx, 1);        /* unlike */
+  }
+
+  var liked = post.likers.indexOf(email) !== -1;
+  var total = post.baseLikes + post.likers.length;
+
+  /* Met à jour TOUTES les instances (fil d'actu + onglet publications profil) */
+  document.querySelectorAll('[id="like-btn-' + postId + '"]').forEach(function(btn) {
+    btn.className = 'act-btn' + (liked ? ' liked' : '');
+    var icon = btn.querySelector('i');
+    if (icon) icon.className = liked ? 'fas fa-heart' : 'far fa-heart';
+  });
+  document.querySelectorAll('[id="like-count-' + postId + '"]').forEach(function(count) {
+    count.textContent = total;
+  });
+
+  /* Persiste les likes dans localStorage */
+  savePostLikers(postId, post.likers);
+
+  /* Milestone likes */
+  if (liked) {
+    var _totalLikes = post.baseLikes + post.likers.length;
+    _checkLikeMilestone(postId, post.ownerEmail || null, _totalLikes);
+  }
+
+  /* Notification au propriétaire du post (si différent de l'auteur du like) */
+  if (liked && post.ownerEmail && post.ownerEmail !== email) {
+    pushNotif(post.ownerEmail, {
+      id:          genNotifId(),
+      type:        'like',
+      fromUser:    { nom: _currentUser.nom, email: _currentUser.email, role: 'Membre Geniwork' },
+      postId:      post.id,
+      postPreview: post.text.slice(0, 60) + (post.text.length > 60 ? '…' : ''),
+      msg:         'a aimé votre publication',
+      at:          Date.now(), time: 'À l\'instant',
+      unread:      true
+    });
+  }
+}
+
+/* ══════════════════════════════════════════
+   DISLIKE POST
+══════════════════════════════════════════ */
+function loadPostDislikers(postId) {
+  return JSON.parse(localStorage.getItem('gw_dislikers_' + postId) || '[]');
+}
+function savePostDislikers(postId, list) {
+  localStorage.setItem('gw_dislikers_' + postId, JSON.stringify(list));
+}
+
+function dislikePost(postId) {
+  if (!_currentUser) { showToast('Connectez-vous pour réagir', 'err'); return; }
+  var email      = _currentUser.email;
+  var dislikers  = loadPostDislikers(postId);
+  var idx        = dislikers.indexOf(email);
+
+  if (idx === -1) {
+    dislikers.push(email);
+    /* Retire le like si présent */
+    var post = getAllPosts().find(function(p) { return p.id === postId; });
+    if (post) {
+      var likeIdx = post.likers.indexOf(email);
+      if (likeIdx !== -1) {
+        post.likers.splice(likeIdx, 1);
+        var total = post.baseLikes + post.likers.length;
+        savePostLikers(postId, post.likers);
+        document.querySelectorAll('[id="like-btn-' + postId + '"]').forEach(function(b) {
+          b.className = 'act-btn';
+          var i = b.querySelector('i'); if (i) i.className = 'far fa-heart';
+        });
+        document.querySelectorAll('[id="like-count-' + postId + '"]').forEach(function(c) { c.textContent = total; });
+      }
+    }
+  } else {
+    dislikers.splice(idx, 1);
+  }
+
+  savePostDislikers(postId, dislikers);
+  var disliked = dislikers.indexOf(email) !== -1;
+  var dcount   = dislikers.length;
+
+  document.querySelectorAll('[id="dislike-btn-' + postId + '"]').forEach(function(btn) {
+    btn.className = 'act-btn' + (disliked ? ' disliked' : '');
+    var i = btn.querySelector('i'); if (i) i.className = (disliked ? 'fas' : 'far') + ' fa-thumbs-down';
+    var c = btn.querySelector('span');
+    if (c) { c.textContent = dcount; c.style.display = dcount > 0 ? '' : 'none'; }
+  });
+}
+
+/* ══════════════════════════════════════════
+   MENU TROIS POINTS — POST
+══════════════════════════════════════════ */
+function openPostMenu(postId) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post) return;
+  var isOwn = _currentUser && post.ownerEmail && post.ownerEmail === _currentUser.email;
+
+  _closeGenericSheet('post-menu');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'post-menu-bg';
+  bg.onclick = function() { _closeGenericSheet('post-menu'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card'; card.id = 'post-menu-card';
+
+  /* ── Options communes : Sauvegarder, Partager, Télécharger, Traduire ── */
+  var fav         = isFavorite(postId);
+  var translateBtn = document.getElementById('translate-btn-' + postId);
+  var isTranslated = translateBtn && translateBtn.dataset.translated === '1';
+  var hasImages    = post.images && post.images.length > 0;
+  var hasText      = post.text && post.text.length > 0;
+
+  var commonItems =
+    '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');toggleFavorite(' + postId + ')">' +
+      '<span class="pmi-ico" style="background:#FFFBEB;color:#D97706"><i class="' + (fav ? 'fas' : 'far') + ' fa-bookmark"></i></span>' +
+      '<span class="pmi-label">' + (fav ? 'Retirer des favoris' : 'Sauvegarder') + '</span>' +
+    '</button>' +
+    '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');sharePost(' + postId + ')">' +
+      '<span class="pmi-ico" style="background:#F0FDF4;color:#16A34A"><i class="fas fa-share-nodes"></i></span>' +
+      '<span class="pmi-label">Partager</span>' +
+    '</button>' +
+    (hasImages
+      ? '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');downloadAllPhotos(' + postId + ')">' +
+          '<span class="pmi-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-download"></i></span>' +
+          '<span class="pmi-label">Télécharger les photos (' + post.images.length + ')</span>' +
+        '</button>'
+      : '') +
+    (hasText
+      ? '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');translatePost(' + postId + ')">' +
+          '<span class="pmi-ico" style="background:#F5F3FF;color:#7C3AED"><i class="fas fa-language"></i></span>' +
+          '<span class="pmi-label">' + (isTranslated ? 'Voir l\'original' : 'Traduire') + '</span>' +
+        '</button>'
+      : '');
+
+  var items = '';
+  if (isOwn) {
+    var isPinned   = post.pinned   ? true : false;
+    var isArchived = post.archived ? true : false;
+    items =
+      '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');editPost(' + postId + ')">' +
+        '<span class="pmi-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-pen"></i></span>' +
+        '<span class="pmi-label">Modifier</span>' +
+      '</button>' +
+      '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');pinPost(' + postId + ')">' +
+        '<span class="pmi-ico" style="background:#F5F3FF;color:#7C3AED"><i class="fas fa-thumbtack"></i></span>' +
+        '<span class="pmi-label">' + (isPinned ? 'Désépingler' : 'Épingler') + '</span>' +
+      '</button>' +
+      commonItems +
+      '<div class="pmi-sep"></div>' +
+      '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');archivePost(' + postId + ')">' +
+        '<span class="pmi-ico" style="background:#FFFBEB;color:#D97706"><i class="fas fa-box-archive"></i></span>' +
+        '<span class="pmi-label">' + (isArchived ? 'Désarchiver' : 'Archiver') + '</span>' +
+      '</button>' +
+      '<button class="post-menu-item post-menu-danger" onclick="_closeGenericSheet(\'post-menu\');deletePost(' + postId + ')">' +
+        '<span class="pmi-ico" style="background:#FEF2F2;color:#DC2626"><i class="fas fa-trash-can"></i></span>' +
+        '<span class="pmi-label" style="color:#DC2626">Supprimer</span>' +
+      '</button>';
+  } else {
+    items =
+      commonItems +
+      '<div class="pmi-sep"></div>' +
+      '<button class="post-menu-item post-menu-warn" onclick="_closeGenericSheet(\'post-menu\');reportPost(' + postId + ')">' +
+        '<span class="pmi-ico" style="background:#FFF7ED;color:#EA580C"><i class="fas fa-flag"></i></span>' +
+        '<span class="pmi-label" style="color:#EA580C">Signaler</span>' +
+      '</button>' +
+      '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');hidePost(' + postId + ')">' +
+        '<span class="pmi-ico" style="background:#F9FAFB;color:#6B7280"><i class="fas fa-eye-slash"></i></span>' +
+        '<span class="pmi-label">Masquer</span>' +
+      '</button>' +
+      '<button class="post-menu-item post-menu-danger" onclick="_closeGenericSheet(\'post-menu\');blockUser(' + postId + ')">' +
+        '<span class="pmi-ico" style="background:#FEF2F2;color:#DC2626"><i class="fas fa-ban"></i></span>' +
+        '<span class="pmi-label" style="color:#DC2626">Bloquer</span>' +
+      '</button>';
+  }
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="post-menu-list">' + items + '</div>' +
+    '<div style="padding:8px 16px 24px">' +
+      '<button class="btn-outline full" onclick="_closeGenericSheet(\'post-menu\')">Annuler</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* ── Modifier un post ── */
+function editPost(postId) {
+  var post = DEMO_POSTS.find(function(p) { return p.id === postId; }) ||
+             PENDING_POSTS.find(function(p) { return p.id === postId; });
+  if (!post) return;
+
+  _closeGenericSheet('edit-post');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg change-pwd-modal'; bg.id = 'edit-post-bg';
+  bg.onclick = function(e) { if (e.target === bg) _closeGenericSheet('edit-post'); };
+
+  var card = document.createElement('div');
+  card.className = 'change-pwd-card'; card.id = 'edit-post-card';
+  card.innerHTML =
+    '<p class="change-pwd-title">Modifier la publication</p>' +
+    '<textarea id="edit-post-text" style="width:100%;padding:12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:14px;resize:vertical;min-height:100px;box-sizing:border-box;background:#F9FAFB;outline:none">' +
+      escHtml(post.text) +
+    '</textarea>' +
+    '<div class="change-pwd-btns">' +
+      '<button class="change-pwd-cancel" onclick="_closeGenericSheet(\'edit-post\')">Annuler</button>' +
+      '<button class="change-pwd-save" onclick="_saveEditPost(' + postId + ')">Enregistrer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+
+  setTimeout(function() {
+    var ta = document.getElementById('edit-post-text');
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }, 100);
+}
+
+function _saveEditPost(postId) {
+  var ta = document.getElementById('edit-post-text');
+  if (!ta) return;
+  var newText = ta.value.trim();
+  if (!newText) { showToast('Le texte ne peut pas être vide', 'err'); return; }
+
+  var post = DEMO_POSTS.find(function(p) { return p.id === postId; }) ||
+             PENDING_POSTS.find(function(p) { return p.id === postId; });
+  if (!post) return;
+
+  post.text = newText;
+  /* Persiste si c'est un post de l'utilisateur connecté */
+  if (_currentUser && post.ownerEmail === _currentUser.email) {
+    var stored = JSON.parse(localStorage.getItem(_userPostsKey(_currentUser.email)) || '[]');
+    var si = stored.findIndex(function(p) { return p.id === postId; });
+    if (si !== -1) { stored[si].text = newText; localStorage.setItem(_userPostsKey(_currentUser.email), JSON.stringify(stored)); }
+  }
+
+  _closeGenericSheet('edit-post');
+  /* Rafraîchit la carte dans le DOM */
+  var el = document.getElementById('ptxt-' + postId);
+  if (el) el.textContent = newText.length > 200 ? newText.slice(0, 200) + '…' : newText;
+  showToast('Publication modifiée ✓', 'ok');
+}
+
+/* ── Épingler un post ── */
+function pinPost(postId) {
+  var post = DEMO_POSTS.find(function(p) { return p.id === postId; }) ||
+             PENDING_POSTS.find(function(p) { return p.id === postId; });
+  if (!post) return;
+  post.pinned = !post.pinned;
+  showToast(post.pinned ? 'Publication épinglée 📌' : 'Publication désépinglée', 'ok');
+}
+
+/* ── Archiver un post ── */
+function archivePost(postId) {
+  var post = DEMO_POSTS.find(function(p) { return p.id === postId; }) ||
+             PENDING_POSTS.find(function(p) { return p.id === postId; });
+  if (!post) return;
+  post.archived = !post.archived;
+  if (post.archived) {
+    var card = document.getElementById('post-' + postId);
+    if (card) card.remove();
+    showToast('Publication archivée 📦', 'ok');
+  } else {
+    showToast('Publication restaurée ✓', 'ok');
+    renderFeed(getAllPosts().filter(function(p) { return !p.archived; }));
+  }
+}
+
+/* ── Supprimer un post ── */
+function deletePost(postId) {
+  if (!confirm('Supprimer cette publication ?')) return;
+
+  /* Supprime les blobs vidéo + document dans IndexedDB si présents */
+  var post = DEMO_POSTS.find(function(p) { return p.id === postId; }) ||
+             PENDING_POSTS.find(function(p) { return p.id === postId; });
+  if (post && post.video && post.video.idbId) { _gwDeleteVideoBlob(post.video.idbId); }
+  if (post && post.doc   && post.doc.idbId)   { _gwDeleteDocBlob(post.doc.idbId); }
+
+  var idx = DEMO_POSTS.findIndex(function(p) { return p.id === postId; });
+  if (idx !== -1) DEMO_POSTS.splice(idx, 1);
+  var pidx = PENDING_POSTS.findIndex(function(p) { return p.id === postId; });
+  if (pidx !== -1) PENDING_POSTS.splice(pidx, 1);
+
+  /* Retire du localStorage de l'utilisateur */
+  if (_currentUser) {
+    var stored = JSON.parse(localStorage.getItem(_userPostsKey(_currentUser.email)) || '[]');
+    stored = stored.filter(function(p) { return p.id !== postId; });
+    localStorage.setItem(_userPostsKey(_currentUser.email), JSON.stringify(stored));
+  }
+
+  var card = document.getElementById('post-' + postId);
+  if (card) card.remove();
+  showToast('Publication supprimée', 'ok');
+}
+
+/* Ouvre le player vidéo depuis une card de post (charge depuis IndexedDB si besoin) */
+/* ── Vues vidéo ── */
+function _getVideoViews(postId) {
+  return parseInt(localStorage.getItem('gw_vid_views_' + postId) || '0', 10);
+}
+function _incrementVideoViews(postId) {
+  var v = _getVideoViews(postId) + 1;
+  localStorage.setItem('gw_vid_views_' + postId, v);
+  /* Met à jour le badge dans le DOM si visible */
+  var badge = document.getElementById('vid-views-' + postId);
+  if (badge) badge.textContent = _fmtViews(v);
+  return v;
+}
+function _fmtViews(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1).replace('.0', '') + 'M';
+  if (n >= 1000)    return (n / 1000).toFixed(1).replace('.0', '') + 'K';
+  return String(n);
+}
+
+/* ══════════════════════════════════════════
+   MILESTONES — Félicitations automatiques
+══════════════════════════════════════════ */
+var _MILE_VIEWS    = [100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000];
+var _MILE_LIKES    = [50, 100, 500, 1000, 5000, 10000];
+var _MILE_COMMENTS = [10, 50, 100, 500, 1000, 5000];
+var _MILE_FOLLOWS  = [100, 500, 1000, 2000, 3000, 5000, 10000, 50000, 100000];
+
+function _mileDone(key)  { return localStorage.getItem('gw_mile_' + key) === '1'; }
+function _mileMark(key)  { localStorage.setItem('gw_mile_' + key, '1'); }
+function _mileLabel(n) {
+  if (n >= 1000000) return (n / 1000000) + 'M';
+  if (n >= 1000)    return (n / 1000) + 'K';
+  return String(n);
+}
+
+/* Toast spécial félicitations (affiché immédiatement si c'est le compte connecté) */
+function _showMilestoneToast(emoji, msg) {
+  var el = document.createElement('div');
+  el.className = 'milestone-toast';
+  el.innerHTML =
+    '<div class="mile-t-inner">' +
+      '<span class="mile-t-emoji">' + emoji + '</span>' +
+      '<div class="mile-t-text">' +
+        '<span class="mile-t-title">Félicitations !</span>' +
+        '<span class="mile-t-msg">' + escHtml(msg) + '</span>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(el);
+  requestAnimationFrame(function() { el.classList.add('visible'); });
+  setTimeout(function() {
+    el.classList.remove('visible');
+    setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 500);
+  }, 4500);
+}
+
+/* ── Vues vidéo ── */
+function _checkViewMilestone(postId, ownerEmail, count) {
+  if (!ownerEmail) return;
+  _MILE_VIEWS.forEach(function(m) {
+    var mkey = 'views_' + postId + '_' + m;
+    if (count >= m && !_mileDone(mkey)) {
+      _mileMark(mkey);
+      var msg = 'Votre vidéo a atteint ' + _mileLabel(m) + ' vues !';
+      pushNotif(ownerEmail, {
+        id: genNotifId(), type: 'milestone', fromUser: null,
+        postId: postId, postPreview: null, msg: '🎉 ' + msg,
+        at: Date.now(), time: 'À l\'instant', unread: true
+      });
+      if (_currentUser && _currentUser.email === ownerEmail) _showMilestoneToast('👁️', msg);
+    }
+  });
+}
+
+/* ── Likes ── */
+function _checkLikeMilestone(postId, ownerEmail, count) {
+  if (!ownerEmail) return;
+  _MILE_LIKES.forEach(function(m) {
+    var mkey = 'likes_' + postId + '_' + m;
+    if (count >= m && !_mileDone(mkey)) {
+      _mileMark(mkey);
+      var msg = 'Votre publication a atteint ' + _mileLabel(m) + ' likes !';
+      pushNotif(ownerEmail, {
+        id: genNotifId(), type: 'milestone', fromUser: null,
+        postId: postId, postPreview: null, msg: '🎉 ' + msg,
+        at: Date.now(), time: 'À l\'instant', unread: true
+      });
+      if (_currentUser && _currentUser.email === ownerEmail) _showMilestoneToast('❤️', msg);
+    }
+  });
+}
+
+/* ── Commentaires ── */
+function _checkCommentMilestone(postId, ownerEmail, count) {
+  if (!ownerEmail) return;
+  _MILE_COMMENTS.forEach(function(m) {
+    var mkey = 'comments_' + postId + '_' + m;
+    if (count >= m && !_mileDone(mkey)) {
+      _mileMark(mkey);
+      var msg = 'Votre publication a atteint ' + _mileLabel(m) + ' commentaires !';
+      pushNotif(ownerEmail, {
+        id: genNotifId(), type: 'milestone', fromUser: null,
+        postId: postId, postPreview: null, msg: '🎉 ' + msg,
+        at: Date.now(), time: 'À l\'instant', unread: true
+      });
+      if (_currentUser && _currentUser.email === ownerEmail) _showMilestoneToast('💬', msg);
+    }
+  });
+}
+
+/* ── Abonnés ── */
+function _checkFollowerMilestone(profileEmail, profileKey, count) {
+  if (!profileEmail) return;
+  _MILE_FOLLOWS.forEach(function(m) {
+    var mkey = 'follows_' + profileKey + '_' + m;
+    if (count >= m && !_mileDone(mkey)) {
+      _mileMark(mkey);
+      var msg = 'Vous avez atteint ' + _mileLabel(m) + ' abonnés !';
+      pushNotif(profileEmail, {
+        id: genNotifId(), type: 'milestone', fromUser: null,
+        postId: null, postPreview: null, msg: '🎉 ' + msg,
+        at: Date.now(), time: 'À l\'instant', unread: true
+      });
+      if (_currentUser && _currentUser.email === profileEmail) _showMilestoneToast('🏆', msg);
+    }
+  });
+}
+
+/* ── Ouvre la vidéo officielle en plein écran au clic ── */
+function _openOfficialVideo(postId) {
+  var list = _offGetPosts();
+  var post = list.find(function(x) { return String(x.id) === String(postId); });
+  if (!post || !post.video) return;
+  /* Comptage vue */
+  _incrementVideoViews('off_' + postId);
+  var dur = (typeof post.video === 'object' && post.video.duration) ? post.video.duration : 0;
+  /* URL déjà en mémoire ? */
+  var url = typeof post.video === 'string' ? post.video : (post.video.url || '');
+  if (url) { openVideoPlayer(url, dur); return; }
+  /* Sinon charge depuis IndexedDB */
+  var idbId = typeof post.video === 'object' ? post.video.idbId : null;
+  if (idbId) {
+    _gwLoadVideoBlob(idbId, function(blob) {
+      if (!blob) { showToast('Vidéo introuvable', 'err'); return; }
+      var bUrl = URL.createObjectURL(blob);
+      post.video.url = bUrl;
+      openVideoPlayer(bUrl, dur);
+    });
+  }
+}
+
+function _openVideoFromPost(postId, duration) {
+  var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(postId); });
+  if (!post || !post.video) return;
+  /* Comptage de la vue + milestone */
+  var _newViews = _incrementVideoViews(postId);
+  _checkViewMilestone(postId, post.ownerEmail || null, _newViews);
+  /* Si on a déjà l'URL en mémoire → ouvre directement */
+  if (post.video.url) {
+    openVideoPlayer(post.video.url, duration);
+    return;
+  }
+  /* Sinon charge depuis IndexedDB */
+  if (post.video.idbId) {
+    _gwLoadVideoBlob(post.video.idbId, function(blob) {
+      if (!blob) { showToast('Vidéo introuvable', 'err'); return; }
+      var bUrl = URL.createObjectURL(blob);
+      post.video.url = bUrl;
+      openVideoPlayer(bUrl, duration);
+    });
+  }
+}
+
+/* ── Signaler un post ── */
+function reportPost(postId) {
+  _closeGenericSheet('report-post');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'report-post-bg';
+  bg.onclick = function() { _closeGenericSheet('report-post'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card'; card.id = 'report-post-card';
+
+  var reasons = ['Contenu inapproprié', 'Spam ou publicité', 'Harcèlement ou intimidation', 'Fausses informations', 'Autre raison'];
+  var items = reasons.map(function(r) {
+    return '<button class="post-menu-item" onclick="_sendReport(' + postId + ',\'' + r.replace(/'/g,"\\'") + '\')">' +
+      '<span class="pmi-ico" style="background:#FFF7ED;color:#EA580C"><i class="fas fa-flag"></i></span>' +
+      '<span class="pmi-label">' + escHtml(r) + '</span>' +
+    '</button>';
+  }).join('');
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="cam-sheet-title">Pourquoi signalez-vous ce contenu ?</p>' +
+    '<div class="post-menu-list">' + items + '</div>' +
+    '<div style="padding:8px 16px 24px">' +
+      '<button class="btn-outline full" onclick="_closeGenericSheet(\'report-post\')">Annuler</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _sendReport(postId, reason) {
+  _closeGenericSheet('report-post');
+  if (!_currentUser) return;
+  /* Retrouve le post pour identifier l'auteur */
+  var post = getAllPosts().find(function(p) { return p.id == postId; });
+  var target = post ? (post.ownerEmail || post.author || '?') : String(postId);
+  /* Sauvegarde dans le tableau de signalements du reporter */
+  try {
+    var key  = 'gw_reports_' + _currentUser.email;
+    var reps = JSON.parse(localStorage.getItem(key) || '[]');
+    reps.push({
+      id:     'rpt_' + Date.now(),
+      date:   new Date().toISOString(),
+      target: target,
+      reason: reason,
+      type:   'post'
+    });
+    localStorage.setItem(key, JSON.stringify(reps));
+    _gwFbSet('reports/' + _gwFbKey(_currentUser.email), reps);
+  } catch(e) {}
+  showToast('Signalement envoyé. Merci !', 'ok');
+}
+
+/* ── Masquer un post ── */
+function hidePost(postId) {
+  var key     = 'gw_hidden_posts';
+  var hidden  = JSON.parse(localStorage.getItem(key) || '[]');
+  if (hidden.indexOf(postId) === -1) hidden.push(postId);
+  localStorage.setItem(key, JSON.stringify(hidden));
+
+  var card = document.getElementById('post-' + postId);
+  if (card) card.remove();
+  showToast('Publication masquée', 'ok');
+}
+
+/* ── Bloquer un utilisateur ── */
+function blockUser(postId) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post) return;
+
+  var blockedEmail = post.ownerEmail;
+  var blockedName  = post.author;
+
+  if (!confirm('Bloquer ' + blockedName + ' ?\n\nSes publications ne seront plus visibles.')) return;
+
+  var key     = 'gw_blocked_' + (_currentUser ? _currentUser.email : '');
+  var blocked = JSON.parse(localStorage.getItem(key) || '[]');
+  if (blocked.indexOf(blockedEmail || blockedName) === -1) {
+    blocked.push(blockedEmail || blockedName);
+  }
+  localStorage.setItem(key, JSON.stringify(blocked));
+
+  /* Retire toutes les publications de cet utilisateur du feed */
+  document.querySelectorAll('.post-card').forEach(function(card) {
+    var id = parseInt(card.id.replace('post-', ''), 10);
+    var p  = getAllPosts().find(function(x) { return x.id === id; });
+    if (p && (p.ownerEmail === blockedEmail || p.author === blockedName)) card.remove();
+  });
+
+  showToast(escHtml(blockedName) + ' a été bloqué', 'ok');
+}
+
+/* ══════════════════════════════════════════
+   COMMENTAIRES — STOCKAGE PERSISTANT
+══════════════════════════════════════════ */
+
+function loadPostLikers(postId) {
+  return JSON.parse(localStorage.getItem('gw_likers_' + postId) || '[]');
+}
+function savePostLikers(postId, likers) {
+  localStorage.setItem('gw_likers_' + postId, JSON.stringify(likers));
+}
+
+function loadUserComments(postId) {
+  return JSON.parse(localStorage.getItem('gw_comments_' + postId) || '[]');
+}
+function saveUserComments(postId, comments) {
+  localStorage.setItem('gw_comments_' + postId, JSON.stringify(comments));
+}
+
+/* Récupère réactions d'un commentaire (👍/👎) */
+function getCommentReact(cid) {
+  return JSON.parse(localStorage.getItem('gw_creact_' + cid) || '{"likes":[],"dislikes":[]}');
+}
+function saveCommentReact(cid, react) {
+  localStorage.setItem('gw_creact_' + cid, JSON.stringify(react));
+}
+
+/* Tous les commentaires d'un post = demo (fixes) + utilisateurs (localStorage) */
+function getAllComments(postId) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  var demo = post ? post.comments.map(function(c, i) {
+    return {
+      id: 'demo_' + postId + '_' + i,
+      postId: postId,
+      parentId: null,
+      authorEmail: 'demo@geniwork.com',
+      authorName: c.author,
+      text: c.text,
+      timeDisplay: 'Récent',
+      isDemo: true
+    };
+  }) : [];
+  return demo.concat(loadUserComments(postId));
+}
+
+/* ── OUVRIR / FERMER ── */
+function openComments(postId) {
+  _currentPostId = postId;
+  cancelReply();
+  document.getElementById('comment-input').value = '';
+  document.getElementById('comments-overlay').classList.remove('hidden');
+  document.getElementById('comments-panel').classList.remove('hidden');
+  renderCommentsList(postId);
+  setTimeout(function() {
+    document.getElementById('comment-input').focus();
+  }, 350);
+}
+
+function closeComments() {
+  document.getElementById('comments-overlay').classList.add('hidden');
+  document.getElementById('comments-panel').classList.add('hidden');
+  _currentPostId = null;
+  cancelReply();
+}
+
+/* ── RENDU DE LA LISTE ── */
+function renderCommentsList(postId) {
+  var list = document.getElementById('comments-list');
+  list.innerHTML = '';
+
+  var all      = getAllComments(postId);
+  var topLevel = all.filter(function(c) { return !c.parentId; });
+
+  /* Compteur dans l'en-tête */
+  var countEl = document.getElementById('comments-count');
+  if (countEl) countEl.textContent = all.length > 0 ? '(' + all.length + ')' : '';
+
+  if (topLevel.length === 0) {
+    list.innerHTML = '<p style="text-align:center;color:#9CA3AF;padding:30px 0;font-size:13px">' +
+      'Aucun commentaire. Soyez le premier !</p>';
+    return;
+  }
+
+  topLevel.forEach(function(c) {
+    list.appendChild(buildCommentEl(c, false));
+    /* Réponses imbriquées */
+    all.filter(function(r) { return r.parentId === c.id; })
+      .forEach(function(r) { list.appendChild(buildCommentEl(r, true)); });
+  });
+
+  list.scrollTop = list.scrollHeight;
+}
+
+function buildCommentEl(c, isReply) {
+  var isOwn   = _currentUser && c.authorEmail === _currentUser.email && !c.isDemo;
+  var react   = getCommentReact(c.id);
+  var email   = _currentUser ? _currentUser.email : '';
+  var liked   = react.likes.indexOf(email) !== -1;
+  var disliked= react.dislikes.indexOf(email) !== -1;
+
+  var el = document.createElement('div');
+  el.className = 'comment-item' + (isReply ? ' comment-reply' : '');
+  el.id = 'comment-' + c.id;
+
+  var ownBtns = isOwn
+    ? '<div class="comment-own-actions">' +
+        '<button onclick="editComment(\'' + c.id + '\',' + c.postId + ')" title="Modifier">' +
+          '<i class="fas fa-pen"></i>' +
+        '</button>' +
+        '<button onclick="deleteComment(\'' + c.id + '\',' + c.postId + ')" title="Supprimer">' +
+          '<i class="fas fa-trash"></i>' +
+        '</button>' +
+      '</div>'
+    : '';
+
+  var replyBtn = !isReply
+    ? '<button class="c-act-btn c-reply-btn" onclick="openReply(\'' + c.id + '\')">' +
+        '<i class="fas fa-reply"></i> Répondre' +
+      '</button>'
+    : '';
+
+  var displayCommentName = getDisplayName(c.authorEmail || null, c.authorName);
+  el.innerHTML =
+    getAvatarHtml(c.authorEmail || null, displayCommentName, 'sm') +
+    '<div class="comment-content">' +
+      '<div class="comment-bubble">' +
+        '<div class="comment-header">' +
+          '<span class="comment-author">' + escHtml(displayCommentName) + '</span>' +
+          '<span class="comment-time">' + escHtml(c.timeDisplay) + '</span>' +
+          (c.edited ? '<span class="edited-label">(modifié)</span>' : '') +
+          ownBtns +
+        '</div>' +
+        '<div class="comment-text" id="ctxt-' + c.id + '">' + escHtml(c.text) + '</div>' +
+      '</div>' +
+      '<div class="comment-actions">' +
+        replyBtn +
+        '<button id="clike-btn-' + c.id + '" class="c-act-btn' + (liked ? ' c-liked' : '') + '" ' +
+          'onclick="likeComment(\'' + c.id + '\',' + c.postId + ',false)">' +
+          '<i class="fas fa-thumbs-up"></i>' +
+          '<span id="clikes-' + c.id + '">' + (react.likes.length || '') + '</span>' +
+        '</button>' +
+        '<button id="cdislike-btn-' + c.id + '" class="c-act-btn' + (disliked ? ' c-disliked' : '') + '" ' +
+          'onclick="likeComment(\'' + c.id + '\',' + c.postId + ',true)">' +
+          '<i class="fas fa-thumbs-down"></i>' +
+          '<span id="cdislikes-' + c.id + '">' + (react.dislikes.length || '') + '</span>' +
+        '</button>' +
+      '</div>' +
+    '</div>';
+
+  return el;
+}
+
+/* ── SOUMETTRE UN COMMENTAIRE / RÉPONSE ── */
+function submitComment() {
+  var input    = document.getElementById('comment-input');
+  var text     = input.value.trim();
+  var parentId = document.getElementById('reply-parent-id').value || null;
+  if (!text || !_currentPostId || !_currentUser) return;
+
+  var newC = {
+    id:          'c_' + genNotifId(),
+    postId:      _currentPostId,
+    parentId:    parentId,
+    authorEmail: _currentUser.email,
+    authorName:  _currentUser.nom,
+    text:        text,
+    timeDisplay: 'À l\'instant',
+    edited:      false,
+    isDemo:      false
+  };
+
+  var comments = loadUserComments(_currentPostId);
+  comments.push(newC);
+  saveUserComments(_currentPostId, comments);
+
+  input.value = '';
+  cancelReply();
+  renderCommentsList(_currentPostId);
+  updatePostCommentCount(_currentPostId);
+
+  /* Milestone commentaires */
+  var post = getAllPosts().find(function(p) { return p.id === _currentPostId; });
+  if (post) {
+    var _totalComments = getAllComments(_currentPostId).length;
+    _checkCommentMilestone(_currentPostId, post.ownerEmail || null, _totalComments);
+  }
+
+  /* Notification au propriétaire */
+  if (!post) post = getAllPosts().find(function(p) { return p.id === _currentPostId; });
+  if (post && post.ownerEmail && post.ownerEmail !== _currentUser.email) {
+    pushNotif(post.ownerEmail, {
+      id:          genNotifId(),
+      type:        'comment',
+      fromUser:    { nom: _currentUser.nom, email: _currentUser.email, role: 'Membre Geniwork' },
+      postId:      post.id,
+      postPreview: '"' + text.slice(0, 55) + (text.length > 55 ? '…' : '') + '"',
+      msg:         parentId ? 'a répondu à un commentaire' : 'a commenté votre publication',
+      at:          Date.now(), time: 'À l\'instant',
+      unread:      true
+    });
+  }
+}
+
+/* ── MODIFIER UN COMMENTAIRE ── */
+function editComment(cid, postId) {
+  var textEl = document.getElementById('ctxt-' + cid);
+  if (!textEl) return;
+  var current = textEl.textContent;
+  textEl.innerHTML =
+    '<textarea class="comment-edit-area" id="cedit-' + cid + '">' + escHtml(current) + '</textarea>' +
+    '<div class="comment-edit-btns">' +
+      '<button class="c-cancel-btn" onclick="cancelEditComment(\'' + cid + '\',\'' +
+        current.replace(/'/g, '\\\'') + '\')">Annuler</button>' +
+      '<button class="c-save-btn" onclick="saveEditComment(\'' + cid + '\',' + postId + ')">Sauvegarder</button>' +
+    '</div>';
+  var ta = document.getElementById('cedit-' + cid);
+  if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+}
+
+function cancelEditComment(cid, original) {
+  var textEl = document.getElementById('ctxt-' + cid);
+  if (textEl) textEl.innerHTML = escHtml(original);
+}
+
+function saveEditComment(cid, postId) {
+  var ta = document.getElementById('cedit-' + cid);
+  if (!ta) return;
+  var newText = ta.value.trim();
+  if (!newText) return;
+
+  var comments = loadUserComments(postId);
+  var c = comments.find(function(x) { return x.id === cid; });
+  if (c) { c.text = newText; c.edited = true; saveUserComments(postId, comments); }
+
+  var textEl = document.getElementById('ctxt-' + cid);
+  if (textEl) textEl.innerHTML = escHtml(newText);
+
+  /* Ajoute label "modifié" si pas déjà là */
+  var header = document.querySelector('#comment-' + cid + ' .comment-header');
+  if (header && !header.querySelector('.edited-label')) {
+    var lbl = document.createElement('span');
+    lbl.className = 'edited-label';
+    lbl.textContent = '(modifié)';
+    header.insertBefore(lbl, header.querySelector('.comment-own-actions'));
+  }
+  showToast('Commentaire modifié ✓', 'ok');
+}
+
+/* ── SUPPRIMER UN COMMENTAIRE ── */
+function deleteComment(cid, postId) {
+  var comments = loadUserComments(postId);
+  /* Supprime le commentaire et ses réponses */
+  comments = comments.filter(function(x) { return x.id !== cid && x.parentId !== cid; });
+  saveUserComments(postId, comments);
+
+  /* Supprime aussi les éléments DOM (commentaire + réponses) */
+  var el = document.getElementById('comment-' + cid);
+  if (el) el.remove();
+  /* Réponses dont parentId = cid */
+  document.querySelectorAll('[id^="comment-"]').forEach(function(node) {
+    /* On re-rend proprement */
+  });
+  renderCommentsList(postId);
+  updatePostCommentCount(postId);
+  showToast('Commentaire supprimé', 'ok');
+}
+
+/* ── LIKE / DISLIKE D'UN COMMENTAIRE ── */
+function likeComment(cid, postId, isDislike) {
+  if (!_currentUser) { showToast('Connectez-vous pour voter', 'err'); return; }
+  var email = _currentUser.email;
+  var react = getCommentReact(cid);
+  var arr     = isDislike ? react.dislikes : react.likes;
+  var opposite= isDislike ? react.likes    : react.dislikes;
+
+  var oppIdx = opposite.indexOf(email);
+  if (oppIdx !== -1) opposite.splice(oppIdx, 1);
+
+  var idx = arr.indexOf(email);
+  if (idx !== -1) arr.splice(idx, 1);
+  else arr.push(email);
+
+  saveCommentReact(cid, react);
+
+  var liked    = react.likes.indexOf(email) !== -1;
+  var disliked = react.dislikes.indexOf(email) !== -1;
+
+  var lBtn = document.getElementById('clike-btn-' + cid);
+  var dBtn = document.getElementById('cdislike-btn-' + cid);
+  var lSpan= document.getElementById('clikes-' + cid);
+  var dSpan= document.getElementById('cdislikes-' + cid);
+
+  if (lBtn)  lBtn.className  = 'c-act-btn' + (liked    ? ' c-liked'    : '');
+  if (dBtn)  dBtn.className  = 'c-act-btn' + (disliked ? ' c-disliked' : '');
+  if (lSpan) lSpan.textContent  = react.likes.length    || '';
+  if (dSpan) dSpan.textContent  = react.dislikes.length || '';
+}
+
+/* ── RÉPONSES ── */
+function openReply(cid) {
+  var authorEl = document.querySelector('#comment-' + cid + ' .comment-author');
+  var name = authorEl ? authorEl.textContent : 'ce commentaire';
+  document.getElementById('reply-parent-id').value = cid;
+  document.getElementById('reply-to-name').textContent = name;
+  document.getElementById('reply-indicator').classList.remove('hidden');
+  document.getElementById('comment-input').placeholder = 'Répondre à ' + name + '…';
+  document.getElementById('comment-input').focus();
+}
+
+function cancelReply() {
+  document.getElementById('reply-parent-id').value = '';
+  var ind = document.getElementById('reply-indicator');
+  if (ind) ind.classList.add('hidden');
+  var inp = document.getElementById('comment-input');
+  if (inp) inp.placeholder = 'Écrire un commentaire…';
+}
+
+/* ── COMPTEUR SUR LA CARTE ── */
+function updatePostCommentCount(postId) {
+  var total = getAllComments(postId).length;
+  /* Met à jour toutes les instances de ce post (feed + profil) */
+  document.querySelectorAll('#ccount-' + postId).forEach(function(span) {
+    span.textContent = total > 0 ? total : '';
+  });
+  var countEl = document.getElementById('comments-count');
+  if (countEl && _currentPostId === postId) countEl.textContent = total > 0 ? '(' + total + ')' : '';
+}
+
+/* ══════════════════════════════════════════
+   FAVORIS — POSTS
+══════════════════════════════════════════ */
+function _favsKey() {
+  return _currentUser ? 'gw_favorites_' + _currentUser.email : null;
+}
+function getFavorites() {
+  var k = _favsKey(); if (!k) return [];
+  return JSON.parse(localStorage.getItem(k) || '[]');
+}
+function saveFavorites(list) {
+  var k = _favsKey(); if (!k) return;
+  localStorage.setItem(k, JSON.stringify(list));
+}
+function isFavorite(postId) {
+  return getFavorites().some(function(f) { return f.postId === postId; });
+}
+function toggleFavorite(postId) {
+  if (!_currentUser) { showToast('Connectez-vous pour sauvegarder', 'err'); return; }
+  var list = getFavorites();
+  var idx  = -1;
+  for (var i = 0; i < list.length; i++) { if (list[i].postId === postId) { idx = i; break; } }
+  if (idx !== -1) {
+    list.splice(idx, 1);
+    saveFavorites(list);
+    _setFavBtn(postId, false);
+    showToast('Retiré des favoris', '');
+  } else {
+    list.unshift({ postId: postId, savedAt: Date.now() });
+    saveFavorites(list);
+    _setFavBtn(postId, true);
+    showToast('Ajouté aux favoris ✓', 'ok');
+  }
+}
+function _setFavBtn(postId, active) {
+  document.querySelectorAll('#fav-btn-' + postId).forEach(function(btn) {
+    btn.classList.toggle('favorited', active);
+    var ico = btn.querySelector('i');
+    if (ico) { ico.className = active ? 'fas fa-bookmark' : 'far fa-bookmark'; }
+  });
+}
+
+/* ══════════════════════════════════════════
+   FAVORIS — SERVICES
+══════════════════════════════════════════ */
+function _savedSvcsKey() {
+  return _currentUser ? 'gw_saved_svcs_' + _currentUser.email : null;
+}
+function getSavedSvcs() {
+  var k = _savedSvcsKey(); if (!k) return [];
+  return JSON.parse(localStorage.getItem(k) || '[]');
+}
+function _saveSavedSvcs(list) {
+  var k = _savedSvcsKey(); if (!k) return;
+  localStorage.setItem(k, JSON.stringify(list));
+}
+function isSvcSaved(svcId, ownerEmail) {
+  return getSavedSvcs().some(function(s) { return s.svcId === svcId && s.ownerEmail === ownerEmail; });
+}
+function toggleSavedSvc(svcId, ownerEmail, btnEl) {
+  if (!_currentUser) { showToast('Connectez-vous pour sauvegarder', 'err'); return; }
+  if (ownerEmail === _currentUser.email) { showToast('C\'est votre propre service', ''); return; }
+  var list = getSavedSvcs();
+  var idx  = -1;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].svcId === svcId && list[i].ownerEmail === ownerEmail) { idx = i; break; }
+  }
+  if (idx !== -1) {
+    list.splice(idx, 1);
+    _saveSavedSvcs(list);
+    if (btnEl) { btnEl.classList.remove('saved'); btnEl.querySelector('i').className = 'far fa-heart'; }
+    showToast('Retiré des favoris', '');
+  } else {
+    list.unshift({ svcId: svcId, ownerEmail: ownerEmail, savedAt: Date.now() });
+    _saveSavedSvcs(list);
+    if (btnEl) { btnEl.classList.add('saved'); btnEl.querySelector('i').className = 'fas fa-heart'; }
+    showToast('Service ajouté aux favoris ✓', 'ok');
+  }
+}
+
+/* ══════════════════════════════════════════
+   ÉCRAN FAVORIS
+══════════════════════════════════════════ */
+function openFavorisPage() {
+  if (!_currentUser) { showToast('Connectez-vous pour voir vos favoris', 'err'); return; }
+  closeSidebar();
+  var screen = document.getElementById('favoris-screen');
+  if (!screen) return;
+  screen.classList.remove('hidden');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+  renderFavorisTab('posts');
+}
+
+function closeFavorisScreen() {
+  var screen = document.getElementById('favoris-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  setTimeout(function() { screen.classList.add('hidden'); openSidebar(); }, 280);
+}
+
+function switchFavorisTab(btn, tab) {
+  document.querySelectorAll('.favoris-tab').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  renderFavorisTab(tab);
+}
+
+function renderFavorisTab(tab) {
+  _renderFavPosts();
+}
+
+function _renderFavPosts() {
+  var container = document.getElementById('favtab-posts');
+  if (!container) return;
+  var favs = getFavorites();
+  if (!favs.length) {
+    container.innerHTML =
+      '<div class="fav-empty">' +
+        '<i class="fas fa-bookmark"></i>' +
+        '<p>Aucune publication sauvegardée</p>' +
+        '<small>Appuyez sur 🔖 sous un post pour l\'enregistrer</small>' +
+      '</div>';
+    return;
+  }
+  var favIds   = favs.map(function(f) { return f.postId; });
+  var allPosts = getAllPosts();
+  var posts    = favIds.map(function(id) {
+    return allPosts.find(function(p) { return p.id === id; });
+  }).filter(Boolean);
+  if (!posts.length) {
+    container.innerHTML =
+      '<div class="fav-empty"><i class="fas fa-bookmark"></i><p>Aucune publication trouvée</p></div>';
+    return;
+  }
+  /* buildPostCard retourne un élément DOM → on utilise outerHTML */
+  container.innerHTML = '';
+  var wrap = document.createElement('div');
+  wrap.id = 'fav-posts-list';
+  posts.forEach(function(p) { wrap.appendChild(buildPostCard(p)); });
+  container.appendChild(wrap);
+}
+
+function _renderFavServices() {
+  var container = document.getElementById('favtab-services');
+  if (!container) return;
+  var saved = getSavedSvcs();
+  if (!saved.length) {
+    container.innerHTML =
+      '<div class="fav-empty">' +
+        '<i class="fas fa-heart"></i>' +
+        '<p>Aucun service sauvegardé</p>' +
+        '<small>Appuyez sur ❤️ sur un service pour l\'enregistrer</small>' +
+      '</div>';
+    return;
+  }
+  var cards = saved.map(function(s) {
+    var list = loadUserServices(s.ownerEmail);
+    var svc  = list.find(function(sv) { return sv.id === s.svcId; });
+    if (!svc) return '';
+    var profile  = loadUserProfile(s.ownerEmail) || {};
+    var name     = profile.nom || s.ownerEmail;
+    var catLabel = (_SVC_CATS && _SVC_CATS[svc.category]) || svc.category;
+    var priceStr = _formatSvcPrice(svc);
+    var photo    = (svc.photos && svc.photos[0]) || null;
+    var mediaHtml = photo
+      ? '<img src="' + photo + '" class="fav-svc-img" alt="">'
+      : '<div class="fav-svc-img-placeholder mk-svc-cat-' + svc.category + '">' +
+          '<i class="fas fa-briefcase"></i></div>';
+    return '<div class="fav-svc-card">' +
+      mediaHtml +
+      '<div class="fav-svc-body">' +
+        '<div class="fav-svc-toprow">' +
+          '<span class="profil-svc-cat-badge">' + escHtml(catLabel) + '</span>' +
+          '<button class="fav-svc-remove" onclick="toggleSavedSvc(' + s.svcId + ',\'' +
+            s.ownerEmail.replace(/'/g,"\\'") + '\',this);_renderFavServices()" ' +
+            'title="Retirer des favoris"><i class="fas fa-heart"></i></button>' +
+        '</div>' +
+        '<p class="fav-svc-title">' + escHtml(svc.title) + '</p>' +
+        '<div class="fav-svc-seller">' +
+          getAvatarHtml(s.ownerEmail, name, 'xs') +
+          '<span>' + escHtml(name) + '</span>' +
+        '</div>' +
+        '<div class="fav-svc-footer">' +
+          '<span class="profil-svc-price">' + escHtml(priceStr) + '</span>' +
+          '<button class="fav-svc-contact-btn" ' +
+            'onclick="_contactAboutService(' + s.svcId + ',\'' + s.ownerEmail.replace(/'/g,"\\'") + '\')">' +
+            '<i class="fas fa-paper-plane"></i> Contacter' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).filter(Boolean).join('');
+  container.innerHTML = cards ||
+    '<div class="fav-empty"><i class="fas fa-heart"></i><p>Aucun service trouvé</p></div>';
+}
+
+/* ══════════════════════════════════════════
+   PARTAGE
+══════════════════════════════════════════ */
+function sharePost(postId) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  var text = post ? post.author + ' sur Geniwork : ' + post.text.slice(0,80) + '…' : 'Geniwork';
+
+  if (navigator.share) {
+    navigator.share({ title: 'Geniwork', text: text, url: 'https://geniwork.com' })
+      .then(function() { notifyShare(post); })
+      .catch(function() {});
+  } else {
+    /* Fallback : copier le lien */
+    var dummy = document.createElement('textarea');
+    dummy.value = 'https://geniwork.com/post/' + postId;
+    document.body.appendChild(dummy);
+    dummy.select();
+    document.execCommand('copy');
+    document.body.removeChild(dummy);
+    showToast('Lien copié ✓', 'ok');
+    notifyShare(post);
+  }
+}
+
+function notifyShare(post) {
+  if (!post || !post.ownerEmail || !_currentUser) return;
+  if (post.ownerEmail === _currentUser.email) return;
+  pushNotif(post.ownerEmail, {
+    id:          genNotifId(),
+    type:        'share',
+    fromUser:    { nom: _currentUser.nom, email: _currentUser.email, role: 'Membre Geniwork' },
+    postId:      post.id,
+    postPreview: post.text.slice(0, 60) + (post.text.length > 60 ? '…' : ''),
+    msg:         'a partagé votre publication',
+    at: Date.now(), time:        'À l\'instant',
+    unread:      true
+  });
+}
+
+/* ══════════════════════════════════════════
+   REPUBLIER (REPOST)
+══════════════════════════════════════════ */
+function _getRepostCount(postId) {
+  return parseInt(localStorage.getItem('gw_rcount_' + postId) || '0', 10);
+}
+function _hasReposted(postId) {
+  if (!_currentUser) return false;
+  return localStorage.getItem('gw_reposted_' + _currentUser.email + '_' + postId) === '1';
+}
+function _markReposted(postId) {
+  if (!_currentUser) return;
+  localStorage.setItem('gw_reposted_' + _currentUser.email + '_' + postId, '1');
+  var c = _getRepostCount(postId) + 1;
+  localStorage.setItem('gw_rcount_' + postId, c);
+  /* Met à jour le badge dans le DOM */
+  document.querySelectorAll('[id="rcount-' + postId + '"]').forEach(function(el) {
+    el.textContent = c > 0 ? c : '';
+  });
+  document.querySelectorAll('[id="repost-btn-' + postId + '"]').forEach(function(btn) {
+    btn.classList.add('reposted');
+  });
+}
+
+/* Ouvre le sheet de choix */
+function openRepostSheet(postId) {
+  if (!_currentUser) { showToast('Connectez-vous pour republier', 'err'); return; }
+  _closeGenericSheet('repost');
+
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post) return;
+
+  var alreadyDone = _hasReposted(postId);
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'repost-bg';
+  bg.onclick = function() { _closeGenericSheet('repost'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card repost-sheet-card'; card.id = 'repost-card';
+
+  card.innerHTML =
+    '<div class="repost-sheet-handle"></div>' +
+    '<div class="repost-sheet-title"><i class="fas fa-retweet"></i> Republier</div>' +
+
+    (alreadyDone
+      ? '<div class="repost-already-done">Vous avez déjà republié cette publication</div>'
+      : '') +
+
+    '<button class="repost-opt-btn' + (alreadyDone ? ' disabled' : '') + '" ' +
+        'onclick="' + (alreadyDone ? '' : 'doRepost(' + postId + ')') + '">' +
+      '<span class="repost-opt-ico" style="background:#ECFDF5;color:#16A34A">' +
+        '<i class="fas fa-retweet"></i>' +
+      '</span>' +
+      '<div class="repost-opt-info">' +
+        '<strong>Republier</strong>' +
+        '<small>Partager instantanément sur votre profil</small>' +
+      '</div>' +
+    '</button>' +
+
+    '<button class="repost-opt-btn" onclick="doQuotePost(' + postId + ')">' +
+      '<span class="repost-opt-ico" style="background:#EFF6FF;color:#2563EB">' +
+        '<i class="fas fa-pen-to-square"></i>' +
+      '</span>' +
+      '<div class="repost-opt-info">' +
+        '<strong>Republier avec commentaire</strong>' +
+        '<small>Ajouter votre avis avant de partager</small>' +
+      '</div>' +
+    '</button>' +
+
+    '<button class="repost-cancel-btn" onclick="_closeGenericSheet(\'repost\')">' +
+      'Annuler' +
+    '</button>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* Republier instantanément */
+function doRepost(postId) {
+  _closeGenericSheet('repost');
+  if (!_currentUser) return;
+  if (_hasReposted(postId)) { showToast('Déjà republié', ''); return; }
+
+  var orig = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!orig) return;
+
+  /* Crée un nouveau post de type repost */
+  var rpId = Date.now();
+  var repostPost = {
+    id:         rpId,
+    author:     _currentUser.nom,
+    role:       'Geniwork Member',
+    verified:   false,
+    at:         Date.now(), time: 'À l\'instant',
+    text:       '',
+    images:     [],
+    video:      null,
+    doc:        null,
+    baseLikes:  0,
+    likers:     [],
+    comments:   [],
+    ownerEmail: _currentUser.email,
+    type:       'repost',
+    repostOf: {
+      id:         orig.id,
+      author:     orig.author,
+      ownerEmail: orig.ownerEmail || null,
+      role:       orig.role     || '',
+      text:       orig.text     || '',
+      images:     orig.images   || [],
+      video:      orig.video    || null,
+      doc:        orig.doc      || null,
+      at:         orig.at       || null,
+      time:       orig.time     || ''
+    }
+  };
+
+  DEMO_POSTS.unshift(repostPost);
+  persistNewPost(repostPost);
+  _markReposted(postId);
+  renderFeed(DEMO_POSTS);
+
+  /* Notif au propriétaire original */
+  if (orig.ownerEmail && orig.ownerEmail !== _currentUser.email) {
+    pushNotif(orig.ownerEmail, {
+      id:          genNotifId(),
+      type:        'share',
+      fromUser:    { nom: _currentUser.nom, email: _currentUser.email, role: 'Membre Geniwork' },
+      postId:      orig.id,
+      postPreview: orig.text.slice(0, 60) + (orig.text.length > 60 ? '…' : ''),
+      msg:         'a republié votre publication',
+      at:          Date.now(), time: 'À l\'instant',
+      unread:      true
+    });
+  }
+  showToast('Publication republiée 🔁', 'ok');
+}
+
+/* Republier avec commentaire → ouvre le compositeur pré-rempli */
+function doQuotePost(postId) {
+  _closeGenericSheet('repost');
+  var orig = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!orig) return;
+
+  /* Mémorise le post original à citer */
+  _quotePostRef = orig;
+
+  showPage('p-publish');
+  var ta = document.getElementById('pub-text');
+  if (ta) {
+    ta.value = '';
+    ta.focus();
+    _renderQuotePreview();
+  }
+}
+
+/* Référence du post à citer dans le compositeur */
+var _quotePostRef = null;
+
+/* Affiche l'aperçu du post cité dans le compositeur */
+function _renderQuotePreview() {
+  var existing = document.getElementById('pub-quote-preview');
+  if (existing) existing.remove();
+  if (!_quotePostRef) return;
+
+  var q = _quotePostRef;
+  var imgHtml = (q.images && q.images[0])
+    ? '<img src="' + q.images[0] + '" class="pub-quote-img" alt=""/>'
+    : (q.video ? '<div class="pub-quote-vid-thumb"><i class="fas fa-film"></i></div>' : '');
+
+  var preview = document.createElement('div');
+  preview.id = 'pub-quote-preview';
+  preview.className = 'pub-quote-preview';
+  preview.innerHTML =
+    '<button class="pub-quote-close" onclick="_clearQuoteRef()"><i class="fas fa-times"></i></button>' +
+    '<div class="pub-quote-author">' +
+      getAvatarHtml(null, q.author, 'xs') +
+      '<strong>' + escHtml(q.author) + '</strong>' +
+    '</div>' +
+    (q.text ? '<p class="pub-quote-text">' + escHtml(q.text.slice(0, 120)) + (q.text.length > 120 ? '…' : '') + '</p>' : '') +
+    imgHtml;
+
+  var ta = document.getElementById('pub-text');
+  if (ta && ta.parentNode) ta.parentNode.insertBefore(preview, ta.nextSibling);
+}
+
+function _clearQuoteRef() {
+  _quotePostRef = null;
+  var el = document.getElementById('pub-quote-preview');
+  if (el) el.remove();
+}
+
+/* ══════════════════════════════════════════
+   VISIONNEUSE PHOTOS
+══════════════════════════════════════════ */
+var _viewerPhotos = [];
+var _viewerIdx    = 0;
+
+function openPhotoViewer(postId, idx) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post || !post.images || post.images.length === 0) return;
+
+  _viewerPhotos = post.images.slice(0, 6);
+  _viewerIdx    = idx || 0;
+
+  /* Crée le viewer la première fois */
+  if (!document.getElementById('photo-viewer')) {
+    var v = document.createElement('div');
+    v.id        = 'photo-viewer';
+    v.className = 'photo-viewer hidden';
+    v.innerHTML =
+      '<div class="pv-counter-top" id="pv-counter"></div>' +
+      '<button class="pv-close" onclick="closePhotoViewer()"><i class="fas fa-times"></i></button>' +
+      '<button class="pv-prev hidden" id="pv-prev" onclick="prevPhoto()"><i class="fas fa-chevron-left"></i></button>' +
+      '<div class="pv-img-wrap"><img id="pv-img" src="" alt=""/></div>' +
+      '<button class="pv-next hidden" id="pv-next" onclick="nextPhoto()"><i class="fas fa-chevron-right"></i></button>' +
+      '<div class="pv-dots" id="pv-dots"></div>' +
+      '<div class="pv-footer">' +
+        '<span class="pv-footer-left">Geniwork</span>' +
+        '<button class="pv-dl" onclick="downloadCurrentPhoto()"><i class="fas fa-download"></i> Télécharger</button>' +
+      '</div>';
+    document.body.appendChild(v);
+
+    /* Swipe tactile */
+    var tx = 0;
+    v.addEventListener('touchstart', function(e) { tx = e.touches[0].clientX; }, { passive: true });
+    v.addEventListener('touchend', function(e) {
+      var dx = e.changedTouches[0].clientX - tx;
+      if (dx < -50) nextPhoto();
+      else if (dx > 50) prevPhoto();
+    }, { passive: true });
+  }
+
+  updateViewer();
+  document.getElementById('photo-viewer').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function updateViewer() {
+  var img     = document.getElementById('pv-img');
+  var counter = document.getElementById('pv-counter');
+  var prev    = document.getElementById('pv-prev');
+  var next    = document.getElementById('pv-next');
+  var dots    = document.getElementById('pv-dots');
+  if (!img) return;
+
+  img.src = _viewerPhotos[_viewerIdx];
+  counter.textContent = (_viewerIdx + 1) + ' / ' + _viewerPhotos.length;
+
+  /* Flèches */
+  prev.classList.toggle('hidden', _viewerPhotos.length <= 1 || _viewerIdx === 0);
+  next.classList.toggle('hidden', _viewerPhotos.length <= 1 || _viewerIdx === _viewerPhotos.length - 1);
+
+  /* Dots */
+  dots.innerHTML = '';
+  if (_viewerPhotos.length > 1) {
+    _viewerPhotos.forEach(function(_, i) {
+      var d = document.createElement('div');
+      d.className = 'pv-dot' + (i === _viewerIdx ? ' active' : '');
+      d.onclick = (function(idx) { return function() { _viewerIdx = idx; updateViewer(); }; })(i);
+      dots.appendChild(d);
+    });
+  }
+}
+
+function prevPhoto() {
+  if (_viewerIdx > 0) { _viewerIdx--; updateViewer(); }
+}
+
+function nextPhoto() {
+  if (_viewerIdx < _viewerPhotos.length - 1) { _viewerIdx++; updateViewer(); }
+}
+
+function closePhotoViewer() {
+  var v = document.getElementById('photo-viewer');
+  if (v) v.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+function downloadCurrentPhoto() {
+  var src = _viewerPhotos[_viewerIdx];
+  downloadImage(src, 'geniwork-photo-' + (_viewerIdx + 1) + '.jpg');
+}
+
+/* ══════════════════════════════════════════
+   TÉLÉCHARGEMENT PHOTOS
+══════════════════════════════════════════ */
+function downloadAllPhotos(postId) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post || !post.images || post.images.length === 0) return;
+
+  var photos = post.images.slice(0, 6);
+  if (photos.length === 1) {
+    downloadImage(photos[0], 'geniwork-photo.jpg');
+    return;
+  }
+
+  showToast('Téléchargement de ' + photos.length + ' photos...', 'ok');
+  photos.forEach(function(src, i) {
+    setTimeout(function() {
+      downloadImage(src, 'geniwork-photo-' + (i + 1) + '.jpg');
+    }, i * 700);
+  });
+}
+
+function downloadImage(src, filename) {
+  if (src.startsWith('data:')) {
+    /* Base64 → lien direct */
+    var a = document.createElement('a');
+    a.href     = src;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } else {
+    /* URL externe → fetch → blob */
+    fetch(src)
+      .then(function(r) { return r.blob(); })
+      .then(function(blob) {
+        var url = URL.createObjectURL(blob);
+        var a   = document.createElement('a');
+        a.href     = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function() { URL.revokeObjectURL(url); }, 1500);
+      })
+      .catch(function() {
+        /* Fallback si CORS bloque */
+        window.open(src, '_blank');
+      });
+  }
+}
+
+/* ══════════════════════════════════════════
+   NOUVEAUX POSTS (pull-to-refresh simulé)
+══════════════════════════════════════════ */
+function loadNewPosts() {
+  var btn = document.getElementById('new-posts-btn');
+  btn.classList.add('hidden');
+
+  /* Ajoute les posts en attente en tête */
+  PENDING_POSTS.forEach(function(p) {
+    DEMO_POSTS.unshift(p);
+  });
+  PENDING_POSTS.length = 0;
+
+  renderFeed(DEMO_POSTS);
+
+  var scroll = document.getElementById('feed-scroll');
+  if (scroll) scroll.scrollTop = 0;
+
+  showToast('Feed mis à jour ✓', 'ok');
+}
+
+/* Simule l'apparition du bouton "Nouveaux posts" après 30s */
+function scheduleNewPosts() {
+  setTimeout(function() {
+    var btn = document.getElementById('new-posts-btn');
+    if (btn && PENDING_POSTS.length > 0) {
+      btn.classList.remove('hidden');
+    }
+  }, 30000);
+}
+
+/* ══════════════════════════════════════════
+   PUBLIER UN POST
+══════════════════════════════════════════ */
+var _pickedImages = [];   /* jusqu'à 6 photos */
+var _pickedVideo  = null; /* { url, name, duration, size } */
+var _pickedDoc    = null; /* { url, file, name, size, type } */
+
+/* ── Déclencheurs fichiers ── */
+function triggerImgPick()     { document.getElementById('img-picker').click(); }
+function triggerVideoGallery(){ document.getElementById('video-picker').click(); }
+function triggerDocPick()     { document.getElementById('doc-picker').click(); }
+
+/* ══════════════════════════════════════════
+   DOCUMENT — UPLOAD & PRÉVISUALISATION
+══════════════════════════════════════════ */
+var _DOC_ALLOWED_EXTS = ['pdf','doc','docx','xls','xlsx','ppt','pptx','txt','csv','odt','ods','odp'];
+var _DOC_MAX_MB       = 50;
+
+function handleDocPick(input) {
+  var file = input.files && input.files[0];
+  if (!file) return;
+
+  var ext = (file.name || '').split('.').pop().toLowerCase();
+  if (_DOC_ALLOWED_EXTS.indexOf(ext) === -1) {
+    showToast('Format non supporté. Utilisez PDF, Word, Excel, PowerPoint ou TXT', 'err');
+    input.value = ''; return;
+  }
+  if (file.size > _DOC_MAX_MB * 1024 * 1024) {
+    showToast('Document trop lourd — maximum ' + _DOC_MAX_MB + ' Mo', 'err');
+    input.value = ''; return;
+  }
+
+  /* Si une image ou vidéo est déjà choisie, on efface */
+  if (_pickedImages.length) { _pickedImages = []; renderImgPreviews(); }
+  if (_pickedVideo) { _pickedVideo = null; renderVideoPreview(); }
+
+  var blobUrl = URL.createObjectURL(file);
+  _pickedDoc = { url: blobUrl, file: file, name: file.name, size: file.size, type: ext };
+  renderDocPreview();
+}
+
+function renderDocPreview() {
+  var wrap = document.getElementById('pub-doc-preview');
+  if (!wrap) return;
+  if (!_pickedDoc) { wrap.innerHTML = ''; wrap.classList.add('hidden'); return; }
+
+  var di        = _docIcon(_pickedDoc.name);
+  var sizeMb    = (_pickedDoc.size / (1024 * 1024)).toFixed(2);
+  var shortName = _pickedDoc.name.length > 30 ? _pickedDoc.name.slice(0, 28) + '…' : _pickedDoc.name;
+  var isPdf     = _pickedDoc.type === 'pdf';
+  var isTxt     = _pickedDoc.type === 'txt' || _pickedDoc.type === 'csv';
+
+  wrap.classList.remove('hidden');
+  wrap.innerHTML =
+    '<div class="pub-doc-card">' +
+      '<div class="pub-doc-icon"><i class="fas ' + di.ico + '" style="color:' + di.color + '"></i></div>' +
+      '<div class="pub-doc-info">' +
+        '<div class="pub-doc-name">' + escHtml(shortName) + '</div>' +
+        '<div class="pub-doc-meta">' + escHtml(_pickedDoc.type.toUpperCase()) + ' · ' + sizeMb + ' Mo</div>' +
+      '</div>' +
+      (isPdf || isTxt
+        ? '<button class="pub-doc-preview-btn" onclick="_previewPickedDoc()"><i class="fas fa-eye"></i></button>'
+        : '') +
+      '<button class="pub-doc-remove" onclick="removeDoc()"><i class="fas fa-times"></i></button>' +
+    '</div>';
+}
+
+function removeDoc() {
+  if (_pickedDoc && _pickedDoc.url) { try { URL.revokeObjectURL(_pickedDoc.url); } catch(e){} }
+  _pickedDoc = null;
+  renderDocPreview();
+  var inp = document.getElementById('doc-picker');
+  if (inp) inp.value = '';
+}
+
+/* Aperçu rapide avant publication */
+function _previewPickedDoc() {
+  if (!_pickedDoc) return;
+  _openDocViewer(_pickedDoc.url, _pickedDoc.name, _pickedDoc.type);
+}
+
+/* ══════════════════════════════════════════
+   CAMÉRA DIRECTE — getUserMedia
+   Permission explicite + preview live + capture photo/vidéo
+══════════════════════════════════════════ */
+var _camMode     = 'photo';       /* 'photo' | 'video'        */
+var _camFacing   = 'environment'; /* 'environment' | 'user'   */
+var _camStream   = null;
+var _camRecorder = null;
+var _camChunks   = [];
+var _camRecording = false;
+var _camTimer    = null;
+var _camSeconds  = 0;
+
+function triggerCameraPhoto() { _camMode = 'photo'; _gwOpenCamera(); }
+function triggerCameraVideo() { _camMode = 'video'; _gwOpenCamera(); }
+
+/* ── Demande permission + ouvre la caméra ── */
+function _gwOpenCamera(facing) {
+  if (facing) _camFacing = facing;
+  _gwStopCamera(); /* ferme tout flux précédent */
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    /* Fallback : input file natif */
+    _gwCamFallback(); return;
+  }
+
+  var constraints = {
+    video: { facingMode: { ideal: _camFacing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: _camMode === 'video'
+  };
+
+  /* Demande la permission */
+  navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
+    _camStream = stream;
+    _gwShowCameraUI();
+  }).catch(function(err) {
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      _gwShowPermDenied();
+    } else {
+      showToast('Caméra indisponible — vérifiez votre appareil', 'err');
+      _gwCamFallback();
+    }
+  });
+}
+
+/* ── UI caméra plein écran ── */
+function _gwShowCameraUI() {
+  var existing = document.getElementById('gw-cam-overlay');
+  if (existing) existing.remove();
+
+  var isVideo = _camMode === 'video';
+
+  var overlay = document.createElement('div');
+  overlay.id = 'gw-cam-overlay';
+  overlay.style.cssText =
+    'position:fixed;inset:0;z-index:3500;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center';
+
+  overlay.innerHTML =
+    /* Vidéo preview */
+    '<video id="gw-cam-preview" autoplay playsinline muted ' +
+      'style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0"></video>' +
+
+    /* Barre top */
+    '<div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:linear-gradient(to bottom,rgba(0,0,0,.6),transparent);z-index:1">' +
+      '<button onclick="_gwCloseCamera()" style="width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.45);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>' +
+      '<div style="color:#fff;font-size:13px;font-weight:700;letter-spacing:.5px">' + (isVideo ? '🎥 VIDÉO' : '📷 PHOTO') + '</div>' +
+      '<button onclick="_gwFlipCamera()" style="width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.45);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-camera-rotate"></i></button>' +
+    '</div>' +
+
+    /* Timer enregistrement */
+    (isVideo ? '<div id="gw-cam-timer" style="position:absolute;top:68px;left:50%;transform:translateX(-50%);background:rgba(220,38,38,.85);color:#fff;font-size:13px;font-weight:800;padding:4px 14px;border-radius:20px;display:none;z-index:1"><i class="fas fa-circle" style="font-size:8px;margin-right:5px;animation:blink 1s infinite"></i><span id="gw-cam-time">0:00</span></div>' : '') +
+
+    /* Barre bas */
+    '<div style="position:absolute;bottom:0;left:0;right:0;padding:28px 20px 40px;background:linear-gradient(to top,rgba(0,0,0,.65),transparent);display:flex;align-items:center;justify-content:center;gap:32px;z-index:1">' +
+      /* Galerie */
+      '<button onclick="_gwCamPickGallery()" style="width:46px;height:46px;border-radius:12px;background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.4);color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-images"></i></button>' +
+      /* Bouton capture / enregistrement */
+      (isVideo
+        ? '<button id="gw-cam-rec-btn" onclick="_gwToggleRecord()" style="width:70px;height:70px;border-radius:50%;background:#EF4444;border:4px solid #fff;color:#fff;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(239,68,68,.4)"><i class="fas fa-circle" id="gw-cam-rec-ico"></i></button>'
+        : '<button onclick="_gwCapturePhoto()" style="width:70px;height:70px;border-radius:50%;background:#fff;border:5px solid rgba(255,255,255,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,.25)"><div style="width:54px;height:54px;border-radius:50%;background:#fff;border:2px solid #ccc"></div></button>') +
+      /* Placeholder droit */
+      '<div style="width:46px"></div>' +
+    '</div>';
+
+  document.body.appendChild(overlay);
+
+  /* Branche le stream sur le <video> */
+  var vid = document.getElementById('gw-cam-preview');
+  if (vid) vid.srcObject = _camStream;
+}
+
+/* ── Capture photo ── */
+function _gwCapturePhoto() {
+  var vid = document.getElementById('gw-cam-preview');
+  if (!vid) return;
+  var canvas = document.createElement('canvas');
+  canvas.width  = vid.videoWidth  || 1280;
+  canvas.height = vid.videoHeight || 720;
+  canvas.getContext('2d').drawImage(vid, 0, 0);
+  var dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+
+  /* Ajoute à _pickedImages comme une photo normale */
+  if (_pickedVideo) { _clearVideo(); }
+  if (_pickedImages.length < 6) {
+    _pickedImages.push(dataUrl);
+  }
+
+  /* Flash blanc */
+  var flash = document.createElement('div');
+  flash.style.cssText = 'position:fixed;inset:0;z-index:4000;background:#fff;opacity:.8;pointer-events:none';
+  document.body.appendChild(flash);
+  setTimeout(function() { flash.remove(); }, 120);
+
+  _gwCloseCamera();
+  renderImgPreviews();
+  showToast('Photo capturée ✓', 'ok');
+}
+
+/* ── Enregistrement vidéo ── */
+function _gwToggleRecord() {
+  if (_camRecording) {
+    _gwStopRecord();
+  } else {
+    _gwStartRecord();
+  }
+}
+
+function _gwStartRecord() {
+  if (!_camStream) return;
+  _camChunks   = [];
+  _camRecording = true;
+  _camSeconds  = 0;
+
+  /* Choisit le codec supporté */
+  var mimeType = '';
+  var types = ['video/mp4;codecs=h264,aac','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+  for (var i = 0; i < types.length; i++) {
+    if (MediaRecorder.isTypeSupported(types[i])) { mimeType = types[i]; break; }
+  }
+
+  try {
+    _camRecorder = new MediaRecorder(_camStream, mimeType ? { mimeType: mimeType } : undefined);
+  } catch(e) {
+    _camRecorder = new MediaRecorder(_camStream);
+  }
+
+  _camRecorder.ondataavailable = function(e) {
+    if (e.data && e.data.size > 0) _camChunks.push(e.data);
+  };
+  _camRecorder.onstop = function() { _gwFinishRecord(); };
+  _camRecorder.start(250); /* chunk toutes les 250ms */
+
+  /* UI : bouton rouge clignotant + timer */
+  var btn  = document.getElementById('gw-cam-rec-btn');
+  var ico  = document.getElementById('gw-cam-rec-ico');
+  var timer = document.getElementById('gw-cam-timer');
+  if (btn)   btn.style.background = '#7f1d1d';
+  if (ico)   ico.className = 'fas fa-stop';
+  if (timer) timer.style.display = 'block';
+
+  _camTimer = setInterval(function() {
+    _camSeconds++;
+    var el = document.getElementById('gw-cam-time');
+    if (el) {
+      var m = Math.floor(_camSeconds/60);
+      var s = _camSeconds % 60;
+      el.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    }
+    /* Max 10 min */
+    if (_camSeconds >= 600) _gwStopRecord();
+  }, 1000);
+}
+
+function _gwStopRecord() {
+  if (_camTimer) { clearInterval(_camTimer); _camTimer = null; }
+  _camRecording = false;
+  if (_camRecorder && _camRecorder.state !== 'inactive') _camRecorder.stop();
+}
+
+function _gwFinishRecord() {
+  if (!_camChunks.length) return;
+  var mimeType = (_camRecorder && _camRecorder.mimeType) || 'video/webm';
+  var blob  = new Blob(_camChunks, { type: mimeType });
+  var ext   = mimeType.includes('mp4') ? '.mp4' : '.webm';
+  var blobUrl = URL.createObjectURL(blob);
+
+  if (_pickedImages.length > 0) { _pickedImages = []; renderImgPreviews(); }
+  _clearVideo();
+  _pickedVideo = { url: blobUrl, blob: blob, name: 'video_' + Date.now() + ext, duration: _camSeconds, size: blob.size };
+
+  _gwCloseCamera();
+  renderVideoPreview();
+  showToast('Vidéo enregistrée ✓', 'ok');
+}
+
+/* ── Retourner caméra ── */
+function _gwFlipCamera() {
+  _camFacing = _camFacing === 'environment' ? 'user' : 'environment';
+  if (_camRecording) _gwStopRecord();
+  _gwStopCamera();
+  _gwOpenCamera();
+}
+
+/* ── Galerie depuis caméra UI ── */
+function _gwCamPickGallery() {
+  _gwCloseCamera();
+  if (_camMode === 'photo') {
+    document.getElementById('img-picker').click();
+  } else {
+    document.getElementById('video-picker').click();
+  }
+}
+
+/* ── Fermer la caméra ── */
+function _gwCloseCamera() {
+  if (_camRecording) _gwStopRecord();
+  _gwStopCamera();
+  var ov = document.getElementById('gw-cam-overlay');
+  if (ov) ov.remove();
+}
+
+function _gwStopCamera() {
+  if (_camStream) {
+    _camStream.getTracks().forEach(function(t) { t.stop(); });
+    _camStream = null;
+  }
+}
+
+/* ── Permission refusée ── */
+function _gwShowPermDenied() {
+  var bg = document.createElement('div');
+  bg.style.cssText = 'position:fixed;inset:0;z-index:3500;background:rgba(0,0,0,.7);display:flex;align-items:flex-end;justify-content:center';
+  bg.onclick = function(e){ if(e.target===bg) bg.remove(); };
+
+  var card = document.createElement('div');
+  card.style.cssText = 'background:#fff;border-radius:24px 24px 0 0;width:100%;max-width:430px;padding:28px 24px 36px;text-align:center';
+  card.innerHTML =
+    '<div style="font-size:40px;margin-bottom:12px">📵</div>' +
+    '<div style="font-size:16px;font-weight:800;color:#0F172A;margin-bottom:8px">Accès caméra refusé</div>' +
+    '<div style="font-size:13px;color:#64748B;line-height:1.6;margin-bottom:20px">' +
+      'Pour prendre des photos ou vidéos, autorisez l\'accès à la caméra dans les paramètres de votre téléphone.<br><br>' +
+      '<strong>Paramètres → Applications → Geniwork → Autorisations → Caméra ✓</strong>' +
+    '</div>' +
+    '<button onclick="this.closest(\'div[style]\').remove()" ' +
+      'style="width:100%;padding:13px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer">Compris</button>';
+
+  bg.appendChild(card);
+  document.body.appendChild(bg);
+  requestAnimationFrame(function(){ card.style.animation = 'slideUp .3s ease'; });
+}
+
+/* ── Fallback input file (si getUserMedia indisponible) ── */
+function _gwCamFallback() {
+  var inputId = _camMode === 'photo'
+    ? (_camFacing === 'user' ? 'cam-front-photo' : 'cam-back-photo')
+    : (_camFacing === 'user' ? 'cam-front-video' : 'cam-back-video');
+  var el = document.getElementById(inputId);
+  if (el) el.click();
+}
+
+/* ── Anciennes fonctions (compatibilité) ── */
+function openCamSheet() { _gwOpenCamera(); }
+function closeCamSheet() { _gwCloseCamera(); }
+function selectCamera(facing) { _gwOpenCamera(facing === 'back' ? 'environment' : 'user'); }
+
+/* ── Sélection photos (galerie ou caméra) ── */
+function handleImgPick(input) {
+  var files = Array.prototype.slice.call(input.files);
+  if (!files.length) return;
+
+  /* Efface la vidéo si des photos sont choisies */
+  if (_pickedVideo) { _clearVideo(); }
+
+  /* Max 6 photos au total */
+  var remaining = 6 - _pickedImages.length;
+  files = files.slice(0, remaining);
+
+  var loaded = 0;
+  files.forEach(function(file) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      _pickedImages.push(e.target.result);
+      loaded++;
+      if (loaded === files.length) renderImgPreviews();
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderImgPreviews() {
+  var preview = document.getElementById('pub-img-preview');
+  if (_pickedImages.length === 0) {
+    preview.classList.add('hidden');
+    preview.innerHTML = '';
+    return;
+  }
+  preview.classList.remove('hidden');
+  var html = '<div style="display:flex;flex-wrap:wrap;gap:6px;padding:0">';
+  _pickedImages.forEach(function(src, i) {
+    html +=
+      '<div style="position:relative;width:calc(33.33% - 4px)">' +
+        '<img src="' + src + '" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;display:block"/>' +
+        '<button class="rm-img" style="position:absolute;top:4px;right:4px" onclick="removeImgAt(' + i + ')">' +
+          '<i class="fas fa-times"></i>' +
+        '</button>' +
+      '</div>';
+  });
+  html += '</div>';
+  if (_pickedImages.length < 6) {
+    html += '<p style="font-size:11px;color:#9CA3AF;margin-top:6px;text-align:center;padding:0 4px">' +
+      _pickedImages.length + ' / 6 photo' + (_pickedImages.length > 1 ? 's' : '') +
+      ' — appuyez sur Galerie pour en ajouter</p>';
+  }
+  preview.innerHTML = html;
+}
+
+function removeImgAt(idx) {
+  _pickedImages.splice(idx, 1);
+  renderImgPreviews();
+  document.getElementById('img-picker').value      = '';
+  document.getElementById('cam-back-photo').value  = '';
+  document.getElementById('cam-front-photo').value = '';
+}
+
+function removeImg() {
+  _pickedImages = [];
+  renderImgPreviews();
+  document.getElementById('img-picker').value       = '';
+  document.getElementById('cam-back-photo').value   = '';
+  document.getElementById('cam-front-photo').value  = '';
+}
+
+/* ── Sélection vidéo (galerie ou caméra) ── */
+function handleVideoPick(input) {
+  var file = input.files[0];
+  if (!file) return;
+
+  /* Accepte tous les formats vidéo courants */
+  var ext = (file.name || '').split('.').pop().toLowerCase();
+  var allowedExts = ['mp4','mov','m4v','mkv','avi','webm','3gp','ts','wmv','flv','hevc','heic'];
+  var isVideoMime = file.type.startsWith('video/') || file.type === 'application/octet-stream';
+  var isVideoExt  = allowedExts.indexOf(ext) !== -1;
+
+  if (!isVideoMime && !isVideoExt) {
+    showToast('Format non supporté. Utilisez MP4, MOV, MKV…', 'err');
+    input.value = '';
+    return;
+  }
+
+  /* Taille max : 500 Mo */
+  if (file.size > 500 * 1024 * 1024) {
+    showVideoError('Fichier trop lourd — maximum 500 Mo');
+    input.value = '';
+    return;
+  }
+
+  var blobUrl = URL.createObjectURL(file);
+
+  /* Efface les photos si une vidéo est choisie */
+  if (_pickedImages.length > 0) { removeImg(); }
+  _clearVideo();
+
+  /* Essaie de lire les métadonnées (durée) — non bloquant si ça échoue */
+  var tempVid     = document.createElement('video');
+  var metaDone    = false;
+  tempVid.preload = 'metadata';
+  tempVid.muted   = true;
+  tempVid.src     = blobUrl;
+
+  function _acceptVideo(duration) {
+    if (metaDone) return;
+    metaDone = true;
+    if (duration && duration > 600) {
+      showVideoError('Vidéo trop longue — maximum 10 min (durée : ' + formatDuration(duration) + ')');
+      URL.revokeObjectURL(blobUrl);
+      input.value = '';
+      return;
+    }
+    _pickedVideo = {
+      url:      blobUrl,
+      file:     file,        /* ← gardé pour IndexedDB */
+      name:     file.name,
+      duration: duration || 0,
+      size:     file.size
+    };
+    renderVideoPreview();
+  }
+
+  tempVid.onloadedmetadata = function() { _acceptVideo(tempVid.duration); };
+  /* Si le WebView ne peut pas lire les métadonnées, on accepte quand même après 2s */
+  tempVid.onerror = function() { _acceptVideo(0); };
+  setTimeout(function() { _acceptVideo(0); }, 2000);
+}
+
+function renderVideoPreview() {
+  var preview = document.getElementById('pub-video-preview');
+  if (!_pickedVideo) {
+    preview.classList.add('hidden');
+    preview.innerHTML = '';
+    return;
+  }
+  preview.classList.remove('hidden');
+  preview.innerHTML =
+    '<video src="' + _pickedVideo.url + '" controls playsinline webkit-playsinline ' +
+      'style="width:100%;max-height:260px;display:block"></video>' +
+    '<button class="rm-video" onclick="removeVideo()"><i class="fas fa-times"></i></button>' +
+    '<div class="pub-video-meta">' +
+      '<span><i class="fas fa-clock"></i> ' + formatDuration(_pickedVideo.duration) + '</span>' +
+      '<span><i class="fas fa-hdd"></i> '   + formatFileSize(_pickedVideo.size)     + '</span>' +
+      '<span><i class="fas fa-film"></i> '  + escHtml(_pickedVideo.name.slice(0, 22)) + '</span>' +
+    '</div>';
+}
+
+function removeVideo() {
+  _clearVideo();
+  renderVideoPreview();
+  document.getElementById('video-picker').value      = '';
+  document.getElementById('cam-back-video').value    = '';
+  document.getElementById('cam-front-video').value   = '';
+}
+
+function _clearVideo() {
+  if (_pickedVideo) {
+    URL.revokeObjectURL(_pickedVideo.url);
+    _pickedVideo = null;
+  }
+}
+
+function showVideoError(msg) {
+  var existing = document.querySelector('.pub-video-error');
+  if (existing) existing.remove();
+  var el = document.createElement('div');
+  el.className = 'pub-video-error';
+  el.innerHTML = '<i class="fas fa-triangle-exclamation"></i> ' + msg;
+  var preview = document.getElementById('pub-video-preview');
+  preview.parentNode.insertBefore(el, preview.nextSibling);
+  setTimeout(function() { if (el.parentNode) el.remove(); }, 5000);
+}
+
+function formatDuration(sec) {
+  sec = sec || 0;
+  var m = Math.floor(sec / 60);
+  var s = Math.floor(sec % 60);
+  return m + ':' + (s < 10 ? '0' : '') + s;
+}
+
+/* ══════════════════════════════════════════
+   VISIONNEUSE DOCUMENT
+══════════════════════════════════════════ */
+var _docViewerBlobUrl = null;
+
+function _openDocViewer(blobUrl, fileName, ext) {
+  /* Ferme si déjà ouverte */
+  var old = document.getElementById('gw-doc-viewer');
+  if (old) old.remove();
+
+  _docViewerBlobUrl = blobUrl;
+  var di      = _docIcon(fileName);
+  var isPdf   = ext === 'pdf';
+  var isTxt   = ext === 'txt' || ext === 'csv';
+  var canView = isPdf || isTxt;
+
+  var ov = document.createElement('div');
+  ov.id  = 'gw-doc-viewer';
+
+  /* Contenu de la visionneuse */
+  var bodyHtml;
+  if (isPdf) {
+    /* object + embed → meilleure compatibilité navigateur pour blob PDF */
+    var safeSrc = escHtml(blobUrl);
+    bodyHtml =
+      '<object class="gw-doc-viewer-frame" data="' + safeSrc + '" type="application/pdf">' +
+        '<embed class="gw-doc-viewer-frame" src="' + safeSrc + '" type="application/pdf"/>' +
+      '</object>';
+  } else if (isTxt) {
+    bodyHtml = '<pre class="gw-doc-viewer-text" id="gw-doc-txt-content">Chargement…</pre>';
+  } else {
+    /* Format non-prévisualisable → téléchargement */
+    bodyHtml =
+      '<div class="gw-doc-viewer-nopreview">' +
+        '<i class="fas ' + di.ico + '" style="color:' + di.color + ';font-size:56px;margin-bottom:16px"></i>' +
+        '<div style="font-size:15px;font-weight:700;color:#0F172A;margin-bottom:6px">' + escHtml(fileName) + '</div>' +
+        '<div style="font-size:13px;color:#6B7280;margin-bottom:24px">Prévisualisation non disponible pour ce format</div>' +
+        '<button class="gw-doc-dl-btn" onclick="_downloadDocViewer()"><i class="fas fa-download"></i> Télécharger</button>' +
+      '</div>';
+  }
+
+  ov.innerHTML =
+    '<div class="gw-doc-viewer-header">' +
+      '<div class="gw-doc-viewer-title">' +
+        '<i class="fas ' + di.ico + '" style="color:' + di.color + '"></i>' +
+        '<span>' + escHtml(fileName.length > 30 ? fileName.slice(0,28)+'…' : fileName) + '</span>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="gw-doc-viewer-btn" onclick="_downloadDocViewer()" title="Télécharger"><i class="fas fa-download"></i></button>' +
+        '<button class="gw-doc-viewer-btn gw-doc-viewer-close" onclick="_closeDocViewer()"><i class="fas fa-times"></i></button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="gw-doc-viewer-body">' + bodyHtml + '</div>';
+
+  document.body.appendChild(ov);
+  requestAnimationFrame(function() { ov.classList.add('open'); });
+
+  /* Charge le texte pour TXT/CSV */
+  if (isTxt) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var el = document.getElementById('gw-doc-txt-content');
+      if (el) el.textContent = e.target.result;
+    };
+    fetch(blobUrl).then(function(r){ return r.blob(); }).then(function(b){ reader.readAsText(b, 'UTF-8'); }).catch(function(){
+      var el = document.getElementById('gw-doc-txt-content');
+      if (el) el.textContent = 'Impossible de lire ce fichier.';
+    });
+  }
+}
+
+function _closeDocViewer() {
+  var ov = document.getElementById('gw-doc-viewer');
+  if (!ov) return;
+  ov.classList.remove('open');
+  setTimeout(function() { if (ov.parentNode) ov.remove(); }, 280);
+}
+
+function _downloadDocViewer() {
+  if (!_docViewerBlobUrl) return;
+  var a = document.createElement('a');
+  a.href = _docViewerBlobUrl;
+  var fn = (document.querySelector('#gw-doc-viewer .gw-doc-viewer-title span') || {}).textContent || 'document';
+  a.download = fn;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+/* Ouvre le doc d'un post (charge depuis IndexedDB si besoin) */
+function _openPostDoc(postId) {
+  var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(postId); });
+  if (!post || !post.doc) return;
+
+  var d = post.doc;
+  if (d.url) {
+    _openDocViewer(d.url, d.name, d.ext || (d.name.split('.').pop().toLowerCase()));
+    return;
+  }
+  if (d.idbId) {
+    _gwLoadDocBlob(d.idbId, function(blob) {
+      if (!blob) { showToast('Document introuvable', 'err'); return; }
+      var bUrl = URL.createObjectURL(blob);
+      d.url = bUrl; /* cache en mémoire */
+      _openDocViewer(bUrl, d.name, d.ext || (d.name.split('.').pop().toLowerCase()));
+    });
+  }
+}
+
+/* ══════════════════════════════════════════
+   LECTEUR VIDÉO PLEIN ÉCRAN
+══════════════════════════════════════════ */
+var _vpFlashTimer = null;
+
+function openVideoPlayer(src, duration) {
+  var modal = document.getElementById('video-player-modal');
+  var video = document.getElementById('vp-video');
+  if (!modal || !video) return;
+
+  /* Pause toutes les vidéos du feed pendant la lecture plein écran */
+  document.querySelectorAll('[id^="fv-"]').forEach(function(v) {
+    if (!v.paused) v.pause();
+    var pid = v.id.replace('fv-', '');
+    var ov = document.getElementById('fvo-' + pid);
+    var mb = document.getElementById('fvm-' + pid);
+    if (ov) ov.style.opacity = '1';
+    if (mb) mb.style.opacity = '0';
+  });
+
+  /* Source */
+  video.src = src;
+  video.currentTime = 0;
+  video.playbackRate = 1;
+
+  /* Durée initiale */
+  var durEl = document.getElementById('vp-dur');
+  if (durEl) durEl.textContent = formatDuration(duration || 0);
+  var curEl = document.getElementById('vp-cur');
+  if (curEl) curEl.textContent = '0:00';
+  var seek = document.getElementById('vp-seek');
+  if (seek) { seek.value = 0; seek.max = duration || 100; }
+
+  /* Reset speed UI */
+  document.querySelectorAll('.vp-speed').forEach(function(b) { b.classList.remove('active'); });
+  var first = document.querySelector('.vp-speed');
+  if (first) first.classList.add('active');
+
+  /* Seek bar drag: évite que ontimeupdate écrase la position pendant le glissement */
+  if (seek && !seek._gwDragBound) {
+    seek._gwDragBound = true;
+    seek.addEventListener('mousedown',  function() { seek._dragging = true;  });
+    seek.addEventListener('touchstart', function() { seek._dragging = true;  }, { passive: true });
+    seek.addEventListener('mouseup',    function() { seek._dragging = false; });
+    seek.addEventListener('touchend',   function() { seek._dragging = false; });
+  }
+  seek._dragging = false;
+
+  /* Reset icône play */
+  _vpSetPlayIcon(false);
+
+  /* Events vidéo */
+  video.onloadedmetadata = function() {
+    var d = video.duration;
+    if (durEl) durEl.textContent = formatDuration(d);
+    if (seek)  seek.max = d;
+  };
+  video.ontimeupdate = function() {
+    if (seek && !seek._dragging) seek.value = video.currentTime;
+    if (curEl) curEl.textContent = formatDuration(video.currentTime);
+    /* Met à jour la teinte de la barre de progression */
+    _vpUpdateSeekGradient();
+  };
+  video.onended = function() { _vpSetPlayIcon(false); };
+  video.onplay  = function() { _vpSetPlayIcon(true);  };
+  video.onpause = function() { _vpSetPlayIcon(false); };
+
+  modal.style.display = 'flex';
+
+  /* Lance la lecture */
+  video.play().catch(function() {});
+}
+
+function closeVideoPlayer() {
+  var video = document.getElementById('vp-video');
+  if (video) { video.pause(); video.src = ''; video.ontimeupdate = null; video.onended = null; }
+  var modal = document.getElementById('video-player-modal');
+  if (modal) modal.style.display = 'none';
+  /* Quitte le plein écran si actif */
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    (document.exitFullscreen || document.webkitExitFullscreen || function(){}).call(document);
+  }
+  /* Réactive l'autoplay feed */
+  _initFeedVideoObserver();
+}
+
+function vpTogglePlay() {
+  var video = document.getElementById('vp-video');
+  if (!video) return;
+  var wasPaused = video.paused;
+  if (wasPaused) { video.play(); } else { video.pause(); }
+  /* Flash visuel : icône de l'action effectuée */
+  _vpFlash(wasPaused ? 'fa-play' : 'fa-pause');
+}
+
+function _vpSetPlayIcon(playing) {
+  var ico = document.getElementById('vp-play-ico');
+  if (ico) ico.className = playing ? 'fas fa-pause' : 'fas fa-play';
+  /* Ajustement padding visuel play vs pause */
+  var btn = document.getElementById('vp-play-btn');
+  if (btn) btn.style.paddingLeft = playing ? '0' : '3px';
+}
+
+function _vpFlash(iconClass) {
+  var flash = document.getElementById('vp-play-flash');
+  if (!flash) return;
+  flash.innerHTML = '<i class="fas ' + iconClass + '"></i>';
+  flash.classList.add('show');
+  clearTimeout(_vpFlashTimer);
+  _vpFlashTimer = setTimeout(function() { flash.classList.remove('show'); }, 500);
+}
+
+function vpSeek(val) {
+  var video = document.getElementById('vp-video');
+  if (video) video.currentTime = parseFloat(val);
+  _vpUpdateSeekGradient();
+}
+
+function _vpUpdateSeekGradient() {
+  var seek = document.getElementById('vp-seek');
+  var video = document.getElementById('vp-video');
+  if (!seek || !video || !video.duration) return;
+  var pct = (video.currentTime / video.duration) * 100;
+  seek.style.background =
+    'linear-gradient(to right, #2563EB 0%, #2563EB ' + pct + '%, rgba(255,255,255,.25) ' + pct + '%)';
+}
+
+function vpSkip(sec) {
+  var video = document.getElementById('vp-video');
+  if (!video) return;
+  video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + sec));
+}
+
+function vpSetSpeed(speed, btn) {
+  var video = document.getElementById('vp-video');
+  if (video) video.playbackRate = speed;
+  document.querySelectorAll('.vp-speed').forEach(function(b) { b.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+}
+
+function vpFullscreen() {
+  var area  = document.getElementById('vp-area');
+  var video = document.getElementById('vp-video');
+  /* iOS WebKit → webkitEnterFullscreen sur l'élément vidéo */
+  if (video && video.webkitEnterFullscreen) {
+    video.webkitEnterFullscreen();
+    return;
+  }
+  var target = area || video;
+  if (!target) return;
+  var req = target.requestFullscreen || target.webkitRequestFullscreen || target.mozRequestFullScreen;
+  if (req) req.call(target);
+}
+
+/* ══════════════════════════════════════════
+   TRADUCTION DE POST (MyMemory API)
+══════════════════════════════════════════ */
+function translatePost(postId) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post || !post.text) return;
+
+  var btn    = document.getElementById('translate-btn-' + postId);
+  var textEl = document.getElementById('ptxt-' + postId);
+  if (!btn || !textEl) return;
+
+  /* Bascule : si déjà traduit, revient à l'original */
+  if (btn.dataset.translated === '1') {
+    textEl.textContent = post.text;
+    btn.innerHTML = '<i class="fas fa-language"></i> ' + t('post.translate');
+    btn.dataset.translated = '0';
+    btn.disabled = false;
+    return;
+  }
+
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> ' + t('post.translating');
+  btn.disabled  = true;
+
+  /* Si UI en FR → traduit vers EN, sinon vers FR */
+  var lang     = _getCurrentLang();
+  var langpair = lang === 'fr' ? 'fr|en' : 'en|fr';
+  var query    = post.text.slice(0, 500);
+
+  fetch('https://api.mymemory.translated.net/get?q=' +
+        encodeURIComponent(query) + '&langpair=' + langpair)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var translated = data.responseData && data.responseData.translatedText;
+      if (translated && translated !== query) {
+        textEl.textContent = translated;
+        btn.innerHTML = '<i class="fas fa-rotate-left"></i> ' + t('post.see_orig');
+        btn.dataset.translated = '1';
+      } else {
+        btn.innerHTML = '<i class="fas fa-language"></i> ' + t('post.translate');
+      }
+      btn.disabled = false;
+    })
+    .catch(function() {
+      btn.innerHTML = '<i class="fas fa-language"></i> ' + t('post.translate');
+      btn.disabled  = false;
+      showToast('Traduction indisponible', 'err');
+    });
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' Ko';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' Mo';
+}
+
+/* ══════════════════════════════════════════════════════════════
+   SYSTÈME DE LIMITES PAR PLAN
+   Applique automatiquement les restrictions selon profile.planType
+════════════════════════════════════════════════════════════════ */
+
+/* ── Définition des limites par plan ── */
+var _PLAN_LIMITS = {
+  free: {
+    postsPerDay  : 5,
+    msgsPerDay   : 10,
+    servicesMax  : 3,
+    projectsMax  : 5,
+    photosPerPost: 3,
+    photosSvc    : 2
+  },
+  premium: {
+    postsPerDay  : Infinity,
+    msgsPerDay   : Infinity,
+    servicesMax  : 10,
+    projectsMax  : Infinity,
+    photosPerPost: 6,
+    photosSvc    : 4
+  },
+  business: {
+    postsPerDay  : Infinity,
+    msgsPerDay   : Infinity,
+    servicesMax  : 20,
+    projectsMax  : Infinity,
+    photosPerPost: 6,
+    photosSvc    : 4
+  }
+};
+
+/* Retourne les limites du plan actuel de l'utilisateur connecté */
+function _getCurrentPlanLimits() {
+  if (!_currentUser) return _PLAN_LIMITS.free;
+  var profile = loadUserProfile(_currentUser.email) || {};
+  var plan = profile.planType || 'free';
+  return _PLAN_LIMITS[plan] || _PLAN_LIMITS.free;
+}
+
+/* Clé de comptage journalier : gw_daily_{feature}_{email}_{YYYY-MM-DD} */
+function _dailyKey(feature, email) {
+  var today = new Date().toISOString().slice(0, 10);
+  return 'gw_daily_' + feature + '_' + email + '_' + today;
+}
+
+function _getDailyCount(feature, email) {
+  return parseInt(localStorage.getItem(_dailyKey(feature, email)) || '0', 10);
+}
+
+function _incDailyCount(feature, email) {
+  var k = _dailyKey(feature, email);
+  var n = _getDailyCount(feature, email) + 1;
+  localStorage.setItem(k, n);
+  return n;
+}
+
+/* Affiche un modal de blocage + envoie une notification à l'utilisateur */
+function _showPlanLimitModal(title, desc, featureName) {
+  /* Ferme si déjà ouvert */
+  var existing = document.getElementById('plan-limit-modal');
+  if (existing) existing.remove();
+
+  var profile   = loadUserProfile(_currentUser.email) || {};
+  var plan      = profile.planType || 'free';
+  var isPrem    = plan === 'premium';
+  var upgTarget = isPrem ? 'Business Pro 💼' : 'Premium 👑';
+  var iconPlan  = isPrem ? 'fas fa-briefcase' : 'fas fa-crown';
+
+  /* ── Notification dans le centre de notifications ── */
+  var notifKey = 'plmlimit_' + featureName + '_' + new Date().toISOString().slice(0,10);
+  var notifs   = getNotifs(_currentUser.email);
+  /* Évite de dupliquer la même notif le même jour */
+  var alreadySent = notifs.some(function(n) { return n.id === notifKey; });
+  if (!alreadySent) {
+    var planLabel = plan === 'free' ? 'Gratuit' : plan === 'premium' ? 'Premium 👑' : 'Business Pro 💼';
+    var limitNotif = {
+      id       : notifKey,
+      type     : 'plan_limit',
+      at       : Date.now(),
+      msg      : '⚠️ Limite atteinte — ' + title + '. Votre plan ' + planLabel + ' ne permet pas d\'aller plus loin. Passez à ' + upgTarget + ' pour continuer.',
+      unread   : true,
+      fromUser : null
+    };
+    notifs.unshift(limitNotif);
+    saveNotifs(_currentUser.email, notifs);
+    try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+  }
+
+  /* ── Modal visuel ── */
+  var modal = document.createElement('div');
+  modal.id = 'plan-limit-modal';
+  modal.className = 'plm-overlay';
+  modal.innerHTML =
+    '<div class="plm-sheet">' +
+      '<div class="plm-icon-wrap"><i class="fas fa-lock plm-lock-icon"></i></div>' +
+      '<div class="plm-title">' + escHtml(title) + '</div>' +
+      '<div class="plm-desc">' + escHtml(desc) + '</div>' +
+      '<div class="plm-current-plan">Plan actuel : <strong>' + (plan === 'free' ? 'Gratuit' : plan === 'premium' ? 'Premium 👑' : 'Business Pro 💼') + '</strong></div>' +
+      '<button class="plm-upgrade-btn" onclick="document.getElementById(\'plan-limit-modal\').remove();openSubPage()">' +
+        '<i class="' + iconPlan + '"></i> Passer ' + upgTarget +
+      '</button>' +
+      '<button class="plm-close-btn" onclick="document.getElementById(\'plan-limit-modal\').remove()">Fermer</button>' +
+    '</div>';
+
+  var frame = document.querySelector('.phone-frame') || document.body;
+  frame.appendChild(modal);
+}
+
+/* Bannière de plan + usage dans la page profil */
+function _renderPlanUsageBanner() {
+  var el = document.getElementById('profil-plan-usage');
+  if (!el || !_currentUser) return;
+  var profile = loadUserProfile(_currentUser.email) || {};
+  var plan    = profile.planType || 'free';
+  var lim     = _PLAN_LIMITS[plan] || _PLAN_LIMITS.free;
+
+  /* Stats usage */
+  var svcs     = loadUserServices(_currentUser.email).length;
+  var projs    = loadProjects(_currentUser.email).length;
+  var postsDay = _getDailyCount('posts', _currentUser.email);
+  var msgsDay  = _getDailyCount('msgs',  _currentUser.email);
+
+  var planLabels = { free: 'Gratuit', premium: 'Premium 👑', business: 'Business Pro 💼' };
+  var planColors = { free: '#64748B', premium: '#D97706', business: '#4F46E5' };
+  var planBgs    = { free: '#F1F5F9', premium: '#FEF3C7', business: '#EEF2FF' };
+  var pLabel = planLabels[plan] || 'Gratuit';
+  var pColor = planColors[plan] || '#64748B';
+  var pBg    = planBgs[plan]    || '#F1F5F9';
+
+  function _usageBar(used, max, label) {
+    var pct  = max === Infinity ? 0 : Math.min(100, Math.round(used / max * 100));
+    var warn = pct >= 80;
+    var maxLabel = max === Infinity ? '∞' : max;
+    var barColor = warn ? '#EF4444' : pColor;
+    return '<div class="ppu-row">' +
+      '<div class="ppu-row-label">' + label + '</div>' +
+      '<div class="ppu-row-right">' +
+        '<div class="ppu-bar-wrap"><div class="ppu-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>' +
+        '<div class="ppu-count' + (warn ? ' warn' : '') + '">' + used + ' / ' + maxLabel + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  var html = '<div class="ppu-card" style="background:' + pBg + ';border-color:' + pColor + '">' +
+    '<div class="ppu-header">' +
+      '<div class="ppu-plan-chip" style="color:' + pColor + '">' + pLabel + '</div>' +
+      (plan !== 'business'
+        ? '<button class="ppu-upgrade-btn" onclick="openSubPage()">' +
+            (plan === 'free' ? '⬆ Passer Premium' : '⬆ Business Pro') +
+          '</button>'
+        : '<span class="ppu-max-badge">✦ Plan maximum</span>'
+      ) +
+    '</div>' +
+    '<div class="ppu-rows">' +
+      _usageBar(svcs,     lim.servicesMax,   '🛠 Services') +
+      _usageBar(projs,    lim.projectsMax,   '📁 Projets') +
+      _usageBar(postsDay, lim.postsPerDay,   '✏️ Posts aujourd\'hui') +
+      _usageBar(msgsDay,  lim.msgsPerDay,    '💬 Messages aujourd\'hui') +
+    '</div>' +
+  '</div>';
+
+  el.innerHTML = html;
+}
+
+/* ── Publication ── */
+function publierPost() {
+  var text = document.getElementById('pub-text').value.trim();
+
+  if (!text && _pickedImages.length === 0 && !_pickedVideo && !_pickedDoc && !_quotePostRef) {
+    showToast('Écrivez quelque chose ou ajoutez un média', 'err'); return;
+  }
+
+  /* ── Vérification limite du plan ── */
+  if (_currentUser) {
+    var _pLim = _getCurrentPlanLimits();
+    /* Limite posts/jour */
+    if (_pLim.postsPerDay !== Infinity) {
+      var _todayPosts = _getDailyCount('posts', _currentUser.email);
+      if (_todayPosts >= _pLim.postsPerDay) {
+        _showPlanLimitModal(
+          'Limite de publications atteinte',
+          'Le plan Gratuit est limité à ' + _pLim.postsPerDay + ' publications par jour. Passez Premium pour publier sans limite.',
+          'posts'
+        );
+        return;
+      }
+    }
+    /* Limite photos/post */
+    if (_pickedImages.length > _pLim.photosPerPost) {
+      showToast('Limite atteinte : ' + _pLim.photosPerPost + ' photo(s) max avec votre plan', 'err');
+      return;
+    }
+  }
+
+  var postId      = Date.now();
+  var videoBlob   = _pickedVideo ? (_pickedVideo.file || _pickedVideo.blob || null) : null;
+  var videoIdbId  = _pickedVideo ? ('vid_' + postId) : null;
+  var docBlob     = _pickedDoc   ? (_pickedDoc.file  || null) : null;
+  var docIdbId    = _pickedDoc   ? ('doc_' + postId) : null;
+
+  /* Vidéo : on stocke l'idbId + le blobUrl courant (pour affichage immédiat) */
+  var videoData = _pickedVideo
+    ? { idbId: videoIdbId, url: _pickedVideo.url, duration: _pickedVideo.duration, size: _pickedVideo.size }
+    : null;
+
+  /* Document : idbId + url courante + métadonnées */
+  var docData = _pickedDoc
+    ? { idbId: docIdbId, url: _pickedDoc.url, name: _pickedDoc.name, size: _pickedDoc.size, ext: _pickedDoc.type }
+    : null;
+
+  /* ── Si un post est cité (doQuotePost) → type quote ── */
+  var quoteData = null;
+  if (_quotePostRef) {
+    var _q = _quotePostRef;
+    quoteData = {
+      id:     _q.id,
+      author: _q.author,
+      role:   _q.role   || '',
+      text:   _q.text   || '',
+      images: _q.images || [],
+      video:  _q.video  || null,
+      doc:    _q.doc    || null
+    };
+  }
+
+  var newPost = {
+    id:         postId,
+    author:     _currentUser ? _currentUser.nom : 'Moi',
+    role:       'Geniwork Member',
+    verified:   false,
+    at: Date.now(), time:       'À l\'instant',
+    text:       text,
+    images:     _pickedImages.slice(),
+    video:      videoData,
+    doc:        docData,
+    baseLikes:  0,
+    likers:     [],
+    comments:   [],
+    ownerEmail: _currentUser ? _currentUser.email : null,
+    type:       quoteData ? 'repost' : undefined,
+    repostOf:   quoteData || undefined
+  };
+
+  /* Sauvegarde les blobs dans IndexedDB pour persistance */
+  if (videoBlob && videoIdbId) { _gwSaveVideoBlob(videoIdbId, videoBlob, function() {}); }
+  if (docBlob   && docIdbId)   { _gwSaveDocBlob(docIdbId, docBlob, function() {}); }
+
+  DEMO_POSTS.unshift(newPost);
+  /* Persiste le post dans localStorage (sans les blob URLs — idbIds suffisent) */
+  var postToStore = JSON.parse(JSON.stringify(newPost));
+  if (postToStore.video) { delete postToStore.video.url; }
+  if (postToStore.doc)   { delete postToStore.doc.url; }
+  persistNewPost(postToStore);
+  /* Incrémente le compteur journalier */
+  if (_currentUser) _incDailyCount('posts', _currentUser.email);
+  renderFeed(DEMO_POSTS);
+
+  /* Réinitialise */
+  document.getElementById('pub-text').value = '';
+  _clearQuoteRef();
+  _pickedImages = [];
+  renderImgPreviews();
+  _pickedVideo = null;
+  renderVideoPreview();
+  _pickedDoc = null;
+  renderDocPreview();
+  document.getElementById('img-picker').value      = '';
+  document.getElementById('cam-back-photo').value  = '';
+  document.getElementById('cam-front-photo').value = '';
+  document.getElementById('video-picker').value    = '';
+  document.getElementById('cam-back-video').value  = '';
+  document.getElementById('cam-front-video').value = '';
+  var dp = document.getElementById('doc-picker');
+  if (dp) dp.value = '';
+
+  showToast('Publication partagée ✓', 'ok');
+
+  var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
+  navTo(homeBtn, 'p-home');
+
+  var scroll = document.getElementById('feed-scroll');
+  if (scroll) scroll.scrollTop = 0;
+}
+
+/* ancienne toggleSidebar supprimée — voir la nouvelle au-dessus */
+
+/* ══════════════════════════════════════════
+   NOTIFICATIONS — STOCKAGE PAR UTILISATEUR
+══════════════════════════════════════════ */
+
+/* Notification système unique pour tous (mise à jour appli) */
+var SYSTEM_NOTIF = {
+  id: 'sys-v1',
+  type: 'system',
+  fromUser: null,
+  postId: null,
+  postPreview: null,
+  msg: '🎉 Bienvenue sur Geniwork v1.0 ! Nouvelles fonctionnalités bientôt disponibles.',
+  at: Date.now() - 86400000 * 3,   /* simulé : il y a 3 jours */
+  unread: false
+};
+
+function getNotifs(email) {
+  var notifs = JSON.parse(localStorage.getItem('gw_notifs_' + email) || '[]');
+  /* Rétrocompatibilité : ajoute `at` manquant sur les notifs déjà stockées */
+  var needsSave = false;
+  notifs.forEach(function(n) {
+    if (!n.at) {
+      /* L'ID numérique genNotifId() = Date.now() + random → > 1e12 = timestamp ms */
+      n.at = (typeof n.id === 'number' && n.id > 1000000000000) ? Math.floor(n.id) : Date.now();
+      needsSave = true;
+    }
+  });
+  /* Persiste la correction pour ne pas recalculer avec Date.now() à chaque appel */
+  if (needsSave) {
+    try { localStorage.setItem('gw_notifs_' + email, JSON.stringify(notifs)); } catch(e) {}
+  }
+  return notifs;
+}
+
+function saveNotifs(email, notifs) {
+  localStorage.setItem('gw_notifs_' + email, JSON.stringify(notifs));
+  if (!_gwFbSkip) _gwFbSet('notifs/' + _gwFbKey(email), notifs);
+}
+
+function genNotifId() {
+  return Date.now() + Math.floor(Math.random() * 1000);
+}
+
+/* ── Temps relatif réel pour les notifications ── */
+function _notifTimeAgo(ts) {
+  if (!ts || isNaN(ts)) return 'À l\'instant';
+  var now     = Date.now();
+  var diff    = Math.max(0, now - ts);          /* ms */
+  var secs    = Math.floor(diff / 1000);
+  var mins    = Math.floor(diff / 60000);
+  var hours   = Math.floor(diff / 3600000);
+  var days    = Math.floor(diff / 86400000);
+  var weeks   = Math.floor(days / 7);
+  var months  = Math.floor(days / 30);
+  var years   = Math.floor(days / 365);
+
+  if (secs  <  60)  return 'À l\'instant';
+  if (mins  <  60)  return 'Il y a ' + mins  + ' min';
+  if (hours <  24)  return 'Il y a ' + hours + (hours === 1 ? 'h' : 'h');
+  if (days  === 1)  return 'Hier';
+  if (days  <   7)  return 'Il y a ' + days  + ' jour' + (days > 1 ? 's' : '');
+  if (weeks <   5)  return 'Il y a ' + weeks + ' semaine' + (weeks > 1 ? 's' : '');
+  if (months < 12)  return 'Il y a ' + months + ' mois';
+  return 'Il y a ' + years + ' an' + (years > 1 ? 's' : '');
+}
+
+/* Pousse une notification dans la liste d'un utilisateur cible */
+function pushNotif(targetEmail, notif) {
+  /* Horodatage automatique si absent */
+  if (!notif.at) notif.at = Date.now();
+  var notifs = getNotifs(targetEmail);
+  notifs.unshift(notif);
+  /* Limite à 50 notifications */
+  if (notifs.length > 50) notifs = notifs.slice(0, 50);
+  saveNotifs(targetEmail, notifs);
+  /* Si c'est l'utilisateur courant, met à jour le badge en temps réel */
+  if (_currentUser && targetEmail === _currentUser.email) {
+    updateNotifBadge();
+  }
+}
+
+/* Génère des notifs de bienvenue à la première connexion */
+function seedDemoNotifs(user) {
+  var existing = getNotifs(user.email);
+  if (existing.length > 0) return;
+
+  var base = Date.now();
+  var demos = [
+    {
+      id: base - 180000,   at: base - 180000,
+      type: 'follow',
+      fromUser: { nom: 'Sophie Lefebvre', email: 'demo_sophie_lefebvre', role: 'Designer UI/UX · Freelance' },
+      postId: null, postPreview: null,
+      msg: 'a commencé à vous suivre',
+      unread: true
+    },
+    {
+      id: base - 900000,   at: base - 900000,
+      type: 'like',
+      fromUser: { nom: 'Thomas Kone', email: 'demo_thomas_kone', role: 'Développeur Full-Stack' },
+      postId: null, postPreview: 'Votre première publication a été remarquée !',
+      msg: 'a aimé votre publication',
+      unread: true
+    },
+    {
+      id: base - 3600000,  at: base - 3600000,
+      type: 'comment',
+      fromUser: { nom: 'Amina Traoré', email: 'demo_amina_traore', role: 'Consultante Marketing' },
+      postId: null, postPreview: '"Bienvenue dans la communauté ! 👋"',
+      msg: 'a commenté votre publication',
+      unread: true
+    }
+  ];
+  saveNotifs(user.email, demos);
+}
+
+function renderNotifs() {
+  if (!_currentUser) return;
+  var list = document.getElementById('notifs-list');
+  if (!list) return;
+
+  var personal = getNotifs(_currentUser.email);
+  /* Notification système toujours en dernier */
+  var all = personal.concat([SYSTEM_NOTIF]);
+
+  list.innerHTML = '';
+
+  if (all.length === 0) {
+    list.innerHTML = '<p style="text-align:center;color:#9CA3AF;padding:40px 16px;font-size:13px">Aucune notification pour l\'instant</p>';
+    return;
+  }
+
+  all.forEach(function(n) {
+    var item = document.createElement('div');
+    item.className = 'notif-item' + (n.unread ? ' unread' : '');
+    item.setAttribute('data-notif-id', String(n.id));
+
+    var badgeCls  = getNotifBadgeCls(n.type);
+    var badgeIcon = getNotifIcon(n.type);
+
+    /* ── Avatar ── */
+    var isGeniwork = !n.fromUser; /* Pas de fromUser = notification Geniwork officielle */
+    var notifAvHtml, senderHtml;
+
+    if (isGeniwork) {
+      /* Logo officiel si disponible, sinon avatar Geniwork brandé */
+      var gwLogo = _admGetOfficialLogo();
+      if (gwLogo) {
+        notifAvHtml =
+          '<div class="notif-gw-av">' +
+            '<img src="' + gwLogo + '" alt="Geniwork"/>' +
+          '</div>';
+      } else {
+        notifAvHtml =
+          '<div class="notif-gw-av notif-gw-av-default">' +
+            '<i class="fas fa-star"></i>' +
+          '</div>';
+      }
+      /* Badge vérifié bleu */
+      senderHtml =
+        '<div class="notif-gw-sender">' +
+          'Geniwork' +
+          '<span class="notif-gw-verified"><i class="fas fa-circle-check"></i></span>' +
+        '</div>';
+    } else {
+      var notifDisplayName = getDisplayName(n.fromUser.email || null, n.fromUser.nom);
+      notifAvHtml = getAvatarHtml(n.fromUser.email || null, notifDisplayName, 'sm');
+      senderHtml  = '<strong>' + escHtml(notifDisplayName) + '</strong> ';
+    }
+
+    /* Tronquer le message si > 80 chars */
+    var fullMsg   = n.msg || '';
+    var isLong    = fullMsg.length > 80;
+    var shortMsg  = isLong ? fullMsg.slice(0, 80) + '…' : fullMsg;
+
+    item.innerHTML =
+      '<div class="notif-av-wrap">' +
+        notifAvHtml +
+        '<div class="notif-type-badge ' + badgeCls + '"><i class="fas ' + badgeIcon + '"></i></div>' +
+      '</div>' +
+      '<div class="notif-body">' +
+        '<div class="notif-msg">' +
+          (isGeniwork ? senderHtml : senderHtml) +
+          escHtml(isGeniwork ? shortMsg : shortMsg) +
+        '</div>' +
+        (n.postPreview ? '<div class="notif-preview">' + escHtml(n.postPreview) + '</div>' : '') +
+        '<div class="notif-time-row">' +
+          (n.unread ? '<span class="notif-unread-dot"></span>' : '') +
+          '<span class="notif-time-txt">' + escHtml(_notifTimeAgo(n.at)) + '</span>' +
+          (isLong ? '<span class="notif-read-more">Lire la suite</span>' : '') +
+        '</div>' +
+      '</div>' +
+      '<i class="fas fa-chevron-right notif-chevron"></i>';
+
+    /* Clic → toujours ouvrir le détail */
+    (function(notif) {
+      item.onclick = function() { openNotif(notif); };
+    })(n);
+
+    list.appendChild(item);
+  });
+
+  updateNotifBadge();
+}
+
+function updateNotifBadge() {
+  var count = 0;
+  if (_currentUser) {
+    count = getNotifs(_currentUser.email).filter(function(n) { return n.unread; }).length;
+  }
+  var badge = document.getElementById('notif-badge');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count > 9 ? '9+' : count;
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+function markAllRead() {
+  if (!_currentUser) return;
+  var notifs = getNotifs(_currentUser.email);
+  notifs.forEach(function(n) { n.unread = false; });
+  saveNotifs(_currentUser.email, notifs);
+  renderNotifs();
+  showToast('Toutes les notifications lues ✓', 'ok');
+}
+
+/* ── Ticker : met à jour les temps des notifs toutes les 60s si la page est ouverte ── */
+(function() {
+  setInterval(function() {
+    var nPage = document.getElementById('p-notifs');
+    if (!nPage || !nPage.classList.contains('active')) return;
+    /* Met à jour uniquement les spans de temps sans re-rendre toute la liste */
+    document.querySelectorAll('.notif-time-txt').forEach(function(span) {
+      var item = span.closest('[data-notif-id]');
+      if (!item) return;
+      var nid = item.getAttribute('data-notif-id');
+      if (!_currentUser) return;
+      var notifs = getNotifs(_currentUser.email);
+      var notif  = notifs.find(function(n) { return String(n.id) === String(nid); });
+      if (notif && notif.at) span.textContent = _notifTimeAgo(notif.at);
+    });
+  }, 30000); /* toutes les 30 secondes */
+})();
+
+function getNotifIcon(type) {
+  var icons = { like: 'fa-heart', comment: 'fa-comment', share: 'fa-share-nodes', follow: 'fa-user-plus', system: 'fa-bell', milestone: 'fa-trophy', bug_report: 'fa-bug', plan_limit: 'fa-lock', official: 'fa-bullhorn' };
+  return icons[type] || 'fa-bell';
+}
+
+function getNotifBadgeCls(type) {
+  var cls = { like: 'nb-like', comment: 'nb-comment', share: 'nb-share', follow: 'nb-follow', system: 'nb-system', milestone: 'nb-milestone', bug_report: 'nb-system', plan_limit: 'nb-system', official: 'nb-system' };
+  return cls[type] || 'nb-system';
+}
+
+/* ── Clic sur une notification → marquer lue + ouvrir détail ── */
+function openNotif(notif) {
+  /* Marque comme lue */
+  if (_currentUser && notif.unread && notif.id !== 'sys-v1') {
+    var notifs = getNotifs(_currentUser.email);
+    var found  = notifs.find(function(x) { return x.id === notif.id; });
+    if (found) { found.unread = false; saveNotifs(_currentUser.email, notifs); }
+    var el = document.querySelector('[data-notif-id="' + notif.id + '"]');
+    if (el) {
+      el.classList.remove('unread');
+      var dot = el.querySelector('.notif-unread-dot');
+      if (dot) dot.remove();
+    }
+    updateNotifBadge();
+  }
+  /* Ouvre toujours la feuille de détail */
+  _openNotifDetail(notif);
+}
+
+/* ── Feuille de détail complète d'une notification ── */
+function _openNotifDetail(notif) {
+  _closeGenericSheet('notif-detail');
+  var isGeniwork = !notif.fromUser;
+  var gwLogo     = _admGetOfficialLogo();
+  var fullMsg    = notif.msg || '';
+
+  /* Avatar + expéditeur */
+  var avHtml, senderName, senderSub;
+  if (isGeniwork) {
+    avHtml = gwLogo
+      ? '<div class="ndd-gw-av"><img src="' + gwLogo + '" alt="Geniwork"/></div>'
+      : '<div class="ndd-gw-av ndd-gw-av-default"><i class="fas fa-star"></i></div>';
+    senderName = 'Geniwork';
+    senderSub  = 'Équipe officielle Geniwork';
+  } else {
+    var dName = getDisplayName(notif.fromUser.email || null, notif.fromUser.nom || '');
+    avHtml     = getAvatarHtml(notif.fromUser.email || null, dName, 'lg');
+    senderName = dName;
+    senderSub  = notif.fromUser.email || '';
+  }
+
+  var bg = document.createElement('div');
+  bg.className = 'notif-detail-bg';
+  bg.id = 'notif-detail-bg';
+  bg.onclick = function() { _closeGenericSheet('notif-detail'); };
+
+  var card = document.createElement('div');
+  card.className = 'notif-detail-card';
+  card.id = 'notif-detail-card';
+  card.innerHTML =
+    '<div class="ndd-drag"></div>' +
+
+    /* ─ En-tête expéditeur ─ */
+    '<div class="ndd-header">' +
+      '<div class="ndd-av-wrap">' +
+        avHtml +
+        (isGeniwork ? '<span class="ndd-gw-check"><i class="fas fa-circle-check"></i></span>' : '') +
+      '</div>' +
+      '<div class="ndd-sender-info">' +
+        '<div class="ndd-sender-name">' +
+          escHtml(senderName) +
+          (isGeniwork ? '<span class="ndd-verified-chip"><i class="fas fa-circle-check"></i> Officiel</span>' : '') +
+        '</div>' +
+        '<div class="ndd-sender-sub">' + escHtml(senderSub) + '</div>' +
+      '</div>' +
+      '<div class="ndd-time">' + escHtml(_notifTimeAgo(notif.at)) + '</div>' +
+    '</div>' +
+
+    /* ─ Message complet ─ */
+    '<div class="ndd-body">' +
+      '<p class="ndd-msg">' + escHtml(fullMsg).replace(/\n/g, '<br>') + '</p>' +
+      (notif.postPreview
+        ? '<div class="ndd-preview-block"><i class="fas fa-quote-left ndd-quote"></i>' + escHtml(notif.postPreview) + '</div>'
+        : '') +
+    '</div>' +
+
+    /* ─ Boutons d'action ─ */
+    '<div class="ndd-actions">' +
+      (notif.postId
+        ? '<button class="ndd-btn-primary" onclick="_nddGoPost(' + notif.postId + ')">' +
+            '<i class="fas fa-arrow-right"></i> Voir la publication' +
+          '</button>'
+        : (notif.fromUser
+            ? '<button class="ndd-btn-primary" onclick="_nddGoProfile(' + JSON.stringify(notif.fromUser) + ')">' +
+                '<i class="fas fa-user"></i> Voir le profil' +
+              '</button>'
+            : '')) +
+      '<button class="ndd-btn-secondary" onclick="_closeGenericSheet(\'notif-detail\')">Fermer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  /* Double rAF : le navigateur doit peindre l'état initial (off-screen)
+     avant d'ajouter 'open' pour que la transition CSS se déclenche */
+  requestAnimationFrame(function() {
+    requestAnimationFrame(function() {
+      bg.classList.add('open');
+      card.classList.add('open');
+    });
+  });
+}
+
+function _nddGoPost(postId) {
+  _closeGenericSheet('notif-detail');
+  var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
+  navTo(homeBtn, 'p-home');
+  setTimeout(function() { highlightPost(postId); }, 350);
+}
+function _nddGoProfile(fromUser) {
+  _closeGenericSheet('notif-detail');
+  openUserProfile(fromUser);
+}
+
+/* Flash d'un post dans le feed */
+function highlightPost(postId) {
+  var card = document.getElementById('post-' + postId);
+  if (!card) { showToast('Publication introuvable', ''); return; }
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.remove('post-highlight');
+  void card.offsetWidth; /* reflow pour relancer l'animation */
+  card.classList.add('post-highlight');
+  setTimeout(function() { card.classList.remove('post-highlight'); }, 2200);
+}
+
+/* Redirige l'ancienne API (notifications etc.) vers la vue complète */
+function openUserProfile(userInfo) {
+  openUserProfileView(userInfo);
+}
+function closeProfileModal() { /* compat — no-op */ }
+
+/* ══════════════════════════════════════════
+   PROFIL UTILISATEUR
+══════════════════════════════════════════ */
+
+/* ── Storage ── */
+function loadUserProfile(email) {
+  return JSON.parse(localStorage.getItem('gw_profile_' + email) || 'null');
+}
+function saveUserProfile(email, data) {
+  var ts = Date.now();
+  var saved = false;
+  try {
+    localStorage.setItem('gw_profile_' + email, JSON.stringify(data));
+    saved = true;
+  } catch(e) {
+    /* QuotaExceededError : re-tente sans la photo */
+    if (data && data.photo) {
+      try {
+        localStorage.setItem('gw_profile_' + email, JSON.stringify(Object.assign({}, data, { photo: null })));
+        saved = true;
+      } catch(e2) {}
+    }
+    showToast('Espace de stockage insuffisant — essayez une photo plus petite.', 'err');
+  }
+  /* Signal global — écrit une seule fois après la sauvegarde réussie */
+  if (saved) {
+    try { localStorage.setItem('gw_profile_changed', JSON.stringify({ email: email, at: ts })); } catch(e3) {}
+  }
+}
+function getDefaultProfile(user) {
+  var now = new Date();
+  var month = now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+  return {
+    photo: null,
+    nom: user.nom,
+    domain: '',
+    location: '',
+    bio: '',
+    skills: [],
+    memberSince: month,
+    projects: 0,
+    rating: null,
+    followers: 0,
+    following: 0
+  };
+}
+
+/* ── Rendu de la page profil ── */
+function renderProfilePage() {
+  if (!_currentUser) return;
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+
+  _renderCollabInvitesBanner();
+
+  /* Photo */
+  var photoImg      = document.getElementById('profil-photo-img');
+  var photoInitials = document.getElementById('profil-photo-initials');
+  if (photoImg && photoInitials) {
+    if (profile.photo) {
+      photoImg.src          = profile.photo;
+      photoImg.style.display = 'block';
+      photoInitials.style.display = 'none';
+    } else {
+      photoImg.style.display      = 'none';
+      photoInitials.style.display = '';
+      photoInitials.textContent   = getInitials(profile.nom || _currentUser.nom);
+    }
+  }
+
+  /* Nom */
+  var nameEl = document.getElementById('profil-name-display');
+  if (nameEl) nameEl.textContent = profile.nom || _currentUser.nom;
+
+  /* Badge */
+  var badgeDisplayEl = document.getElementById('profil-badge-display');
+  if (badgeDisplayEl) badgeDisplayEl.innerHTML = getBadgeHtml(_currentUser.email);
+
+  /* Domaine */
+  var domEl = document.getElementById('profil-domain-display');
+  if (domEl) domEl.textContent = profile.domain || 'Ajouter votre domaine';
+
+  /* Localisation */
+  var locEl = document.getElementById('profil-location-text');
+  if (locEl) locEl.textContent = profile.location || 'Ajouter une ville';
+
+  /* Stats */
+  var setTxt = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; };
+  var _selfKey = getProfileKey({ nom: _currentUser.nom, email: _currentUser.email });
+  setTxt('pstat-projects',  loadProjects(_currentUser.email).length);
+  setTxt('pstat-rating',    profile.rating ? profile.rating + ' ★' : '—');
+  setTxt('pstat-followers', _getTotalFollowers(_selfKey, false));  /* toujours depuis le vrai storage */
+  setTxt('pstat-following', getFollowing().length);
+
+  /* Bio */
+  var bioEl = document.getElementById('profil-bio-display');
+  if (bioEl) {
+    if (profile.bio) {
+      bioEl.textContent = profile.bio;
+      bioEl.classList.remove('empty-bio');
+    } else {
+      bioEl.textContent = 'Aucune description. Appuyez sur le crayon pour vous présenter.';
+      bioEl.classList.add('empty-bio');
+    }
+  }
+
+  /* Membre depuis */
+  var memberEl = document.getElementById('profil-member-since');
+  if (memberEl) memberEl.textContent = 'Membre depuis ' + (profile.memberSince || 'récemment');
+
+  /* Compétences */
+  _renderProfileSkills(profile.skills || []);
+
+  /* Bouton badge CTA sous le nom */
+  var badgeCta = document.getElementById('profil-badge-cta');
+  if (badgeCta) {
+    if (profile.badgeType === 'verified') {
+      badgeCta.style.display = 'inline-flex';
+      badgeCta.innerHTML = '<i class="fas fa-circle-check"></i> Badge Vérifié';
+      badgeCta.className = 'profil-badge-cta profil-badge-cta-blue';
+    } else if (profile.badgeType === 'premium') {
+      badgeCta.style.display = 'inline-flex';
+      badgeCta.innerHTML = '<i class="fas fa-crown"></i> Badge Premium';
+      badgeCta.className = 'profil-badge-cta profil-badge-cta-gold';
+    } else if (profile.badgeStatus === 'pending') {
+      badgeCta.style.display = 'inline-flex';
+      badgeCta.innerHTML = '<i class="fas fa-hourglass-half"></i> Vérification en cours…';
+      badgeCta.className = 'profil-badge-cta profil-badge-cta-pending';
+    } else {
+      badgeCta.style.display = 'inline-flex';
+      badgeCta.innerHTML = '<i class="fas fa-shield-halved"></i> Obtenir le badge';
+      badgeCta.className = 'profil-badge-cta profil-badge-cta-default';
+    }
+  }
+
+  /* ── Téléphone ── */
+  var phoneValEl  = document.getElementById('profil-phone-display');
+  var phoneVerEl  = document.getElementById('profil-phone-verified');
+  var phoneVisBadge = document.getElementById('profil-phone-vis-badge');
+  if (phoneValEl) {
+    phoneValEl.textContent = profile.phone || 'Ajouter un numéro';
+    phoneValEl.style.color = profile.phone ? '#111827' : '#9CA3AF';
+  }
+  if (phoneVerEl) {
+    phoneVerEl.style.display = profile.phoneVerified ? 'inline' : 'none';
+  }
+  if (phoneVisBadge) {
+    if (profile.phonePublic) {
+      phoneVisBadge.innerHTML = '<i class="fas fa-earth-europe"></i> Public';
+      phoneVisBadge.className = 'profil-visibility-badge profil-vis-public';
+    } else {
+      phoneVisBadge.innerHTML = '<i class="fas fa-lock"></i> Privé';
+      phoneVisBadge.className = 'profil-visibility-badge';
+    }
+  }
+
+  /* ── Email professionnel ── */
+  var emailValEl    = document.getElementById('profil-email-display');
+  var emailVisBadge = document.getElementById('profil-email-vis-badge');
+  var cooldownInfo  = _getProEmailCooldownInfo(profile);
+
+  if (emailValEl) {
+    if (profile.proEmail) {
+      emailValEl.textContent = profile.proEmail;
+      emailValEl.style.color = '#111827';
+    } else {
+      emailValEl.textContent = 'Ajouter un email pro';
+      emailValEl.style.color = '#9CA3AF';
+    }
+    /* Indicateur de cooldown actif sur la ligne */
+    var emailRow = document.getElementById('profil-email-row');
+    if (emailRow) {
+      var oldCooldownBadge = emailRow.querySelector('.pro-email-mini-cd');
+      if (oldCooldownBadge) oldCooldownBadge.remove();
+      if (cooldownInfo.locked && profile.proEmail) {
+        var cdBadge = document.createElement('span');
+        cdBadge.className = 'pro-email-mini-cd';
+        cdBadge.innerHTML = '<i class="fas fa-clock"></i> ' + cooldownInfo.daysLeft + 'j';
+        emailValEl.parentNode.appendChild(cdBadge);
+      }
+    }
+  }
+  if (emailVisBadge) {
+    if (profile.proEmailPublic) {
+      emailVisBadge.innerHTML = '<i class="fas fa-earth-europe"></i> Public';
+      emailVisBadge.className = 'profil-visibility-badge profil-vis-public';
+    } else {
+      emailVisBadge.innerHTML = '<i class="fas fa-lock"></i> Privé';
+      emailVisBadge.className = 'profil-visibility-badge';
+    }
+  }
+
+  /* Badge "Compte Google" — masqué */
+  var googleBadge = document.getElementById('profil-google-badge');
+  if (googleBadge) googleBadge.style.display = 'none';
+}
+
+function _renderProfileSkills(skills) {
+  var wrap = document.getElementById('profil-skills-display');
+  if (!wrap) return;
+  if (!skills.length) {
+    wrap.innerHTML = '<p class="profil-empty-hint">Aucune compétence. Appuyez sur le crayon pour en ajouter.</p>';
+    return;
+  }
+  wrap.innerHTML = skills.map(function(s) {
+    return '<span class="profil-skill-chip">' + escHtml(s) + '</span>';
+  }).join('');
+}
+
+/* ── Switcher de tabs ── */
+function switchProfilTab(btn, tab) {
+  /* Uniquement les tabs du profil courant (pas ceux de user-profile-view) */
+  document.querySelectorAll('#p-profil .profil-tab').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  var map = { about: 'ptab-about', services: 'ptab-services', projects: 'ptab-projects', reviews: 'ptab-reviews', posts: 'ptab-posts' };
+  Object.values(map).forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.classList.add('hidden');
+  });
+  var target = document.getElementById(map[tab]);
+  if (target) target.classList.remove('hidden');
+  /* Rend les publications si l'onglet est sélectionné */
+  if (tab === 'posts' && _currentUser) {
+    renderProfilPosts(_currentUser.email, _currentUser.nom, target);
+  }
+  if (tab === 'services')  renderProfileServices();
+  if (tab === 'projects')  renderProfileProjects();
+}
+
+/* ── Photo de profil ── */
+function pickProfilePhoto() {
+  var inp = document.getElementById('profil-photo-picker');
+  if (inp) inp.click();
+}
+
+function handleProfilePhoto(input) {
+  if (!input.files || !input.files[0]) return;
+  var reader = new FileReader();
+  reader.onload = function(e) { _openCropModal(e.target.result); };
+  reader.readAsDataURL(input.files[0]);
+  input.value = '';
+}
+
+/* ══════════════════════════════════════════
+   CROP / RECADRAGE PHOTO DE PROFIL
+══════════════════════════════════════════ */
+var _cropSrcImg  = null;
+var _cropScale   = 1;
+var _cropX       = 0;
+var _cropY       = 0;
+var _cropVW      = 280;   /* largeur viewport */
+var _cropVH      = 280;   /* hauteur viewport */
+var _cropDia     = 240;   /* diamètre du cercle de recadrage */
+
+function _openCropModal(src) {
+  var modal  = document.getElementById('photo-crop-modal');
+  var imgEl  = document.getElementById('crop-img-el');
+  var range  = document.getElementById('crop-zoom-range');
+  if (!modal || !imgEl || !range) return;
+
+  _cropSrcImg = new Image();
+  _cropSrcImg.onload = function() {
+    /* Échelle initiale : le côté court remplit le cercle */
+    var minSide = Math.min(_cropSrcImg.naturalWidth, _cropSrcImg.naturalHeight);
+    _cropScale  = _cropDia / minSide;
+    _cropX = (_cropVW - _cropSrcImg.naturalWidth  * _cropScale) / 2;
+    _cropY = (_cropVH - _cropSrcImg.naturalHeight * _cropScale) / 2;
+    _cropApplyTransform(imgEl);
+
+    range.min   = _cropScale.toFixed(4);
+    range.max   = (_cropScale * 5).toFixed(4);
+    range.step  = '0.01';
+    range.value = _cropScale;
+
+    _cropAttachEvents(imgEl, range);
+  };
+  _cropSrcImg.src = src;
+  imgEl.src = src;
+
+  modal.style.display = 'flex';
+}
+
+function _cropApplyTransform(imgEl) {
+  imgEl.style.transform =
+    'translate(' + _cropX + 'px,' + _cropY + 'px) scale(' + _cropScale + ')';
+}
+
+function _cropAttachEvents(imgEl, range) {
+  var vp = document.getElementById('crop-viewport');
+
+  /* ── Nettoyage des anciens listeners ── */
+  vp.onmousedown = null;
+  vp.ontouchstart = null;
+
+  var isDragging = false, lastX = 0, lastY = 0;
+  var pinchStartDist = 0, pinchStartScale = 1;
+
+  /* Mouse */
+  vp.onmousedown = function(e) {
+    isDragging = true; lastX = e.clientX; lastY = e.clientY;
+    imgEl.style.cursor = 'grabbing'; e.preventDefault();
+  };
+  document.onmousemove = function(e) {
+    if (!isDragging) return;
+    _cropX += e.clientX - lastX; _cropY += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    _cropApplyTransform(imgEl);
+  };
+  document.onmouseup = function() {
+    isDragging = false; imgEl.style.cursor = 'grab';
+  };
+
+  /* Touch — drag + pinch */
+  vp.ontouchstart = function(e) {
+    e.preventDefault();
+    if (e.touches.length === 1) {
+      isDragging = true;
+      lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    } else if (e.touches.length === 2) {
+      isDragging = false;
+      pinchStartDist  = Math.hypot(
+        e.touches[1].clientX - e.touches[0].clientX,
+        e.touches[1].clientY - e.touches[0].clientY);
+      pinchStartScale = _cropScale;
+    }
+  };
+  vp.ontouchmove = function(e) {
+    e.preventDefault();
+    if (e.touches.length === 1 && isDragging) {
+      _cropX += e.touches[0].clientX - lastX;
+      _cropY += e.touches[0].clientY - lastY;
+      lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+      _cropApplyTransform(imgEl);
+    } else if (e.touches.length === 2) {
+      var dist = Math.hypot(
+        e.touches[1].clientX - e.touches[0].clientX,
+        e.touches[1].clientY - e.touches[0].clientY);
+      _cropSetScale(pinchStartScale * dist / pinchStartDist, imgEl, range);
+    }
+  };
+  vp.ontouchend = function(e) { if (e.touches.length < 2) isDragging = false; };
+
+  /* Slider */
+  range.oninput = function() {
+    _cropSetScale(parseFloat(range.value), imgEl, range);
+  };
+}
+
+function _cropSetScale(newScale, imgEl, range) {
+  var min = parseFloat(range.min), max = parseFloat(range.max);
+  newScale = Math.max(min, Math.min(max, newScale));
+  var ratio = newScale / _cropScale;
+  var cx = _cropVW / 2, cy = _cropVH / 2;
+  /* Zoom centré sur le centre du viewport */
+  _cropX = cx - (cx - _cropX) * ratio;
+  _cropY = cy - (cy - _cropY) * ratio;
+  _cropScale = newScale;
+  range.value = newScale;
+  _cropApplyTransform(imgEl);
+}
+
+function _cropApply() {
+  if (!_cropSrcImg) return;
+  var r       = _cropDia / 2;
+  var cx      = _cropVW / 2, cy = _cropVH / 2;
+  /* Coordonnées dans l'image source correspondant au cercle */
+  var srcX = (cx - r - _cropX) / _cropScale;
+  var srcY = (cy - r - _cropY) / _cropScale;
+  var srcW = _cropDia / _cropScale;
+
+  var OUT  = 180;
+  var canvas = document.createElement('canvas');
+  canvas.width = OUT; canvas.height = OUT;
+  var ctx = canvas.getContext('2d');
+  ctx.drawImage(_cropSrcImg, srcX, srcY, srcW, srcW, 0, 0, OUT, OUT);
+
+  var dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  profile.photo = dataUrl;
+  saveUserProfile(_currentUser.email, profile);
+
+  _onProfileSaved();
+  showToast('Photo de profil mise à jour ✓', 'ok');
+  _cropCancel();
+}
+
+function _cropCancel() {
+  var modal = document.getElementById('photo-crop-modal');
+  if (modal) modal.style.display = 'none';
+  document.onmousemove = null;
+  document.onmouseup  = null;
+  _cropSrcImg = null;
+}
+
+/* ── Paramètres du profil (hub d'édition) ── */
+function openProfileSettings() {
+  _closeGenericSheet('profil-settings');
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'profil-settings-bg';
+  bg.onclick = function() { _closeGenericSheet('profil-settings'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card'; card.id = 'profil-settings-card';
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="cam-sheet-title">Modifier le profil</p>' +
+
+    '<button class="cam-sheet-btn" onclick="_closeGenericSheet(\'profil-settings\');openEditName()">' +
+      '<div class="cam-sheet-icon" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-user-pen"></i></div>' +
+      '<div class="cam-sheet-label"><strong>Nom complet</strong>' +
+        '<small>' + escHtml(profile.nom || '') + '</small></div>' +
+    '</button>' +
+
+    '<button class="cam-sheet-btn" onclick="_closeGenericSheet(\'profil-settings\');openEditDomain()">' +
+      '<div class="cam-sheet-icon" style="background:#F0FDF4;color:#16A34A"><i class="fas fa-briefcase"></i></div>' +
+      '<div class="cam-sheet-label"><strong>Domaine professionnel</strong>' +
+        '<small>' + escHtml(profile.domain || 'Non défini') + '</small></div>' +
+    '</button>' +
+
+    '<button class="cam-sheet-btn" onclick="_closeGenericSheet(\'profil-settings\');openEditLocation()">' +
+      '<div class="cam-sheet-icon" style="background:#FFF7ED;color:#EA580C"><i class="fas fa-location-dot"></i></div>' +
+      '<div class="cam-sheet-label"><strong>Localisation</strong>' +
+        '<small>' + escHtml(profile.location || 'Non définie') + '</small></div>' +
+    '</button>' +
+
+    '<button class="cam-sheet-btn" onclick="_closeGenericSheet(\'profil-settings\');openEditBio()">' +
+      '<div class="cam-sheet-icon" style="background:#FDF4FF;color:#9333EA"><i class="fas fa-align-left"></i></div>' +
+      '<div class="cam-sheet-label"><strong>À propos</strong>' +
+        '<small>Modifier votre description</small></div>' +
+    '</button>' +
+
+    '<button class="cam-sheet-btn" onclick="_closeGenericSheet(\'profil-settings\');openEditSkills()">' +
+      '<div class="cam-sheet-icon" style="background:#ECFDF5;color:#059669"><i class="fas fa-tags"></i></div>' +
+      '<div class="cam-sheet-label"><strong>Compétences</strong>' +
+        '<small>' + (profile.skills && profile.skills.length ? profile.skills.length + ' compétence(s)' : 'Aucune') + '</small></div>' +
+    '</button>' +
+
+    '<button class="cam-sheet-btn" onclick="_closeGenericSheet(\'profil-settings\');pickProfilePhoto()">' +
+      '<div class="cam-sheet-icon" style="background:#F0F9FF;color:#0EA5E9"><i class="fas fa-camera"></i></div>' +
+      '<div class="cam-sheet-label"><strong>Photo de profil</strong>' +
+        '<small>Importer depuis la galerie</small></div>' +
+    '</button>' +
+
+    '<div class="cam-sheet-divider"></div>' +
+    '<button class="cam-sheet-btn" onclick="_closeGenericSheet(\'profil-settings\')">' +
+      '<div class="cam-sheet-icon cam-icon-cancel"><i class="fas fa-times"></i></div>' +
+      '<div class="cam-sheet-label"><strong style="color:#EF4444">Fermer</strong></div>' +
+    '</button>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _closeGenericSheet(prefix) {
+  var bg   = document.getElementById(prefix + '-bg');
+  var card = document.getElementById(prefix + '-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+}
+
+/* ── Feuille d'édition générique ── */
+function _openEditSheet(title, bodyHtml, onSave) {
+  _closeEditSheet();
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'edit-sheet-bg';
+  bg.onclick = _closeEditSheet;
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card edit-sheet-card'; card.id = 'edit-sheet-card';
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="edit-sheet-head">' +
+      '<p class="edit-sheet-title">' + escHtml(title) + '</p>' +
+      '<button class="edit-sheet-close" onclick="_closeEditSheet()"><i class="fas fa-times"></i></button>' +
+    '</div>' +
+    '<div class="edit-sheet-body">' + bodyHtml + '</div>' +
+    '<div class="edit-sheet-footer">' +
+      '<button class="btn-outline edit-sheet-footer-cancel" onclick="_closeEditSheet()">Annuler</button>' +
+      '<button class="btn-blue" id="edit-sheet-save-btn">Enregistrer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+
+  document.getElementById('edit-sheet-save-btn').onclick = function() {
+    var ok = onSave();
+    if (ok !== false) _closeEditSheet();
+  };
+}
+
+function _closeEditSheet() {
+  var bg   = document.getElementById('edit-sheet-bg');
+  var card = document.getElementById('edit-sheet-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+}
+
+/* ── Édition nom ── */
+function openEditName() {
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  _openEditSheet(
+    'Modifier le nom',
+    '<div class="edit-field-group">' +
+      '<label>Nom complet</label>' +
+      '<div class="edit-field-box">' +
+        '<input type="text" id="edit-name-input" value="' + escHtml(profile.nom || '') +
+        '" placeholder="Votre nom complet" maxlength="60"/>' +
+      '</div>' +
+    '</div>',
+    function() {
+      var val = (document.getElementById('edit-name-input').value || '').trim();
+      if (!val) { showToast('Le nom ne peut pas être vide', ''); return false; }
+      var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+      p.nom = val;
+      saveUserProfile(_currentUser.email, p);
+      /* Sync partout : session, gw_users, feed, notifications */
+      _syncUserRecord(_currentUser.email, val);
+      renderProfilePage();
+      showToast('Nom mis à jour ✓', 'ok');
+      return true;
+    }
+  );
+  setTimeout(function() { var i = document.getElementById('edit-name-input'); if (i) { i.focus(); i.select(); } }, 320);
+}
+
+/* ── Édition domaine ── */
+var DOMAIN_LIST = [
+  'Développeur Web','Développeur Mobile','Développeur Fullstack',
+  'Designer UI/UX','Designer Graphique','Motion Designer',
+  'Marketing Digital','Community Manager','Gestionnaire Réseaux Sociaux',
+  'Rédacteur / Copywriter','Consultant Business','Chef de Projet',
+  'Data Analyst','Photographe','Vidéaste / Monteur',
+  'Comptable / Financier','Consultant RH','Coach / Formateur',
+  'Traducteur','Architecte','Ingénieur','Juriste / Avocat',
+  'Musicien / Compositeur','Illustrateur','Technicien IT','Autre'
+];
+
+function openEditDomain() {
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  var manualVal = (DOMAIN_LIST.indexOf(profile.domain) === -1 && profile.domain) ? profile.domain : '';
+
+  var listHtml = DOMAIN_LIST.map(function(d) {
+    var sel = d === profile.domain ? ' selected' : '';
+    return '<button class="domain-option' + sel + '" onclick="selectDomainOption(this)">' + escHtml(d) + '</button>';
+  }).join('');
+
+  _openEditSheet(
+    'Domaine professionnel',
+    '<div class="edit-field-group">' +
+      '<label>Entrer manuellement</label>' +
+      '<div class="edit-field-box">' +
+        '<input type="text" id="edit-domain-manual" placeholder="Ex : Consultant SEO" ' +
+        'value="' + escHtml(manualVal) + '" maxlength="60" ' +
+        'oninput="document.querySelectorAll(\'.domain-option\').forEach(function(b){b.classList.remove(\'selected\')})"/>' +
+      '</div>' +
+    '</div>' +
+    '<div class="edit-field-group"><label>Ou choisir dans la liste</label></div>' +
+    '<div class="domain-list">' + listHtml + '</div>',
+    function() {
+      var manual   = (document.getElementById('edit-domain-manual').value || '').trim();
+      var selBtn   = document.querySelector('.domain-option.selected');
+      var val      = manual || (selBtn ? selBtn.textContent.trim() : '');
+      var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+      p.domain = val;
+      saveUserProfile(_currentUser.email, p);
+      renderProfilePage();
+      /* Le domaine apparaît dans les posts → re-render feed */
+      if (document.getElementById('feed-list')) renderFeed(getAllPosts());
+      showToast('Domaine mis à jour ✓', 'ok');
+      return true;
+    }
+  );
+}
+
+function selectDomainOption(btn) {
+  document.querySelectorAll('.domain-option').forEach(function(b) { b.classList.remove('selected'); });
+  btn.classList.add('selected');
+  var inp = document.getElementById('edit-domain-manual');
+  if (inp) inp.value = '';
+}
+
+/* ── Édition bio ── */
+function openEditBio() {
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  var bioVal  = profile.bio || '';
+  _openEditSheet(
+    'À propos de vous',
+    '<div class="edit-field-group">' +
+      '<label>Description (max 500 caractères)</label>' +
+      '<textarea id="edit-bio-input" class="edit-textarea" rows="6" maxlength="500" ' +
+      'placeholder="Présentez-vous : votre expérience, vos spécialités...">' + escHtml(bioVal) + '</textarea>' +
+      '<div class="edit-charcount"><span id="edit-bio-count">' + bioVal.length + '</span>/500</div>' +
+    '</div>',
+    function() {
+      var val = (document.getElementById('edit-bio-input').value || '').trim();
+      var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+      p.bio = val;
+      saveUserProfile(_currentUser.email, p);
+      renderProfilePage();
+      showToast('Description mise à jour', 'ok');
+      return true;
+    }
+  );
+  setTimeout(function() {
+    var ta = document.getElementById('edit-bio-input');
+    if (ta) {
+      ta.focus();
+      ta.addEventListener('input', function() {
+        var cc = document.getElementById('edit-bio-count');
+        if (cc) cc.textContent = ta.value.length;
+      });
+    }
+  }, 320);
+}
+
+/* ── Édition localisation ── */
+function openEditLocation() {
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  _openEditSheet(
+    'Localisation',
+    '<div class="edit-field-group">' +
+      '<label>Ville, Pays</label>' +
+      '<div class="edit-field-box">' +
+        '<input type="text" id="edit-location-input" value="' + escHtml(profile.location || '') +
+        '" placeholder="Ex : Paris, France" maxlength="80"/>' +
+      '</div>' +
+    '</div>',
+    function() {
+      var val = (document.getElementById('edit-location-input').value || '').trim();
+      var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+      p.location = val;
+      saveUserProfile(_currentUser.email, p);
+      renderProfilePage();
+      showToast('Localisation mise à jour', 'ok');
+      return true;
+    }
+  );
+  setTimeout(function() { var i = document.getElementById('edit-location-input'); if (i) { i.focus(); i.select(); } }, 320);
+}
+
+/* ── Édition téléphone ── */
+function openEditPhone() {
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  var isPublic = !!profile.phonePublic;
+
+  _openEditSheet(
+    'Téléphone',
+    /* ── Numéro ── */
+    '<div class="edit-field-group">' +
+      '<label>Numéro de téléphone</label>' +
+      '<div class="edit-field-box">' +
+        '<i class="fas fa-phone field-icon"></i>' +
+        '<input type="tel" id="edit-phone-input" value="' + escHtml(profile.phone || '') +
+        '" placeholder="+33 6 00 00 00 00" maxlength="20" inputmode="tel"/>' +
+      '</div>' +
+      '<p class="edit-hint">Requis pour la vérification du badge ✅</p>' +
+    '</div>' +
+    /* ── Visibilité ── */
+    '<div class="edit-field-group">' +
+      '<label>Visibilité</label>' +
+      '<div class="vis-toggle-row">' +
+        '<button type="button" class="vis-toggle-btn' + (!isPublic ? ' vis-active-private' : '') + '" ' +
+                'id="vis-private-btn" onclick="_setPhoneVis(false)">' +
+          '<i class="fas fa-lock"></i> Privé' +
+          '<span class="vis-toggle-sub">Visible uniquement par vous</span>' +
+        '</button>' +
+        '<button type="button" class="vis-toggle-btn' + (isPublic ? ' vis-active-public' : '') + '" ' +
+                'id="vis-public-btn" onclick="_setPhoneVis(true)">' +
+          '<i class="fas fa-earth-europe"></i> Public' +
+          '<span class="vis-toggle-sub">Visible sur votre profil</span>' +
+        '</button>' +
+      '</div>' +
+    '</div>',
+    function() {
+      var val     = (document.getElementById('edit-phone-input').value || '').trim();
+      var pub     = document.getElementById('vis-public-btn').classList.contains('vis-active-public');
+      if (val && val.length < 8) { showToast('Numéro trop court', 'err'); return false; }
+      var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+      p.phone        = val;
+      p.phoneVerified = val.length >= 8;
+      p.phonePublic  = pub;
+      saveUserProfile(_currentUser.email, p);
+      renderProfilePage();
+      var msg = val
+        ? 'Téléphone enregistré — ' + (pub ? '🌐 Public' : '🔒 Privé')
+        : 'Téléphone supprimé';
+      showToast(msg, 'ok');
+      return true;
+    }
+  );
+  setTimeout(function() { var i = document.getElementById('edit-phone-input'); if (i) { i.focus(); } }, 320);
+}
+
+/* Helper interne : bascule les boutons public/privé dans le modal téléphone */
+function _setPhoneVis(isPublic) {
+  var privBtn = document.getElementById('vis-private-btn');
+  var pubBtn  = document.getElementById('vis-public-btn');
+  if (!privBtn || !pubBtn) return;
+  privBtn.className = 'vis-toggle-btn' + (!isPublic ? ' vis-active-private' : '');
+  pubBtn.className  = 'vis-toggle-btn' + (isPublic  ? ' vis-active-public'  : '');
+}
+
+/* ── Édition visibilité email ── */
+/* ── Email professionnel — délai de modification : 7 jours ── */
+var PRO_EMAIL_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000; /* 7 jours en ms */
+
+function _getProEmailCooldownInfo(profile) {
+  if (!profile.proEmailLastChanged) return { locked: false, daysLeft: 0 };
+  var elapsed = Date.now() - profile.proEmailLastChanged;
+  var remaining = PRO_EMAIL_COOLDOWN_MS - elapsed;
+  if (remaining <= 0) return { locked: false, daysLeft: 0 };
+  var daysLeft = Math.ceil(remaining / (24 * 60 * 60 * 1000));
+  var hoursLeft = Math.ceil(remaining / (60 * 60 * 1000));
+  return { locked: true, daysLeft: daysLeft, hoursLeft: hoursLeft, remaining: remaining };
+}
+
+function openEditProEmail() {
+  if (!_currentUser) return;
+  var profile  = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  var isPublic = !!profile.proEmailPublic;
+  var cooldown = _getProEmailCooldownInfo(profile);
+
+  /* ── Message de cooldown ── */
+  var cooldownHtml = '';
+  if (cooldown.locked) {
+    cooldownHtml =
+      '<div class="pro-email-cooldown">' +
+        '<i class="fas fa-clock"></i>' +
+        '<div>' +
+          '<strong>Modification bloquée</strong>' +
+          '<span>Prochaine modification possible dans <strong>' +
+            (cooldown.daysLeft > 1
+              ? cooldown.daysLeft + ' jours'
+              : cooldown.hoursLeft + ' heure(s)') +
+          '</strong></span>' +
+        '</div>' +
+      '</div>';
+  }
+
+  _openEditSheet(
+    'Email professionnel',
+
+    /* ── Email du compte (verrouillé) ── */
+    '<div class="edit-field-group">' +
+      '<label>Email du compte <span class="pro-email-locked-badge"><i class="fas fa-lock"></i> Non modifiable</span></label>' +
+      '<div class="edit-field-box edit-field-locked">' +
+        '<i class="fas fa-envelope field-icon"></i>' +
+        '<input type="email" value="' + escHtml(_currentUser.email) + '" readonly />' +
+      '</div>' +
+      '<p class="edit-hint">L\'email de connexion ne peut jamais être modifié ici.</p>' +
+    '</div>' +
+
+    /* ── Email professionnel (modifiable avec cooldown) ── */
+    '<div class="edit-field-group">' +
+      '<label>Email professionnel affiché</label>' +
+      (cooldownHtml || '') +
+      '<div class="edit-field-box' + (cooldown.locked ? ' edit-field-locked' : '') + '">' +
+        '<i class="fas fa-briefcase field-icon"></i>' +
+        '<input type="email" id="edit-pro-email-input" ' +
+               'value="' + escHtml(profile.proEmail || '') + '" ' +
+               'placeholder="contact@monentreprise.com" maxlength="100" ' +
+               (cooldown.locked ? 'readonly ' : '') + '/>' +
+      '</div>' +
+      '<p class="edit-hint">' +
+        (cooldown.locked
+          ? 'Vous pourrez modifier cet email dans ' + cooldown.daysLeft + ' jour(s).'
+          : 'Cet email est affiché sur votre profil public. Modifiable une fois tous les 7 jours.') +
+      '</p>' +
+    '</div>' +
+
+    /* ── Visibilité ── */
+    '<div class="edit-field-group">' +
+      '<label>Visibilité</label>' +
+      '<div class="vis-toggle-row">' +
+        '<button type="button" class="vis-toggle-btn' + (!isPublic ? ' vis-active-private' : '') + '" ' +
+                'id="vis-email-private-btn" onclick="_setEmailVis(false)">' +
+          '<i class="fas fa-lock"></i> Privé' +
+          '<span class="vis-toggle-sub">Seul vous voyez cet email</span>' +
+        '</button>' +
+        '<button type="button" class="vis-toggle-btn' + (isPublic ? ' vis-active-public' : '') + '" ' +
+                'id="vis-email-public-btn" onclick="_setEmailVis(true)">' +
+          '<i class="fas fa-earth-europe"></i> Public' +
+          '<span class="vis-toggle-sub">Affiché sur votre profil</span>' +
+        '</button>' +
+      '</div>' +
+    '</div>',
+
+    function() {
+      var p   = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+      var pub = document.getElementById('vis-email-public-btn').classList.contains('vis-active-public');
+      var newVal = (document.getElementById('edit-pro-email-input').value || '').trim().toLowerCase();
+
+      /* Vérifie le cooldown avant toute modification du champ email */
+      var cd = _getProEmailCooldownInfo(p);
+      if (!cd.locked && newVal !== (p.proEmail || '')) {
+        /* Email modifié → démarre le cooldown */
+        if (newVal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newVal)) {
+          showToast('Adresse email invalide', 'err');
+          return false;
+        }
+        p.proEmail           = newVal;
+        p.proEmailLastChanged = newVal ? Date.now() : null;
+      }
+      /* Si cooldown actif → on ne modifie pas l'email mais on met à jour la visibilité */
+      p.proEmailPublic = pub;
+      saveUserProfile(_currentUser.email, p);
+      renderProfilePage();
+      var msg = newVal
+        ? 'Email pro enregistré — ' + (pub ? '🌐 Public' : '🔒 Privé')
+        : 'Email pro supprimé';
+      showToast(msg, 'ok');
+      return true;
+    }
+  );
+  setTimeout(function() {
+    var i = document.getElementById('edit-pro-email-input');
+    if (i && !i.readOnly) { i.focus(); }
+  }, 320);
+}
+
+function _setEmailVis(isPublic) {
+  var privBtn = document.getElementById('vis-email-private-btn');
+  var pubBtn  = document.getElementById('vis-email-public-btn');
+  if (!privBtn || !pubBtn) return;
+  privBtn.className = 'vis-toggle-btn' + (!isPublic ? ' vis-active-private' : '');
+  pubBtn.className  = 'vis-toggle-btn' + (isPublic  ? ' vis-active-public'  : '');
+}
+
+/* ── Téléphone public → appel (ou copie sur desktop) ── */
+function upvCallPhone() {
+  var el = document.getElementById('upv-phone-display');
+  if (!el) return;
+  var num = el.textContent.trim();
+  if (!num) return;
+  /* Essaie d'ouvrir l'appel natif (mobile) */
+  window.location.href = 'tel:' + num.replace(/\s/g, '');
+  showToast('Appel vers ' + num, 'ok');
+}
+
+/* ── Email professionnel public → copier dans le presse-papier ── */
+function upvCopyEmail() {
+  var el = document.getElementById('upv-email-display');
+  if (!el) return;
+  var mail = el.textContent.trim();
+  if (!mail) return;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(mail).then(function() {
+      showToast('Email professionnel copié 📋', 'ok');
+    });
+  } else {
+    showToast(mail, '');
+  }
+}
+
+/* ── Édition compétences ── */
+var SKILLS_LIST = [
+  'HTML','CSS','JavaScript','TypeScript','React','Vue.js','Angular','Next.js',
+  'Node.js','Python','PHP','Laravel','WordPress','MongoDB','MySQL','PostgreSQL',
+  'Docker','Git','Figma','Adobe XD','Photoshop','Illustrator','After Effects',
+  'Premiere Pro','SEO','Google Ads','Facebook Ads','Copywriting','Content Marketing',
+  'Email Marketing','Project Management','Agile / Scrum','UI/UX Design',
+  'Swift','Kotlin','Flutter','React Native','AWS','Firebase','Canva',
+  'Excel / Sheets','Power BI','Notion','Webflow','Shopify'
+];
+
+function openEditSkills() {
+  var profile  = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  var current  = (profile.skills || []).slice();
+
+  var chipsHtml = SKILLS_LIST.map(function(s) {
+    var active = current.indexOf(s) !== -1 ? ' active' : '';
+    return '<button class="skill-pick-chip' + active + '" data-skill="' + escHtml(s) +
+           '" onclick="this.classList.toggle(\'active\')">' + escHtml(s) + '</button>';
+  }).join('');
+
+  /* Chips personnalisés déjà enregistrés (hors liste standard) */
+  var customChips = current.filter(function(s) { return SKILLS_LIST.indexOf(s) === -1; }).map(function(s) {
+    return '<button class="skill-pick-chip active" data-skill="' + escHtml(s) +
+           '" onclick="this.classList.toggle(\'active\')">' + escHtml(s) + '</button>';
+  }).join('');
+
+  _openEditSheet(
+    'Compétences',
+    '<div class="edit-field-group">' +
+      '<label>Ajouter manuellement</label>' +
+      '<div class="edit-field-row">' +
+        '<div class="edit-field-box" style="flex:1">' +
+          '<input type="text" id="edit-skill-manual" placeholder="Ex : Rust, Blender, Figma..." maxlength="40"/>' +
+        '</div>' +
+        '<button class="edit-add-btn" onclick="addManualSkill()"><i class="fas fa-plus"></i></button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="edit-field-group"><label>Sélectionner dans la liste</label></div>' +
+    '<div class="skill-pick-wrap" id="skill-pick-wrap">' + customChips + chipsHtml + '</div>',
+    function() {
+      var selected = [];
+      document.querySelectorAll('.skill-pick-chip.active').forEach(function(b) {
+        var sk = (b.dataset.skill || b.textContent).trim();
+        if (sk && selected.indexOf(sk) === -1) selected.push(sk);
+      });
+      var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+      p.skills = selected;
+      saveUserProfile(_currentUser.email, p);
+      _renderProfileSkills(selected);
+      showToast(selected.length + ' compétence(s) sauvegardée(s)', 'ok');
+      return true;
+    }
+  );
+  setTimeout(function() {
+    var inp = document.getElementById('edit-skill-manual');
+    if (inp) {
+      inp.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); addManualSkill(); }
+      });
+    }
+  }, 320);
+}
+
+function addManualSkill() {
+  var inp = document.getElementById('edit-skill-manual');
+  if (!inp) return;
+  var val = inp.value.trim();
+  if (!val) return;
+  /* Vérifie si déjà présent */
+  var existing = document.querySelector('.skill-pick-chip[data-skill="' + val + '"]');
+  if (existing) {
+    existing.classList.add('active');
+    existing.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    inp.value = '';
+    return;
+  }
+  /* Crée un nouveau chip */
+  var wrap = document.getElementById('skill-pick-wrap');
+  if (!wrap) return;
+  var chip = document.createElement('button');
+  chip.className   = 'skill-pick-chip active';
+  chip.dataset.skill = val;
+  chip.textContent = val;
+  chip.onclick = function() { chip.classList.toggle('active'); };
+  wrap.insertBefore(chip, wrap.firstChild);
+  inp.value = '';
+  inp.focus();
+}
+
+/* ══════════════════════════════════════════
+   VUE PROFIL VISITEUR
+══════════════════════════════════════════ */
+
+var _upvTarget = null; /* { nom, email, role } */
+var _upvRating = 0;
+var _STAR_LABELS = ['','Mauvais 😞','Passable 😐','Bien 🙂','Très bien 😊','Excellent 🤩'];
+
+/* ── Clé de profil (email ou nom slugifié) ── */
+function getProfileKey(userInfo) {
+  if (!userInfo) return 'unknown';
+  return userInfo.email
+    ? userInfo.email
+    : 'demo_' + (userInfo.nom || '').toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+}
+
+/* ── Storage abonnements ── */
+function getFollowing() {
+  if (!_currentUser) return [];
+  return JSON.parse(localStorage.getItem('gw_following_' + _currentUser.email) || '[]');
+}
+function saveFollowing(list) {
+  if (!_currentUser) return;
+  localStorage.setItem('gw_following_' + _currentUser.email, JSON.stringify(list));
+}
+function isFollowing(profileKey) {
+  return getFollowing().some(function(f) { return f.key === profileKey; });
+}
+
+/* ── Compteur d'abonnés dynamiques (vrais follows) ── */
+function _getFCount(key)  { return parseInt(localStorage.getItem('gw_fc_' + key) || '0', 10); }
+function _incrFCount(key) { localStorage.setItem('gw_fc_' + key, _getFCount(key) + 1); }
+function _decrFCount(key) { var c = _getFCount(key); if (c > 0) localStorage.setItem('gw_fc_' + key, c - 1); }
+
+/* ── Base fixe et persistante pour les utilisateurs démo ── */
+function _getSeedFollowers(profileKey, isDemo) {
+  if (!isDemo) return 0;   /* utilisateurs inscrits : base = 0 */
+  var k = 'gw_base_fl_' + profileKey;
+  var v = localStorage.getItem(k);
+  if (v !== null) return parseInt(v, 10);
+  var seed = Math.floor(Math.random() * 280) + 20;  /* généré une fois, puis figé */
+  localStorage.setItem(k, seed);
+  return seed;
+}
+
+/* ── Nombre total d'abonnés à afficher ── */
+function _getTotalFollowers(profileKey, isDemo) {
+  return _getSeedFollowers(profileKey, isDemo) + _getFCount(profileKey);
+}
+
+/* ── Chiffre démo fixe et persistant (stats projets / abonnements) ── */
+function _getSeedNum(key, min, max) {
+  var k = 'gw_seed_' + key;
+  var v = localStorage.getItem(k);
+  if (v !== null) return parseInt(v, 10);
+  var n = Math.floor(Math.random() * (max - min + 1)) + min;
+  localStorage.setItem(k, n);
+  return n;
+}
+
+/* ── Storage avis ── */
+function loadReviews(profileKey)            { return JSON.parse(localStorage.getItem('gw_reviews_' + profileKey) || '[]'); }
+function saveReviews(profileKey, reviews)   { localStorage.setItem('gw_reviews_' + profileKey, JSON.stringify(reviews)); }
+
+/* ── Ouvrir la vue ── */
+function openUserProfileView(userInfo) {
+  if (!userInfo || !userInfo.nom) return;
+
+  /* ── Résolution email : si absent, cherche parmi les inscrits ── */
+  var resolvedEmail = userInfo.email || null;
+  if (!resolvedEmail && userInfo.nom) {
+    var nomLower = userInfo.nom.toLowerCase();
+    var found = getUsers().find(function(u) {
+      return u.nom.toLowerCase() === nomLower ||
+             getDisplayName(u.email, u.nom).toLowerCase() === nomLower;
+    });
+    if (found) resolvedEmail = found.email;
+  }
+  /* Reconstruit userInfo avec l'email résolu */
+  userInfo = {
+    nom:   userInfo.nom,
+    email: resolvedEmail,
+    role:  userInfo.role || ''
+  };
+
+  _upvTarget = userInfo;
+  _upvRating = 0;
+
+  /* Enregistre dans l'historique (uniquement si ce n'est pas son propre profil) */
+  if (_currentUser && userInfo.email && userInfo.email !== _currentUser.email) {
+    _pushHistory('profile', { nom: userInfo.nom, email: userInfo.email });
+  }
+
+  var profileKey = getProfileKey(userInfo);
+  var profile    = resolvedEmail ? loadUserProfile(resolvedEmail) : null;
+  var reviews    = loadReviews(profileKey);
+
+  /* Helpers locaux */
+  var _t = function(id, txt) { var e = document.getElementById(id); if (e) e.textContent = txt; };
+
+  /* Nom */
+  var nom = (profile && profile.nom) || userInfo.nom || '?';
+  _t('upv-title', nom); _t('upv-name', nom);
+  /* Badge */
+  var upvBadgeEl = document.getElementById('upv-badge-display');
+  if (upvBadgeEl) upvBadgeEl.innerHTML = getBadgeHtml(resolvedEmail);
+
+  /* Photo */
+  var photoImg = document.getElementById('upv-photo-img');
+  var photoIni = document.getElementById('upv-initials');
+  if (photoImg && photoIni) {
+    if (profile && profile.photo) {
+      photoImg.src = profile.photo; photoImg.style.display = 'block';
+      photoIni.style.display = 'none';
+    } else {
+      photoImg.style.display = 'none';
+      photoIni.style.display = ''; photoIni.textContent = getInitials(nom);
+    }
+  }
+
+  /* Domaine & localisation */
+  _t('upv-domain',   (profile && profile.domain)   || userInfo.role || 'Membre Geniwork');
+  _t('upv-location', (profile && profile.location)  || '—');
+
+  /* Stats */
+  var avg = reviews.length
+    ? (reviews.reduce(function(s, r) { return s + r.rating; }, 0) / reviews.length).toFixed(1)
+    : null;
+  var isDemo    = !userInfo.email;
+  var followers = _getTotalFollowers(profileKey, isDemo);
+  /* Projets et abonnements : données réelles ou base démo fixe */
+  var seedProj = _getSeedNum('proj_' + profileKey, 2, 50);
+  var seedFllw = _getSeedNum('fllw_' + profileKey, 5, 120);
+  _t('upv-stat-projects',  (profile && profile.projects) || seedProj);
+  _t('upv-stat-rating',    avg ? avg + ' ★' : '—');
+  _t('upv-stat-followers', followers);
+  _t('upv-stat-following', (profile && profile.following) || seedFllw);
+
+  /* Bio */
+  var bioEl = document.getElementById('upv-bio');
+  if (bioEl) {
+    if (profile && profile.bio) {
+      bioEl.textContent = profile.bio; bioEl.classList.remove('empty-bio');
+    } else {
+      bioEl.textContent = 'Aucune description renseignée.'; bioEl.classList.add('empty-bio');
+    }
+  }
+
+  /* Membre depuis */
+  _t('upv-since', 'Membre depuis ' + ((profile && profile.memberSince) || 'récemment'));
+
+  /* ── Téléphone (public uniquement) ── */
+  var upvPhoneRow = document.getElementById('upv-phone-row');
+  var upvPhoneEl  = document.getElementById('upv-phone-display');
+  if (upvPhoneRow && upvPhoneEl) {
+    var showPhone = profile && profile.phone && profile.phonePublic;
+    upvPhoneRow.style.display = showPhone ? 'flex' : 'none';
+    if (showPhone) upvPhoneEl.textContent = profile.phone;
+  }
+
+  /* ── Email professionnel (public uniquement) ── */
+  var upvEmailRow = document.getElementById('upv-email-row');
+  var upvEmailEl  = document.getElementById('upv-email-display');
+  if (upvEmailRow && upvEmailEl) {
+    var showEmail = profile && profile.proEmail && profile.proEmailPublic;
+    upvEmailRow.style.display = showEmail ? 'flex' : 'none';
+    if (showEmail) upvEmailEl.textContent = profile.proEmail;
+  }
+
+  /* Compétences */
+  var skillsWrap = document.getElementById('upv-skills');
+  if (skillsWrap) {
+    var skills = (profile && profile.skills && profile.skills.length) ? profile.skills : [];
+    skillsWrap.innerHTML = skills.length
+      ? skills.map(function(s) { return '<span class="profil-skill-chip">' + escHtml(s) + '</span>'; }).join('')
+      : '<p class="profil-empty-hint">Aucune compétence renseignée.</p>';
+  }
+
+  /* Bouton Suivre */
+  var isSelf = _currentUser && userInfo.email && userInfo.email === _currentUser.email;
+  var followBtn = document.getElementById('upv-follow-btn');
+  var rateCard  = document.getElementById('upv-rate-card');
+  if (followBtn) followBtn.style.display = isSelf ? 'none' : '';
+  if (rateCard)  rateCard.style.display  = isSelf ? 'none' : '';
+  var actionBar = document.getElementById('upv-action-bar');
+  if (actionBar) actionBar.style.display = isSelf ? 'none' : '';
+  _updateFollowBtn();
+
+  /* Badge avis */
+  _updateReviewsBadge(reviews);
+
+  /* Étoiles — pré-remplit si l'utilisateur a déjà noté */
+  _resetStarsUI();
+  var rtEl = document.getElementById('upv-review-text');
+  if (rtEl) rtEl.value = '';
+  if (!isSelf && _currentUser) {
+    var existing = reviews.find(function(r) { return r.authorEmail === _currentUser.email; });
+    if (existing) {
+      _upvRating = existing.rating;
+      _updateStarsUI(_upvRating);
+      _t('upv-rating-label', _STAR_LABELS[_upvRating] || '');
+      if (rtEl) rtEl.value = existing.text || '';
+    }
+  }
+
+  /* Reset tabs → À propos */
+  document.querySelectorAll('#user-profile-view .profil-tab').forEach(function(b) { b.classList.remove('active'); });
+  var firstTab = document.querySelector('#user-profile-view .profil-tab');
+  if (firstTab) firstTab.classList.add('active');
+  var abt = document.getElementById('upvtab-about');
+  var rvw = document.getElementById('upvtab-reviews');
+  if (abt) abt.classList.remove('hidden');
+  if (rvw) rvw.classList.add('hidden');
+
+  /* Liste des avis */
+  _renderReviewsList(profileKey, reviews);
+
+  /* ── Nettoie un éventuel overlay ban précédent ── */
+  var oldBanOv = document.getElementById('upv-ban-overlay');
+  if (oldBanOv) oldBanOv.remove();
+
+  /* ── Compte banni → comportement selon qui regarde ── */
+  if (resolvedEmail) {
+    var banI = _admGetBanInfo(resolvedEmail);
+    if (banI) {
+      var isOwnAccount = _currentUser && _currentUser.email.toLowerCase() === resolvedEmail.toLowerCase();
+      if (isOwnAccount) {
+        /* Banni qui voit son propre profil → écran ban + recours par-dessus */
+        var ov2 = document.getElementById('user-profile-view');
+        ov2.classList.remove('hidden');
+        void ov2.offsetWidth;
+        ov2.classList.add('open');
+        setTimeout(function() { _gwShowProfileBanOverlay(resolvedEmail, nom, banI); }, 50);
+      } else {
+        /* Autre utilisateur tente de voir un banni → profil introuvable */
+        _gwShowUnavailableProfile(nom);
+      }
+      return;
+    }
+  }
+
+  /* Affiche l'overlay normalement */
+  var ov = document.getElementById('user-profile-view');
+  ov.classList.remove('hidden');
+  void ov.offsetWidth;
+  ov.classList.add('open');
+  ov.querySelector('.upv-content').scrollTop = 0;
+}
+
+/* ── Profil introuvable (compte banni ou supprimé) ── */
+function _gwShowUnavailableProfile(nom) {
+  var existing = document.getElementById('unavail-profile-overlay');
+  if (existing) existing.remove();
+  var ov = document.createElement('div');
+  ov.id = 'unavail-profile-overlay';
+  ov.className = 'unavail-profile-overlay';
+  ov.innerHTML =
+    '<div class="unavail-profile-card">' +
+      '<div class="unavail-profile-icon"><i class="fas fa-user-slash"></i></div>' +
+      '<h3 class="unavail-profile-title">Profil indisponible</h3>' +
+      '<p class="unavail-profile-desc">Ce compte n\'est plus accessible.<br>Il a peut-être été suspendu ou supprimé.</p>' +
+      '<button class="unavail-profile-back" onclick="document.getElementById(\'unavail-profile-overlay\').remove()">' +
+        '<i class="fas fa-arrow-left"></i> Retour' +
+      '</button>' +
+    '</div>';
+  (document.querySelector('.phone-frame') || document.body).appendChild(ov);
+}
+
+/* ── Fermer ── */
+function closeUserProfileView() {
+  var ov = document.getElementById('user-profile-view');
+  ov.classList.remove('open');
+  setTimeout(function() { ov.classList.add('hidden'); }, 320);
+  _upvTarget = null;
+}
+
+/* ── Switcher de tabs (vue visiteur) ── */
+function switchUpvTab(btn, tab) {
+  document.querySelectorAll('#user-profile-view .profil-tab').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  ['about', 'services', 'projects', 'reviews', 'posts'].forEach(function(t) {
+    var el = document.getElementById('upvtab-' + t);
+    if (el) el.classList.toggle('hidden', t !== tab);
+  });
+  if (tab === 'posts' && _upvTarget) {
+    renderProfilPosts(_upvTarget.email || null, _upvTarget.nom, document.getElementById('upvtab-posts'));
+  }
+  if (tab === 'projects' && _upvTarget) {
+    renderUpvProjects(_upvTarget.email || null);
+  }
+  if (tab === 'services' && _upvTarget) {
+    renderUpvServices(_upvTarget.email || null);
+  }
+}
+
+/* ══════════════════════════════════════════
+   PUBLICATIONS SUR LE PROFIL
+══════════════════════════════════════════ */
+function renderProfilPosts(email, nom, container) {
+  if (!container) return;
+  container.innerHTML = '';
+
+  var posts = getPostsByAuthor(email, nom);
+
+  if (!posts.length) {
+    container.innerHTML =
+      '<div class="profil-posts-empty">' +
+        '<i class="fas fa-pen-to-square"></i>' +
+        '<p>Aucune publication pour l\'instant</p>' +
+        '<small>Les publications apparaîtront ici</small>' +
+      '</div>';
+    return;
+  }
+
+  /* Compteur */
+  var header = document.createElement('div');
+  header.className = 'profil-posts-count';
+  header.innerHTML = '<i class="fas fa-newspaper"></i> ' + posts.length +
+    ' publication' + (posts.length > 1 ? 's' : '');
+  container.appendChild(header);
+
+  posts.forEach(function(post) {
+    var card = buildPostCard(post);
+    /* Supprime le bouton Suivre dans le contexte profil (déjà sur ce profil) */
+    var followBtn = card.querySelector('.post-follow-btn');
+    if (followBtn) followBtn.remove();
+    container.appendChild(card);
+  });
+}
+
+/* ══════════════════════════════════════════
+   LOGIQUE CENTRALE DE SUIVI
+══════════════════════════════════════════ */
+
+/* Appelé depuis la vue profil ET depuis un post */
+function _doFollowToggle(userInfo) {
+  if (!_currentUser || !userInfo) return;
+  /* Empêche de se suivre soi-même */
+  if (userInfo.email && userInfo.email === _currentUser.email) {
+    showToast('Vous ne pouvez pas vous suivre vous-même', '');
+    return;
+  }
+
+  var key  = getProfileKey(userInfo);
+  var list = getFollowing();
+
+  if (isFollowing(key)) {
+    /* ── Se désabonner ── */
+    saveFollowing(list.filter(function(f) { return f.key !== key; }));
+    _decrFCount(key);
+    showToast('Désabonné de ' + escHtml(userInfo.nom), '');
+  } else {
+    /* ── S'abonner ── */
+    list.push({
+      key:   key,
+      nom:   userInfo.nom,
+      email: userInfo.email || null,
+      role:  userInfo.role  || ''
+    });
+    saveFollowing(list);
+    _incrFCount(key);
+
+    /* ── Milestone abonnés ── */
+    if (userInfo.email) {
+      var _newFollowCount = _getTotalFollowers(key, false);
+      _checkFollowerMilestone(userInfo.email, key, _newFollowCount);
+    }
+
+    /* ── Notification au créateur (si utilisateur inscrit) ── */
+    if (userInfo.email) {
+      var notifs = getNotifs(userInfo.email);
+      /* Évite les doublons : supprime éventuelle notif précédente du même abonné */
+      notifs = notifs.filter(function(n) {
+        return !(n.type === 'follow' && n.fromUser && n.fromUser.email === _currentUser.email);
+      });
+      notifs.unshift({
+        id:        'follow_' + Date.now(),
+        type:      'follow',
+        fromUser:  { nom: _currentUser.nom, email: _currentUser.email },
+        postId:    null,
+        postPreview: null,
+        msg:       'a commencé à vous suivre.',
+        at: Date.now(), time:      'À l\'instant',
+        unread:    true
+      });
+      saveNotifs(userInfo.email, notifs);
+      /* Si c'est notre propre compte connecté, actualise le badge */
+      if (userInfo.email === _currentUser.email) updateNotifBadge();
+    }
+    showToast('Vous suivez maintenant ' + escHtml(userInfo.nom) + ' 👍', 'ok');
+  }
+
+  /* ── Rafraîchit tous les boutons dans le feed ── */
+  _refreshAllFollowBtns(key);
+
+  /* ── Rafraîchit la vue profil visiteur si elle est ouverte sur ce profil ── */
+  if (_upvTarget && getProfileKey(_upvTarget) === key) {
+    _updateFollowBtn();
+    var isDemo = !userInfo.email;
+    var countEl = document.getElementById('upv-stat-followers');
+    if (countEl) countEl.textContent = _getTotalFollowers(key, isDemo);
+  }
+
+  /* ── Met à jour le compteur Abonnements sur la page profil perso ── */
+  var pfEl = document.getElementById('pstat-following');
+  if (pfEl) pfEl.textContent = getFollowing().length;
+
+  /* ── Si le profil suivi EST le compte connecté (abonnement croisé), rafraîchit pstat-followers ── */
+  if (_currentUser) {
+    var _myKey = getProfileKey({ nom: _currentUser.nom, email: _currentUser.email });
+    if (key === _myKey) {
+      var follEl = document.getElementById('pstat-followers');
+      if (follEl) follEl.textContent = _getTotalFollowers(_myKey, false);
+    }
+  }
+}
+
+/* Depuis la topbar de la vue profil */
+function toggleFollowUser() {
+  if (!_currentUser || !_upvTarget) return;
+  _doFollowToggle(_upvTarget);
+}
+
+/* Depuis un bouton Suivre sur un post */
+function toggleFollowFromPost(postId) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post) return;
+  _doFollowToggle({ nom: post.author, email: post.ownerEmail || null, role: post.role || '' });
+}
+
+/* Met à jour tous les .post-follow-btn du même auteur dans le feed */
+function _refreshAllFollowBtns(profileKey) {
+  var followed = isFollowing(profileKey);
+  document.querySelectorAll('.post-follow-btn[data-fkey="' + profileKey + '"]').forEach(function(btn) {
+    if (followed) {
+      btn.textContent = '✓ Abonné';
+      btn.classList.add('following');
+    } else {
+      btn.textContent = '+ Suivre';
+      btn.classList.remove('following');
+    }
+  });
+}
+
+/* Met à jour le bouton Suivre dans la vue profil */
+function _updateFollowBtn() {
+  if (!_upvTarget) return;
+  var following = isFollowing(getProfileKey(_upvTarget));
+
+  var btn = document.getElementById('upv-follow-btn');
+  if (btn) {
+    if (following) {
+      btn.innerHTML = '<i class="fas fa-user-check"></i> ' + t('upv.following');
+      btn.classList.add('following');
+    } else {
+      btn.innerHTML = '<i class="fas fa-user-plus"></i> ' + t('upv.follow');
+      btn.classList.remove('following');
+    }
+  }
+
+  var actionBtn = document.getElementById('upv-action-follow-btn');
+  var actionLabel = document.getElementById('upv-action-follow-label');
+  if (actionBtn && actionLabel) {
+    if (following) {
+      actionBtn.querySelector('i').className = 'fas fa-user-check';
+      actionLabel.textContent = t('upv.following');
+      actionBtn.classList.add('following');
+    } else {
+      actionBtn.querySelector('i').className = 'fas fa-user-plus';
+      actionLabel.textContent = t('upv.follow');
+      actionBtn.classList.remove('following');
+    }
+  }
+}
+
+/* ══════════════════════════════════════════
+   STATS CLIQUABLES — PROFIL PROPRE
+══════════════════════════════════════════ */
+function openSelfFollowersList() {
+  if (!_currentUser) return;
+  var profileKey = getProfileKey({ nom: _currentUser.nom, email: _currentUser.email });
+  var isDemo     = false;
+
+  var realFollowers = [];
+  try {
+    var users = JSON.parse(localStorage.getItem('gw_users') || '[]');
+    users.forEach(function(u) {
+      if (u.email === _currentUser.email) return;
+      var list = JSON.parse(localStorage.getItem('gw_following_' + u.email) || '[]');
+      if (list.some(function(f) { return f.key === profileKey; })) {
+        var p = loadUserProfile(u.email);
+        realFollowers.push({ nom: (p && p.nom) || u.nom || u.email, email: u.email, role: (p && p.role) || 'Membre Geniwork' });
+      }
+    });
+  } catch(e) {}
+
+  var total = realFollowers.length;
+
+  _closeGenericSheet('self-followers-list');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'self-followers-list-bg';
+  bg.onclick = function() { _closeGenericSheet('self-followers-list'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card following-list-card'; card.id = 'self-followers-list-card';
+
+  var listHtml = realFollowers.map(function(f) {
+    var nomSafe  = f.nom.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    var roleSafe = f.role.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return '<div class="following-item">' +
+      '<div class="following-item-left" ' +
+           'onclick="_closeGenericSheet(\'self-followers-list\');' +
+                    'openUserProfileView({nom:\'' + nomSafe + '\',' +
+                                          'email:\'' + f.email + '\',' +
+                                          'role:\'' + roleSafe + '\'})">' +
+        getAvatarHtml(f.email, f.nom, 'sm') +
+        '<div class="following-item-info">' +
+          '<strong>' + escHtml(f.nom) + '</strong>' +
+          '<small>' + escHtml(f.role) + '</small>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="cam-sheet-title">Abonnés (' + total + ')</p>' +
+    (total === 0
+      ? '<div class="following-empty"><i class="fas fa-user-group"></i><p>Personne ne vous suit encore</p><small>Partagez votre profil pour gagner des abonnés</small></div>'
+      : '<div class="following-list-scroll">' + listHtml + '</div>') +
+    '<div style="padding:14px 16px 20px">' +
+      '<button class="btn-outline full" onclick="_closeGenericSheet(\'self-followers-list\')">Fermer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function openSelfProjectsList() {
+  if (!_currentUser) return;
+  /* Navigue directement vers l'onglet Projets du profil */
+  var btn = document.querySelector('#p-profil .profil-tab[onclick*="projects"]');
+  if (btn) switchProfilTab(btn, 'projects');
+}
+
+/* ══════════════════════════════════════════
+   LISTE DES ABONNEMENTS
+══════════════════════════════════════════ */
+function openFollowingList() {
+  if (!_currentUser) return;
+  _closeGenericSheet('following-list');
+
+  var following = getFollowing();
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'following-list-bg';
+  bg.onclick = function() { _closeGenericSheet('following-list'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card following-list-card'; card.id = 'following-list-card';
+
+  if (!following.length) {
+    card.innerHTML =
+      '<div class="cam-sheet-handle"></div>' +
+      '<p class="cam-sheet-title">Abonnements (0)</p>' +
+      '<div class="following-empty">' +
+        '<i class="fas fa-user-group"></i>' +
+        '<p>Vous ne suivez personne pour l\'instant</p>' +
+        '<small>Suivez des utilisateurs depuis leurs profils<br/>ou leurs publications</small>' +
+      '</div>' +
+      '<div style="padding:14px 16px 20px">' +
+        '<button class="btn-outline full" onclick="_closeGenericSheet(\'following-list\')">Fermer</button>' +
+      '</div>';
+  } else {
+    var listHtml = following.map(function(f) {
+      /* Nom et rôle toujours à jour depuis le profil */
+      var currentNom  = getDisplayName(f.email, f.nom);
+      var currentRole = getDisplayRole(f.email, f.role || 'Membre Geniwork');
+      var nomSafe  = currentNom.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      var roleSafe = currentRole.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      var emailArg = f.email ? "'" + f.email + "'" : 'null';
+
+      return '<div class="following-item" id="fli-' + CSS.escape(f.key) + '">' +
+        '<div class="following-item-left" ' +
+             'onclick="_closeGenericSheet(\'following-list\');' +
+                      'openUserProfileView({nom:\'' + nomSafe + '\',' +
+                                            'email:' + emailArg + ',' +
+                                            'role:\'' + roleSafe + '\'})">' +
+          getAvatarHtml(f.email || null, currentNom, 'sm') +
+          '<div class="following-item-info">' +
+            '<strong>' + escHtml(currentNom) + '</strong>' +
+            '<small>' + escHtml(currentRole) + '</small>' +
+          '</div>' +
+        '</div>' +
+        '<button class="following-unfollow-btn" ' +
+                'onclick="unfollowFromList(\'' + f.key.replace(/'/g,"\\'") + '\')">' +
+          'Abonné ✓' +
+        '</button>' +
+      '</div>';
+    }).join('');
+
+    card.innerHTML =
+      '<div class="cam-sheet-handle"></div>' +
+      '<p class="cam-sheet-title">Abonnements (' + following.length + ')</p>' +
+      '<div class="following-list-scroll">' + listHtml + '</div>' +
+      '<div style="padding:14px 16px 20px">' +
+        '<button class="btn-outline full" onclick="_closeGenericSheet(\'following-list\')">Fermer</button>' +
+      '</div>';
+  }
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* Désabonnement depuis la liste */
+function unfollowFromList(profileKey) {
+  var following = getFollowing();
+  var item = following.find(function(f) { return f.key === profileKey; });
+  if (!item) return;
+
+  /* Désabonne */
+  saveFollowing(following.filter(function(f) { return f.key !== profileKey; }));
+  _decrFCount(profileKey);
+
+  /* Grise l'entrée dans la liste */
+  var itemEl = document.getElementById('fli-' + CSS.escape(profileKey));
+  if (itemEl) {
+    itemEl.style.opacity = '0.4';
+    itemEl.style.pointerEvents = 'none';
+    var unfBtn = itemEl.querySelector('.following-unfollow-btn');
+    if (unfBtn) { unfBtn.textContent = 'Désabonné'; unfBtn.style.color = '#EF4444'; }
+  }
+
+  /* Met à jour le titre de la feuille */
+  var titleEl = document.querySelector('#following-list-card .cam-sheet-title');
+  if (titleEl) titleEl.textContent = 'Abonnements (' + getFollowing().length + ')';
+
+  /* Met à jour les boutons du feed */
+  _refreshAllFollowBtns(profileKey);
+
+  /* Met à jour le compteur Abonnements sur le profil perso */
+  var pfEl = document.getElementById('pstat-following');
+  if (pfEl) pfEl.textContent = getFollowing().length;
+
+  /* Met à jour la vue profil si ouverte sur ce profil */
+  if (_upvTarget && getProfileKey(_upvTarget) === profileKey) {
+    _updateFollowBtn();
+    var isDemo  = !item.email;
+    var cntEl   = document.getElementById('upv-stat-followers');
+    if (cntEl) cntEl.textContent = _getTotalFollowers(profileKey, isDemo);
+  }
+
+  showToast('Désabonné de ' + escHtml(item.nom), '');
+}
+
+/* ══════════════════════════════════════════
+   STATS CLIQUABLES — VUE PROFIL VISITEUR
+══════════════════════════════════════════ */
+
+/* Abonnés du profil visité */
+function upvOpenFollowersList() {
+  if (!_upvTarget) return;
+  var profileKey = getProfileKey(_upvTarget);
+  var isDemo     = !_upvTarget.email;
+
+  /* Utilisateurs réels qui suivent cette cible */
+  var realFollowers = [];
+  try {
+    var users = JSON.parse(localStorage.getItem('gw_users') || '[]');
+    users.forEach(function(u) {
+      var list = JSON.parse(localStorage.getItem('gw_following_' + u.email) || '[]');
+      if (list.some(function(f) { return f.key === profileKey; })) {
+        var p = loadUserProfile(u.email);
+        realFollowers.push({ nom: (p && p.nom) || u.nom || u.email, email: u.email, role: (p && p.role) || 'Membre Geniwork' });
+      }
+    });
+  } catch(e) {}
+
+  var seedCount = _getSeedFollowers(profileKey, isDemo);
+  var total     = realFollowers.length + seedCount;
+
+  _closeGenericSheet('upv-followers-list');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'upv-followers-list-bg';
+  bg.onclick = function() { _closeGenericSheet('upv-followers-list'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card following-list-card'; card.id = 'upv-followers-list-card';
+
+  var listHtml = realFollowers.map(function(f) {
+    var nomSafe  = f.nom.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    var roleSafe = f.role.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return '<div class="following-item">' +
+      '<div class="following-item-left" ' +
+           'onclick="_closeGenericSheet(\'upv-followers-list\');' +
+                    'openUserProfileView({nom:\'' + nomSafe + '\',' +
+                                          'email:\'' + f.email + '\',' +
+                                          'role:\'' + roleSafe + '\'})">' +
+        getAvatarHtml(f.email, f.nom, 'sm') +
+        '<div class="following-item-info">' +
+          '<strong>' + escHtml(f.nom) + '</strong>' +
+          '<small>' + escHtml(f.role) + '</small>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  if (seedCount > 0) {
+    listHtml += '<p class="upv-stat-seed-hint">+ ' + seedCount + ' abonné' + (seedCount > 1 ? 's' : '') + '</p>';
+  }
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="cam-sheet-title">Abonnés (' + total + ')</p>' +
+    (total === 0
+      ? '<div class="following-empty"><i class="fas fa-user-group"></i><p>Aucun abonné pour le moment</p></div>'
+      : '<div class="following-list-scroll">' + listHtml + '</div>') +
+    '<div style="padding:14px 16px 20px">' +
+      '<button class="btn-outline full" onclick="_closeGenericSheet(\'upv-followers-list\')">Fermer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* Abonnements du profil visité */
+function upvOpenFollowingList() {
+  if (!_upvTarget) return;
+  var email = _upvTarget.email;
+
+  var list = email ? JSON.parse(localStorage.getItem('gw_following_' + email) || '[]') : [];
+  var seedCount = list.length === 0 ? _getSeedNum('fllw_' + getProfileKey(_upvTarget), 5, 120) : 0;
+  var total = list.length + seedCount;
+
+  _closeGenericSheet('upv-following-list');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'upv-following-list-bg';
+  bg.onclick = function() { _closeGenericSheet('upv-following-list'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card following-list-card'; card.id = 'upv-following-list-card';
+
+  var listHtml = list.map(function(f) {
+    var currentNom  = getDisplayName(f.email, f.nom);
+    var currentRole = getDisplayRole(f.email, f.role || 'Membre Geniwork');
+    var nomSafe  = currentNom.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    var roleSafe = currentRole.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    var emailArg = f.email ? "'" + f.email + "'" : 'null';
+    return '<div class="following-item">' +
+      '<div class="following-item-left" ' +
+           'onclick="_closeGenericSheet(\'upv-following-list\');' +
+                    'openUserProfileView({nom:\'' + nomSafe + '\',' +
+                                          'email:' + emailArg + ',' +
+                                          'role:\'' + roleSafe + '\'})">' +
+        getAvatarHtml(f.email || null, currentNom, 'sm') +
+        '<div class="following-item-info">' +
+          '<strong>' + escHtml(currentNom) + '</strong>' +
+          '<small>' + escHtml(currentRole) + '</small>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  if (seedCount > 0) {
+    listHtml += '<p class="upv-stat-seed-hint">+ ' + seedCount + ' abonnement' + (seedCount > 1 ? 's' : '') + '</p>';
+  }
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="cam-sheet-title">Abonnements (' + total + ')</p>' +
+    (total === 0
+      ? '<div class="following-empty"><i class="fas fa-user-group"></i><p>Aucun abonnement</p></div>'
+      : '<div class="following-list-scroll">' + listHtml + '</div>') +
+    '<div style="padding:14px 16px 20px">' +
+      '<button class="btn-outline full" onclick="_closeGenericSheet(\'upv-following-list\')">Fermer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* Projets du profil visité → navigue vers l'onglet Projets */
+function upvOpenProjectsList() {
+  if (!_upvTarget) return;
+  var btn = document.querySelector('#user-profile-view .profil-tab[onclick*="projects"]');
+  if (btn) switchUpvTab(btn, 'projects');
+}
+
+/* ── Étoiles ── */
+function setRatingStar(val) {
+  _upvRating = val;
+  _updateStarsUI(val);
+  var el = document.getElementById('upv-rating-label');
+  if (el) el.textContent = _STAR_LABELS[val] || '';
+}
+function _updateStarsUI(val) {
+  document.querySelectorAll('#upv-stars-input .upv-star').forEach(function(btn, idx) {
+    btn.classList.toggle('active', idx < val);
+  });
+}
+function _resetStarsUI() {
+  _upvRating = 0;
+  _updateStarsUI(0);
+  var el = document.getElementById('upv-rating-label');
+  if (el) el.textContent = 'Appuyez sur une étoile';
+}
+
+/* ── Soumettre un avis ── */
+function submitReview() {
+  if (!_currentUser || !_upvTarget) return;
+  if (_upvRating === 0) { showToast('Choisissez une note entre 1 et 5 étoiles', ''); return; }
+
+  var key      = getProfileKey(_upvTarget);
+  var reviews  = loadReviews(key);
+  var textVal  = (document.getElementById('upv-review-text').value || '').trim();
+  var newRev   = {
+    id: 'rev_' + Date.now(),
+    authorEmail: _currentUser.email,
+    authorName:  _currentUser.nom,
+    rating:      _upvRating,
+    text:        textVal,
+    date:        new Date().toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' })
+  };
+
+  var idx = reviews.findIndex(function(r) { return r.authorEmail === _currentUser.email; });
+  if (idx !== -1) { reviews[idx] = newRev; } else { reviews.unshift(newRev); }
+  saveReviews(key, reviews);
+
+  /* Recalcule la moyenne */
+  var avg = (reviews.reduce(function(s, r) { return s + r.rating; }, 0) / reviews.length).toFixed(1);
+  var rEl = document.getElementById('upv-stat-rating'); if (rEl) rEl.textContent = avg + ' ★';
+  _renderReviewsList(key, reviews);
+  _updateReviewsBadge(reviews);
+  showToast('Avis publié ! Merci 🙏', 'ok');
+}
+
+/* ── Rendu des avis ── */
+function _renderReviewsList(profileKey, reviews) {
+  var listEl = document.getElementById('upv-reviews-list');
+  if (!listEl) return;
+
+  if (!reviews.length) {
+    listEl.innerHTML =
+      '<div class="upv-empty-reviews">' +
+        '<i class="fas fa-star"></i>' +
+        '<p>Aucun avis pour l\'instant.<br/>Soyez le premier à noter !</p>' +
+      '</div>';
+    return;
+  }
+
+  var avg = (reviews.reduce(function(s, r) { return s + r.rating; }, 0) / reviews.length).toFixed(1);
+  var starsHtml = function(n) {
+    var h = '';
+    for (var i = 1; i <= 5; i++) h += '<i class="' + (i <= Math.round(n) ? 'fas' : 'far') + ' fa-star"></i>';
+    return h;
+  };
+
+  var html =
+    '<div class="upv-avg-block">' +
+      '<span class="upv-avg-score">' + avg + '</span>' +
+      '<div>' +
+        '<div class="upv-avg-stars">' + starsHtml(parseFloat(avg)) + '</div>' +
+        '<div class="upv-avg-count">' + reviews.length + ' avis</div>' +
+      '</div>' +
+    '</div>';
+
+  reviews.forEach(function(r) {
+    html +=
+      '<div class="upv-review-item">' +
+        '<div class="upv-review-header">' +
+          '<div class="user-av sm"><span>' + escHtml(getInitials(r.authorName || 'U')) + '</span></div>' +
+          '<div class="upv-review-meta">' +
+            '<strong>' + escHtml(r.authorName || 'Utilisateur') + '</strong>' +
+            '<small>' + escHtml(r.date || '') + '</small>' +
+          '</div>' +
+          '<div class="upv-review-stars">' + starsHtml(r.rating) + '</div>' +
+        '</div>' +
+        (r.text ? '<p class="upv-review-text">' + escHtml(r.text) + '</p>' : '') +
+      '</div>';
+  });
+
+  listEl.innerHTML = html;
+}
+
+function _updateReviewsBadge(reviews) {
+  var b = document.getElementById('upv-reviews-badge');
+  if (b) b.textContent = reviews.length ? '(' + reviews.length + ')' : '';
+}
+
+/* ── Ouvrir le profil de l'auteur d'un post ── */
+function openAuthorProfile(postId) {
+  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post) return;
+  /* Utilise le nom actuel (peut avoir changé) */
+  var displayNom  = getDisplayName(post.ownerEmail, post.author);
+  var displayRole = getDisplayRole(post.ownerEmail, post.role);
+  openUserProfileView({ nom: displayNom, email: post.ownerEmail || null, role: displayRole });
+}
+
+/* ══════════════════════════════════════════
+   MESSAGES — DONNÉES DÉMO
+══════════════════════════════════════════ */
+var _D = Date.now(); /* référence pour les timestamps démo */
+
+/* ── Générateur d'ID unique (évite les collisions Date.now() au même ms) ── */
+var _convIdCounter = 100; /* commence à 100 pour ne pas collisionner avec les IDs démo 1-6 */
+function _newConvId() {
+  return Date.now() * 1000 + (++_convIdCounter % 1000);
+}
+
+var DEMO_CONVERSATIONS = [
+  {
+    id: 1,
+    name: 'Marie Dupont',
+    role: 'Designer UI/UX',
+    verified: true, online: true,
+    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1494790108755-2616b612b786?w=120&q=80' },
+    lastAt: _D - 1800000,   /* il y a 30 min */
+    lastMsg: 'Bonjour ! J\'ai bien reçu votre brief, je vous propose qu\'on échange…',
+    unread: 2, archived: false,
+    messages: [
+      { id:1, from:'them', text:'Bonjour ! J\'ai bien reçu votre brief.',                                      at: _D - 5400000 },
+      { id:2, from:'me',   text:'Super, merci ! Vous avez des questions ?',                                    at: _D - 4800000 },
+      { id:3, from:'them', text:'Oui, quelques précisions sur les couleurs souhaitées.',                       at: _D - 3600000 },
+      { id:4, from:'them', text:'J\'ai bien reçu votre brief, je vous propose qu\'on échange rapidement.',     at: _D - 1800000 }
+    ]
+  },
+  {
+    id: 2,
+    name: 'Thomas Martin',
+    role: 'Développeur Fullstack',
+    verified: true, online: true,
+    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=120&q=80' },
+    lastAt: _D - 3600000,   /* il y a 1h */
+    lastMsg: 'Parfait, merci pour ces informations. Je vous envoie ça rapidement.',
+    unread: 1, archived: false,
+    messages: [
+      { id:1, from:'me',   text:'Bonjour Thomas, avez-vous pu consulter mon projet ?',                        at: _D - 7200000 },
+      { id:2, from:'them', text:'Oui, c\'est bien noté. Je travaille dessus ce matin.',                       at: _D - 5400000 },
+      { id:3, from:'me',   text:'Merci beaucoup ! Prenez le temps qu\'il faut.',                              at: _D - 4200000 },
+      { id:4, from:'them', text:'Parfait, merci pour ces informations. Je vous envoie ça rapidement.',        at: _D - 3600000 }
+    ]
+  },
+  {
+    id: 3,
+    name: 'Sophie Bernard',
+    role: 'Graphiste & Illustratrice',
+    verified: true, online: true,
+    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=120&q=80' },
+    lastAt: _D - 86400000,  /* hier */
+    lastMsg: 'Le design est prêt, j\'aimerais avoir votre avis.',
+    unread: 0, archived: false,
+    messages: [
+      { id:1, from:'them', text:'Bonjour ! J\'ai terminé la première version du design.',   at: _D - 104400000 },
+      { id:2, from:'me',   text:'Excellent, j\'ai hâte de voir ça !',                       at: _D - 100800000 },
+      { id:3, from:'them', text:'Le design est prêt, j\'aimerais avoir votre avis.',        at: _D - 86400000  }
+    ]
+  },
+  {
+    id: 4,
+    name: 'Julien Morel',
+    role: 'Consultant Marketing',
+    verified: false, online: true,
+    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=120&q=80' },
+    lastAt: _D - 90000000,  /* hier */
+    lastMsg: 'Merci pour votre confiance ! N\'hésitez pas si vous avez…',
+    unread: 0, archived: false,
+    messages: [
+      { id:1, from:'me',   text:'Merci pour votre travail Julien, très satisfait !',                                     at: _D - 97200000 },
+      { id:2, from:'them', text:'Merci pour votre confiance ! N\'hésitez pas si vous avez d\'autres besoins.',          at: _D - 90000000 }
+    ]
+  },
+  {
+    id: 5,
+    name: 'Agence Innovate',
+    role: 'Agence digitale',
+    verified: false, online: false,
+    avatar: { type: 'color', color: '#1E3A5F', initials: 'AI' },
+    lastAt: _D - 172800000, /* il y a 2 jours */
+    lastMsg: 'Nous serions ravis de collaborer avec vous sur ce projet.',
+    unread: 0, archived: false,
+    messages: [
+      { id:1, from:'them', text:'Bonjour, nous avons vu votre profil Geniwork.',                             at: _D - 180000000 },
+      { id:2, from:'them', text:'Nous serions ravis de collaborer avec vous sur ce projet.',                 at: _D - 172800000 }
+    ]
+  },
+  {
+    id: 6,
+    name: 'Camille Leroy',
+    role: 'Chef de projet',
+    verified: false, online: false,
+    avatar: { type: 'img', url: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=120&q=80' },
+    lastAt: _D - 259200000, /* il y a 3 jours */
+    lastMsg: 'Pouvez-vous me partager le cahier des charges ?',
+    unread: 0, archived: false,
+    messages: [
+      { id:1, from:'them', text:'Bonjour, suite à notre échange, pouvez-vous me partager le cahier des charges ?',  at: _D - 266400000 },
+      { id:2, from:'me',   text:'Bien sûr, je vous l\'envoie dès aujourd\'hui.',                                    at: _D - 259200000 }
+    ]
+  }
+];
+
+var _msgTab          = 'all';
+var _chatConvId      = null;
+var _groupConvsReady = false;
+
+/* ── Persistance des conversations DM dynamiques (conversations réelles entre utilisateurs) ──
+   Sauvegarde dans gw_dm_convlist_{email} pour restaurer après refresh                      ── */
+function _saveDMConvList() {
+  if (!_currentUser) return;
+  try {
+    /* Sauvegarder uniquement les convs dynamiques (email set, non groupe, non démo 1-6) */
+    var dyn = DEMO_CONVERSATIONS.filter(function(c) {
+      return !c.isGroup && c.email && c.id > 6;
+    }).map(function(c) {
+      /* Ne stocker que les métadonnées (pas les messages — déjà dans gw_dm_*) */
+      return {
+        id:       c.id,
+        name:     c.name,
+        email:    c.email,
+        role:     c.role,
+        verified: c.verified,
+        online:   false,
+        avatar:   c.avatar,
+        at:       c.at,
+        time:     c.time,
+        lastMsg:  c.lastMsg,
+        lastAt:   c.lastAt,
+        unread:   0, /* reset à 0 : _globalMsgPoll recalcule */
+        archived: c.archived || false,
+        messages: [] /* rechargées depuis gw_dm_* */
+      };
+    });
+    localStorage.setItem('gw_dm_convlist_' + _currentUser.email, JSON.stringify(dyn));
+  } catch(e) {}
+}
+
+function _loadDMConvList() {
+  if (!_currentUser) return;
+  try {
+    var saved = JSON.parse(localStorage.getItem('gw_dm_convlist_' + _currentUser.email) || '[]');
+    saved.forEach(function(c) {
+      if (!DEMO_CONVERSATIONS.find(function(x) { return x.id === c.id || (!x.isGroup && x.email === c.email); })) {
+        DEMO_CONVERSATIONS.unshift(c);
+      }
+    });
+  } catch(e) {}
+}
+
+/* ══════════════════════════════════════════
+   GROUPE — MESSAGERIE PARTAGÉE ENTRE MEMBRES
+   Clé partagée : gw_grp_{projId}___{ownerEmail}
+   Tous les membres lisent/écrivent la même clé
+══════════════════════════════════════════ */
+function _getGroupMsgKey(projId, ownerEmail) {
+  return 'gw_grp_' + String(projId).replace(/[^a-z0-9]/gi, '_') +
+         '___' + String(ownerEmail).replace(/[^a-z0-9@._-]/gi, '_');
+}
+
+/* Sauvegarde UN message dans le storage partagé du groupe (merge par ID) */
+function _saveGroupMsg(conv, msg) {
+  if (!conv || !conv.projId || !conv.projOwnerEmail) return;
+  if (!msg || !msg.id) return;
+  var key = _getGroupMsgKey(conv.projId, conv.projOwnerEmail);
+  try {
+    var existing = null;
+    try { existing = JSON.parse(localStorage.getItem(key)); } catch(e) {}
+    var stored = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
+    /* Merge par ID */
+    var map = {};
+    stored.forEach(function(m) { map[String(m.id)] = true; });
+    if (!map[String(msg.id)]) { stored.push(msg); }
+    stored.sort(function(a, b) { return (Number(a.id) || 0) - (Number(b.id) || 0); });
+    localStorage.setItem(key, JSON.stringify({
+      messages: stored,
+      lastMsg:  msg.text || '',
+      lastAt:   msg.at || Date.now()
+    }));
+  } catch(e) {}
+}
+
+/* Charge et merge tous les messages du storage partagé dans conv.messages */
+function _loadGroupMsgs(conv) {
+  if (!conv || !conv.projId || !conv.projOwnerEmail) return;
+  var key = _getGroupMsgKey(conv.projId, conv.projOwnerEmail);
+  try {
+    var data = JSON.parse(localStorage.getItem(key));
+    if (!data || !Array.isArray(data.messages)) return;
+    var convMap = {};
+    conv.messages.forEach(function(m) { convMap[String(m.id)] = true; });
+    var merged = conv.messages.slice();
+    data.messages.forEach(function(m) {
+      if (!convMap[String(m.id)]) {
+        merged.push(m);
+        convMap[String(m.id)] = true;
+      }
+    });
+    merged.sort(function(a, b) { return (Number(a.id) || 0) - (Number(b.id) || 0); });
+    conv.messages = merged;
+    if (data.lastMsg) conv.lastMsg = data.lastMsg;
+    if (data.lastAt)  conv.lastAt  = data.lastAt;
+  } catch(e) {}
+}
+
+/* Poll : détecte les nouveaux messages du groupe depuis le storage partagé */
+function _pollGroupMessages() {
+  if (!_currentUser || !_chatConvId) return;
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !conv.isGroup || !conv.projId) return;
+  var key = _getGroupMsgKey(conv.projId, conv.projOwnerEmail);
+  try {
+    var data = JSON.parse(localStorage.getItem(key));
+    if (!data || !Array.isArray(data.messages)) return;
+    var convMap = {};
+    conv.messages.forEach(function(m) { convMap[String(m.id)] = true; });
+    var newOnes = data.messages.filter(function(m) { return !convMap[String(m.id)]; });
+
+    /* ── Détecte les suppressions "pour tous" sur messages déjà en mémoire ── */
+    var box = document.getElementById('chat-messages');
+    data.messages.forEach(function(sm) {
+      if (!sm.deletedForAll) return;
+      var ex = conv.messages.find(function(m) { return String(m.id) === String(sm.id); });
+      if (ex && !ex.deletedForAll) {
+        ex.deletedForAll = true;
+        if (box) {
+          var domRow = box.querySelector('[data-msg-id="' + sm.id + '"]');
+          if (domRow) domRow.innerHTML = _buildBubbleHtml(ex, domRow.classList.contains('mine'));
+        }
+      }
+    });
+
+    if (newOnes.length === 0) return;
+    /* Merge en mémoire */
+    newOnes.forEach(function(m) { conv.messages.push(m); convMap[String(m.id)] = true; });
+    conv.messages.sort(function(a, b) { return (Number(a.id) || 0) - (Number(b.id) || 0); });
+
+    if (!box) return;
+    var toAdd = newOnes.filter(function(m) { return m.from !== _currentUser.email; });
+    if (toAdd.length > 0) {
+      toAdd.forEach(function(m) {
+        if (_isDeletedForMe(m.id)) return;
+        var row = document.createElement('div');
+        if (m.from === 'system') {
+          row.className = 'chat-sys-msg';
+          row.textContent = m.text || '';
+        } else {
+          var senderProfile = loadUserProfile(m.from) || {};
+          var senderName = senderProfile.nom || m.from || '';
+          var sAv = senderProfile.photo
+            ? '<img src="' + senderProfile.photo + '" class="chat-group-av" alt="">'
+            : '<div class="chat-group-av chat-group-av-init">' + escHtml(senderName.charAt(0).toUpperCase()) + '</div>';
+          var senderHtml = '<div class="chat-group-sender-row">' + sAv +
+            '<span class="chat-group-sender-name">' + escHtml(senderName) + '</span></div>';
+          row.className = 'chat-msg-row theirs';
+          row.setAttribute('data-msg-id', m.id);
+          row.innerHTML = senderHtml + _buildBubbleHtml(m, false);
+        }
+        box.appendChild(row);
+      });
+      var lastNew = newOnes[newOnes.length - 1];
+      conv.lastMsg = lastNew.text || conv.lastMsg;
+      conv.lastAt  = lastNew.at  || Date.now();
+      _scrollChatToBottom();
+      renderConversations();
+    }
+  } catch(e) {}
+}
+
+/* Poll global pour les groupes inactifs (badge non-lu) */
+function _pollGroupsBackground() {
+  if (!_currentUser) return;
+  DEMO_CONVERSATIONS.forEach(function(conv) {
+    if (!conv.isGroup || !conv.projId || conv.id === _chatConvId) return;
+    var key = _getGroupMsgKey(conv.projId, conv.projOwnerEmail);
+    try {
+      var data = JSON.parse(localStorage.getItem(key));
+      if (!data || !Array.isArray(data.messages)) return;
+      var convMap = {};
+      conv.messages.forEach(function(m) { convMap[String(m.id)] = true; });
+      /* Messages réels = des autres membres (pas nous) */
+      var newOnesOthers = data.messages.filter(function(m) {
+        return !convMap[String(m.id)] && m.from !== _currentUser.email && m.from !== 'system';
+      });
+      /* Tous les nouveaux (y compris système) à merger en mémoire */
+      var allNew = data.messages.filter(function(m) { return !convMap[String(m.id)]; });
+      if (allNew.length > 0) {
+        allNew.forEach(function(m) { conv.messages.push(m); });
+        conv.messages.sort(function(a, b) { return (Number(a.id) || 0) - (Number(b.id) || 0); });
+        /* Mise à jour lastMsg depuis le storage partagé */
+        if (data.lastMsg) conv.lastMsg = data.lastMsg;
+        if (data.lastAt)  conv.lastAt  = data.lastAt;
+      }
+      if (newOnesOthers.length > 0) {
+        conv.unread = (conv.unread || 0) + newOnesOthers.length;
+      }
+    } catch(e) {}
+  });
+}
+
+/* ── Persistance des conversations de groupe (collaboration) — métadonnées locales ── */
+function _loadGroupConvs() {
+  if (_groupConvsReady) return;
+  _groupConvsReady = true;
+  if (!_currentUser) return;
+  try {
+    var saved = JSON.parse(localStorage.getItem('gw_group_convs_' + _currentUser.email) || '[]');
+    saved.forEach(function(gc) {
+      if (!DEMO_CONVERSATIONS.find(function(c) { return c.id === gc.id; })) {
+        DEMO_CONVERSATIONS.unshift(gc);
+      }
+      /* Charge les messages partagés depuis le storage commun */
+      var inMem = DEMO_CONVERSATIONS.find(function(c) { return c.id === gc.id; });
+      if (inMem) _loadGroupMsgs(inMem);
+    });
+  } catch(e) {}
+}
+
+function _saveGroupConvs() {
+  if (!_currentUser) return;
+  try {
+    /* Sauvegarde uniquement les métadonnées (messages dans gw_grp_*) */
+    var groups = DEMO_CONVERSATIONS.filter(function(c) { return c.isGroup; }).map(function(c) {
+      return {
+        id: c.id, isGroup: true, projId: c.projId, projOwnerEmail: c.projOwnerEmail,
+        name: c.name, avatar: c.avatar, at: c.at, time: c.time,
+        lastMsg: c.lastMsg, lastAt: c.lastAt, unread: 0,
+        archived: c.archived || false, online: false,
+        members: c.members, messages: []
+      };
+    });
+    localStorage.setItem('gw_group_convs_' + _currentUser.email, JSON.stringify(groups));
+  } catch(e) {}
+}
+
+/* ── Inbox de groupe : notifier un membre qu'un groupe existe ── */
+function _writeGroupInbox(targetEmail, groupMeta) {
+  if (!targetEmail || !groupMeta) return;
+  try {
+    var key = 'gw_group_inbox_' + String(targetEmail).replace(/[^a-z0-9@._]/gi, '_');
+    var inbox = JSON.parse(localStorage.getItem(key) || '[]');
+    /* Pas de doublon */
+    var already = inbox.some(function(g) {
+      return g.projId === groupMeta.projId && g.projOwnerEmail === groupMeta.projOwnerEmail;
+    });
+    if (!already) {
+      inbox.push(groupMeta);
+      localStorage.setItem(key, JSON.stringify(inbox));
+    }
+  } catch(e) {}
+}
+
+function _checkGroupInbox() {
+  if (!_currentUser) return;
+  try {
+    var key = 'gw_group_inbox_' + String(_currentUser.email).replace(/[^a-z0-9@._]/gi, '_');
+    var inbox = JSON.parse(localStorage.getItem(key) || '[]');
+    if (!inbox.length) return;
+    var changed = false;
+    inbox.forEach(function(meta) {
+      var existing = DEMO_CONVERSATIONS.find(function(c) {
+        return c.isGroup && c.projId === meta.projId && c.projOwnerEmail === meta.projOwnerEmail;
+      });
+      if (!existing) {
+        var conv = {
+          id:             meta.id || _newConvId(),
+          isGroup:        true,
+          projId:         meta.projId,
+          projOwnerEmail: meta.projOwnerEmail,
+          name:           meta.name,
+          avatar:         meta.avatar || { type: 'group', members: meta.members || [] },
+          at:             meta.at     || Date.now(),
+          time:           meta.time   || 'À l\'instant',
+          lastMsg:        meta.lastMsg || '',
+          lastAt:         meta.lastAt  || Date.now(),
+          unread:         0,
+          archived:       false,
+          online:         false,
+          members:        meta.members || [],
+          messages:       []
+        };
+        _loadGroupMsgs(conv);
+        /* Compte les messages non lus depuis les autres membres */
+        conv.unread = conv.messages.filter(function(m) {
+          return m.from && m.from !== _currentUser.email && m.from !== 'system';
+        }).length;
+        DEMO_CONVERSATIONS.unshift(conv);
+        _saveGroupConvs();
+        changed = true;
+      }
+    });
+    if (changed) {
+      var msgPage = document.getElementById('p-messages');
+      if (msgPage && msgPage.classList.contains('active')) renderConversations();
+    }
+  } catch(e) {}
+}
+
+function _getOrCreateGroupConv(projId, ownerEmail, projTitle, members) {
+  _loadGroupConvs();
+  var existing = DEMO_CONVERSATIONS.find(function(c) {
+    return c.isGroup && c.projId === projId && c.projOwnerEmail === ownerEmail;
+  });
+  if (existing) {
+    /* Met à jour la liste des membres si besoin */
+    existing.members = members;
+    existing.avatar.members = members;
+    _saveGroupConvs();
+    return existing;
+  }
+  var _gTs = Date.now();
+  var _sysMsg = {
+    id:   _gTs + 1,
+    from: 'system',
+    text: 'Espace de collaboration ouvert pour le projet "' + projTitle + '" · ' +
+          members.length + ' membre' + (members.length > 1 ? 's' : ''),
+    time: _nowTime(),
+    at:   _gTs
+  };
+  var conv = {
+    id:             _newConvId(),
+    isGroup:        true,
+    projId:         projId,
+    projOwnerEmail: ownerEmail,
+    name:           projTitle,
+    avatar:         { type: 'group', members: members },
+    at: _gTs, time: 'À l\'instant',
+    lastMsg:        'Espace de collaboration créé',
+    lastAt:         _gTs,
+    unread:         0,
+    archived:       false,
+    online:         false,
+    members:        members,
+    messages:       [_sysMsg]
+  };
+  DEMO_CONVERSATIONS.unshift(conv);
+  /* Sauvegarder le message système dans le storage partagé */
+  _saveGroupMsg(conv, _sysMsg);
+  _saveGroupConvs();
+  /* Notifier tous les membres (sauf le créateur) que ce groupe existe */
+  var _groupMeta0 = {
+    id:             conv.id,
+    projId:         conv.projId,
+    projOwnerEmail: conv.projOwnerEmail,
+    name:           conv.name,
+    avatar:         conv.avatar,
+    members:        conv.members,
+    at:             conv.at,
+    time:           conv.time,
+    lastMsg:        conv.lastMsg,
+    lastAt:         conv.lastAt
+  };
+  if (_currentUser) {
+    members.forEach(function(m) {
+      if (m.email && m.email !== _currentUser.email) {
+        _writeGroupInbox(m.email, _groupMeta0);
+      }
+    });
+  }
+  return conv;
+}
+
+/* ── Rendu de la liste ── */
+function renderConversations() {
+  _loadGroupConvs();
+  var list = document.getElementById('conv-list');
+  if (!list) return;
+  var query = (document.getElementById('msg-search') || {}).value || '';
+  var convs = DEMO_CONVERSATIONS.filter(function(c) {
+    /* Masquer les conversations avec des comptes bannis */
+    if (!c.isGroup && c.email && _admIsBanned(c.email)) return false;
+    if (c.archived && _msgTab !== 'archived') return false;
+    if (!c.archived && _msgTab === 'archived') return false;
+    if (_msgTab === 'unread' && c.unread === 0) return false;
+    if (query) {
+      var q = query.toLowerCase();
+      return c.name.toLowerCase().indexOf(q) !== -1 || (c.lastMsg || '').toLowerCase().indexOf(q) !== -1;
+    }
+    return true;
+  }).sort(function(a, b) {
+    /* Tri décroissant par lastAt → conv la plus récente en haut */
+    return (b.lastAt || b.at || 0) - (a.lastAt || a.at || 0);
+  });
+
+  if (!convs.length) {
+    list.innerHTML =
+      '<div class="msg-empty">' +
+        '<i class="fas fa-comment-slash"></i>' +
+        '<p>' + (_msgTab === 'unread' ? 'Aucun message non lu' : 'Aucune conversation') + '</p>' +
+      '</div>';
+    return;
+  }
+
+  list.innerHTML = convs.map(function(c) {
+    var avHtml = c.isGroup ? _groupAvatar(c, 52) : _convAvatar(c, 52);
+    var badge  = c.unread > 0 ? '<span class="conv-unread-badge">' + c.unread + '</span>' : '';
+    /* Nom live : relit localStorage si email connu */
+    var liveName = c.isGroup
+      ? '<i class="fas fa-users" style="font-size:11px;color:#2563EB;margin-right:4px"></i>' + escHtml(c.name)
+      : escHtml(c.email ? getDisplayName(c.email, c.name) : c.name);
+    return '<div class="conv-item' + (c.unread > 0 ? ' conv-unread' : '') + '" ' +
+               'onclick="openChat(' + c.id + ')">' +
+        '<div class="conv-av-wrap">' +
+          avHtml +
+          (!c.isGroup && c.online ? '<span class="conv-online-dot"></span>' : '') +
+        '</div>' +
+        '<div class="conv-body">' +
+          '<div class="conv-top">' +
+            '<span class="conv-name">' + liveName +
+              (!c.isGroup && c.verified ? ' <i class="fas fa-circle-check conv-verified"></i>' : '') +
+            '</span>' +
+            '<span class="conv-time">' + escHtml(c.lastAt ? _convTimeAgo(c.lastAt) : (c.time || '')) + '</span>' +
+          '</div>' +
+          '<div class="conv-bottom">' +
+            '<span class="conv-preview">' + escHtml(c.lastMsg) + '</span>' +
+            badge +
+          '</div>' +
+        '</div>' +
+      '</div>';
+  }).join('');
+
+  /* Compteur non lus — onglet "Non lus" */
+  var totalUnread = DEMO_CONVERSATIONS.reduce(function(s,c){ return s + (c.unread || 0); }, 0);
+  var tabBadge = document.getElementById('msg-unread-count');
+  if (tabBadge) {
+    tabBadge.textContent = totalUnread;
+    tabBadge.style.display = totalUnread > 0 ? '' : 'none';
+  }
+  /* Badge sur l'icône Messages de la bottom nav */
+  _updateMsgNavBadge(totalUnread);
+}
+
+function _updateMsgNavBadge(count) {
+  var nav = document.getElementById('msg-nav-badge');
+  if (!nav) return;
+  if (count > 0) {
+    nav.textContent = count > 99 ? '99+' : count;
+    nav.classList.remove('hidden');
+  } else {
+    nav.classList.add('hidden');
+  }
+}
+
+function _convAvatar(c, size) {
+  var sz = size || 50;
+  var r  = sz / 2;
+
+  /* Priorité : photo de profil depuis localStorage (email stocké dans la conv) */
+  if (c.email) {
+    var p = loadUserProfile(c.email);
+    if (p && p.photo) {
+      return '<img class="conv-av-img" data-email="' + escHtml(c.email) + '" src="' + escHtml(p.photo) + '" alt="" ' +
+             'style="width:' + sz + 'px;height:' + sz + 'px;border-radius:50%;object-fit:cover">';
+    }
+  }
+
+  if (c.avatar && c.avatar.type === 'img') {
+    return '<img class="conv-av-img" src="' + escHtml(c.avatar.url) + '" alt="" ' +
+           'style="width:' + sz + 'px;height:' + sz + 'px;" ' +
+           'onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">' +
+           '<div class="conv-av-fallback" style="width:' + sz + 'px;height:' + sz + 'px;' +
+           'background:#2563EB;border-radius:50%;display:none;align-items:center;justify-content:center;' +
+           'color:#fff;font-weight:700;font-size:' + Math.round(sz * 0.38) + 'px">' +
+           escHtml(getInitials(c.name)) + '</div>';
+  }
+  var bg  = (c.avatar && c.avatar.color) ? c.avatar.color : '#2563EB';
+  var ini = (c.avatar && c.avatar.initials) ? c.avatar.initials : getInitials(c.name);
+  return '<div class="conv-av-color" style="width:' + sz + 'px;height:' + sz + 'px;' +
+         'background:' + bg + ';border-radius:50%;display:flex;align-items:center;justify-content:center;' +
+         'color:#fff;font-weight:700;font-size:' + Math.round(sz * 0.38) + 'px">' +
+         escHtml(ini) + '</div>';
+}
+
+function _groupAvatar(conv, size) {
+  var sz  = size || 50;
+  var members = (conv.members || []).slice(0, 2);
+  if (!members.length) {
+    return '<div style="width:' + sz + 'px;height:' + sz + 'px;border-radius:50%;' +
+           'background:#2563EB;display:flex;align-items:center;justify-content:center;' +
+           'color:#fff;font-size:' + Math.round(sz * 0.45) + 'px">' +
+           '<i class="fas fa-users"></i></div>';
+  }
+  /* Deux mini-avatars superposés */
+  var half = Math.round(sz * 0.68);
+  function _miniAv(m, extraStyle) {
+    var p = loadUserProfile(m.email) || {};
+    var photo = p.photo || m.photo;
+    var name  = p.nom  || m.name || m.email;
+    if (photo) return '<img src="' + photo + '" style="width:' + half + 'px;height:' + half + 'px;' +
+      'border-radius:50%;object-fit:cover;border:2px solid #fff;position:absolute;' + extraStyle + '">';
+    return '<div style="width:' + half + 'px;height:' + half + 'px;border-radius:50%;' +
+      'background:#6366F1;display:flex;align-items:center;justify-content:center;' +
+      'color:#fff;font-weight:700;font-size:' + Math.round(half * 0.42) + 'px;' +
+      'border:2px solid #fff;position:absolute;' + extraStyle + '">' +
+      (name).charAt(0).toUpperCase() + '</div>';
+  }
+  return '<div style="width:' + sz + 'px;height:' + sz + 'px;position:relative;flex-shrink:0">' +
+    _miniAv(members[0], 'top:0;left:0;') +
+    (members[1] ? _miniAv(members[1], 'bottom:0;right:0;') : '') +
+  '</div>';
+}
+
+/* ══════════════════════════════════════════
+   ENVOYER UN MESSAGE DEPUIS UN PROFIL VISITÉ
+══════════════════════════════════════════ */
+function openChatWithUser() {
+  if (!_currentUser) { showToast('Connectez-vous pour envoyer un message', 'err'); return; }
+  if (!_upvTarget)   return;
+
+  var nom   = getDisplayName(_upvTarget.email, _upvTarget.nom);
+  var role  = getDisplayRole(_upvTarget.email, _upvTarget.role) || 'Membre Geniwork';
+  var email = _upvTarget.email || null;
+
+  /* Empêche de se messagerie soi-même */
+  if (email && email === _currentUser.email) {
+    showToast('Vous ne pouvez pas vous envoyer un message', '');
+    return;
+  }
+
+  /* Cherche une conversation existante — uniquement par email (évite les faux positifs par nom) */
+  var existing = email
+    ? DEMO_CONVERSATIONS.find(function(c) { return !c.isGroup && c.email === email; })
+    : null;
+
+  if (existing) {
+    /* Conversation existante → ouvre directement */
+    _openChatAndCloseUpv(existing.id);
+    return;
+  }
+
+  /* Nouvelle conversation → crée dynamiquement */
+  var profile  = email ? loadUserProfile(email) : null;
+  var hasBadge = profile && (profile.badgeType === 'verified' || profile.badgeType === 'premium');
+  var newConv  = {
+    id:       _newConvId(),
+    name:     nom,
+    email:    email,
+    role:     role,
+    verified: hasBadge,
+    online:   false,
+    avatar:   { type: 'color', color: '#2563EB', initials: getInitials(nom) },
+    at: Date.now(), time:     'À l\'instant',
+    lastMsg:  'Démarrez la conversation',
+    unread:   0,
+    archived: false,
+    messages: []
+  };
+
+  DEMO_CONVERSATIONS.unshift(newConv);
+  _saveDMConvList(); /* Persiste pour survivre au refresh */
+  _openChatAndCloseUpv(newConv.id);
+}
+
+function _openChatAndCloseUpv(convId) {
+  /* Ferme le profil, va sur messages, ouvre le chat */
+  closeUserProfileView();
+  var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+  navTo(msgsBtn, 'p-messages');
+  renderConversations();
+  /* Petit délai pour que l'animation de fermeture se termine */
+  setTimeout(function() { openChat(convId); }, 220);
+}
+
+function switchMsgTab(btn, tab) {
+  document.querySelectorAll('.msg-tab').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  _msgTab = tab;
+  renderConversations();
+}
+
+function filterConversations(q) {
+  renderConversations();
+}
+
+/* ── Ouvrir/fermer le chat ── */
+function openChat(convId) {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === convId; });
+  if (!conv) return;
+  _chatConvId = convId;
+
+  /* Marque comme lu */
+  conv.unread = 0;
+  renderConversations();
+
+  /* Remplie topbar */
+  var avWrap   = document.getElementById('chat-contact-av');
+  var nameEl   = document.getElementById('chat-contact-name');
+  var statusEl = document.getElementById('chat-contact-status');
+  if (conv.isGroup) {
+    if (avWrap)   avWrap.innerHTML   = _groupAvatar(conv, 38);
+    if (nameEl)   nameEl.innerHTML   =
+      '<i class="fas fa-users" style="font-size:11px;color:#2563EB;margin-right:5px"></i>' +
+      escHtml(conv.name);
+    if (statusEl) {
+      var mc = (conv.members || []).length;
+      statusEl.textContent = mc + ' membre' + (mc > 1 ? 's' : '') + ' · Groupe privé';
+    }
+  } else {
+    if (avWrap) avWrap.innerHTML = _convAvatar(conv, 38);
+    var liveName = conv.email ? getDisplayName(conv.email, conv.name) : conv.name;
+    if (nameEl) nameEl.innerHTML = escHtml(liveName) +
+      (conv.verified ? ' <i class="fas fa-circle-check" style="color:#2563EB;font-size:12px"></i>' : '');
+    if (statusEl) statusEl.textContent = conv.online ? 'En ligne' : 'Hors ligne';
+  }
+
+  /* Charge les messages depuis le storage partagé */
+  if (conv.isGroup) {
+    _loadGroupMsgs(conv);   /* Storage partagé entre tous les membres */
+  } else {
+    _loadDMConv(conv);      /* Storage partagé entre les deux utilisateurs */
+  }
+
+  /* Rend les messages */
+  _renderChatMessages(conv);
+
+  /* Slide in */
+  var screen = document.getElementById('chat-screen');
+  screen.classList.remove('hidden');
+  void screen.offsetWidth;
+  screen.classList.add('open');
+
+  /* Focus input + démarrage du polling */
+  setTimeout(function() {
+    var inp = document.getElementById('chat-input');
+    if (inp) inp.focus();
+    _scrollChatToBottom();
+  }, 320);
+  _startChatPolling();
+  /* Active le maintien pour supprimer */
+  setTimeout(_initMsgLongPress, 350);
+}
+
+/* ══════════════════════════════════════════
+   SUPPRESSION DE MESSAGE — long press
+══════════════════════════════════════════ */
+var _lpTimer  = null;
+var _lpTarget = null;
+
+function _initMsgLongPress() {
+  var box = document.getElementById('chat-messages');
+  if (!box || box._lpReady) return;
+  box._lpReady = true;
+
+  /* Remonte jusqu'au .chat-msg-row portant data-msg-id */
+  function _findRow(el) {
+    while (el && el !== box) {
+      if (el.dataset && el.dataset.msgId) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function _start(e) {
+    /* Ignore les boutons internes (reply, dl, etc.) */
+    if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+    var row = _findRow(e.target);
+    if (!row) return;
+    _lpTarget = row;
+    row.classList.add('msg-pressing');
+    _lpTimer = setTimeout(function() {
+      row.classList.remove('msg-pressing');
+      _lpTarget = null;
+      _showMsgDeleteMenu(row.dataset.msgId, row.classList.contains('mine'));
+    }, 600);
+  }
+  function _cancel() {
+    if (_lpTimer)  { clearTimeout(_lpTimer);  _lpTimer  = null; }
+    if (_lpTarget) { _lpTarget.classList.remove('msg-pressing'); _lpTarget = null; }
+  }
+
+  box.addEventListener('touchstart',  _start,  { passive: true });
+  box.addEventListener('touchend',    _cancel, { passive: true });
+  box.addEventListener('touchmove',   _cancel, { passive: true });
+  box.addEventListener('touchcancel', _cancel, { passive: true });
+  box.addEventListener('mousedown',   _start);
+  box.addEventListener('mouseup',     _cancel);
+  box.addEventListener('mouseleave',  _cancel);
+  /* Clic droit sur desktop → menu immédiat */
+  box.addEventListener('contextmenu', function(e) {
+    e.preventDefault();
+    var row = _findRow(e.target);
+    if (row) _showMsgDeleteMenu(row.dataset.msgId, row.classList.contains('mine'));
+  });
+}
+
+/* ── Menu contextuel de suppression ── */
+function _showMsgDeleteMenu(msgId, isMine) {
+  if (!_chatConvId || !_currentUser || !msgId) return;
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv) return;
+  var msg = conv.messages.find(function(m) { return String(m.id) === String(msgId); });
+  if (!msg || msg.deletedForAll) return;
+
+  /* ≤ 60 secondes depuis l'envoi ? */
+  var sentAt      = Number(msg.at) || Number(msg.id) || 0;
+  var withinLimit = isMine && (Date.now() - sentAt) <= 60000;
+
+  _closeGenericSheet('msg-del-menu');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'msg-del-menu-bg';
+  bg.onclick = function() { _closeGenericSheet('msg-del-menu'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card'; card.id = 'msg-del-menu-card';
+
+  var handle = document.createElement('div');
+  handle.className = 'cam-sheet-handle';
+  card.appendChild(handle);
+
+  var title = document.createElement('p');
+  title.className = 'cam-sheet-title';
+  title.style.color = '#EF4444';
+  title.innerHTML = '<i class="fas fa-trash-can" style="margin-right:7px"></i>Supprimer le message';
+  card.appendChild(title);
+
+  /* Bouton "Pour tout le monde" — seulement si isMine ET dans les 60s */
+  if (withinLimit) {
+    var btnAll = document.createElement('button');
+    btnAll.className = 'msg-del-btn msg-del-all';
+    btnAll.innerHTML = '<i class="fas fa-users-slash"></i><span>Supprimer pour moi et tous</span>';
+    btnAll.onclick = function() {
+      _closeGenericSheet('msg-del-menu');
+      _doDeleteMsgForAll(msgId, conv);
+    };
+    card.appendChild(btnAll);
+  }
+
+  /* Bouton "Chez moi seulement" — toujours disponible */
+  var btnMe = document.createElement('button');
+  btnMe.className = 'msg-del-btn msg-del-me';
+  btnMe.innerHTML = '<i class="fas fa-eye-slash"></i><span>Supprimer chez moi</span>';
+  btnMe.onclick = function() {
+    _closeGenericSheet('msg-del-menu');
+    _doDeleteMsgForMe(msgId);
+  };
+  card.appendChild(btnMe);
+
+  /* Annuler */
+  var btnCancel = document.createElement('button');
+  btnCancel.className = 'msg-del-btn msg-del-cancel';
+  btnCancel.innerHTML = '<i class="fas fa-xmark"></i><span>Annuler</span>';
+  btnCancel.onclick = function() { _closeGenericSheet('msg-del-menu'); };
+  card.appendChild(btnCancel);
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+}
+
+/* ── Supprimer pour tout le monde ── */
+function _doDeleteMsgForAll(msgId, conv) {
+  if (conv.isGroup) {
+    _updateGroupMsg(conv, msgId, { deletedForAll: true, text: '', type: 'text' });
+  } else {
+    _updateDMMsg(conv, msgId, { deletedForAll: true, text: '', type: 'text' });
+  }
+  /* Mise à jour DOM */
+  var row = document.querySelector('.chat-msg-row[data-msg-id="' + msgId + '"]');
+  if (row) {
+    var updMsg = conv.messages.find(function(m) { return String(m.id) === String(msgId); });
+    if (updMsg) row.innerHTML = _buildBubbleHtml(updMsg, row.classList.contains('mine'));
+  }
+  showToast('Message supprimé pour tout le monde', 'ok');
+}
+
+/* ── Supprimer chez moi seulement ── */
+function _doDeleteMsgForMe(msgId) {
+  _markDeletedForMe(msgId);
+  var row = document.querySelector('.chat-msg-row[data-msg-id="' + msgId + '"]');
+  if (row) {
+    row.style.transition = 'opacity .22s, max-height .28s, margin .28s';
+    row.style.opacity    = '0';
+    row.style.maxHeight  = '0';
+    row.style.overflow   = 'hidden';
+    row.style.marginBottom = '0';
+    setTimeout(function() { if (row.parentNode) row.parentNode.removeChild(row); }, 300);
+  }
+  showToast('Message supprimé chez vous', 'ok');
+}
+
+function closeChat() {
+  _stopChatPolling();
+  closeChatProfilePanel();
+  var screen = document.getElementById('chat-screen');
+  screen.classList.remove('open');
+  setTimeout(function() { screen.classList.add('hidden'); }, 300);
+  _chatConvId = null;
+}
+
+/* ══════════════════════════════════════════
+   PANEL PROFIL DANS LE CHAT
+══════════════════════════════════════════ */
+function openChatProfilePanel() {
+  if (!_chatConvId) return;
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || conv.isGroup) return;  /* Panel disponible uniquement pour les DM */
+
+  /* Récupère les données du profil */
+  var email   = conv.email || null;
+  var name    = email ? getDisplayName(email, conv.name) : conv.name;
+  var profile = email ? (loadUserProfile(email) || {}) : {};
+  var isOnline= !!conv.online;
+  var verified= !!conv.verified;
+  var isMuted    = !!conv.muted;
+  var isArchived = !!conv.archived;
+
+  /* Avatar large */
+  var avHtml = getAvatarHtml(email, name, 'lg');
+
+  /* Badge vérifié */
+  var vBadge = verified
+    ? ' <i class="fas fa-circle-check cpp-verified-ico"></i>'
+    : '';
+
+  /* Note */
+  var rating  = profile.rating || null;
+  var ratingHtml = rating
+    ? '<div class="cpp-rating"><i class="fas fa-star"></i> ' + rating + ' <span>(' + (profile.ratingCount || 0) + ' avis)</span></div>'
+    : '';
+
+  /* Bio */
+  var bio = profile.bio || conv.bio || '';
+
+  /* Infos */
+  var location  = profile.location || profile.city || '';
+  var joinDate  = profile.joinDate  || '';
+  var projects  = loadProjects(email).length || (profile.projects || 0);
+  var langs     = profile.languages || profile.langs || '';
+  var response  = profile.responseTime || '';
+
+  /* Membre depuis */
+  var memberSince = joinDate
+    ? 'Membre depuis ' + joinDate
+    : (profile.memberSince || '');
+
+  /* Followers */
+  var pKey      = email ? getProfileKey({ nom: name, email: email }) : '';
+  var followers = pKey ? _getTotalFollowers(pKey, !email) : 0;
+
+  var infoRows = '';
+  if (location)   infoRows += _cppInfoRow('fa-location-dot',  '#6366F1', location);
+  if (memberSince)infoRows += _cppInfoRow('fa-calendar',      '#2563EB', memberSince);
+  if (projects)   infoRows += _cppInfoRow('fa-briefcase',     '#16A34A', projects + ' projet' + (projects > 1 ? 's' : '') + ' réalisé' + (projects > 1 ? 's' : ''));
+  if (response)   infoRows += _cppInfoRow('fa-clock',         '#F59E0B', 'Répond en moyenne en ' + response);
+  if (langs)      infoRows += _cppInfoRow('fa-globe',         '#8B5CF6', langs);
+  if (followers)  infoRows += _cppInfoRow('fa-users',         '#EC4899', followers + ' abonné' + (followers > 1 ? 's' : ''));
+
+  var hasInfo = infoRows !== '';
+
+  /* Helpers inline pour actions sans fermer manuellement le sheet */
+  var nameSafe  = escHtml(name).replace(/'/g, "\\'");
+  var emailSafe = email ? escHtml(email) : '';
+
+  /* Panel HTML */
+  var panel = document.createElement('div');
+  panel.id = 'chat-profile-panel';
+  panel.className = 'chat-profile-panel';
+  panel.innerHTML =
+    /* Header */
+    '<div class="cpp-header">' +
+      '<button class="cpp-close-btn" onclick="closeChatProfilePanel()">' +
+        '<i class="fas fa-times"></i>' +
+      '</button>' +
+      '<span class="cpp-header-title">Profil</span>' +
+      '<span></span>' +
+    '</div>' +
+
+    /* Scroll body */
+    '<div class="cpp-body">' +
+
+      /* Avatar + statut */
+      '<div class="cpp-av-wrap">' +
+        avHtml +
+        '<span class="cpp-online-dot' + (isOnline ? ' online' : '') + '"></span>' +
+      '</div>' +
+
+      /* Nom + badge */
+      '<div class="cpp-name">' + escHtml(name) + vBadge + '</div>' +
+
+      /* Rôle */
+      (conv.role || profile.job || profile.role
+        ? '<div class="cpp-role">' + escHtml(conv.role || profile.job || profile.role || '') + '</div>'
+        : '') +
+
+      /* Note */
+      ratingHtml +
+
+      /* Bouton Voir le profil */
+      (email
+        ? '<button class="cpp-profile-btn" onclick="closeChatProfilePanel();openUserProfileView({nom:\'' +
+            nameSafe + '\',email:\'' + emailSafe + '\'})">' +
+            '<i class="fas fa-user"></i> Voir le profil' +
+          '</button>'
+        : '') +
+
+      /* À propos */
+      (bio
+        ? '<div class="cpp-section-title">À propos</div>' +
+          '<p class="cpp-bio">' + escHtml(bio) + '</p>'
+        : '') +
+
+      /* Infos */
+      (hasInfo
+        ? '<div class="cpp-section-title">Informations</div>' +
+          '<div class="cpp-info-card">' + infoRows + '</div>'
+        : '') +
+
+      /* ── ACTIONS ── */
+      '<div class="cpp-section-title">Actions</div>' +
+      '<div class="cpp-links">' +
+
+        /* Voir les services */
+        (email
+          ? '<button class="cpp-link-btn" onclick="closeChatProfilePanel();openUserProfileView({nom:\'' +
+              nameSafe + '\',email:\'' + emailSafe + '\'});setTimeout(function(){var t=document.querySelector(\'#user-profile-view .profil-tab[onclick*=\\\"services\\\"]\');if(t)t.click();},400)">' +
+              '<span class="cpp-link-ico" style="color:#16A34A"><i class="fas fa-briefcase"></i></span>' +
+              'Voir les services' +
+              '<i class="fas fa-chevron-right cpp-link-arr"></i>' +
+            '</button>'
+          : '') +
+
+        /* Partager le profil */
+        '<button class="cpp-link-btn" onclick="closeChatProfilePanel();_chatShareProfile(\'' + escHtml(name) + '\')">' +
+          '<span class="cpp-link-ico" style="color:#2563EB"><i class="fas fa-share-nodes"></i></span>' +
+          'Partager le profil' +
+          '<i class="fas fa-chevron-right cpp-link-arr"></i>' +
+        '</button>' +
+
+        /* Sourdine */
+        '<button class="cpp-link-btn" id="cpp-mute-btn" onclick="closeChatProfilePanel();_chatToggleMute()">' +
+          '<span class="cpp-link-ico" style="color:#6B7280"><i class="fas ' + (isMuted ? 'fa-bell' : 'fa-bell-slash') + '"></i></span>' +
+          (isMuted ? 'Activer les notifications' : 'Mettre en sourdine') +
+          '<i class="fas fa-chevron-right cpp-link-arr"></i>' +
+        '</button>' +
+
+        /* Archiver */
+        '<button class="cpp-link-btn" onclick="closeChatProfilePanel();_chatToggleArchive()">' +
+          '<span class="cpp-link-ico" style="color:#2563EB"><i class="fas ' + (isArchived ? 'fa-inbox' : 'fa-box-archive') + '"></i></span>' +
+          (isArchived ? 'Désarchiver' : 'Archiver la conversation') +
+          '<i class="fas fa-chevron-right cpp-link-arr"></i>' +
+        '</button>' +
+
+        /* Séparateur */
+        '<div class="cpp-links-sep"></div>' +
+
+        /* Signaler */
+        '<button class="cpp-link-btn" onclick="closeChatProfilePanel();_chatReport()">' +
+          '<span class="cpp-link-ico" style="color:#EA580C"><i class="fas fa-flag"></i></span>' +
+          '<span style="color:#EA580C">Signaler</span>' +
+          '<i class="fas fa-chevron-right cpp-link-arr"></i>' +
+        '</button>' +
+
+        /* Bloquer */
+        '<button class="cpp-link-btn cpp-link-danger" onclick="closeChatProfilePanel();_chatToggleBlock()">' +
+          '<span class="cpp-link-ico" style="color:#EF4444"><i class="fas fa-ban"></i></span>' +
+          'Bloquer cet utilisateur' +
+          '<i class="fas fa-chevron-right cpp-link-arr"></i>' +
+        '</button>' +
+
+      '</div>' +
+
+    '</div>'; /* /cpp-body */
+
+  /* Overlay semi-transparent */
+  var overlay = document.createElement('div');
+  overlay.id = 'cpp-overlay';
+  overlay.className = 'cpp-overlay';
+  overlay.onclick = closeChatProfilePanel;
+
+  var chatScreen = document.getElementById('chat-screen');
+  chatScreen.appendChild(overlay);
+  chatScreen.appendChild(panel);
+
+  requestAnimationFrame(function() {
+    overlay.classList.add('visible');
+    panel.classList.add('open');
+  });
+}
+
+function closeChatProfilePanel() {
+  var panel   = document.getElementById('chat-profile-panel');
+  var overlay = document.getElementById('cpp-overlay');
+  if (panel)   { panel.classList.remove('open');    setTimeout(function() { if (panel.parentNode)   panel.parentNode.removeChild(panel); },   320); }
+  if (overlay) { overlay.classList.remove('visible'); setTimeout(function() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 320); }
+}
+
+function _cppInfoRow(icon, color, text) {
+  return '<div class="cpp-info-row">' +
+    '<span class="cpp-info-ico" style="color:' + color + '"><i class="fas ' + icon + '"></i></span>' +
+    '<span class="cpp-info-txt">' + escHtml(text) + '</span>' +
+  '</div>';
+}
+
+function _chatShareProfile(name) {
+  if (navigator.share) {
+    navigator.share({ title: name + ' sur Geniwork', text: 'Découvrez le profil de ' + name, url: 'https://geniwork.com' })
+      .catch(function(){});
+  } else {
+    showToast('Lien du profil copié ✓', 'ok');
+  }
+}
+
+/* ══════════════════════════════════════════
+   MENU CHAT — 3 points (⋮)
+══════════════════════════════════════════ */
+function openChatMenu() {
+  _closeGenericSheet('chat-menu');
+  var conv = _chatConvId ? DEMO_CONVERSATIONS.find(function(c){ return c.id === _chatConvId; }) : null;
+  if (!conv) return;
+
+  /* Pour les DM : panneau unifié profil + options */
+  if (!conv.isGroup) { openChatProfilePanel(); return; }
+
+  var isMuted    = !!conv.muted;
+  var isArchived = !!conv.archived;
+  var isBlocked  = !!conv.blocked;
+
+  var bg = document.createElement('div');
+  bg.className = 'chat-sheet-bg'; bg.id = 'chat-menu-bg';
+  bg.onclick = function(e){ if(e.target===bg) _closeGenericSheet('chat-menu'); };
+
+  var card = document.createElement('div');
+  card.className = 'chat-sheet-card chat-menu-card'; card.id = 'chat-menu-card';
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="chat-menu-title">Options de conversation</p>' +
+
+    /* ── Sourdine ── */
+    '<button class="chat-menu-item" onclick="_chatToggleMute()">' +
+      '<span class="chat-menu-ico" style="background:#F3F4F6;color:#6B7280">' +
+        '<i class="fas ' + (isMuted ? 'fa-bell' : 'fa-bell-slash') + '"></i>' +
+      '</span>' +
+      '<div class="chat-menu-text">' +
+        '<span>' + (isMuted ? 'Activer les notifications' : 'Mettre en sourdine') + '</span>' +
+        '<small>' + (isMuted ? 'Recevoir à nouveau les messages' : 'Ne plus recevoir de notifications') + '</small>' +
+      '</div>' +
+    '</button>' +
+
+    /* ── Archiver ── */
+    '<button class="chat-menu-item" onclick="_chatToggleArchive()">' +
+      '<span class="chat-menu-ico" style="background:#EFF6FF;color:#2563EB">' +
+        '<i class="fas ' + (isArchived ? 'fa-inbox' : 'fa-box-archive') + '"></i>' +
+      '</span>' +
+      '<div class="chat-menu-text">' +
+        '<span>' + (isArchived ? 'Désarchiver' : 'Archiver la conversation') + '</span>' +
+        '<small>' + (isArchived ? 'Remettre dans la liste principale' : 'Masquer dans les archives') + '</small>' +
+      '</div>' +
+    '</button>' +
+
+    '<div class="chat-menu-sep"></div>' +
+
+    /* ── Signaler ── */
+    '<button class="chat-menu-item" onclick="_chatReport()">' +
+      '<span class="chat-menu-ico" style="background:#FFF7ED;color:#EA580C">' +
+        '<i class="fas fa-flag"></i>' +
+      '</span>' +
+      '<div class="chat-menu-text">' +
+        '<span style="color:#EA580C">Signaler</span>' +
+        '<small>Signaler un comportement inapproprié</small>' +
+      '</div>' +
+    '</button>' +
+
+    /* ── Bloquer ── */
+    '<button class="chat-menu-item" onclick="_chatToggleBlock()">' +
+      '<span class="chat-menu-ico" style="background:#FEF2F2;color:#DC2626">' +
+        '<i class="fas ' + (isBlocked ? 'fa-user-check' : 'fa-ban') + '"></i>' +
+      '</span>' +
+      '<div class="chat-menu-text">' +
+        '<span style="color:#DC2626">' + (isBlocked ? 'Débloquer' : 'Bloquer') + '</span>' +
+        '<small>' + (isBlocked ? 'Permettre à nouveau les messages' : 'Empêcher cet utilisateur de vous contacter') + '</small>' +
+      '</div>' +
+    '</button>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* ── Sourdine ── */
+function _chatToggleMute() {
+  _closeGenericSheet('chat-menu');
+  var conv = DEMO_CONVERSATIONS.find(function(c){ return c.id === _chatConvId; });
+  if (!conv) return;
+  conv.muted = !conv.muted;
+  showToast(conv.muted ? 'Conversation mise en sourdine 🔕' : 'Notifications réactivées 🔔', 'ok');
+  renderConversations();
+}
+
+/* ── Archiver / désarchiver ── */
+function _chatToggleArchive() {
+  _closeGenericSheet('chat-menu');
+  var conv = DEMO_CONVERSATIONS.find(function(c){ return c.id === _chatConvId; });
+  if (!conv) return;
+  conv.archived = !conv.archived;
+  if (conv.archived) {
+    showToast('Conversation archivée 📦', 'ok');
+    closeChat();
+    setTimeout(renderConversations, 320);
+  } else {
+    showToast('Conversation désarchivée ✓', 'ok');
+    renderConversations();
+  }
+}
+
+/* ── Signaler ── */
+function _chatReport() {
+  _closeGenericSheet('chat-menu');
+
+  var bg = document.createElement('div');
+  bg.className = 'chat-sheet-bg'; bg.id = 'chat-menu-bg';
+  bg.onclick = function(e){ if(e.target===bg) _closeGenericSheet('chat-menu'); };
+
+  var card = document.createElement('div');
+  card.className = 'chat-sheet-card chat-menu-card'; card.id = 'chat-menu-card';
+
+  var reasons = [
+    { ico:'fa-triangle-exclamation', label:'Spam ou publicité non souhaitée' },
+    { ico:'fa-face-angry',           label:'Harcèlement ou intimidation' },
+    { ico:'fa-images',               label:'Contenu inapproprié ou choquant' },
+    { ico:'fa-user-secret',          label:'Usurpation d\'identité' },
+    { ico:'fa-comment-slash',        label:'Propos haineux ou discriminatoires' },
+    { ico:'fa-ellipsis',             label:'Autre raison' }
+  ];
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="chat-menu-title"><i class="fas fa-flag" style="color:#EA580C;margin-right:6px"></i>Signaler l\'utilisateur</p>' +
+    '<p style="font-size:12px;color:#9CA3AF;margin:-6px 0 10px;padding:0 4px">Choisissez le motif du signalement</p>' +
+    reasons.map(function(r) {
+      return '<button class="chat-menu-item" onclick="_submitChatReport(\'' + r.label.replace(/'/g,"\\'") + '\')">' +
+        '<span class="chat-menu-ico" style="background:#FFF7ED;color:#EA580C"><i class="fas ' + r.ico + '"></i></span>' +
+        '<div class="chat-menu-text"><span>' + r.label + '</span></div>' +
+      '</button>';
+    }).join('') +
+    '<button class="chat-menu-cancel-btn" onclick="_closeGenericSheet(\'chat-menu\')">Annuler</button>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _submitChatReport(reason) {
+  _closeGenericSheet('chat-menu');
+  /* Sauvegarde locale du signalement */
+  if (_currentUser) {
+    try {
+      var conv = DEMO_CONVERSATIONS.find(function(c){ return c.id === _chatConvId; });
+      var reports = JSON.parse(localStorage.getItem('gw_reports_' + _currentUser.email) || '[]');
+      reports.push({
+        id:     'rpt_' + Date.now(),
+        date:   new Date().toISOString(),
+        target: conv ? (conv.email || conv.name) : '?',
+        reason: reason,
+        type:   'chat'
+      });
+      localStorage.setItem('gw_reports_' + _currentUser.email, JSON.stringify(reports));
+    } catch(e) {}
+  }
+  showToast('Signalement envoyé. Merci ! 🚩', 'ok');
+}
+
+/* ══════════════════════════════════════════
+   SIGNALEMENT BUG / PROBLÈME → ADMINS
+══════════════════════════════════════════ */
+function _openBugReportModal() {
+  var existing = document.getElementById('bug-report-modal');
+  if (existing) existing.remove();
+
+  /* ── Overlay ── */
+  var overlay = document.createElement('div');
+  overlay.id = 'bug-report-modal';
+  overlay.style.cssText = [
+    'position:fixed','inset:0','background:rgba(0,0,0,.5)',
+    'z-index:999999','display:flex','align-items:flex-end','justify-content:center'
+  ].join(';');
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  /* ── Sheet ── */
+  var sheet = document.createElement('div');
+  sheet.style.cssText = [
+    'background:#fff','border-radius:20px 20px 0 0',
+    'width:100%','max-width:520px','padding:24px 20px 36px',
+    'box-sizing:border-box'
+  ].join(';');
+
+  /* Handle */
+  var handle = document.createElement('div');
+  handle.style.cssText = 'width:36px;height:4px;background:#E5E7EB;border-radius:2px;margin:0 auto 20px';
+  sheet.appendChild(handle);
+
+  /* Header */
+  var header = document.createElement('div');
+  header.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:20px';
+  header.innerHTML =
+    '<div style="width:44px;height:44px;border-radius:12px;background:#FEF2F2;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+      '<i class="fas fa-bug" style="color:#EF4444;font-size:20px"></i>' +
+    '</div>' +
+    '<div>' +
+      '<div style="font-weight:700;font-size:16px;color:#111827;margin-bottom:2px">Signaler un problème</div>' +
+      '<div style="font-size:12px;color:#9CA3AF">Envoyé directement aux admins Geniwork</div>' +
+    '</div>';
+  sheet.appendChild(header);
+
+  /* Catégorie label */
+  var lblCat = document.createElement('label');
+  lblCat.style.cssText = 'display:block;font-size:12px;font-weight:600;color:#374151;margin-bottom:6px';
+  lblCat.textContent = 'Catégorie';
+  sheet.appendChild(lblCat);
+
+  /* Select */
+  var sel = document.createElement('select');
+  sel.id = 'bug-report-cat';
+  sel.style.cssText = 'width:100%;padding:10px 12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:14px;color:#111;background:#F9FAFB;margin-bottom:16px;outline:none;-webkit-appearance:auto;box-sizing:border-box';
+  [
+    ['bug',      '🐛 Bug / Erreur technique'],
+    ['message',  '💬 Problème de messagerie'],
+    ['paiement', '💳 Problème de paiement'],
+    ['compte',   '👤 Problème de compte'],
+    ['autre',    '📋 Autre']
+  ].forEach(function(o) {
+    var opt = document.createElement('option');
+    opt.value = o[0]; opt.textContent = o[1];
+    sel.appendChild(opt);
+  });
+  sheet.appendChild(sel);
+
+  /* Description label */
+  var lblDesc = document.createElement('label');
+  lblDesc.style.cssText = 'display:block;font-size:12px;font-weight:600;color:#374151;margin-bottom:6px';
+  lblDesc.innerHTML = 'Description du problème <span style="color:#EF4444">*</span>';
+  sheet.appendChild(lblDesc);
+
+  /* Textarea */
+  var ta = document.createElement('textarea');
+  ta.id = 'bug-report-txt';
+  ta.placeholder = 'Décrivez le problème en détail : ce que vous faisiez, ce qui se passe, les messages affichés...';
+  ta.style.cssText = 'width:100%;min-height:120px;padding:10px 12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:14px;color:#111;resize:vertical;font-family:inherit;box-sizing:border-box;outline:none;display:block';
+  sheet.appendChild(ta);
+
+  /* Boutons */
+  var btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:10px;margin-top:16px';
+
+  var btnCancel = document.createElement('button');
+  btnCancel.style.cssText = 'flex:1;padding:13px;border:1.5px solid #E5E7EB;border-radius:12px;background:#fff;font-size:14px;font-weight:600;color:#6B7280;cursor:pointer';
+  btnCancel.textContent = 'Annuler';
+  btnCancel.addEventListener('click', function() { overlay.remove(); });
+
+  var btnSend = document.createElement('button');
+  btnSend.style.cssText = 'flex:2;padding:13px;border:none;border-radius:12px;background:#EF4444;color:#fff;font-size:14px;font-weight:700;cursor:pointer';
+  btnSend.innerHTML = '<i class="fas fa-paper-plane" style="margin-right:6px"></i>Envoyer aux admins';
+  btnSend.addEventListener('click', _sendBugReport);
+
+  btnRow.appendChild(btnCancel);
+  btnRow.appendChild(btnSend);
+  sheet.appendChild(btnRow);
+
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+  setTimeout(function() { ta.focus(); }, 150);
+}
+
+/* ══════════════════════════════════════════
+   SUPPORT THREADS — TICKETS BIDIRECTIONNELS
+   Clé partagée : gw_support_threads
+   Tous les admins + chaque utilisateur lisent la même clé
+══════════════════════════════════════════ */
+function _getSupportThreads() {
+  try { return JSON.parse(localStorage.getItem('gw_support_threads') || '[]'); } catch(e) { return []; }
+}
+function _saveSupportThreads(threads) {
+  try { localStorage.setItem('gw_support_threads', JSON.stringify(threads)); } catch(e) {}
+}
+function _getSupportThreadsForUser(email) {
+  return _getSupportThreads().filter(function(t) { return t.userEmail === email; });
+}
+
+function _sendBugReport() {
+  if (!_currentUser) { showToast('Connectez-vous pour signaler un problème', 'err'); return; }
+
+  var cat  = (document.getElementById('bug-report-cat') || {}).value || 'bug';
+  var txt  = ((document.getElementById('bug-report-txt') || {}).value || '').trim();
+
+  if (!txt || txt.length < 10) {
+    showToast('Merci de décrire le problème (min. 10 caractères)', 'err'); return;
+  }
+
+  var catLabels = { bug:'Bug technique', message:'Messagerie', paiement:'Paiement', compte:'Compte', autre:'Autre' };
+  var catLabel  = catLabels[cat] || cat;
+  var ts        = Date.now();
+  var threadId  = 'thr_' + ts;
+
+  /* ── 1. Créer le ticket dans le storage partagé ── */
+  var firstMsg = { id: ts, from: _currentUser.email, text: txt, at: ts, isAdmin: false };
+  var thread = {
+    id:          threadId,
+    userEmail:   _currentUser.email,
+    userNom:     _currentUser.nom || _currentUser.email,
+    userPhoto:   _currentUser.photo || null,
+    category:    cat,
+    catLabel:    catLabel,
+    status:      'open',       /* open | closed */
+    createdAt:   ts,
+    updatedAt:   ts,
+    messages:    [firstMsg],
+    unreadAdmin: 1,            /* non-lu côté admin */
+    unreadUser:  0             /* non-lu côté utilisateur */
+  };
+  var threads = _getSupportThreads();
+  threads.unshift(thread);
+  _saveSupportThreads(threads);
+
+  /* ── 2. Notification pour le super admin et tous les admins ── */
+  var adminNotif = {
+    id:       threadId + '_n',
+    type:     'bug_report',
+    at:       ts,
+    msg:      '🐛 [' + catLabel + '] ' + (_currentUser.nom || _currentUser.email) + ' : ' + txt.slice(0, 100) + (txt.length > 100 ? '…' : ''),
+    unread:   true,
+    threadId: threadId,
+    fromUser: { nom: _currentUser.nom || _currentUser.email, email: _currentUser.email, role: _currentUser.role || 'Membre' }
+  };
+  try {
+    var sa = _admGetSuperAdmin();
+    if (sa) { var saN = getNotifs(sa.email); saN.unshift(adminNotif); saveNotifs(sa.email, saN); }
+    _admGetAdmins().forEach(function(a) {
+      if (!sa || a.email !== sa.email) { var aN = getNotifs(a.email); aN.unshift(adminNotif); saveNotifs(a.email, aN); }
+    });
+  } catch(e) {}
+
+  /* ── 3. Ferme le modal + toast ── */
+  var modal = document.getElementById('bug-report-modal');
+  if (modal) modal.remove();
+  showToast('Signalement envoyé ! Les admins vous répondront ici 🙏', 'ok');
+}
+
+/* ── Admin : répondre à un ticket ── */
+function _admReplyThread(threadId) {
+  if (!_adminUser) return;
+  var inp = document.getElementById('adm-reply-' + threadId);
+  if (!inp) return;
+  var txt = (inp.value || '').trim();
+  if (!txt) { showToast('Écrivez un message', 'err'); return; }
+
+  var threads = _getSupportThreads();
+  var thread  = threads.find(function(t) { return t.id === threadId; });
+  if (!thread) return;
+
+  var ts  = Date.now();
+  var msg = { id: ts, from: _adminUser.email, fromNom: _adminUser.nom || 'Admin', text: txt, at: ts, isAdmin: true };
+  thread.messages.push(msg);
+  thread.updatedAt  = ts;
+  thread.unreadUser = (thread.unreadUser || 0) + 1;
+  thread.unreadAdmin = 0;
+  _saveSupportThreads(threads);
+
+  /* Notif à l'utilisateur */
+  try {
+    var userNotif = {
+      id:       'adm_reply_' + ts,
+      type:     'system',
+      at:       ts,
+      msg:      '💬 L\'équipe Geniwork a répondu à votre signalement : "' + txt.slice(0, 80) + (txt.length > 80 ? '…' : '') + '"',
+      unread:   true,
+      fromUser: null
+    };
+    var uN = getNotifs(thread.userEmail);
+    uN.unshift(userNotif);
+    saveNotifs(thread.userEmail, uN);
+  } catch(e) {}
+
+  inp.value = '';
+  /* Re-rendre l'onglet */
+  if (typeof _admRender === 'function') _admRender();
+  showToast('Réponse envoyée ✓', 'ok');
+}
+
+/* ── Admin : fermer / rouvrir un ticket ── */
+function _admCloseThread(threadId) {
+  var threads = _getSupportThreads();
+  var thread  = threads.find(function(t) { return t.id === threadId; });
+  if (!thread) return;
+  thread.status = thread.status === 'closed' ? 'open' : 'closed';
+  thread.updatedAt = Date.now();
+  _saveSupportThreads(threads);
+  if (typeof _admRender === 'function') _admRender();
+}
+
+/* ── Admin : supprimer un ticket ── */
+function _admDeleteThread(threadId) {
+  var threads = _getSupportThreads().filter(function(t) { return t.id !== threadId; });
+  _saveSupportThreads(threads);
+  if (typeof _admRender === 'function') _admRender();
+}
+
+/* ── Utilisateur : répondre dans son ticket ── */
+function _userReplyThread(threadId) {
+  if (!_currentUser) return;
+  var inp = document.getElementById('usr-reply-' + threadId);
+  if (!inp) return;
+  var txt = (inp.value || '').trim();
+  if (!txt) return;
+
+  var threads = _getSupportThreads();
+  var thread  = threads.find(function(t) { return t.id === threadId; });
+  if (!thread || thread.userEmail !== _currentUser.email) return;
+
+  var ts  = Date.now();
+  var msg = { id: ts, from: _currentUser.email, text: txt, at: ts, isAdmin: false };
+  thread.messages.push(msg);
+  thread.updatedAt   = ts;
+  thread.unreadAdmin = (thread.unreadAdmin || 0) + 1;
+  thread.status      = 'open';
+  _saveSupportThreads(threads);
+
+  /* Notif admins */
+  var adminNotif2 = {
+    id: 'usr_reply_' + ts, type: 'bug_report', at: ts,
+    msg: '💬 Réponse de ' + (_currentUser.nom || _currentUser.email) + ' sur son ticket : "' + txt.slice(0, 80) + '"',
+    unread: true, threadId: threadId,
+    fromUser: { nom: _currentUser.nom || _currentUser.email, email: _currentUser.email }
+  };
+  try {
+    var sa2 = _admGetSuperAdmin();
+    if (sa2) { var saN2 = getNotifs(sa2.email); saN2.unshift(adminNotif2); saveNotifs(sa2.email, saN2); }
+    _admGetAdmins().forEach(function(a) {
+      if (!sa2 || a.email !== sa2.email) { var aN2 = getNotifs(a.email); aN2.unshift(adminNotif2); saveNotifs(a.email, aN2); }
+    });
+  } catch(e) {}
+
+  inp.value = '';
+  _renderUserTickets();
+  showToast('Message envoyé ✓', 'ok');
+}
+
+/* ── Utilisateur : afficher ses tickets dans le support screen ── */
+function _renderUserTickets() {
+  var wrap = document.getElementById('user-tickets-wrap');
+  if (!wrap || !_currentUser) return;
+  var threads = _getSupportThreadsForUser(_currentUser.email);
+  if (!threads.length) {
+    wrap.innerHTML = '<p style="font-size:12px;color:#9CA3AF;text-align:center;padding:12px 0">Aucun signalement envoyé pour l\'instant.</p>';
+    return;
+  }
+  /* Marque comme lus */
+  var allThreads = _getSupportThreads();
+  threads.forEach(function(t) {
+    var orig = allThreads.find(function(x) { return x.id === t.id; });
+    if (orig) orig.unreadUser = 0;
+  });
+  _saveSupportThreads(allThreads);
+
+  wrap.innerHTML = threads.map(function(t) {
+    var statusBadge = t.status === 'closed'
+      ? '<span style="background:#F3F4F6;color:#6B7280;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px">Fermé</span>'
+      : '<span style="background:#DCFCE7;color:#16A34A;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px">Ouvert</span>';
+    var d = new Date(t.createdAt).toLocaleDateString('fr-FR') + ' ' +
+            new Date(t.createdAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+    var msgs = (t.messages || []).map(function(m) {
+      var isMe = !m.isAdmin;
+      var who  = isMe ? 'Vous' : '🛡️ Admin Geniwork';
+      var bg   = isMe ? '#EFF6FF' : '#F0FDF4';
+      var col  = isMe ? '#1D4ED8' : '#15803D';
+      return '<div style="margin-bottom:10px">' +
+        '<div style="font-size:11px;font-weight:700;color:' + col + ';margin-bottom:3px">' + escHtml(who) + ' · ' + _notifTimeAgo(m.at) + '</div>' +
+        '<div style="background:' + bg + ';border-radius:10px;padding:10px 12px;font-size:13px;color:#111;line-height:1.5">' + escHtml(m.text) + '</div>' +
+      '</div>';
+    }).join('');
+
+    var replyBox = t.status !== 'closed' ? (
+      '<div style="display:flex;gap:8px;margin-top:10px">' +
+        '<input id="usr-reply-' + t.id + '" type="text" placeholder="Répondre..." ' +
+          'style="flex:1;padding:9px 12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:13px;outline:none">' +
+        '<button onclick="_userReplyThread(\'' + t.id + '\')" ' +
+          'style="padding:9px 14px;background:#2563EB;color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">' +
+          '<i class="fas fa-paper-plane"></i></button>' +
+      '</div>'
+    ) : '<p style="font-size:12px;color:#9CA3AF;margin:8px 0 0;text-align:center">Ce ticket est fermé.</p>';
+
+    return '<div style="background:#fff;border:1.5px solid #E5E7EB;border-radius:14px;padding:14px;margin-bottom:12px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
+        '<div style="font-size:12px;font-weight:700;color:#374151">🐛 ' + escHtml(t.catLabel) + '</div>' +
+        '<div style="display:flex;gap:6px;align-items:center">' + statusBadge +
+          '<span style="font-size:11px;color:#9CA3AF">' + d + '</span>' +
+        '</div>' +
+      '</div>' +
+      msgs + replyBox +
+    '</div>';
+  }).join('');
+}
+
+/* ── Bloquer / débloquer ── */
+function _chatToggleBlock() {
+  _closeGenericSheet('chat-menu');
+  var conv = DEMO_CONVERSATIONS.find(function(c){ return c.id === _chatConvId; });
+  if (!conv) return;
+
+  if (conv.blocked) {
+    /* Débloquer directement */
+    conv.blocked = false;
+    showToast('Utilisateur débloqué ✓', 'ok');
+    renderConversations();
+    return;
+  }
+
+  /* Confirmation avant blocage */
+  var bg = document.createElement('div');
+  bg.className = 'chat-sheet-bg'; bg.id = 'chat-menu-bg';
+  bg.onclick = function(e){ if(e.target===bg) _closeGenericSheet('chat-menu'); };
+
+  var card = document.createElement('div');
+  card.className = 'chat-sheet-card'; card.id = 'chat-menu-card';
+  card.style.padding = '0 0 28px';
+
+  var nom = conv.name || 'cet utilisateur';
+
+  card.innerHTML =
+    '<div class="acct-modal-header acct-modal-header-danger">' +
+      '<div class="acct-modal-ico-wrap"><i class="fas fa-ban"></i></div>' +
+      '<div>' +
+        '<p class="acct-modal-title">Bloquer ' + escHtml(nom) + ' ?</p>' +
+        '<p class="acct-modal-sub">Cette personne ne pourra plus vous contacter</p>' +
+      '</div>' +
+    '</div>' +
+    '<div class="acct-warn-box acct-warn-box-danger" style="margin:14px 20px 0">' +
+      '<i class="fas fa-triangle-exclamation"></i>' +
+      '<div>' +
+        '<strong>Effets du blocage :</strong>' +
+        '<p>• Ses messages ne vous parviendront plus<br>' +
+           '• Il ne pourra plus voir votre profil<br>' +
+           '• Vous pouvez le débloquer à tout moment</p>' +
+      '</div>' +
+    '</div>' +
+    '<div class="delete-acct-btns">' +
+      '<button class="delete-acct-cancel" onclick="_closeGenericSheet(\'chat-menu\')">Annuler</button>' +
+      '<button class="delete-acct-confirm" onclick="_doBlockUser()"><i class="fas fa-ban" style="margin-right:6px"></i>Bloquer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _doBlockUser() {
+  _closeGenericSheet('chat-menu');
+  var conv = DEMO_CONVERSATIONS.find(function(c){ return c.id === _chatConvId; });
+  if (!conv) return;
+  conv.blocked = true;
+  /* Sauvegarde */
+  if (_currentUser) {
+    try {
+      var blocked = JSON.parse(localStorage.getItem('gw_blocked_' + _currentUser.email) || '[]');
+      if (conv.email && !blocked.includes(conv.email)) blocked.push(conv.email);
+      localStorage.setItem('gw_blocked_' + _currentUser.email, JSON.stringify(blocked));
+    } catch(e) {}
+  }
+  showToast('Utilisateur bloqué 🚫', 'ok');
+  closeChat();
+  setTimeout(renderConversations, 320);
+}
+
+function _renderChatMessages(conv) {
+  var box    = document.getElementById('chat-messages');
+  var inpBar = document.getElementById('chat-input');
+  var sendBtn = document.getElementById('chat-send-btn');
+  if (!box) return;
+
+  /* ── Partenaire banni → conv bloquée, messages cachés ── */
+  var partnerBanned = !conv.isGroup && conv.email && _admIsBanned(conv.email);
+  if (partnerBanned) {
+    if (inpBar)  { inpBar.disabled = true; inpBar.placeholder = 'Compte suspendu'; }
+    if (sendBtn) sendBtn.disabled = true;
+    box.innerHTML =
+      '<div class="chat-banned-notice">' +
+        '<div class="chat-banned-icon"><i class="fas fa-ban"></i></div>' +
+        '<div class="chat-banned-title">Compte suspendu</div>' +
+        '<p class="chat-banned-desc">Ce compte a été suspendu par l\'équipe Geniwork.<br>Les messages et contenus de cet utilisateur ne sont plus accessibles.</p>' +
+      '</div>';
+    return;
+  }
+
+  /* Bannière + blocage de saisie si utilisateur bloqué */
+  if (conv.blocked) {
+    if (inpBar)  { inpBar.disabled = true;  inpBar.placeholder = 'Utilisateur bloqué'; }
+    if (sendBtn) sendBtn.disabled = true;
+  } else {
+    if (inpBar)  { inpBar.disabled = false; inpBar.placeholder = 'Écrire un message...'; }
+    if (sendBtn) sendBtn.disabled = false;
+  }
+
+  var isGroup = conv.isGroup === true;
+  var meEmail = _currentUser ? _currentUser.email : null;
+
+  /* Pour les DM avec un vrai utilisateur : n'afficher que les vrais messages */
+  var allMsgs = conv.messages || [];
+  var msgs = (!isGroup && conv.email && String(conv.email).indexOf('@') !== -1)
+    ? allMsgs.filter(function(m) {
+        if (!m || !m.from) return false;
+        if (m.from === 'system') return true;
+        return m.from !== 'them' && m.from !== 'me' && String(m.from).indexOf('@') !== -1;
+      })
+    : allMsgs;
+  /* Exclure les messages supprimés "chez moi" */
+  msgs = msgs.filter(function(m) { return !_isDeletedForMe(m.id); });
+
+  /* Bannières état */
+  var bannerHtml = '';
+  if (conv.blocked) {
+    bannerHtml = '<div class="chat-status-banner chat-ban-blocked">' +
+      '<i class="fas fa-ban"></i> Vous avez bloqué cet utilisateur — ' +
+      '<button onclick="_chatToggleBlock()" style="background:none;border:none;color:inherit;font-weight:700;cursor:pointer;text-decoration:underline">Débloquer</button>' +
+    '</div>';
+  } else if (conv.muted) {
+    bannerHtml = '<div class="chat-status-banner chat-ban-muted">' +
+      '<i class="fas fa-bell-slash"></i> Conversation en sourdine — ' +
+      '<button onclick="_chatToggleMute()" style="background:none;border:none;color:inherit;font-weight:700;cursor:pointer;text-decoration:underline">Réactiver</button>' +
+    '</div>';
+  }
+
+  box.innerHTML =
+    bannerHtml +
+    '<div class="chat-date-sep">Aujourd\'hui</div>' +
+    msgs.map(function(m) {
+      /* Message système */
+      if (m.from === 'system') {
+        return '<div class="chat-system-msg"><span>' + escHtml(m.text) + '</span></div>';
+      }
+
+      /* isMine : basé sur l'email réel uniquement */
+      var isMine = !!(meEmail && m.from === meEmail);
+
+      /* Sender header in groups (uniquement pour les messages des autres) */
+      var senderHtml = '';
+      if (isGroup && !isMine && m.from && m.from !== 'system') {
+        var sp = loadUserProfile(m.from) || {};
+        var sName  = sp.nom || getDisplayName(m.from, m.from) || m.from;
+        var sPhoto = sp.photo || null;
+        var sAv = sPhoto
+          ? '<img src="' + escHtml(sPhoto) + '" class="chat-group-av" alt="">'
+          : '<div class="chat-group-av chat-group-av-init">' + escHtml(sName.charAt(0).toUpperCase()) + '</div>';
+        senderHtml = '<div class="chat-group-sender-row">' + sAv +
+          '<span class="chat-group-sender-name">' + escHtml(sName) + '</span></div>';
+      }
+
+      return '<div class="chat-msg-row ' + (isMine ? 'mine' : 'theirs') + '" data-msg-id="' + m.id + '">' +
+        senderHtml +
+        _buildBubbleHtml(m, isMine) +
+      '</div>';
+    }).join('');
+}
+
+function _scrollChatToBottom() {
+  var box = document.getElementById('chat-messages');
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+/* ══════════════════════════════════════════
+   MESSAGERIE PERSISTANTE — localStorage
+   Clé partagée triée : gw_dm_{A}__{B}
+══════════════════════════════════════════ */
+function _getDMKey(emailA, emailB) {
+  return 'gw_dm_' + [emailA, emailB].sort().join('__');
+}
+
+/* ── Suppression "chez moi" : stockage local utilisateur ── */
+function _isDeletedForMe(msgId) {
+  if (!_currentUser) return false;
+  try {
+    var list = JSON.parse(localStorage.getItem('gw_del_forme_' + _currentUser.email) || '[]');
+    return list.indexOf(String(msgId)) !== -1;
+  } catch(e) { return false; }
+}
+function _markDeletedForMe(msgId) {
+  if (!_currentUser) return;
+  try {
+    var key  = 'gw_del_forme_' + _currentUser.email;
+    var list = JSON.parse(localStorage.getItem(key) || '[]');
+    if (list.indexOf(String(msgId)) === -1) {
+      list.push(String(msgId));
+      localStorage.setItem(key, JSON.stringify(list));
+    }
+  } catch(e) {}
+}
+
+/* ── Met à jour un message existant dans le stockage partagé DM ── */
+function _updateDMMsg(conv, msgId, updates) {
+  if (!conv || conv.isGroup || !conv.email || !_currentUser) return;
+  try {
+    var key  = _getDMKey(_currentUser.email, conv.email);
+    var data = JSON.parse(localStorage.getItem(key) || '{}');
+    var msgs = (data && Array.isArray(data.messages)) ? data.messages : [];
+    var hit  = false;
+    msgs = msgs.map(function(m) {
+      if (String(m.id) === String(msgId)) { hit = true; return Object.assign({}, m, updates); }
+      return m;
+    });
+    if (hit) { data.messages = msgs; localStorage.setItem(key, JSON.stringify(data)); }
+  } catch(e) {}
+  /* Mise à jour en mémoire */
+  conv.messages = conv.messages.map(function(m) {
+    return String(m.id) === String(msgId) ? Object.assign({}, m, updates) : m;
+  });
+}
+
+/* ── Met à jour un message existant dans le stockage partagé Groupe ── */
+function _updateGroupMsg(conv, msgId, updates) {
+  if (!conv || !conv.isGroup || !conv.projId) return;
+  try {
+    var key  = _getGroupMsgKey(conv.projId, conv.projOwnerEmail);
+    var data = JSON.parse(localStorage.getItem(key) || '{}');
+    var msgs = (data && Array.isArray(data.messages)) ? data.messages : [];
+    msgs = msgs.map(function(m) {
+      return String(m.id) === String(msgId) ? Object.assign({}, m, updates) : m;
+    });
+    data.messages = msgs;
+    localStorage.setItem(key, JSON.stringify(data));
+  } catch(e) {}
+  /* Mise à jour en mémoire */
+  conv.messages = conv.messages.map(function(m) {
+    return String(m.id) === String(msgId) ? Object.assign({}, m, updates) : m;
+  });
+}
+
+/* ── Sauvegarde DM : merge par ID pour ne jamais écraser les messages de l'autre ── */
+function _saveDMConv(conv) {
+  if (!conv || conv.isGroup || !conv.email || !_currentUser) return;
+  var key = _getDMKey(_currentUser.email, conv.email);
+  try {
+    /* 1. Lire ce qui est déjà en storage */
+    var existing = null;
+    try { existing = JSON.parse(localStorage.getItem(key)); } catch(e) {}
+    var storedMsgs = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
+
+    /* 2. Index des IDs déjà stockés */
+    var storedMap = {};
+    storedMsgs.forEach(function(m) { storedMap[String(m.id)] = true; });
+
+    /* 3. Filtrer : ne conserver que les vrais messages (pas les démos) */
+    function _isRealMsg(m) {
+      return m && m.from && m.from !== 'them' && m.from !== 'me' &&
+             m.from !== 'system' && String(m.from).indexOf('@') !== -1;
+    }
+    /* Nettoyer aussi les messages déjà stockés (au cas où ils auraient été contaminés) */
+    var cleanStored = storedMsgs.filter(_isRealMsg);
+    var cleanStoredMap = {};
+    cleanStored.forEach(function(m) { cleanStoredMap[String(m.id)] = true; });
+
+    var merged = cleanStored.slice();
+    conv.messages.filter(_isRealMsg).forEach(function(m) {
+      if (!cleanStoredMap[String(m.id)]) {
+        merged.push(m);
+        cleanStoredMap[String(m.id)] = true;
+      }
+    });
+
+    /* 4. Trier par timestamp */
+    merged.sort(function(a, b) { return (Number(a.id) || 0) - (Number(b.id) || 0); });
+
+    /* 5. Mettre à jour la copie en mémoire */
+    conv.messages = merged;
+
+    /* Pour le storage partagé : ne pas persister le base64 des images/fichiers (trop lourd)
+       On garde uniquement les métadonnées — l'aperçu reste local à l'envoyeur */
+    var mergedForStorage = merged.map(function(m) {
+      if ((m.type === 'img' || m.type === 'file') && m.data) {
+        var stripped = {};
+        for (var k in m) { if (k !== 'data') stripped[k] = m[k]; }
+        return stripped;
+      }
+      return m;
+    });
+
+    localStorage.setItem(key, JSON.stringify({
+      messages: mergedForStorage,
+      lastMsg:  conv.lastMsg,
+      lastAt:   conv.lastAt || Date.now(),
+      time:     conv.time
+    }));
+  } catch(e) {}
+}
+
+/* ── Chargement DM : merge avec les messages déjà en mémoire ── */
+function _loadDMConv(conv) {
+  if (!conv || conv.isGroup || !conv.email || !_currentUser) return;
+  var key = _getDMKey(_currentUser.email, conv.email);
+  try {
+    var data = JSON.parse(localStorage.getItem(key));
+    if (data && Array.isArray(data.messages)) {
+      /* Filtrer les messages demo de la mémoire et du storage */
+      function _isRealMsgL(m) {
+        return m && m.from && m.from !== 'them' && m.from !== 'me' &&
+               m.from !== 'system' && String(m.from).indexOf('@') !== -1;
+      }
+      var merged = conv.messages.filter(_isRealMsgL);
+      var convMap2 = {};
+      merged.forEach(function(m) { convMap2[String(m.id)] = true; });
+
+      data.messages.filter(_isRealMsgL).forEach(function(m) {
+        if (!convMap2[String(m.id)]) {
+          merged.push(m);
+          convMap2[String(m.id)] = true;
+        }
+      });
+
+      merged.sort(function(a, b) { return (Number(a.id) || 0) - (Number(b.id) || 0); });
+      conv.messages = merged;
+      if (data.lastMsg) conv.lastMsg = data.lastMsg;
+      if (data.lastAt)  conv.lastAt  = data.lastAt;
+    }
+  } catch(e) {}
+}
+
+/* ── Polling — détecte les nouveaux messages du destinataire ── */
+var _chatPollInterval = null;
+
+function _startChatPolling() {
+  _stopChatPolling();
+  _chatPollInterval = setInterval(function() {
+    /* Poll DM ou groupe selon le type de conv ouverte */
+    var _openConv = _chatConvId
+      ? DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; })
+      : null;
+    if (_openConv && _openConv.isGroup) {
+      _pollGroupMessages();
+    } else {
+      _pollChatMessages();
+    }
+  }, 3000);
+}
+
+function _stopChatPolling() {
+  if (_chatPollInterval) { clearInterval(_chatPollInterval); _chatPollInterval = null; }
+}
+
+function _pollChatMessages() {
+  if (!_chatConvId || !_currentUser) return;
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || conv.isGroup || !conv.email) return;
+
+  var key = _getDMKey(_currentUser.email, conv.email);
+  try {
+    var data = JSON.parse(localStorage.getItem(key));
+    if (!data || !Array.isArray(data.messages)) return;
+    /* Garder uniquement les vrais messages (exclure les messages démo) */
+    var stored = data.messages.filter(function(m) {
+      return m && m.from && m.from !== 'them' && m.from !== 'me' &&
+             m.from !== 'system' && String(m.from).indexOf('@') !== -1;
+    });
+
+    /* Comparer par ID — évite le bug de décompte par index */
+    var convMap = {};
+    conv.messages.forEach(function(m) { convMap[String(m.id)] = true; });
+
+    var newOnes = stored.filter(function(m) { return !convMap[String(m.id)]; });
+
+    /* ── Détecte les suppressions "pour tous" sur messages déjà en mémoire ── */
+    var box = document.getElementById('chat-messages');
+    stored.forEach(function(sm) {
+      if (!sm.deletedForAll) return;
+      var ex = conv.messages.find(function(m) { return String(m.id) === String(sm.id); });
+      if (ex && !ex.deletedForAll) {
+        ex.deletedForAll = true;
+        if (box) {
+          var domRow = box.querySelector('[data-msg-id="' + sm.id + '"]');
+          if (domRow) domRow.innerHTML = _buildBubbleHtml(ex, domRow.classList.contains('mine'));
+        }
+      }
+    });
+
+    if (newOnes.length === 0) return;
+
+    /* Merge en mémoire */
+    newOnes.forEach(function(m) { conv.messages.push(m); convMap[String(m.id)] = true; });
+    conv.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+
+    if (!box) return;
+
+    /* Ajouter uniquement les messages reçus (pas les nôtres déjà affichés) */
+    var toAdd = newOnes.filter(function(m) { return m.from !== _currentUser.email && m.from !== 'me'; });
+    var addedRecv = 0;
+    toAdd.forEach(function(m) {
+      if (!_isDeletedForMe(m.id)) {
+        var row = document.createElement('div');
+        row.className = 'chat-msg-row theirs';
+        row.setAttribute('data-msg-id', m.id);
+        row.innerHTML = _buildBubbleHtml(m, false);
+        box.appendChild(row);
+        addedRecv++;
+      }
+    });
+
+    if (addedRecv > 0) {
+      var _lastNew = newOnes[newOnes.length - 1];
+      conv.lastMsg = _lastNew.text || conv.lastMsg;
+      conv.lastAt  = _lastNew.at   || Date.now();
+      _scrollChatToBottom();
+      renderConversations();
+    }
+  } catch(e) {}
+}
+
+/* ══════════════════════════════════════════
+   RÉPONDRE À UN MESSAGE (reply / citation)
+══════════════════════════════════════════ */
+var _chatReplyRef = null; /* { id, from, text, type } */
+
+function chatReplyTo(msgId) {
+  var conv = _chatConvId ? DEMO_CONVERSATIONS.find(function(c){ return c.id === _chatConvId; }) : null;
+  if (!conv) return;
+  var m = (conv.messages || []).find(function(x){ return String(x.id) === String(msgId); });
+  if (!m) return;
+
+  _chatReplyRef = { id: m.id, from: m.from, text: m.text || '', type: m.type || 'text' };
+
+  /* Nom de l'expéditeur du message cité */
+  var isMineMsg = _currentUser && m.from === _currentUser.email;
+  var senderName;
+  if (isMineMsg) {
+    senderName = 'Vous';
+  } else if (m.from && String(m.from).indexOf('@') !== -1) {
+    senderName = getDisplayName(m.from, conv.name || m.from);
+  } else {
+    senderName = conv.name || 'Eux';
+  }
+
+  /* Texte de prévisualisation */
+  var preview = m.type === 'img'  ? '📷 Photo'
+              : m.type === 'file' ? '📎 ' + (m.fileName || 'Fichier')
+              : (m.text || '').slice(0, 80);
+
+  /* Affiche le bandeau */
+  var bar = document.getElementById('chat-reply-bar');
+  var aEl = document.getElementById('crb-author');
+  var tEl = document.getElementById('crb-text');
+  if (bar) bar.classList.remove('hidden');
+  if (aEl) aEl.textContent = senderName;
+  if (tEl) tEl.textContent = preview;
+
+  /* Focus input */
+  var inp = document.getElementById('chat-input');
+  if (inp) inp.focus();
+}
+
+function cancelChatReply() {
+  _chatReplyRef = null;
+  var bar = document.getElementById('chat-reply-bar');
+  if (bar) bar.classList.add('hidden');
+}
+
+/* Construit le bloc citation à afficher dans une bulle */
+function _buildReplyQuoteHtml(replyTo, isMine) {
+  if (!replyTo) return '';
+  var accentColor = isMine ? 'rgba(255,255,255,.4)' : '#6366F1';
+  var textColor   = isMine ? 'rgba(255,255,255,.9)' : '#334155';
+  var nameColor   = isMine ? '#fff' : '#6366F1';
+  var bg          = isMine ? 'rgba(255,255,255,.15)' : '#F0F0FF';
+
+  var preview = replyTo.type === 'img'  ? '📷 Photo'
+              : replyTo.type === 'file' ? '📎 Fichier'
+              : (replyTo.text || '').slice(0, 80);
+
+  var meEmail = _currentUser ? _currentUser.email : '';
+  var isQuoteMine = replyTo.from === meEmail;
+  /* Nom de l'auteur du message cité : lire depuis le profil si possible */
+  var quoteName;
+  if (isQuoteMine) {
+    quoteName = 'Vous';
+  } else if (replyTo.from && String(replyTo.from).indexOf('@') !== -1) {
+    /* Lit le vrai nom depuis le profil de l'expéditeur */
+    quoteName = getDisplayName(replyTo.from, replyTo.from);
+  } else {
+    var _qConv = _chatConvId ? DEMO_CONVERSATIONS.find(function(c){ return c.id === _chatConvId; }) : null;
+    quoteName = _qConv ? _qConv.name : (replyTo.from || 'Eux');
+  }
+
+  return '<div class="bubble-reply-quote" style="' +
+      'background:' + bg + ';' +
+      'border-left:3px solid ' + accentColor + ';' +
+    '">' +
+    '<span class="brq-author" style="color:' + nameColor + '">' + escHtml(quoteName) + '</span>' +
+    '<span class="brq-text"   style="color:' + textColor + '">' + escHtml(preview) + '</span>' +
+  '</div>';
+}
+
+/* ── Construit le HTML d'une bulle (texte, image, fichier) ── */
+function _buildBubbleHtml(m, isMine) {
+  var cls = isMine ? 'bubble-sent' : 'bubble-recv';
+
+  /* ── Message supprimé pour tous ── */
+  if (m.deletedForAll) {
+    return '<div class="bubble-reply-wrap">' +
+      '<div class="chat-bubble ' + cls + ' chat-bubble-deleted">' +
+        '<i class="fas fa-ban"></i>' +
+        (isMine ? 'Vous avez supprimé ce message' : 'Ce message a été supprimé') +
+      '</div>' +
+    '</div>';
+  }
+
+  var _bubbleTimeStr = m.at ? _msgTimeDisplay(m.at) : (m.time || '');
+  var timeHtml = '<span class="bubble-time">' + escHtml(_bubbleTimeStr) +
+    (isMine ? ' <i class="fas fa-check-double bubble-read"></i>' : '') + '</span>';
+
+  /* Bouton Répondre (apparaît au survol/tap) */
+  var replyBtn = '<button class="bubble-reply-btn" onclick="chatReplyTo(\'' + m.id + '\')" title="Répondre">' +
+    '<i class="fas fa-reply"></i>' +
+  '</button>';
+
+  /* Bloc citation si c'est une réponse */
+  var quoteHtml = m.replyTo ? _buildReplyQuoteHtml(m.replyTo, isMine) : '';
+
+  if (m.type === 'img') {
+    return '<div class="bubble-reply-wrap">' +
+      (isMine ? replyBtn : '') +
+      '<div class="chat-bubble ' + cls + ' bubble-img">' +
+        quoteHtml +
+        '<img src="' + m.data + '" class="chat-img-attach" ' +
+             'onclick="_openImgFull(\'' + m.id + '\')" alt="photo"/>' +
+        timeHtml +
+      '</div>' +
+      (!isMine ? replyBtn : '') +
+    '</div>';
+  }
+  if (m.type === 'file') {
+    var ico = _fileTypeIco(m.fileName);
+    return '<div class="bubble-reply-wrap">' +
+      (isMine ? replyBtn : '') +
+      '<div class="chat-bubble ' + cls + '">' +
+        quoteHtml +
+        '<div class="chat-file-attach">' +
+          '<i class="fas ' + ico + ' chat-file-ico"></i>' +
+          '<div class="chat-file-info">' +
+            '<span class="chat-file-name">' + escHtml(m.fileName || 'Fichier') + '</span>' +
+            '<span class="chat-file-size">' + escHtml(m.fileSize || '') + '</span>' +
+          '</div>' +
+          '<button class="chat-file-dl" onclick="_downloadChatFile(\'' + m.id + '\')">' +
+            '<i class="fas fa-download"></i>' +
+          '</button>' +
+        '</div>' +
+        timeHtml +
+      '</div>' +
+      (!isMine ? replyBtn : '') +
+    '</div>';
+  }
+  if (m.type === 'listing_card') {
+    var imgPart = m.listingImg
+      ? '<div style="width:100%;height:90px;border-radius:8px 8px 0 0;background:url(\'' + m.listingImg + '\') center/cover no-repeat;margin-bottom:0"></div>'
+      : '<div style="width:100%;height:70px;border-radius:8px 8px 0 0;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center"><i class="fas fa-tag" style="color:#fff;font-size:22px"></i></div>';
+    var catLabel = m.listingCat ? '<span style="font-size:9.5px;background:#EEF2FF;color:#6366F1;border-radius:10px;padding:2px 7px;font-weight:700">' + escHtml(m.listingCat) + '</span>' : '';
+    var safeId = (m.listingId || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return '<div class="bubble-reply-wrap">' +
+      (isMine ? replyBtn : '') +
+      '<div class="chat-bubble ' + cls + '" style="padding:0;overflow:hidden;min-width:195px;max-width:230px;border-radius:12px">' +
+        imgPart +
+        '<div style="padding:9px 10px 4px">' +
+          catLabel +
+          '<div style="font-size:12.5px;font-weight:800;color:#0F172A;margin:4px 0 2px;line-height:1.3">' + escHtml(m.listingTitle || 'Annonce') + '</div>' +
+          '<div style="font-size:14px;font-weight:800;color:#6366F1">' + parseFloat(m.listingPrice || 0).toFixed(2) + ' €</div>' +
+        '</div>' +
+        '<button onclick="_mkOpenDetail(\'' + safeId + '\')" style="width:100%;padding:9px 0;background:#6366F1;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px">' +
+          '<i class="fas fa-eye"></i>Voir l\'annonce' +
+        '</button>' +
+        '<div style="padding:3px 10px 6px;text-align:right">' + timeHtml + '</div>' +
+      '</div>' +
+      (!isMine ? replyBtn : '') +
+    '</div>';
+  }
+  /* Texte par défaut */
+  return '<div class="bubble-reply-wrap">' +
+    (isMine ? replyBtn : '') +
+    '<div class="chat-bubble ' + cls + '">' +
+      quoteHtml +
+      '<p>' + escHtml(m.text) + '</p>' +
+      timeHtml +
+    '</div>' +
+    (!isMine ? replyBtn : '') +
+  '</div>';
+}
+
+function _fileTypeIco(name) {
+  if (!name) return 'fa-file';
+  var ext = name.split('.').pop().toLowerCase();
+  if (['pdf'].includes(ext))                      return 'fa-file-pdf';
+  if (['doc','docx'].includes(ext))               return 'fa-file-word';
+  if (['xls','xlsx'].includes(ext))               return 'fa-file-excel';
+  if (['ppt','pptx'].includes(ext))               return 'fa-file-powerpoint';
+  return 'fa-file-lines';
+}
+
+function _formatFileSize(bytes) {
+  if (bytes < 1024)       return bytes + ' o';
+  if (bytes < 1048576)    return (bytes / 1024).toFixed(1) + ' Ko';
+  return (bytes / 1048576).toFixed(1) + ' Mo';
+}
+
+function _openImgFull(msgId) {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv) return;
+  var m = (conv.messages || []).find(function(x) { return String(x.id) === String(msgId); });
+  if (!m || !m.data) return;
+
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;';
+
+  /* Boutons top */
+  var topBar = document.createElement('div');
+  topBar.style.cssText = 'width:100%;max-width:430px;display:flex;justify-content:space-between;align-items:center;padding:0 16px;';
+  topBar.innerHTML =
+    '<button style="background:rgba(255,255,255,.15);border:none;color:#fff;width:38px;height:38px;border-radius:50%;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;" onclick="this.closest(\'div[style]\').remove()">' +
+      '<i class="fas fa-arrow-left"></i>' +
+    '</button>' +
+    '<button style="background:rgba(255,255,255,.15);border:none;color:#fff;width:38px;height:38px;border-radius:50%;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;" onclick="_downloadChatFile(\'' + m.id + '\')">' +
+      '<i class="fas fa-download"></i>' +
+    '</button>';
+
+  var img = document.createElement('img');
+  img.src = m.data;
+  img.style.cssText = 'max-width:95%;max-height:80vh;border-radius:10px;object-fit:contain;';
+
+  overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+  overlay.appendChild(topBar);
+  overlay.appendChild(img);
+  document.body.appendChild(overlay);
+}
+
+/* ── Télécharge un fichier depuis un message (base64 → Blob → URL) ── */
+function _downloadChatFile(msgId) {
+  /* Cherche le message dans toutes les convs */
+  var m = null;
+  for (var i = 0; i < DEMO_CONVERSATIONS.length; i++) {
+    var found = (DEMO_CONVERSATIONS[i].messages || []).find(function(x) {
+      return String(x.id) === String(msgId);
+    });
+    if (found) { m = found; break; }
+  }
+  if (!m || !m.data) return;
+
+  try {
+    /* Convertit base64 en Blob */
+    var parts   = m.data.split(',');
+    var mime    = (parts[0].match(/:(.*?);/) || ['','application/octet-stream'])[1];
+    var binary  = atob(parts[1] || parts[0]);
+    var bytes   = new Uint8Array(binary.length);
+    for (var j = 0; j < binary.length; j++) bytes[j] = binary.charCodeAt(j);
+    var blob    = new Blob([bytes], { type: mime });
+    var url     = URL.createObjectURL(blob);
+
+    var a = document.createElement('a');
+    a.href     = url;
+    a.download = m.fileName || ('geniwork_' + m.id + '.' + (mime.split('/')[1] || 'bin'));
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
+    showToast('Téléchargement démarré ✓', 'ok');
+  } catch(e) {
+    showToast('Impossible de télécharger ce fichier', 'err');
+  }
+}
+
+/* ── Pièce jointe ── */
+function handleChatAttach(input) {
+  var file = input && input.files && input.files[0];
+  if (!file || !_chatConvId || !_currentUser) return;
+  input.value = '';
+
+  if (file.size > 8 * 1024 * 1024) {
+    showToast('Fichier trop volumineux (max 8 Mo)', 'err'); return;
+  }
+
+  var isImage = file.type.startsWith('image/');
+  var reader  = new FileReader();
+
+  reader.onload = function(e) {
+    var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+    if (!conv) return;
+
+    var msg = {
+      id:       Date.now(),
+      from:     _currentUser.email,
+      text:     isImage ? '' : file.name,
+      type:     isImage ? 'img' : 'file',
+      data:     e.target.result,
+      fileName: file.name,
+      fileSize: _formatFileSize(file.size),
+      time:     _nowTime(),
+      at:       Date.now()
+    };
+    conv.messages.push(msg);
+    conv.lastMsg = isImage ? '📷 Photo' : '📎 ' + file.name;
+    conv.lastAt  = Date.now();
+
+    var box = document.getElementById('chat-messages');
+    if (box) {
+      var row = document.createElement('div');
+      row.className = 'chat-msg-row mine';
+      row.setAttribute('data-msg-id', msg.id);
+      row.innerHTML = _buildBubbleHtml(msg, true);
+      box.appendChild(row);
+      _scrollChatToBottom();
+    }
+    if (conv.isGroup) {
+      _saveGroupMsg(conv, msg);
+      _saveGroupConvs();
+    } else {
+      _saveDMConv(conv);
+      if (conv.email) {
+        var _fLabel = isImage ? '📷 Photo' : '📎 ' + file.name;
+        _writeDMInbox(conv.email, _currentUser.email, _currentUser.nom, _currentUser.role || 'Membre Geniwork', _fLabel);
+        _saveDMConvList();
+      }
+    }
+    renderConversations();
+  };
+  reader.readAsDataURL(file);
+}
+
+function sendChatMessage() {
+  _closeEmojiPicker();
+  var inp  = document.getElementById('chat-input');
+  var text = inp ? inp.value.trim() : '';
+  if (!text || !_chatConvId || !_currentUser) return;
+
+  /* ── Vérification limite messages/jour ── */
+  var _mLim = _getCurrentPlanLimits();
+  if (_mLim.msgsPerDay !== Infinity) {
+    var _todayMsgs = _getDailyCount('msgs', _currentUser.email);
+    if (_todayMsgs >= _mLim.msgsPerDay) {
+      _showPlanLimitModal(
+        'Limite de messages atteinte',
+        'Le plan Gratuit est limité à ' + _mLim.msgsPerDay + ' messages par jour. Passez Premium pour des messages illimités.',
+        'msgs'
+      );
+      return;
+    }
+  }
+
+  inp.value = '';
+
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv) return;
+
+  /* Incrémente le compteur journalier messages */
+  _incDailyCount('msgs', _currentUser.email);
+
+  /* Stocke l'email réel de l'expéditeur (clé de livraison cross-session) */
+  var newMsg = {
+    id:      Date.now(),
+    from:    _currentUser.email,
+    text:    text,
+    type:    'text',
+    time:    _nowTime(),
+    at:      Date.now(),
+    replyTo: _chatReplyRef || undefined
+  };
+  cancelChatReply(); /* Efface le bandeau de citation */
+  conv.messages.push(newMsg);
+  conv.lastMsg = text;
+  conv.lastAt  = Date.now();
+
+  /* Persistance */
+  if (conv.isGroup) {
+    /* Écrit dans le storage PARTAGÉ du groupe (tous les membres lisent la même clé) */
+    _saveGroupMsg(conv, newMsg);
+    /* Métadonnées locales (liste des convs) */
+    _saveGroupConvs();
+  } else {
+    _saveDMConv(conv);
+    /* ← Notifie l'inbox du destinataire pour qu'il crée la conv s'il ne l'a pas encore */
+    if (conv.email) {
+      _writeDMInbox(conv.email, _currentUser.email, _currentUser.nom, _currentUser.role || 'Membre Geniwork', text);
+      _saveDMConvList(); /* ← Sauvegarde la liste pour survivre au refresh */
+    }
+  }
+
+  /* Ajoute la bulle dans le DOM */
+  var box = document.getElementById('chat-messages');
+  if (box) {
+    var row = document.createElement('div');
+    row.className = 'chat-msg-row mine';
+    row.setAttribute('data-msg-id', newMsg.id);
+    row.innerHTML = _buildBubbleHtml(newMsg, true);
+    box.appendChild(row);
+    _scrollChatToBottom();
+  }
+  renderConversations();
+}
+
+/* ══════════════════════════════════════════
+   EMOJI PICKER — Chat
+══════════════════════════════════════════ */
+var _EP_CATS = [
+  { icon: '😀', label: 'Smileys', emojis: ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩','😘','😗','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸','😎','🤓','🧐','😕','😟','🙁','☹️','😮','😯','😲','😳','🥺','😦','😧','😨','😰','😥','😢','😭','😱','😖','😣','😞','😓','😩','😫','🥱','😤','😡','😠','🤬','😈','👿','💀','☠️','💩','🤡','👹','👺','👻','👽','👾','🤖'] },
+  { icon: '👋', label: 'Gestes', emojis: ['👋','🤚','🖐','✋','🖖','👌','🤌','🤏','✌️','🤞','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','👐','🤲','🤝','🙏','✍️','💅','🤳','💪','🦾','🦿','🦵','🦶','👂','🦻','👃','🫀','🫁','🧠','🦷','🦴','👀','👁','👅','👄','💋'] },
+  { icon: '❤️', label: 'Cœurs', emojis: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','❤️‍🔥','❤️‍🩹','💕','💞','💓','💗','💖','💘','💝','💟','☮️','✝️','☪️','🕉','☯️','🔯','🕎','☦️','🛐','⛎','♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','🆔','⚛️','🉑','☢️','☣️','📴','📳','🈶','🈚','🈸','🈺','🈷️','✴️','🆚','💮','🉐','㊙️','㊗️','🈴','🈵','🈹','🈲','🅰️','🅱️','🆎','🆑','🅾️','🆘'] },
+  { icon: '🎉', label: 'Fête', emojis: ['🎉','🎊','🎈','🎁','🎀','🪅','🎆','🎇','🧨','✨','⭐','🌟','💫','🔥','🌈','🎂','🍰','🧁','🥂','🍾','🥳','🎤','🎵','🎶','🎸','🎹','🥁','🎺','🎻','🪕','🎮','🕹️','🎯','🎲','🎰','🃏','🀄','🎭','🎨','🖼️','🎬','🎥','📽️','🎞️','📺','📷','📸'] },
+  { icon: '🔥', label: 'Top', emojis: ['🔥','💯','✅','❌','⚡','💥','🌊','🎯','🏆','🥇','🥈','🥉','🏅','🎖️','👑','💎','💰','💵','💸','🤑','🚀','⭐','🌟','✨','💫','🆕','🆙','🆒','🆓','🔝','🔛','🔜','🔚','🔙','🔄','🔃','⬆️','⬇️','⬅️','➡️','↩️','↪️','🔁','🔂','▶️','⏩','⏭️','⏯️','◀️','⏪','⏮️','🔀','🎵','🎶','🔔','🔕','📢','📣'] },
+  { icon: '😺', label: 'Animaux', emojis: ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🐤','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐜','🦟','🦗','🕷️','🦂','🐢','🐍','🦎','🦖','🦕','🐙','🦑','🦐','🦞','🦀','🐡','🐠','🐟','🐬','🐳','🐋','🦈','🦭','🐊','🐅','🐆','🦓','🦍','🦧','🦣','🐘','🦛','🦏','🐪','🐫','🦒','🦘','🦬','🐃'] },
+  { icon: '🍕', label: 'Nourriture', emojis: ['🍕','🍔','🌭','🍟','🍿','🧂','🥓','🥚','🍳','🧇','🥞','🧈','🍞','🥐','🥖','🫓','🥨','🥯','🧀','🥗','🥙','🥪','🌮','🌯','🫔','🥫','🍱','🍘','🍙','🍚','🍛','🍜','🍝','🍠','🍢','🍣','🍤','🍥','🥮','🍡','🥟','🥠','🥡','🦪','🍦','🍧','🍨','🍩','🍪','🎂','🍰','🧁','🥧','🍫','🍬','🍭','🍮','🍯','🍼','🥛','☕','🫖','🍵','🧃','🥤','🧋','🍶','🍺','🍻','🥂','🍷','🥃','🍸','🍹','🧉','🍾'] },
+  { icon: '⚽', label: 'Sport', emojis: ['⚽','🏀','🏈','⚾','🥎','🎾','🏐','🏉','🥏','🎱','🪀','🏓','🏸','🏒','🥍','🏑','🏏','🪃','🥅','⛳','🪁','🎣','🤿','🎽','🎿','🛷','🥌','🎯','🪆','🪅','🎈','🎆','🎇','🧨','🎉','🎊','🎋','🎍','🎎','🎐','🎑','🧧','🎁','🎗️','🎟️','🎫','🎖️','🏆','🥇','🥈','🥉','⚽','🏅','🎖️'] },
+];
+var _epCurrentCat = 0;
+
+function toggleEmojiPicker(e) {
+  if (e) e.stopPropagation();
+  var picker = document.getElementById('emoji-picker');
+  if (!picker) return;
+  var isOpen = picker.classList.contains('open');
+  if (isOpen) {
+    _closeEmojiPicker();
+  } else {
+    _openEmojiPicker();
+  }
+}
+
+function _openEmojiPicker() {
+  var picker = document.getElementById('emoji-picker');
+  if (!picker) return;
+  _epBuildTabs();
+  _epShowCat(_epCurrentCat);
+  picker.classList.add('open');
+  /* Scroll les messages vers le bas pour que le picker n'obscurcisse pas */
+  setTimeout(_scrollChatToBottom, 300);
+  /* Ferme si on clique ailleurs */
+  setTimeout(function() {
+    document.addEventListener('click', _epOutsideClick, { once: true });
+  }, 10);
+  /* Change l'icône du bouton */
+  var btn = document.getElementById('chat-emoji-btn');
+  if (btn) btn.classList.add('active');
+}
+
+function _closeEmojiPicker() {
+  var picker = document.getElementById('emoji-picker');
+  if (picker) picker.classList.remove('open');
+  var btn = document.getElementById('chat-emoji-btn');
+  if (btn) btn.classList.remove('active');
+}
+
+function _epOutsideClick(e) {
+  var picker = document.getElementById('emoji-picker');
+  var btn    = document.getElementById('chat-emoji-btn');
+  if (picker && !picker.contains(e.target) && e.target !== btn) {
+    _closeEmojiPicker();
+  }
+}
+
+function _epBuildTabs() {
+  var tabs = document.getElementById('ep-tabs');
+  if (!tabs || tabs.childElementCount > 0) return; /* déjà construit */
+  tabs.innerHTML = _EP_CATS.map(function(cat, i) {
+    return '<button class="ep-tab' + (i === _epCurrentCat ? ' active' : '') + '" ' +
+               'title="' + cat.label + '" ' +
+               'onclick="_epShowCat(' + i + ')">' +
+             cat.icon +
+           '</button>';
+  }).join('');
+}
+
+function _epShowCat(idx) {
+  _epCurrentCat = idx;
+  /* Mise à jour onglets */
+  var tabs = document.getElementById('ep-tabs');
+  if (tabs) {
+    tabs.querySelectorAll('.ep-tab').forEach(function(t, i) {
+      t.classList.toggle('active', i === idx);
+    });
+  }
+  /* Grille */
+  var grid = document.getElementById('ep-grid');
+  if (!grid) return;
+  var cat = _EP_CATS[idx];
+  if (!cat) return;
+  grid.innerHTML = cat.emojis.map(function(em) {
+    return '<button class="ep-emoji-btn" onclick="_epInsert(\'' + em + '\')">' + em + '</button>';
+  }).join('');
+}
+
+function _epInsert(emoji) {
+  var inp = document.getElementById('chat-input');
+  if (!inp) return;
+  var start = inp.selectionStart || inp.value.length;
+  var end   = inp.selectionEnd   || inp.value.length;
+  inp.value = inp.value.slice(0, start) + emoji + inp.value.slice(end);
+  var pos = start + emoji.length;
+  inp.focus();
+  inp.setSelectionRange(pos, pos);
+}
+
+function _nowTime() {
+  var d = new Date();
+  return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+}
+
+/* ── Temps relatif pour la liste des conversations (style WhatsApp) ── */
+function _convTimeAgo(ts) {
+  if (!ts) return '';
+  var now  = new Date();
+  var d    = new Date(ts);
+  var diff = now - d;  /* ms */
+  var secs = Math.floor(diff / 1000);
+  var mins = Math.floor(diff / 60000);
+
+  if (secs  <  60)  return 'À l\'instant';
+  if (mins  <  60)  return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+
+  /* Même jour */
+  if (d.toDateString() === now.toDateString())
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+
+  /* Hier */
+  var yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return 'Hier';
+
+  /* Cette semaine → nom du jour */
+  var days = Math.floor(diff / 86400000);
+  if (days < 7) {
+    var jours = ['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
+    return jours[d.getDay()];
+  }
+
+  /* Plus vieux → DD/MM */
+  return ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth()+1)).slice(-2);
+}
+
+/* ── Temps d'affichage d'une bulle de message ── */
+function _msgTimeDisplay(ts) {
+  if (!ts) return '';
+  var now  = new Date();
+  var d    = new Date(ts);
+  var hhmm = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+
+  if (d.toDateString() === now.toDateString()) return hhmm;
+
+  var yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return 'Hier ' + hhmm;
+
+  return ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth()+1)).slice(-2) + ' ' + hhmm;
+}
+
+/* ══════════════════════════════════════════
+   PROJETS UTILISATEUR
+══════════════════════════════════════════ */
+var _PROJ_CATS = {
+  dev: 'Développement', design: 'Design', redac: 'Rédaction',
+  mkt: 'Marketing', video: 'Vidéo & Audio', conseil: 'Conseil', autre: 'Autre'
+};
+
+/* Icônes et couleurs par défaut selon la catégorie */
+var _PROJ_ICON_MAP = {
+  dev:     { ico: 'fa-code',          bg: '#EFF6FF', color: '#2563EB' },
+  design:  { ico: 'fa-pen-ruler',     bg: '#F5F3FF', color: '#7C3AED' },
+  redac:   { ico: 'fa-pen-nib',       bg: '#F0FDF4', color: '#16A34A' },
+  mkt:     { ico: 'fa-bullhorn',      bg: '#FFF7ED', color: '#EA580C' },
+  video:   { ico: 'fa-film',          bg: '#FEF2F2', color: '#DC2626' },
+  conseil: { ico: 'fa-lightbulb',     bg: '#FFFBEB', color: '#D97706' },
+  autre:   { ico: 'fa-briefcase',     bg: '#F9FAFB', color: '#6B7280' }
+};
+
+var _PROJ_MONTHS_FR = ['','Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
+
+/* ── État icône du formulaire ── */
+var _projIcon = null; /* null = auto (icône par défaut), 'data:...' = photo custom */
+
+function _updateProjIconPreview() {
+  var cat     = (document.getElementById('proj-category') || {}).value || 'autre';
+  var preview = document.getElementById('proj-icon-form-preview');
+  if (!preview) return;
+  if (_projIcon) {
+    preview.innerHTML = '<img src="' + _projIcon + '" style="width:100%;height:100%;object-fit:cover;border-radius:12px" alt="">';
+    preview.style.background = 'transparent';
+  } else {
+    var m = _PROJ_ICON_MAP[cat] || _PROJ_ICON_MAP.autre;
+    preview.innerHTML = '<i class="fas ' + m.ico + '" style="color:' + m.color + ';font-size:26px"></i>';
+    preview.style.background = m.bg;
+  }
+}
+
+function _projIconDefault() {
+  _projIcon = null;
+  _updateProjIconPreview();
+  var ab = document.getElementById('proj-icon-auto-btn');
+  var pb = document.getElementById('proj-icon-photo-btn');
+  if (ab) ab.classList.add('active');
+  if (pb) pb.classList.remove('active');
+}
+
+function handleProjIconFile(input) {
+  if (!input.files || !input.files[0]) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var img = new Image();
+    img.onload = function() {
+      var canvas = document.createElement('canvas');
+      var size = Math.min(img.width, img.height);
+      canvas.width = 200; canvas.height = 200;
+      var sx = (img.width  - size) / 2;
+      var sy = (img.height - size) / 2;
+      canvas.getContext('2d').drawImage(img, sx, sy, size, size, 0, 0, 200, 200);
+      _projIcon = canvas.toDataURL('image/jpeg', 0.85);
+      _updateProjIconPreview();
+      var ab = document.getElementById('proj-icon-auto-btn');
+      var pb = document.getElementById('proj-icon-photo-btn');
+      if (ab) ab.classList.remove('active');
+      if (pb) pb.classList.add('active');
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(input.files[0]);
+  input.value = '';
+}
+
+function loadProjects(email) {
+  try { return JSON.parse(localStorage.getItem('gw_projects_' + email) || '[]'); }
+  catch(e) { return []; }
+}
+function saveProjects(email, arr) {
+  localStorage.setItem('gw_projects_' + email, JSON.stringify(arr));
+}
+
+/* ── Variables du formulaire ── */
+var _projEditingId    = null;
+var _projPickedImages = [];
+var _projStatus       = 'encours';
+var _projDocs         = []; /* [{name, type, data}] */
+
+/* ── Statut ── */
+function _selectProjStatus(btn) {
+  _projStatus = btn.dataset.status;
+  document.querySelectorAll('.proj-status-btn').forEach(function(b) {
+    b.classList.toggle('active', b === btn);
+  });
+}
+
+/* ── Documents ── */
+var _PROJ_DOC_MAX_MB = 3;
+
+function _docIcon(filename) {
+  var ext = (filename.split('.').pop() || '').toLowerCase();
+  if (ext === 'pdf')                      return { ico: 'fa-file-pdf',        color: '#DC2626' };
+  if (ext === 'doc'  || ext === 'docx')   return { ico: 'fa-file-word',       color: '#2563EB' };
+  if (ext === 'xls'  || ext === 'xlsx' || ext === 'csv') return { ico: 'fa-file-excel', color: '#16A34A' };
+  if (ext === 'ppt'  || ext === 'pptx')   return { ico: 'fa-file-powerpoint', color: '#EA580C' };
+  return { ico: 'fa-file-lines', color: '#6B7280' };
+}
+
+function handleProjDocFile(input) {
+  var files = Array.prototype.slice.call(input.files || []);
+  input.value = '';
+  var toRead = files.slice(0, 5 - _projDocs.length);
+  toRead.forEach(function(file) {
+    if (file.size > _PROJ_DOC_MAX_MB * 1024 * 1024) {
+      showToast('"' + file.name + '" trop lourd (max ' + _PROJ_DOC_MAX_MB + ' Mo)', 'err');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      _projDocs.push({ name: file.name, type: file.type, data: e.target.result });
+      _renderProjDocPreviews();
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function _renderProjDocPreviews() {
+  var container = document.getElementById('proj-docs-preview');
+  if (!container) return;
+  if (!_projDocs.length) { container.innerHTML = ''; return; }
+  container.innerHTML = _projDocs.map(function(doc, i) {
+    var di = _docIcon(doc.name);
+    var shortName = doc.name.length > 28 ? doc.name.slice(0, 26) + '…' : doc.name;
+    return '<div class="proj-doc-item">' +
+      '<i class="fas ' + di.ico + '" style="color:' + di.color + '"></i>' +
+      '<span class="proj-doc-name">' + escHtml(shortName) + '</span>' +
+      '<button type="button" class="proj-doc-remove" onclick="_projRemoveDoc(' + i + ')">' +
+        '<i class="fas fa-xmark"></i>' +
+      '</button>' +
+    '</div>';
+  }).join('');
+}
+
+function _projRemoveDoc(idx) {
+  _projDocs.splice(idx, 1);
+  _renderProjDocPreviews();
+}
+
+function _openProjDoc(docData, docName) {
+  var a = document.createElement('a');
+  a.href = docData;
+  a.download = docName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+/* ── Ouvrir le formulaire ── */
+function openAddProject(projId) {
+  if (!_currentUser) return;
+  _projEditingId    = projId || null;
+  _projPickedImages = [];
+  _projIcon         = null;
+
+  /* Remplis les années dynamiquement */
+  var yearSel = document.getElementById('proj-year');
+  if (yearSel && !yearSel.dataset.built) {
+    yearSel.dataset.built = '1';
+    var y = new Date().getFullYear();
+    yearSel.innerHTML = '<option value="">Année</option>';
+    for (var i = y; i >= 2000; i--) {
+      yearSel.innerHTML += '<option value="' + i + '">' + i + '</option>';
+    }
+  }
+
+  /* Reset */
+  ['proj-title','proj-desc','proj-link','proj-tags'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.value = '';
+  });
+  var mSel = document.getElementById('proj-month');
+  var ySel = document.getElementById('proj-year');
+  if (mSel) mSel.value = '';
+  if (ySel) ySel.value = '';
+  document.getElementById('proj-category').value = 'dev';
+  _projStatus = 'encours';
+  _projDocs   = [];
+
+  var titleLabel = document.getElementById('proj-form-title');
+
+  if (_projEditingId) {
+    if (titleLabel) titleLabel.textContent = 'Modifier le projet';
+    var proj = loadProjects(_currentUser.email).find(function(p) { return p.id === _projEditingId; });
+    if (proj) {
+      document.getElementById('proj-title').value    = proj.title || '';
+      document.getElementById('proj-category').value = proj.category || 'dev';
+      document.getElementById('proj-desc').value     = proj.desc || '';
+      document.getElementById('proj-link').value     = proj.link || '';
+      document.getElementById('proj-tags').value     = (proj.tags || []).join(', ');
+      if (proj.date) {
+        var pts = proj.date.split('-');
+        if (ySel) ySel.value = pts[0] || '';
+        if (mSel) mSel.value = pts[1] || '';
+      }
+      _projPickedImages = (proj.photos || []).slice();
+      _projIcon         = proj.cover || null;
+      _projStatus       = proj.status || 'encours';
+      _projDocs         = (proj.docs || []).slice();
+    }
+  } else {
+    if (titleLabel) titleLabel.textContent = 'Nouveau projet';
+  }
+
+  /* Reset boutons statut */
+  document.querySelectorAll('.proj-status-btn').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.status === _projStatus);
+  });
+
+  /* Reset boutons icône */
+  var ab = document.getElementById('proj-icon-auto-btn');
+  var pb = document.getElementById('proj-icon-photo-btn');
+  if (ab) ab.classList.toggle('active', !_projIcon);
+  if (pb) pb.classList.toggle('active', !!_projIcon);
+  _updateProjIconPreview();
+  _renderProjPhotoPreviews();
+  _renderProjDocPreviews();
+  var modal = document.getElementById('project-form-modal');
+  if (modal) { modal.classList.remove('hidden'); requestAnimationFrame(function() { modal.classList.add('open'); }); }
+  setTimeout(function() {
+    var t = document.getElementById('proj-title'); if (t) t.focus();
+  }, 300);
+}
+
+function closeProjectForm() {
+  var modal = document.getElementById('project-form-modal');
+  if (modal) {
+    modal.classList.remove('open');
+    setTimeout(function() { modal.classList.add('hidden'); }, 280);
+  }
+  _projPickedImages = [];
+  _projDocs         = [];
+  _projEditingId    = null;
+  _projStatus       = 'encours';
+}
+
+/* ── Gestion des photos ── */
+function handleProjPhotos(input) {
+  var remaining = 4 - _projPickedImages.length;
+  if (remaining <= 0) { showToast('Maximum 4 photos', 'err'); input.value = ''; return; }
+  var files = Array.from(input.files).slice(0, remaining);
+  input.value = '';
+  files.forEach(function(file) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var img = new Image();
+      img.onload = function() {
+        var canvas = document.createElement('canvas');
+        var max = 800, w = img.width, h = img.height;
+        if (w > max || h > max) {
+          if (w >= h) { canvas.width = max; canvas.height = Math.round(h * max / w); }
+          else { canvas.height = max; canvas.width = Math.round(w * max / h); }
+        } else { canvas.width = w; canvas.height = h; }
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        _projPickedImages.push(canvas.toDataURL('image/jpeg', 0.82));
+        _renderProjPhotoPreviews();
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function _renderProjPhotoPreviews() {
+  var container = document.getElementById('proj-photos-preview');
+  var addBtn    = document.getElementById('proj-add-photo-btn');
+  if (!container) return;
+  container.innerHTML = _projPickedImages.map(function(src, i) {
+    return '<div class="svc-photo-thumb">' +
+      '<img src="' + src + '" alt="">' +
+      '<button class="svc-photo-rm" onclick="_projRemovePhoto(' + i + ')">×</button>' +
+    '</div>';
+  }).join('');
+  if (addBtn) addBtn.style.display = _projPickedImages.length >= 4 ? 'none' : '';
+}
+
+function _projRemovePhoto(idx) {
+  _projPickedImages.splice(idx, 1);
+  _renderProjPhotoPreviews();
+}
+
+/* ── Soumettre ── */
+function _submitProject() {
+  if (!_currentUser) return;
+  var title = (document.getElementById('proj-title').value || '').trim();
+  if (!title) { showToast('Le titre est obligatoire', 'err'); return; }
+
+  /* ── Vérification limite projets (seulement pour les nouveaux) ── */
+  if (!_projEditingId) {
+    var _pjLim   = _getCurrentPlanLimits();
+    var _pjCount = loadProjects(_currentUser.email).length;
+    if (_pjLim.projectsMax !== Infinity && _pjCount >= _pjLim.projectsMax) {
+      _showPlanLimitModal(
+        'Limite de projets atteinte',
+        'Le plan Gratuit autorise ' + _pjLim.projectsMax + ' projets maximum. Passez Premium pour des projets illimités.',
+        'projects'
+      );
+      return;
+    }
+  }
+
+  var month   = document.getElementById('proj-month').value;
+  var year    = document.getElementById('proj-year').value;
+  var dateStr = year ? (month ? year + '-' + month : year) : '';
+
+  var tagsRaw = (document.getElementById('proj-tags').value || '').trim();
+  var tags    = tagsRaw ? tagsRaw.split(',').map(function(s) { return s.trim(); }).filter(Boolean) : [];
+
+  var proj = {
+    id:       _projEditingId || Date.now(),
+    title:    title,
+    category: document.getElementById('proj-category').value,
+    status:   _projStatus,
+    desc:     (document.getElementById('proj-desc').value || '').trim(),
+    link:     (document.getElementById('proj-link').value || '').trim(),
+    date:     dateStr,
+    tags:     tags,
+    photos:   _projPickedImages.slice(),
+    cover:    _projIcon,
+    docs:     _projDocs.slice()
+  };
+
+  var list = loadProjects(_currentUser.email);
+  if (_projEditingId) {
+    var idx = -1;
+    list.forEach(function(p, i) { if (p.id === _projEditingId) idx = i; });
+    if (idx !== -1) list[idx] = proj; else list.unshift(proj);
+  } else {
+    list.unshift(proj);
+  }
+  saveProjects(_currentUser.email, list);
+  closeProjectForm();
+  renderProfileProjects();
+  showToast(_projEditingId ? 'Projet modifié ✓' : 'Projet ajouté ✓', 'ok');
+}
+
+/* ── Supprimer ── */
+function deleteProject(projId) {
+  if (!_currentUser) return;
+  var list = loadProjects(_currentUser.email).filter(function(p) { return p.id !== projId; });
+  saveProjects(_currentUser.email, list);
+  renderProfileProjects();
+  showToast('Projet supprimé', 'ok');
+}
+
+function confirmDeleteProject(projId) {
+  var proj = loadProjects(_currentUser.email).find(function(p) { return p.id === projId; });
+  if (!proj) return;
+  if (window.confirm('Supprimer "' + proj.title + '" ?')) deleteProject(projId);
+}
+
+/* ── Status map ── */
+var _PROJ_STATUS_MAP = {
+  encours: { label: 'En cours',  ico: 'fa-circle-play',  color: '#16A34A', bg: '#F0FDF4' },
+  pause:   { label: 'En pause',  ico: 'fa-circle-pause', color: '#D97706', bg: '#FFFBEB' },
+  termine: { label: 'Terminé',   ico: 'fa-circle-check', color: '#2563EB', bg: '#EFF6FF' }
+};
+
+/* ── Construire une carte projet (layout horizontal) ── */
+function _buildProjCard(proj, isOwn) {
+  var catLabel = _PROJ_CATS[proj.category] || proj.category || '';
+  var iconMap  = _PROJ_ICON_MAP[proj.category] || _PROJ_ICON_MAP.autre;
+
+  /* Icône : photo custom ou icône par défaut */
+  var cover = proj.cover || (proj.photos && proj.photos[0]) || null;
+  var iconHtml = cover
+    ? '<div class="proj-card-icon proj-card-icon-photo"><img src="' + cover + '" alt=""></div>'
+    : '<div class="proj-card-icon" style="background:' + iconMap.bg + '">' +
+        '<i class="fas ' + iconMap.ico + '" style="color:' + iconMap.color + '"></i>' +
+      '</div>';
+
+  /* Date */
+  var dateStr = '';
+  if (proj.date) {
+    var pts = proj.date.split('-');
+    var mo  = pts[1] ? (parseInt(pts[1], 10) || 0) : 0;
+    dateStr = (mo ? _PROJ_MONTHS_FR[mo] + ' ' : '') + pts[0];
+  }
+
+  /* Tags */
+  var tagsHtml = (proj.tags && proj.tags.length)
+    ? '<div class="proj-tags">' +
+        proj.tags.slice(0, 5).map(function(t) {
+          return '<span class="proj-tag">' + escHtml(t) + '</span>';
+        }).join('') +
+      '</div>'
+    : '';
+
+  /* Lien */
+  var linkHtml = proj.link
+    ? '<a href="' + escHtml(proj.link) + '" target="_blank" class="proj-link-btn" onclick="event.stopPropagation()">' +
+        '<i class="fas fa-arrow-up-right-from-square"></i> Voir' +
+      '</a>'
+    : '';
+
+  /* Menu 3 points (propre profil seulement) */
+  var menuHtml = isOwn
+    ? '<button class="proj-menu-btn" onclick="event.stopPropagation();_openProjMenu(' + proj.id + ')">' +
+        '<i class="fas fa-ellipsis-vertical"></i>' +
+      '</button>'
+    : '';
+
+  /* Status badge */
+  var st = _PROJ_STATUS_MAP[proj.status] || _PROJ_STATUS_MAP.encours;
+  var statusHtml = '<span class="proj-status-badge" style="color:' + st.color + ';background:' + st.bg + '">' +
+    '<i class="fas ' + st.ico + '"></i> ' + st.label +
+  '</span>';
+
+  /* Collaborateurs */
+  var collabs = proj.collaborators || [];
+  var collabHtml = '';
+  if (collabs.length || isOwn) {
+    collabHtml = '<div class="proj-card-collabs">';
+    var shown = collabs.slice(0, 4);
+    shown.forEach(function(c) {
+      /* Lit les données live depuis localStorage */
+      var lp    = loadUserProfile(c.email) || {};
+      var lName = lp.nom   || c.name  || c.email;
+      var lPhoto= lp.photo || c.photo || null;
+      collabHtml += lPhoto
+        ? '<img src="' + lPhoto + '" class="proj-collab-av" title="' + escHtml(lName) + '" alt="">'
+        : '<div class="proj-collab-av proj-collab-av-init" title="' + escHtml(lName) + '">' +
+            lName.charAt(0).toUpperCase() + '</div>';
+    });
+    if (collabs.length > 4) {
+      collabHtml += '<div class="proj-collab-av proj-collab-av-more">+' + (collabs.length - 4) + '</div>';
+    }
+    if (isOwn) {
+      collabHtml += '<button class="proj-collab-add-btn" title="Inviter" ' +
+        'onclick="event.stopPropagation();_openCollabInvite(' + proj.id + ')">' +
+        '<i class="fas fa-user-plus"></i>' +
+      '</button>';
+    }
+    if (collabs.length) {
+      var accepted = collabs.filter(function(c) { return c.status === 'accepted'; }).length;
+      var waiting  = collabs.length - accepted;
+      var lbl = collabs.length + ' collaborateur' + (collabs.length > 1 ? 's' : '');
+      if (waiting) lbl += ' · ' + waiting + ' en attente';
+      collabHtml += '<span class="proj-collab-lbl">' + lbl + '</span>';
+    }
+    collabHtml += '</div>';
+  }
+
+  /* Docs */
+  var docsHtml = '';
+  if (proj.docs && proj.docs.length) {
+    docsHtml = '<div class="proj-card-docs">' +
+      proj.docs.map(function(doc, i) {
+        var di = _docIcon(doc.name);
+        var shortName = doc.name.length > 22 ? doc.name.slice(0, 20) + '…' : doc.name;
+        return '<button type="button" class="proj-doc-chip" onclick="event.stopPropagation();_openProjDoc(\'' +
+          doc.data.replace(/'/g, "\\'") + '\',\'' + escHtml(doc.name).replace(/'/g, "\\'") + '\')">' +
+          '<i class="fas ' + di.ico + '" style="color:' + di.color + '"></i>' +
+          '<span>' + escHtml(shortName) + '</span>' +
+        '</button>';
+      }).join('') +
+    '</div>';
+  }
+
+  return '<div class="proj-card">' +
+    iconHtml +
+    '<div class="proj-card-body">' +
+      '<div class="proj-card-toprow">' +
+        '<h4 class="proj-title">' + escHtml(proj.title) + '</h4>' +
+        menuHtml +
+      '</div>' +
+      '<div class="proj-card-meta">' +
+        '<span class="proj-cat-badge">' + escHtml(catLabel) + '</span>' +
+        statusHtml +
+        (dateStr ? '<span class="proj-date-txt">· ' + dateStr + '</span>' : '') +
+      '</div>' +
+      (proj.desc ? '<p class="proj-desc">' + escHtml(proj.desc) + '</p>' : '') +
+      tagsHtml +
+      docsHtml +
+      collabHtml +
+      (linkHtml ? '<div class="proj-foot">' + linkHtml + '</div>' : '') +
+    '</div>' +
+  '</div>';
+}
+
+/* ── Menu 3 points d'un projet ── */
+function _openProjMenu(projId) {
+  _closeGenericSheet('proj-menu');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'proj-menu-bg';
+  bg.onclick = function() { _closeGenericSheet('proj-menu'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card post-menu-card'; card.id = 'proj-menu-card';
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="post-menu-list">' +
+      '<button class="post-menu-item" onclick="_closeGenericSheet(\'proj-menu\');openAddProject(' + projId + ')">' +
+        '<span class="pmi-ico"><i class="fas fa-pen"></i></span>' +
+        '<span class="pmi-label">Modifier</span>' +
+      '</button>' +
+      '<button class="post-menu-item" onclick="_closeGenericSheet(\'proj-menu\');_openCollabInvite(' + projId + ')">' +
+        '<span class="pmi-ico"><i class="fas fa-user-plus"></i></span>' +
+        '<span class="pmi-label">Inviter des collaborateurs</span>' +
+      '</button>' +
+      '<button class="post-menu-item post-menu-danger" ' +
+              'onclick="_closeGenericSheet(\'proj-menu\');confirmDeleteProject(' + projId + ')">' +
+        '<span class="pmi-ico"><i class="fas fa-trash-can"></i></span>' +
+        '<span class="pmi-label">Supprimer</span>' +
+      '</button>' +
+    '</div>' +
+    '<div style="height:8px"></div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* ════════════════════════════════════════════
+   COLLABORATION SUR PROJETS
+════════════════════════════════════════════ */
+
+function _getCollabInvites(email) {
+  try { return JSON.parse(localStorage.getItem('gw_collab_invites_' + email) || '[]'); } catch(e) { return []; }
+}
+function _saveCollabInvites(email, arr) {
+  localStorage.setItem('gw_collab_invites_' + email, JSON.stringify(arr));
+}
+
+/* ── Ouvrir le panneau d'invitation ── */
+function _openCollabInvite(projId) {
+  if (!_currentUser) return;
+  var proj = loadProjects(_currentUser.email).find(function(p) { return p.id === projId; });
+  if (!proj) return;
+
+  _closeGenericSheet('collab-invite');
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'collab-invite-bg';
+  bg.onclick = function() { _closeGenericSheet('collab-invite'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card collab-sheet'; card.id = 'collab-invite-card';
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="collab-sheet-head">' +
+      '<h4><i class="fas fa-users"></i> Collaborateurs</h4>' +
+      '<p class="collab-sheet-sub">' + escHtml(proj.title) + '</p>' +
+    '</div>' +
+    '<div class="collab-search-row">' +
+      '<div class="collab-search-wrap">' +
+        '<i class="fas fa-magnifying-glass"></i>' +
+        '<input id="collab-search-input" class="collab-search-input" type="text" ' +
+               'placeholder="Rechercher par nom ou email…" ' +
+               'oninput="_searchCollabUsers(' + projId + ')">' +
+      '</div>' +
+    '</div>' +
+    '<div id="collab-search-results" class="collab-search-results"></div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+
+  _renderCollabResults(projId, null);
+  setTimeout(function() {
+    var inp = document.getElementById('collab-search-input');
+    if (inp) inp.focus();
+  }, 300);
+}
+
+/* ── Rendu de la liste dans la sheet ── */
+function _renderCollabResults(projId, query) {
+  var resultsEl = document.getElementById('collab-search-results');
+  if (!resultsEl || !_currentUser) return;
+
+  var proj = loadProjects(_currentUser.email).find(function(p) { return p.id === projId; });
+  var collabs = (proj && proj.collaborators) || [];
+  var existingEmails = collabs.map(function(c) { return c.email; });
+  existingEmails.push(_currentUser.email);
+
+  var html = '';
+
+  /* Section collaborateurs actuels */
+  if (collabs.length) {
+    html += '<p class="collab-section-label">Collaborateurs actuels</p>';
+    html += collabs.map(function(c) {
+      var av = c.photo
+        ? '<img src="' + c.photo + '" class="collab-av" alt="">'
+        : '<div class="collab-av collab-av-init">' + (c.name || c.email).charAt(0).toUpperCase() + '</div>';
+      var badge = c.status === 'accepted'
+        ? '<span class="collab-badge collab-badge-ok"><i class="fas fa-check"></i> Accepté</span>'
+        : '<span class="collab-badge collab-badge-wait"><i class="fas fa-clock"></i> En attente</span>';
+      return '<div class="collab-user-row">' + av +
+        '<div class="collab-user-info"><b>' + escHtml(c.name || c.email) + '</b><span>' + escHtml(c.email) + '</span></div>' +
+        badge + '</div>';
+    }).join('');
+  }
+
+  /* Section recherche */
+  if (query && query.trim()) {
+    var q = query.trim().toLowerCase();
+    var found = [];
+    for (var i = 0; i < localStorage.length; i++) {
+      var key = localStorage.key(i);
+      if (!key || !key.startsWith('gw_profile_')) continue;
+      try {
+        var profile = JSON.parse(localStorage.getItem(key) || '{}');
+        var email = key.replace('gw_profile_', '');
+        if (existingEmails.indexOf(email) !== -1) continue;
+        var name = (profile.nom || '').toLowerCase();
+        if (name.indexOf(q) !== -1 || email.toLowerCase().indexOf(q) !== -1) {
+          found.push({ email: email, name: profile.nom || email, photo: profile.photo || null });
+        }
+      } catch(e) {}
+    }
+
+    if (!found.length) {
+      html += '<div class="collab-empty"><i class="fas fa-user-slash"></i><p>Aucun utilisateur trouvé</p></div>';
+    } else {
+      html += '<p class="collab-section-label">Résultats</p>';
+      html += found.slice(0, 8).map(function(u) {
+        var av = u.photo
+          ? '<img src="' + u.photo + '" class="collab-av" alt="">'
+          : '<div class="collab-av collab-av-init">' + (u.name || u.email).charAt(0).toUpperCase() + '</div>';
+        return '<div class="collab-user-row">' + av +
+          '<div class="collab-user-info"><b>' + escHtml(u.name) + '</b><span>' + escHtml(u.email) + '</span></div>' +
+          '<button class="collab-invite-btn" onclick="_inviteCollaborator(' + projId + ',\'' + u.email.replace(/'/g,"\\'" ) + '\')">' +
+            '<i class="fas fa-user-plus"></i> Inviter' +
+          '</button></div>';
+      }).join('');
+    }
+  } else if (!collabs.length) {
+    html += '<div class="collab-empty"><i class="fas fa-user-group"></i>' +
+      '<p>Tapez un nom pour rechercher<br>des utilisateurs à inviter</p></div>';
+  }
+
+  resultsEl.innerHTML = html;
+}
+
+function _searchCollabUsers(projId) {
+  var query = (document.getElementById('collab-search-input') || {}).value || '';
+  _renderCollabResults(projId, query);
+}
+
+/* ── Envoyer une invitation ── */
+function _inviteCollaborator(projId, targetEmail) {
+  if (!_currentUser) return;
+
+  var list = loadProjects(_currentUser.email);
+  var proj = list.find(function(p) { return p.id === projId; });
+  if (!proj) return;
+
+  if (!proj.collaborators) proj.collaborators = [];
+  if (proj.collaborators.find(function(c) { return c.email === targetEmail; })) return;
+
+  var tp = loadUserProfile(targetEmail) || {};
+  proj.collaborators.push({ email: targetEmail, name: tp.nom || targetEmail, photo: tp.photo || null, status: 'invited' });
+  saveProjects(_currentUser.email, list);
+
+  /* Notification pour l'invité */
+  var invites = _getCollabInvites(targetEmail);
+  invites.unshift({
+    id: Date.now(),
+    projId:     projId,
+    projTitle:  proj.title,
+    ownerEmail: _currentUser.email,
+    ownerName:  _currentUser.nom || _currentUser.email,
+    ownerPhoto: _currentUser.photo || null
+  });
+  _saveCollabInvites(targetEmail, invites);
+
+  showToast('Invitation envoyée !', 'ok');
+  _renderCollabResults(projId, (document.getElementById('collab-search-input') || {}).value || '');
+}
+
+/* ── Accepter une invitation ── */
+function _acceptCollabInvite(inviteId, projId, ownerEmail) {
+  if (!_currentUser) return;
+
+  var invites = _getCollabInvites(_currentUser.email).filter(function(i) { return i.id !== inviteId; });
+  _saveCollabInvites(_currentUser.email, invites);
+
+  /* Mettre à jour le statut dans les projets du propriétaire */
+  var ownerList = loadProjects(ownerEmail);
+  var ownerProj = ownerList.find(function(p) { return p.id === projId; });
+  if (ownerProj && ownerProj.collaborators) {
+    ownerProj.collaborators.forEach(function(c) {
+      if (c.email === _currentUser.email) c.status = 'accepted';
+    });
+    saveProjects(ownerEmail, ownerList);
+  }
+
+  /* Ouvrir / créer le groupe de discussion */
+  _openCollabGroupChat(projId, ownerEmail);
+
+  showToast('Collaboration acceptée ! Discussion de groupe ouverte.', 'ok');
+  _renderCollabInvitesBanner();
+  renderProfileProjects();
+}
+
+/* ── Créer/ouvrir la discussion de groupe du projet ── */
+function _openCollabGroupChat(projId, ownerEmail) {
+  /* Récupère le projet depuis les données du propriétaire */
+  var ownerList = loadProjects(ownerEmail);
+  var proj = ownerList.find(function(p) { return p.id === projId; });
+  var projTitle = proj ? proj.title : 'Projet collaboratif';
+
+  /* Construit la liste des membres (propriétaire + collaborateurs acceptés) */
+  var ownerProfile = loadUserProfile(ownerEmail) || {};
+  var members = [{
+    email: ownerEmail,
+    name:  ownerProfile.nom || ownerEmail,
+    photo: ownerProfile.photo || null,
+    role:  'Propriétaire'
+  }];
+  ((proj && proj.collaborators) || [])
+    .filter(function(c) { return c.status === 'accepted'; })
+    .forEach(function(c) {
+      var cp = loadUserProfile(c.email) || {};
+      members.push({
+        email: c.email,
+        name:  cp.nom  || c.name || c.email,
+        photo: cp.photo || c.photo || null,
+        role:  'Collaborateur'
+      });
+    });
+
+  var conv = _getOrCreateGroupConv(projId, ownerEmail, projTitle, members);
+
+  /* Message système de bienvenue pour le nouvel arrivant */
+  if (_currentUser) {
+    var joinerProfile = loadUserProfile(_currentUser.email) || {};
+    var joinerName    = joinerProfile.nom || _currentUser.nom || _currentUser.email;
+    var _joinTs = Date.now();
+    var _joinMsg = {
+      id:   _newConvId(),
+      from: 'system',
+      text: joinerName + ' a rejoint la collaboration',
+      time: _nowTime(),
+      at:   _joinTs
+    };
+    /* Eviter le doublon si déjà dans la conv (refresh) */
+    var _alreadyJoined = conv.messages.some(function(m) {
+      return m.from === 'system' && m.text === _joinMsg.text;
+    });
+    if (!_alreadyJoined) {
+      conv.messages.push(_joinMsg);
+      conv.lastMsg = _joinMsg.text;
+      conv.lastAt  = _joinTs;
+      /* Ecriture dans le storage PARTAGÉ → visible par tous les membres */
+      _saveGroupMsg(conv, _joinMsg);
+      _saveGroupConvs();
+
+      /* Notifier tous les autres membres pour qu'ils découvrent le groupe */
+      var _groupMeta = {
+        id:             conv.id,
+        projId:         conv.projId,
+        projOwnerEmail: conv.projOwnerEmail,
+        name:           conv.name,
+        avatar:         conv.avatar,
+        members:        conv.members,
+        at:             conv.at,
+        time:           conv.time,
+        lastMsg:        conv.lastMsg,
+        lastAt:         conv.lastAt
+      };
+      (conv.members || []).forEach(function(m) {
+        if (m.email && m.email !== _currentUser.email) {
+          _writeGroupInbox(m.email, _groupMeta);
+        }
+      });
+    }
+  }
+
+  /* Naviguer vers Messages et ouvrir le groupe */
+  var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+  if (msgsBtn) navTo(msgsBtn, 'p-messages');
+  renderConversations();
+  setTimeout(function() { openChat(conv.id); }, 280);
+}
+
+/* ── Refuser une invitation ── */
+function _declineCollabInvite(inviteId, ownerEmail, projId) {
+  if (!_currentUser) return;
+
+  var invites = _getCollabInvites(_currentUser.email).filter(function(i) { return i.id !== inviteId; });
+  _saveCollabInvites(_currentUser.email, invites);
+
+  /* Retirer le collaborateur de la liste du propriétaire */
+  var ownerList = loadProjects(ownerEmail);
+  var ownerProj = ownerList.find(function(p) { return p.id === projId; });
+  if (ownerProj && ownerProj.collaborators) {
+    ownerProj.collaborators = ownerProj.collaborators.filter(function(c) { return c.email !== _currentUser.email; });
+    saveProjects(ownerEmail, ownerList);
+  }
+
+  showToast('Invitation refusée', 'ok');
+  _renderCollabInvitesBanner();
+}
+
+/* ── Bannière d'invitations en attente (profil) ── */
+function _renderCollabInvitesBanner() {
+  var banner = document.getElementById('collab-invites-banner');
+  if (!banner || !_currentUser) return;
+
+  var invites = _getCollabInvites(_currentUser.email);
+  if (!invites.length) { banner.style.display = 'none'; banner.innerHTML = ''; return; }
+
+  banner.style.display = '';
+  banner.innerHTML =
+    '<div class="collab-banner">' +
+      '<div class="collab-banner-head">' +
+        '<i class="fas fa-envelope-open-text"></i>' +
+        '<span>Invitations à collaborer <b>(' + invites.length + ')</b></span>' +
+      '</div>' +
+      invites.map(function(inv) {
+        /* Toujours lire le profil live (photo + nom à jour) */
+        var _invP = loadUserProfile(inv.ownerEmail) || {};
+        var _invPhoto = _invP.photo || inv.ownerPhoto || null;
+        var _invName  = _invP.nom  || inv.ownerName  || inv.ownerEmail || '?';
+        var av = _invPhoto
+          ? '<img src="' + escHtml(_invPhoto) + '" class="collab-av collab-av-sm" alt="">'
+          : '<div class="collab-av collab-av-sm collab-av-init">' + _invName.charAt(0).toUpperCase() + '</div>';
+        return '<div class="collab-invite-item">' +
+          av +
+          '<div class="collab-invite-info">' +
+            '<b>' + escHtml(_invName) + '</b> vous invite sur<br>' +
+            '<span class="collab-invite-proj">"' + escHtml(inv.projTitle) + '"</span>' +
+          '</div>' +
+          '<div class="collab-invite-actions">' +
+            '<button class="collab-btn-accept" onclick="_acceptCollabInvite(' + inv.id + ',' + inv.projId + ',\'' + inv.ownerEmail.replace(/'/g,"\\'") + '\')">' +
+              '<i class="fas fa-check"></i>' +
+            '</button>' +
+            '<button class="collab-btn-decline" onclick="_declineCollabInvite(' + inv.id + ',\'' + inv.ownerEmail.replace(/'/g,"\\'") + '\',' + inv.projId + ')">' +
+              '<i class="fas fa-xmark"></i>' +
+            '</button>' +
+          '</div>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+}
+
+/* ── Rendu onglet Projets (propre profil) ── */
+function renderProfileProjects() {
+  if (!_currentUser) return;
+  var list    = loadProjects(_currentUser.email);
+  var listEl  = document.getElementById('profil-projects-list');
+  var emptyEl = document.getElementById('profil-projects-empty');
+  var countEl = document.getElementById('pstat-projects');
+
+  if (countEl) countEl.textContent = list.length;
+  if (!listEl) return;
+
+  if (!list.length) {
+    listEl.innerHTML = '';
+    if (emptyEl) emptyEl.style.display = '';
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = 'none';
+  listEl.innerHTML = list.map(function(p) { return _buildProjCard(p, true); }).join('');
+}
+
+/* ── Rendu onglet Projets (profil visité) ── */
+function renderUpvProjects(email) {
+  var container = document.getElementById('upv-projects-list');
+  if (!container) return;
+  if (!email) {
+    container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
+      '<i class="fas fa-folder-open"></i><p>Projets non disponibles</p></div></div>';
+    return;
+  }
+  var list = loadProjects(email);
+  /* Met à jour le compteur dans les stats UPV */
+  var countEl = document.getElementById('upv-stat-projects');
+  if (countEl) countEl.textContent = list.length;
+
+  if (!list.length) {
+    container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
+      '<i class="fas fa-folder-open"></i><p>Aucun projet publié</p></div></div>';
+    return;
+  }
+  container.innerHTML = '<div class="profil-card">' +
+    list.map(function(p) { return _buildProjCard(p, false); }).join('') +
+  '</div>';
+}
+
+/* ── Rendu onglet Services (profil visité) ── */
+function renderUpvServices(email) {
+  var container = document.getElementById('upv-services-list');
+  if (!container) return;
+  if (!email) {
+    container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
+      '<i class="fas fa-concierge-bell"></i><p>Services non disponibles</p></div></div>';
+    return;
+  }
+  /* Tous les services du profil — les produits ne s'affichent pas ici */
+  var list = loadUserServices(email).filter(function(s) {
+    return !s.itemType || s.itemType === 'service';
+  });
+  if (!list.length) {
+    container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
+      '<i class="fas fa-concierge-bell" style="font-size:28px;color:#6366F1;margin-bottom:8px"></i>' +
+      '<p style="font-weight:700;color:#1E293B;margin:0 0 4px">Aucun service proposé</p>' +
+      '<small style="color:#64748B">Cet utilisateur n\'a pas encore<br>ajouté de services à son profil</small></div></div>';
+    return;
+  }
+  container.innerHTML = list.map(function(svc) {
+    var catLabel = (_SVC_CATS && _SVC_CATS[svc.category]) || svc.category;
+    var priceStr = _formatSvcPrice(svc);
+    var photos   = svc.photos || [];
+    var ssHtml   = photos.length ? _buildSvcSlideshow(photos, 'upvss-' + svc.id) : '';
+    var descHtml = svc.description
+      ? '<p class="profil-svc-desc">' + escHtml(svc.description) + '</p>'
+      : '';
+    return '<div class="profil-card upv-svc-card">' +
+      (ssHtml ? '<div class="profil-svc-media">' + ssHtml + '</div>' : '') +
+      '<div class="profil-svc-body">' +
+        '<div class="profil-svc-top" style="margin-bottom:6px">' +
+          '<div class="profil-svc-cat-badge">' + escHtml(catLabel) + '</div>' +
+          '<span class="profil-svc-price">' + escHtml(priceStr) + '</span>' +
+        '</div>' +
+        '<p class="profil-svc-title">' + escHtml(svc.title) + '</p>' +
+        descHtml +
+        '<div class="upv-svc-actions">' +
+          '<button class="upv-svc-save-btn' + (isSvcSaved(svc.id, email) ? ' saved' : '') + '" ' +
+            'onclick="event.stopPropagation();toggleSavedSvc(' + svc.id + ',\'' + email.replace(/'/g,"\\'") + '\',this)" ' +
+            'title="Sauvegarder">' +
+            '<i class="' + (isSvcSaved(svc.id, email) ? 'fas' : 'far') + ' fa-heart"></i>' +
+          '</button>' +
+          '<button class="upv-svc-contact-btn" ' +
+            'onclick="_contactAboutService(' + svc.id + ',\'' + email.replace(/'/g, "\\'") + '\')">' +
+            '<i class="fas fa-paper-plane"></i> Contacter' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+/* ── Contacter un utilisateur à propos d'un service ── */
+function _contactAboutService(svcId, ownerEmail) {
+  if (!_currentUser) { showToast('Connectez-vous pour envoyer un message', 'err'); return; }
+  if (ownerEmail === _currentUser.email) { showToast('C\'est votre propre service', ''); return; }
+
+  var list = loadUserServices(ownerEmail);
+  var svc  = list.find(function(s) { return s.id === svcId; });
+  if (!svc) return;
+
+  /* Crée ou retrouve la conversation 1-à-1 */
+  var ownerProfile = loadUserProfile(ownerEmail) || {};
+  var ownerName    = ownerProfile.nom || ownerEmail;
+
+  var conv = DEMO_CONVERSATIONS.find(function(c) {
+    return !c.isGroup && c.email === ownerEmail;
+  });
+  if (!conv) {
+    conv = {
+      id:       _newConvId(),
+      name:     ownerName,
+      email:    ownerEmail,
+      role:     ownerProfile.domain || 'Membre Geniwork',
+      verified: !!(ownerProfile.badgeType),
+      online:   false,
+      avatar:   { type: 'color', color: '#2563EB', initials: getInitials(ownerName) },
+      at: Date.now(), time:     'À l\'instant',
+      lastMsg:  '',
+      unread:   0,
+      archived: false,
+      messages: []
+    };
+    DEMO_CONVERSATIONS.unshift(conv);
+    _saveDMConvList();
+  }
+
+  /* Message d'introduction avec les détails du service */
+  var catLabel  = (_SVC_CATS && _SVC_CATS[svc.category]) || svc.category;
+  var priceStr  = _formatSvcPrice(svc);
+  var descPart  = svc.description
+    ? '\n\n' + svc.description.slice(0, 140) + (svc.description.length > 140 ? '…' : '')
+    : '';
+  var introText = 'Bonjour, je suis intéressé(e) par votre service :\n\n' +
+    '📋 ' + svc.title + '\n' +
+    '🏷️ ' + catLabel + '  ·  ' + priceStr +
+    descPart;
+
+  /* Éviter le doublon si la demande pour ce service a déjà été envoyée */
+  var _alreadySent = conv.messages.some(function(m) {
+    return m.svcId === svc.id && m.from === _currentUser.email;
+  });
+
+  if (!_alreadySent) {
+    var _ts = Date.now();
+    /* Message système local (informatif, non partagé) */
+    conv.messages.push({
+      id:    _ts - 2,
+      from:  'system',
+      text:  '💼 Service : ' + svc.title + ' · ' + catLabel + ' · ' + priceStr,
+      at:    _ts - 2
+    });
+    /* Message de l'utilisateur (vrai email → partagé via DM storage) */
+    var _svcMsg = {
+      id:    _ts,
+      from:  _currentUser.email,
+      svcId: svc.id,
+      text:  introText,
+      type:  'text',
+      time:  _nowTime(),
+      at:    _ts
+    };
+    conv.messages.push(_svcMsg);
+    conv.lastMsg = 'Intéressé(e) par : ' + svc.title;
+    conv.lastAt  = _ts;
+
+    /* Sauvegarder dans le storage partagé et notifier le vendeur */
+    _saveDMConv(conv);
+    _writeDMInbox(ownerEmail, _currentUser.email, _currentUser.nom || _currentUser.email,
+                  _currentUser.role || 'Membre Geniwork', conv.lastMsg);
+  }
+
+  /* Notification marketplace pour le vendeur */
+  if (_currentUser && ownerEmail !== _currentUser.email && !_alreadySent) {
+    var buyerProfile = loadUserProfile(_currentUser.email) || {};
+    var buyerName    = buyerProfile.nom || _currentUser.nom || _currentUser.email;
+    _addMkNotif({
+      toEmail:   ownerEmail,
+      type:      'inquiry',
+      text:      buyerName + ' est intéressé(e) par votre service : ' + svc.title,
+      icon:      'fa-paper-plane',
+      iconBg:    '#EFF6FF',
+      iconColor: '#2563EB'
+    });
+  }
+
+  /* Fermer l'achat screen si ouvert */
+  closeAchatScreen();
+
+  /* Fermer l'UPV, aller dans Messages et ouvrir le chat */
+  closeUserProfileView();
+  var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+  if (msgsBtn) navTo(msgsBtn, 'p-messages');
+  renderConversations();
+  setTimeout(function() { openChat(conv.id); }, 280);
+}
+
+/* ══════════════════════════════════════════
+   SERVICES & PRODUITS UTILISATEUR
+══════════════════════════════════════════ */
+var _SVC_CATS = {
+  dev:     'Développement',
+  design:  'Design',
+  redac:   'Rédaction',
+  mkt:     'Marketing',
+  video:   'Vidéo & Audio',
+  conseil: 'Conseil',
+  autre:   'Autre'
+};
+var _PROD_CATS = {
+  electro: 'Électronique',
+  mode:    'Mode & Vêtements',
+  maison:  'Maison & Déco',
+  livres:  'Livres & Médias',
+  sport:   'Sport & Loisirs',
+  beaute:  'Beauté & Santé',
+  alim:    'Alimentation',
+  autre:   'Autre'
+};
+var _svcItemType = 'service'; /* 'service' | 'produit' — état courant du formulaire */
+var _SVC_PRICE_TYPES = {
+  fixed:      'Prix fixe',
+  from:       'À partir de',
+  negotiate:  'Sur devis'
+};
+
+function loadUserServices(email) {
+  return JSON.parse(localStorage.getItem('gw_services_' + email) || '[]');
+}
+function saveUserServices(email, list) {
+  localStorage.setItem('gw_services_' + email, JSON.stringify(list));
+}
+
+/* ── Ouvrir le formulaire d'ajout ── */
+var _editSvcId      = null;  /* null = nouveau, number = édition */
+var _svcPickedImages = [];   /* data URLs, max 4 */
+
+function openAddService(svcId) {
+  if (!_currentUser) return;
+
+  /* ── Vérification limite services (seulement pour les nouveaux) ── */
+  if (!svcId) {
+    var _sLim = _getCurrentPlanLimits();
+    var _svcCount = loadUserServices(_currentUser.email).length;
+    if (_svcCount >= _sLim.servicesMax) {
+      var _svcProfile = loadUserProfile(_currentUser.email) || {};
+      var _svcPlan    = _svcProfile.planType || 'free';
+      _showPlanLimitModal(
+        'Limite de services atteinte',
+        'Votre plan ' + (_svcPlan === 'free' ? 'Gratuit' : _svcPlan === 'premium' ? 'Premium' : 'Business Pro') +
+        ' autorise ' + _sLim.servicesMax + ' service(s) maximum. Passez à un plan supérieur pour en ajouter davantage.',
+        'services'
+      );
+      return;
+    }
+  }
+
+  _editSvcId = svcId || null;
+
+  var svc = null;
+  if (_editSvcId) {
+    var list = loadUserServices(_currentUser.email);
+    svc = list.find(function(s) { return s.id === _editSvcId; }) || null;
+  }
+
+  /* Type détecté depuis l'item existant, sinon 'service' par défaut */
+  _svcItemType = (svc && svc.itemType === 'produit') ? 'produit' : 'service';
+  /* Photos pré-chargées */
+  _svcPickedImages = (svc && svc.photos) ? svc.photos.slice() : [];
+
+  _closeGenericSheet('add-service');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'add-service-bg';
+  bg.onclick = function(e) { if (e.target === bg) _closeGenericSheet('add-service'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card add-service-card'; card.id = 'add-service-card';
+
+  /* Toggle Service / Produit (uniquement pour les nouveaux items) */
+  var toggleHtml = !_editSvcId
+    ? '<div class="svc-type-toggle">' +
+        '<button class="svc-type-btn' + (_svcItemType === 'service' ? ' active' : '') + '" ' +
+          'data-type="service" onclick="_setSvcItemType(\'service\')">' +
+          '<i class="fas fa-concierge-bell"></i> Service' +
+        '</button>' +
+        '<button class="svc-type-btn' + (_svcItemType === 'produit' ? ' active' : '') + '" ' +
+          'data-type="produit" onclick="_setSvcItemType(\'produit\')">' +
+          '<i class="fas fa-box"></i> Produit / Article' +
+        '</button>' +
+      '</div>'
+    : '';
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    toggleHtml +
+    '<p class="cam-sheet-title" id="svc-form-title">' +
+      (_editSvcId
+        ? (_svcItemType === 'produit' ? 'Modifier le produit' : 'Modifier le service')
+        : (_svcItemType === 'produit' ? 'Ajouter un produit / article' : 'Ajouter un service')) +
+    '</p>' +
+    '<p style="margin:-8px 16px 10px;font-size:11.5px;color:#6366F1;background:#EEF2FF;border-radius:8px;padding:7px 10px;display:flex;align-items:center;gap:6px" id="svc-form-notice">' +
+      '<i class="fas fa-circle-info"></i>' +
+      (_svcItemType === 'produit'
+        ? 'Visible dans la Marketplace'
+        : 'Visible sur votre profil uniquement') +
+    '</p>' +
+    '<div id="svc-form-inner"></div>' +
+    '<div class="svc-form-btns">' +
+      '<button class="svc-cancel-btn" onclick="_closeGenericSheet(\'add-service\')">Annuler</button>' +
+      '<button class="svc-submit-btn" id="svc-submit-btn" onclick="_submitService()">Publier</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+
+  /* Construit le contenu du formulaire */
+  _rebuildSvcFormInner(svc);
+
+  setTimeout(function() {
+    var inp = document.getElementById('svc-title');
+    if (inp) inp.focus();
+  }, 150);
+}
+
+/* ── Switcher de type Service ↔ Produit ── */
+function _setSvcItemType(type) {
+  _svcItemType = type;
+  document.querySelectorAll('.svc-type-btn').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.type === type);
+  });
+  var titleEl = document.getElementById('svc-form-title');
+  if (titleEl) titleEl.textContent = type === 'produit' ? 'Ajouter un produit / article' : 'Ajouter un service';
+  var noticeEl = document.getElementById('svc-form-notice');
+  if (noticeEl) noticeEl.innerHTML = '<i class="fas fa-circle-info"></i> ' +
+    (type === 'produit' ? 'Visible dans la Marketplace' : 'Visible sur votre profil uniquement');
+  /* Réinitialise les photos quand on change de type (nouveau formulaire) */
+  _svcPickedImages = [];
+  _rebuildSvcFormInner(null);
+}
+
+/* ── Construit le contenu interne du formulaire ── */
+function _rebuildSvcFormInner(svc) {
+  var inner = document.getElementById('svc-form-inner');
+  if (!inner) return;
+
+  var isProd    = (_svcItemType === 'produit');
+  var cats      = isProd ? _PROD_CATS : _SVC_CATS;
+  var firstCat  = Object.keys(cats)[0];
+  var defPtype  = isProd ? 'fixed' : 'from';
+
+  var catOptions = Object.keys(cats).map(function(k) {
+    var sel = svc && svc.category === k ? ' selected' : (!svc && k === firstCat ? ' selected' : '');
+    return '<option value="' + k + '"' + sel + '>' + cats[k] + '</option>';
+  }).join('');
+
+  var priceTypeHtml = Object.keys(_SVC_PRICE_TYPES).map(function(k) {
+    var active = svc ? (svc.priceType === k) : (k === defPtype);
+    return '<button type="button" class="svc-price-chip' + (active ? ' active' : '') + '" data-ptype="' + k + '" ' +
+           'onclick="_setSvcPriceType(this)">' + _SVC_PRICE_TYPES[k] + '</button>';
+  }).join('');
+
+  var titleLabel  = isProd ? 'Nom du produit' : 'Titre du service';
+  var titlePh     = isProd ? 'Ex : Montre connectée Samsung Galaxy' : 'Ex : Création de logo professionnel';
+  var descPh      = isProd ? 'Décrivez ce produit (état, caractéristiques…)' : 'Décrivez votre service en quelques phrases…';
+
+  inner.innerHTML =
+    '<div class="svc-form">' +
+
+      '<div class="svc-field">' +
+        '<label class="svc-label">' + titleLabel + ' <span class="svc-req">*</span></label>' +
+        '<input id="svc-title" class="svc-input" type="text" maxlength="60" ' +
+               'placeholder="' + titlePh + '" ' +
+               'value="' + escHtml(svc ? svc.title : '') + '"/>' +
+      '</div>' +
+
+      '<div class="svc-field">' +
+        '<label class="svc-label">Catégorie</label>' +
+        '<select id="svc-cat" class="svc-input svc-select">' + catOptions + '</select>' +
+      '</div>' +
+
+      '<div class="svc-field">' +
+        '<label class="svc-label">Description</label>' +
+        '<textarea id="svc-desc" class="svc-input svc-textarea" maxlength="300" ' +
+                  'placeholder="' + descPh + '">' +
+          escHtml(svc ? svc.description : '') +
+        '</textarea>' +
+      '</div>' +
+
+      '<div class="svc-field">' +
+        '<label class="svc-label">Prix</label>' +
+        '<div class="svc-price-chips">' + priceTypeHtml + '</div>' +
+        '<div class="svc-price-row">' +
+          '<input id="svc-price" class="svc-input svc-price-input" type="number" min="0" ' +
+                 'placeholder="0" value="' + (svc && svc.price ? svc.price : '') + '"/>' +
+          '<span class="svc-currency">€</span>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="svc-field">' +
+        '<label class="svc-label">Photos <span style="color:#9CA3AF;font-weight:500;text-transform:none;letter-spacing:0">(max 4)</span></label>' +
+        '<div id="svc-photos-preview" class="svc-photos-preview"></div>' +
+        '<button type="button" class="svc-add-photo-btn" id="svc-add-photo-btn" ' +
+                'onclick="document.getElementById(\'svc-photo-picker\').click()">' +
+          '<i class="fas fa-camera"></i> Ajouter des photos' +
+        '</button>' +
+        '<input type="file" id="svc-photo-picker" accept="image/*" multiple style="display:none" ' +
+               'onchange="handleSvcPhotos(this)"/>' +
+      '</div>' +
+
+    '</div>';
+
+  _renderSvcPhotoPreviews();
+  /* Focus sur le titre */
+  var inp = document.getElementById('svc-title');
+  if (inp && !svc) setTimeout(function() { inp.focus(); }, 80);
+}
+
+function _setSvcPriceType(btn) {
+  document.querySelectorAll('.svc-price-chip').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  var priceRow = document.querySelector('.svc-price-row');
+  if (priceRow) priceRow.style.display = btn.dataset.ptype === 'negotiate' ? 'none' : '';
+}
+
+/* ── Photos du service (formulaire) ── */
+function handleSvcPhotos(input) {
+  if (!input.files || !input.files.length) return;
+  var remaining = 4 - _svcPickedImages.length;
+  if (remaining <= 0) { showToast('Maximum 4 photos', 'err'); return; }
+  var files = Array.prototype.slice.call(input.files, 0, remaining);
+  var loaded = 0;
+  files.forEach(function(file) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      /* Redimensionne via canvas */
+      var img = new Image();
+      img.onload = function() {
+        var canvas = document.createElement('canvas');
+        var MAX = 800;
+        var ratio = Math.min(MAX / img.width, MAX / img.height, 1);
+        canvas.width  = Math.round(img.width  * ratio);
+        canvas.height = Math.round(img.height * ratio);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        _svcPickedImages.push(canvas.toDataURL('image/jpeg', 0.82));
+        loaded++;
+        if (loaded === files.length) _renderSvcPhotoPreviews();
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+  input.value = '';
+}
+
+function _renderSvcPhotoPreviews() {
+  var wrap   = document.getElementById('svc-photos-preview');
+  var addBtn = document.getElementById('svc-add-photo-btn');
+  if (!wrap) return;
+
+  wrap.innerHTML = '';
+  _svcPickedImages.forEach(function(src, i) {
+    var thumb = document.createElement('div');
+    thumb.className = 'svc-photo-thumb';
+    thumb.innerHTML =
+      '<img src="' + src + '"/>' +
+      '<button type="button" class="svc-photo-rm" onclick="_removeSvcPhoto(' + i + ')">' +
+        '<i class="fas fa-times"></i>' +
+      '</button>';
+    wrap.appendChild(thumb);
+  });
+
+  /* Masquer le bouton d'ajout si 4 photos atteint */
+  if (addBtn) addBtn.style.display = _svcPickedImages.length >= 4 ? 'none' : '';
+  wrap.style.display = _svcPickedImages.length ? '' : 'none';
+}
+
+function _removeSvcPhoto(idx) {
+  _svcPickedImages.splice(idx, 1);
+  _renderSvcPhotoPreviews();
+}
+
+function _submitService() {
+  var title    = (document.getElementById('svc-title')   || {}).value.trim();
+  var cat      = (document.getElementById('svc-cat')     || {}).value;
+  var desc     = (document.getElementById('svc-desc')    || {}).value.trim();
+  var price    = parseFloat((document.getElementById('svc-price') || {}).value) || 0;
+  var pTypeEl  = document.querySelector('.svc-price-chip.active');
+  var priceType = pTypeEl ? pTypeEl.dataset.ptype : 'from';
+  var itemType  = _svcItemType || 'service';
+  var showMk   = (itemType === 'produit'); /* Produits → Marketplace | Services → Profil uniquement */
+
+  if (!title) { showToast('Veuillez saisir un titre', 'err'); return; }
+
+  /* ── Vérification limite photos par service ── */
+  var _svLim = _getCurrentPlanLimits();
+  if (_svcPickedImages.length > _svLim.photosSvc) {
+    showToast('Votre plan autorise ' + _svLim.photosSvc + ' photo(s) max par service', 'err');
+    return;
+  }
+
+  /* ── Vérification limite services (double vérification) ── */
+  if (!_editSvcId) {
+    var _svCount = loadUserServices(_currentUser.email).length;
+    if (_svCount >= _svLim.servicesMax) {
+      _showPlanLimitModal(
+        'Limite de services atteinte',
+        'Vous avez atteint la limite de ' + _svLim.servicesMax + ' service(s) de votre plan.',
+        'services'
+      );
+      return;
+    }
+  }
+
+  var list    = loadUserServices(_currentUser.email);
+  var profile = loadUserProfile(_currentUser.email) || {};
+
+  if (_editSvcId) {
+    var idx = list.findIndex(function(s) { return s.id === _editSvcId; });
+    if (idx !== -1) {
+      list[idx] = Object.assign(list[idx], {
+        title: title, category: cat, description: desc,
+        price: price, priceType: priceType, itemType: itemType,
+        showInMarketplace: showMk, photos: _svcPickedImages.slice()
+      });
+    }
+  } else {
+    list.unshift({
+      id:              Date.now(),
+      ownerEmail:      _currentUser.email,
+      ownerName:       profile.nom || _currentUser.nom,
+      title:           title,
+      category:        cat,
+      description:     desc,
+      price:           price,
+      priceType:       priceType,
+      itemType:        itemType,           /* 'service' | 'produit' */
+      showInMarketplace: showMk,
+      photos:          _svcPickedImages.slice(),
+      createdAt:       Date.now()
+    });
+  }
+  _svcPickedImages = [];
+
+  saveUserServices(_currentUser.email, list);
+  _closeGenericSheet('add-service');
+  renderProfileServices();
+  renderMarketplaceUserServices();
+  var isProd = itemType === 'produit';
+  showToast(_editSvcId
+    ? (isProd ? 'Produit mis à jour ✓' : 'Service mis à jour ✓')
+    : (isProd ? 'Produit publié ✓' : 'Service publié ✓'),
+    'ok');
+  _editSvcId = null;
+}
+
+/* ── Rendu dans l'onglet profil ── */
+function renderProfileServices() {
+  if (!_currentUser) return;
+  /* Les produits/articles ne s'affichent PAS dans le profil */
+  var list      = loadUserServices(_currentUser.email).filter(function(s) {
+    return !s.itemType || s.itemType === 'service';
+  });
+  var container = document.getElementById('profil-services-list');
+  var empty     = document.getElementById('profil-services-empty');
+  if (!container) return;
+
+  if (!list.length) {
+    if (empty) empty.style.display = '';
+    container.querySelectorAll('.profil-svc-card').forEach(function(c) { c.remove(); });
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  container.querySelectorAll('.profil-svc-card').forEach(function(c) { c.remove(); });
+
+  list.forEach(function(svc) {
+    var card = document.createElement('div');
+    card.className = 'profil-svc-card';
+    var photos  = svc.photos || [];
+    var thumbHtml = photos.length
+      ? '<div class="profil-svc-thumb"><img src="' + photos[0] + '"/></div>'
+      : '<div class="profil-svc-thumb"><i class="fas fa-concierge-bell profil-svc-thumb-ico"></i></div>';
+    card.innerHTML =
+      thumbHtml +
+      '<div class="profil-svc-body">' +
+        '<div class="profil-svc-top">' +
+          '<div class="profil-svc-cat-badge">' + escHtml(_SVC_CATS[svc.category] || svc.category) + '</div>' +
+        '</div>' +
+        '<p class="profil-svc-title">' + escHtml(svc.title) + '</p>' +
+        '<div class="profil-svc-footer">' +
+          '<span class="profil-svc-price">' + _formatSvcPrice(svc) + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<button class="profil-svc-menu" onclick="openServiceMenu(' + svc.id + ')">' +
+        '<i class="fas fa-ellipsis-v"></i>' +
+      '</button>';
+    container.appendChild(card);
+  });
+}
+
+/* ── Slideshow ── */
+function _buildSvcSlideshow(photos, uid) {
+  if (!photos || !photos.length) return '';
+  if (photos.length === 1) {
+    return '<div class="svc-ss svc-ss-single">' +
+      '<img src="' + photos[0] + '" class="svc-ss-img-single"/>' +
+    '</div>';
+  }
+  var slides = photos.map(function(src, i) {
+    return '<div class="svc-ss-slide' + (i === 0 ? ' active' : '') + '">' +
+      '<img src="' + src + '"/>' +
+    '</div>';
+  }).join('');
+  var dots = photos.map(function(_, i) {
+    return '<span class="svc-ss-dot' + (i === 0 ? ' active' : '') + '" ' +
+           'onclick="_ssGoTo(\'' + uid + '\',' + i + ',event)"></span>';
+  }).join('');
+  return '<div class="svc-ss" id="' + uid + '" data-idx="0" data-total="' + photos.length + '">' +
+    '<div class="svc-ss-slides">' + slides + '</div>' +
+    '<button class="svc-ss-btn svc-ss-prev" onclick="_ssPrev(\'' + uid + '\',event)"><i class="fas fa-chevron-left"></i></button>' +
+    '<button class="svc-ss-btn svc-ss-next" onclick="_ssNext(\'' + uid + '\',event)"><i class="fas fa-chevron-right"></i></button>' +
+    '<div class="svc-ss-dots">' + dots + '</div>' +
+  '</div>';
+}
+
+function _ssGoTo(uid, idx, e) {
+  if (e) e.stopPropagation();
+  var ss = document.getElementById(uid);
+  if (!ss) return;
+  var total = parseInt(ss.dataset.total, 10);
+  idx = ((idx % total) + total) % total;
+  ss.dataset.idx = idx;
+  ss.querySelectorAll('.svc-ss-slide').forEach(function(s, i) { s.classList.toggle('active', i === idx); });
+  ss.querySelectorAll('.svc-ss-dot').forEach(function(d, i)   { d.classList.toggle('active', i === idx); });
+}
+function _ssPrev(uid, e) { var ss = document.getElementById(uid); if (ss) _ssGoTo(uid, parseInt(ss.dataset.idx,10)-1,e); }
+function _ssNext(uid, e) { var ss = document.getElementById(uid); if (ss) _ssGoTo(uid, parseInt(ss.dataset.idx,10)+1,e); }
+
+function _formatSvcPrice(svc) {
+  if (svc.priceType === 'negotiate') return 'Sur devis';
+  if (!svc.price) return svc.priceType === 'from' ? 'Prix à définir' : 'Gratuit';
+  var label = svc.priceType === 'from' ? 'À partir de ' : '';
+  return label + svc.price + ' €';
+}
+
+/* ── Menu d'un service (modifier / basculer marketplace / supprimer) ── */
+function openServiceMenu(svcId) {
+  var list = loadUserServices(_currentUser.email);
+  var svc  = list.find(function(s) { return s.id === svcId; });
+  if (!svc) return;
+
+  _closeGenericSheet('svc-menu');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'svc-menu-bg';
+  bg.onclick = function() { _closeGenericSheet('svc-menu'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card'; card.id = 'svc-menu-card';
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="cam-sheet-title" style="font-size:15px;color:#6B7280">' + escHtml(svc.title) + '</p>' +
+    '<div class="post-menu-list">' +
+
+      '<button class="post-menu-item" onclick="_closeGenericSheet(\'svc-menu\');openAddService(' + svcId + ')">' +
+        '<span class="pmi-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-pen"></i></span>' +
+        '<span class="pmi-label">Modifier</span>' +
+      '</button>' +
+
+      '<button class="post-menu-item post-menu-danger" onclick="_closeGenericSheet(\'svc-menu\');_deleteSvc(' + svcId + ')">' +
+        '<span class="pmi-ico" style="background:#FEF2F2;color:#DC2626"><i class="fas fa-trash-can"></i></span>' +
+        '<span class="pmi-label" style="color:#DC2626">Supprimer</span>' +
+      '</button>' +
+
+    '</div>' +
+    '<div style="padding:8px 16px 24px">' +
+      '<button class="btn-outline full" onclick="_closeGenericSheet(\'svc-menu\')">Annuler</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _toggleSvcMarketplace(svcId) {
+  var list = loadUserServices(_currentUser.email);
+  var svc  = list.find(function(s) { return s.id === svcId; });
+  if (!svc) return;
+  svc.showInMarketplace = !svc.showInMarketplace;
+  saveUserServices(_currentUser.email, list);
+  renderProfileServices();
+  renderMarketplaceUserServices();
+  showToast(svc.showInMarketplace ? 'Publié dans la Marketplace ✓' : 'Retiré de la Marketplace', 'ok');
+}
+
+function _deleteSvc(svcId) {
+  var all  = loadUserServices(_currentUser.email);
+  var item = all.find(function(s) { return s.id === svcId; });
+  var isProd = item && item.itemType === 'produit';
+  var list = all.filter(function(s) { return s.id !== svcId; });
+  saveUserServices(_currentUser.email, list);
+  renderProfileServices();
+  renderMarketplaceUserServices();
+  showToast(isProd ? 'Produit supprimé' : 'Service supprimé', 'ok');
+}
+
+/* ── Rendu dans la Marketplace ── */
+function renderMarketplaceUserServices() {
+  var section = document.getElementById('mk-user-services-section');
+  var listEl  = document.getElementById('mk-user-services-list');
+  if (!section || !listEl) return;
+
+  /* Collecte tous les services publiés de tous les utilisateurs */
+  var all = [];
+  try {
+    var users = JSON.parse(localStorage.getItem('gw_users') || '[]');
+    users.forEach(function(u) {
+      loadUserServices(u.email).forEach(function(svc) {
+        if (svc.showInMarketplace) all.push(svc);
+      });
+    });
+    /* Aussi le currentUser si pas encore dans gw_users */
+    if (_currentUser) {
+      var alreadyIn = users.some(function(u) { return u.email === _currentUser.email; });
+      if (!alreadyIn) {
+        loadUserServices(_currentUser.email).forEach(function(svc) {
+          if (svc.showInMarketplace) all.push(svc);
+        });
+      }
+    }
+  } catch(e) {}
+
+  /* ── Applique les filtres _mkFilters ── */
+  var filtered = all.filter(function(svc) {
+    var itype = svc.itemType || 'service';
+    if (_mkFilters.type !== 'all' && itype !== _mkFilters.type) return false;
+    if (_mkFilters.minPrice !== '' && (svc.price || 0) < _mkFilters.minPrice) return false;
+    if (_mkFilters.maxPrice !== '' && (svc.price || 0) > _mkFilters.maxPrice) return false;
+    return true;
+  });
+
+  /* ── Tri ── */
+  if (_mkFilters.sort === 'price_asc')  filtered.sort(function(a,b) { return (a.price||0) - (b.price||0); });
+  if (_mkFilters.sort === 'price_desc') filtered.sort(function(a,b) { return (b.price||0) - (a.price||0); });
+  /* 'recent' = ordre naturel (déjà le plus récent en tête grâce à unshift) */
+
+  if (!filtered.length) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = '';
+  listEl.innerHTML = '';
+
+  filtered.forEach(function(svc) {
+    var ownerEmail = svc.ownerEmail || '';
+    var ownerSafe  = ownerEmail.replace(/'/g, "\\'");
+    var profile    = loadUserProfile(ownerEmail) || {};
+    var name       = profile.nom || svc.ownerName || 'Membre';
+    var nameSafe   = name.replace(/'/g, "\\'");
+    var role       = profile.domain || 'Membre Geniwork';
+    var roleSafe   = role.replace(/'/g, "\\'");
+    var itemType   = svc.itemType || 'service';
+    var cats       = itemType === 'produit' ? _PROD_CATS : _SVC_CATS;
+    var catLabel   = cats[svc.category] || svc.category;
+
+    var photos  = svc.photos || [];
+    var uid     = 'mkss-' + svc.id;
+    var placeholderIco = itemType === 'produit' ? 'fa-box-open' : 'fa-briefcase';
+    var mediaHtml = photos.length
+      ? _buildSvcSlideshow(photos, uid)
+      : '<div class="mk-svc-cat-bg mk-svc-cat-' + svc.category + ' mk-svc-cat-placeholder">' +
+          '<i class="fas ' + placeholderIco + '" style="font-size:28px;opacity:.35;color:#fff"></i>' +
+        '</div>';
+
+    var typeBadge = itemType === 'produit'
+      ? '<span class="mk-item-type-badge mk-item-type-prod"><i class="fas fa-box"></i> Produit</span>'
+      : '';
+
+    var card = document.createElement('div');
+    card.className = 'mk-service-card mk-user-svc-card';
+    card.dataset.category = svc.category;
+
+    /* Lien vendeur cliquable → profil */
+    var sellerClickFn = ownerEmail
+      ? 'openUserProfileView({nom:\'' + nameSafe + '\',role:\'' + roleSafe + '\',email:\'' + ownerSafe + '\'})'
+      : '';
+
+    card.innerHTML =
+      '<div class="mk-service-img mk-user-svc-img">' +
+        mediaHtml +
+        '<span class="mk-service-badge">' + escHtml(catLabel) + '</span>' +
+        typeBadge +
+        '<button class="mk-wish-btn' + (isSvcSaved(svc.id, ownerEmail) ? ' saved' : '') + '" ' +
+          'onclick="event.stopPropagation();toggleSavedSvc(' + svc.id + ',\'' + ownerSafe + '\',this)">' +
+          '<i class="' + (isSvcSaved(svc.id, ownerEmail) ? 'fas' : 'far') + ' fa-heart"></i>' +
+        '</button>' +
+      '</div>' +
+      '<div class="mk-service-body">' +
+        '<div class="mk-service-seller mk-seller-clickable"' +
+          (sellerClickFn ? ' onclick="' + sellerClickFn + '"' : '') + '>' +
+          getAvatarHtml(ownerEmail, name, 'xs') +
+          '<span class="mk-seller-name-link">' + escHtml(name) + '</span>' +
+          (profile.badgeType ? getBadgeHtml(ownerEmail) : '') +
+          (sellerClickFn ? '<i class="fas fa-chevron-right mk-seller-arrow"></i>' : '') +
+        '</div>' +
+        '<p class="mk-service-title">' + escHtml(svc.title) + '</p>' +
+        (svc.description ? '<p class="mk-service-desc">' + escHtml(svc.description.slice(0, 60)) + (svc.description.length > 60 ? '…' : '') + '</p>' : '') +
+        '<p class="mk-service-price">' + escHtml(_formatSvcPrice(svc)) + '</p>' +
+      '</div>';
+    listEl.appendChild(card);
+  });
+
+  /* Injecter les annonces du système Marketplace */
+  try { _mkRenderSystemListings(); } catch(e){}
+
+  /* Injecter les annonces sponsorisées dans le feed après rendu */
+  setTimeout(function(){ try { _mkInjectAdsInFeed(); } catch(e){} }, 500);
+}
+
+/* ══════════════════════════════════════════
+   MARKETPLACE
+══════════════════════════════════════════ */
+function setMkCat(btn, cat) {
+  document.querySelectorAll('.mk-cat').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  /* Filtre les cartes par catégorie */
+  var catMap = {
+    all:'', dev:'Développement', design:'Design', redac:'Rédaction',
+    mkt:'Marketing', video:'Vidéo', more:''
+  };
+  var keyword = catMap[cat] || '';
+  document.querySelectorAll('.mk-service-card').forEach(function(c) {
+    var title = c.querySelector('.mk-service-title');
+    var match = !keyword || (title && title.textContent.indexOf(keyword) !== -1);
+    c.style.display = match ? '' : 'none';
+  });
+}
+
+function filterMarketplace(q) {
+  var query = (q || '').toLowerCase();
+  document.querySelectorAll('.mk-service-card').forEach(function(c) {
+    var text = c.textContent.toLowerCase();
+    c.style.display = (!query || text.indexOf(query) !== -1) ? '' : 'none';
+  });
+}
+
+function toggleMkWish(btn) {
+  var ico = btn.querySelector('i');
+  var active = ico.className === 'fas fa-heart';
+  ico.className = active ? 'far fa-heart' : 'fas fa-heart';
+  btn.classList.toggle('wished', !active);
+  showToast(active ? 'Retiré des souhaits' : 'Ajouté aux souhaits ✓', active ? '' : 'ok');
+}
+
+function switchMkTxTab(btn, tab) {
+  document.querySelectorAll('.mk-tx-tab').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  document.getElementById('mk-tx-buy').classList.toggle('hidden', tab !== 'buy');
+  document.getElementById('mk-tx-sell').classList.toggle('hidden', tab !== 'sell');
+}
+
+/* ══════════════════════════════════════════
+   TRANSACTIONS RÉELLES — Achats & Ventes
+══════════════════════════════════════════ */
+
+/* ── Rendu des deux onglets Transactions ── */
+function _mkRenderTxTabs() {
+  if (!_currentUser) return;
+  var email = _currentUser.email;
+  var txns  = _mkGetTxns();
+
+  var buys  = txns.filter(function(t) { return t.buyerEmail  === email; });
+  var sells = txns.filter(function(t) {
+    /* seller peut être une liste séparée par virgule (commandes panier multi-vendeurs) */
+    return (t.sellerEmail || '').indexOf(email) !== -1;
+  });
+
+  /* Compteurs "Mes achats / Mes ventes" */
+  var buyCount  = document.getElementById('mk-buy-count');
+  var sellCount = document.getElementById('mk-sell-count');
+  if (buyCount)  buyCount.textContent  = buys.length  ? buys.length  + ' commande(s)' : 'Aucune commande';
+  if (sellCount) sellCount.textContent = sells.length ? sells.length + ' vente(s)' : 'Aucune vente';
+
+  _mkFillTxList('mk-tx-buy',  buys,  'buy');
+  _mkFillTxList('mk-tx-sell', sells, 'sell');
+}
+
+/* ── Remplit une liste de transactions ── */
+function _mkFillTxList(elId, txns, mode) {
+  var el = document.getElementById(elId);
+  if (!el) return;
+
+  if (!txns.length) {
+    el.innerHTML =
+      '<div style="text-align:center;padding:24px 16px;color:#94A3B8">' +
+        '<i class="fas fa-' + (mode === 'buy' ? 'bag-shopping' : 'tag') + '" style="font-size:28px;display:block;margin-bottom:8px;color:#CBD5E1"></i>' +
+        '<div style="font-size:13px;font-weight:600;color:#64748B">' + (mode === 'buy' ? 'Aucun achat encore' : 'Aucune vente encore') + '</div>' +
+        '<div style="font-size:12px;margin-top:3px">' + (mode === 'buy' ? 'Explorez la marketplace !' : 'Publiez une annonce !') + '</div>' +
+      '</div>';
+    return;
+  }
+
+  el.innerHTML = txns.map(function(t) {
+    var d   = new Date(t.date);
+    var dt  = d.toLocaleDateString('fr-FR') + ' · ' + d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    var amt = mode === 'sell'
+      ? (t.sellerNet || (t.amount - (t.commission || 0))).toFixed(2)
+      : (t.amount || 0).toFixed(2);
+    var shortId = (t.id || '').slice(-6).toUpperCase();
+    var icons   = ['fa-briefcase','fa-palette','fa-code','fa-pen-nib','fa-bullhorn','fa-clapperboard'];
+    var iconIdx = Math.abs((t.id || '').split('').reduce(function(a,c){ return a + c.charCodeAt(0); },0)) % icons.length;
+    var bgColors = ['#E0E7FF','#FEF3C7','#DCFCE7','#FEE2E2','#EDE9FE','#E0F2FE'];
+    var fgColors = ['#4F46E5','#D97706','#16A34A','#DC2626','#7C3AED','#0284C7'];
+
+    return '<div class="mk-tx-item" onclick="_mkOpenTxDetail(\'' + t.id + '\')">' +
+      '<div class="mk-tx-thumb" style="background:' + bgColors[iconIdx] + '">' +
+        '<i class="fas ' + icons[iconIdx] + '" style="color:' + fgColors[iconIdx] + '"></i>' +
+      '</div>' +
+      '<div class="mk-tx-info">' +
+        '<strong>' + escHtml(t.listingTitle || 'Commande') + '</strong>' +
+        '<small>#' + shortId + ' · ' + dt + '</small>' +
+        '<span class="mk-tx-status done">Complétée</span>' +
+      '</div>' +
+      '<div class="mk-tx-right">' +
+        '<span class="mk-tx-amount">' + amt + '€' + (mode === 'sell' ? '<span style="font-size:9px;color:#10B981;display:block;text-align:right">net</span>' : '') + '</span>' +
+        '<i class="fas fa-chevron-right mk-tx-chevron"></i>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+/* ── Détail d'une transaction ── */
+function _mkOpenTxDetail(txId) {
+  var txns = _mkGetTxns();
+  var t    = txns.find(function(x) { return x.id === txId; });
+  if (!t) return;
+
+  var isBuyer  = _currentUser && t.buyerEmail  === _currentUser.email;
+  var isSeller = _currentUser && (t.sellerEmail || '').indexOf(_currentUser.email) !== -1;
+  var d        = new Date(t.date);
+  var dt       = d.toLocaleDateString('fr-FR', { day:'2-digit', month:'long', year:'numeric' }) + ' à ' + d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+  var shortId  = (t.id || '').slice(-6).toUpperCase();
+  var commission = t.commission || 0;
+  var sellerNet  = t.sellerNet  || (t.amount - commission);
+
+  var existing = document.getElementById('mk-tx-detail-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('mk-tx-detail-card');
+  if (existingCard) existingCard.remove();
+
+  var bg = document.createElement('div');
+  bg.id = 'mk-tx-detail-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+
+  var card = document.createElement('div');
+  card.id = 'mk-tx-detail-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:85vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  bg.onclick = function(e) { if (e.target === bg) { bg.remove(); card.remove(); } };
+
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
+    '<div style="padding:20px 20px 30px">' +
+
+    /* Icône succès */
+    '<div style="text-align:center;margin-bottom:20px">' +
+      '<div style="width:64px;height:64px;border-radius:50%;background:#F0FDF4;display:flex;align-items:center;justify-content:center;margin:0 auto 10px">' +
+        '<i class="fas fa-check-circle" style="font-size:30px;color:#22C55E"></i>' +
+      '</div>' +
+      '<div style="font-size:18px;font-weight:800;color:#0F172A">Transaction complétée</div>' +
+      '<div style="font-size:12px;color:#94A3B8;margin-top:3px">' + dt + '</div>' +
+    '</div>' +
+
+    /* Détails */
+    '<div style="background:#F8FAFC;border-radius:14px;padding:16px;margin-bottom:16px">' +
+      _mkTxRow('Référence',   '#' + shortId) +
+      _mkTxRow('Annonce',     escHtml(t.listingTitle || 'Commande')) +
+      _mkTxRow('Acheteur',    escHtml(t.buyerEmail  || '—')) +
+      _mkTxRow('Vendeur',     escHtml((t.sellerEmail || '—').split(',')[0])) +
+      '<div style="height:1px;background:#E2E8F0;margin:10px 0"></div>' +
+      _mkTxRow('Montant total',     '<strong>' + (t.amount || 0).toFixed(2) + ' €</strong>') +
+      _mkTxRow('Commission Geniwork (1%)', '<span style="color:#F59E0B">' + commission.toFixed(2) + ' €</span>') +
+      _mkTxRow('Net vendeur',       '<strong style="color:#10B981">' + sellerNet.toFixed(2) + ' €</strong>') +
+      (t.paypalOrderId ? _mkTxRow('PayPal ID', '<code style="font-size:10px;color:#6366F1">' + t.paypalOrderId + '</code>') : '') +
+    '</div>' +
+
+    /* Bouton fermer */
+    '<button onclick="document.getElementById(\'mk-tx-detail-bg\').remove();document.getElementById(\'mk-tx-detail-card\').remove()" style="width:100%;padding:13px;background:#F1F5F9;color:#374151;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer">Fermer</button>' +
+
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _mkTxRow(label, value) {
+  return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;font-size:12.5px">' +
+    '<span style="color:#64748B">' + label + '</span>' +
+    '<span style="color:#0F172A;text-align:right;max-width:60%;word-break:break-all">' + value + '</span>' +
+  '</div>';
+}
+
+/* ── Écran "Mes achats" (toutes mes commandes) ── */
+/* ── Ferme un écran plein-écran avec slide-out ── */
+function _mkCloseScreen(id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.style.transform = 'translateX(-50%) translateX(100%)';
+  setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 290);
+}
+
+/* ══════════════════════════════════════════════════════════
+   MES ACHATS — Synchronisé avec les annonces marketplace
+══════════════════════════════════════════════════════════ */
+function _mkOpenMyPurchases() {
+  if (!_currentUser) { showToast('Connectez-vous', 'err'); return; }
+
+  var email    = _currentUser.email;
+  var txns     = _mkGetTxns().filter(function(t) { return t.buyerEmail === email; });
+  var listings = _mkGetListings();
+
+  var existing = document.getElementById('mk-purchases-screen');
+  if (existing) existing.remove();
+
+  var screen = document.createElement('div');
+  screen.id  = 'mk-purchases-screen';
+  screen.style.cssText = 'position:fixed;left:50%;top:0;bottom:0;width:100%;max-width:430px;transform:translateX(-50%) translateX(100%);transition:transform .28s cubic-bezier(.4,0,.2,1);background:#F8FAFC;z-index:1400;overflow-y:auto;-webkit-overflow-scrolling:touch';
+  document.body.appendChild(screen);
+  requestAnimationFrame(function(){ screen.style.transform = 'translateX(-50%) translateX(0)'; });
+
+  /* ── Header ── */
+  var html =
+    '<div style="position:sticky;top:0;background:#fff;z-index:10;padding:14px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #E2E8F0;box-shadow:0 1px 4px rgba(0,0,0,.05)">' +
+      '<button onclick="_mkCloseScreen(\'mk-purchases-screen\')" style="width:36px;height:36px;border:none;background:#F1F5F9;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;color:#374151;cursor:pointer"><i class="fas fa-arrow-left"></i></button>' +
+      '<div>' +
+        '<div style="font-size:17px;font-weight:800;color:#0F172A">Mes achats</div>' +
+        '<div style="font-size:11px;color:#94A3B8">' + txns.length + ' commande(s)</div>' +
+      '</div>' +
+    '</div>';
+
+  if (!txns.length) {
+    html +=
+      '<div style="text-align:center;padding:60px 24px">' +
+        '<div style="font-size:52px;margin-bottom:12px">🛒</div>' +
+        '<div style="font-size:16px;font-weight:700;color:#374151">Aucun achat</div>' +
+        '<div style="font-size:13px;color:#94A3B8;margin-top:6px">Explorez le marketplace et trouvez ce qu\'il vous faut.</div>' +
+        '<button onclick="_mkCloseScreen(\'mk-purchases-screen\')" style="margin-top:20px;padding:12px 24px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">Explorer le marketplace</button>' +
+      '</div>';
+  } else {
+    html += '<div style="padding:16px">';
+    txns.forEach(function(t) {
+      var listing = listings.find(function(l){ return l.id === t.listingId; });
+      var d       = new Date(t.date);
+      var dt      = d.toLocaleDateString('fr-FR', { day:'2-digit', month:'short', year:'numeric' });
+      var shortId = (t.id || '').slice(-8).toUpperCase();
+      var imgHtml = (listing && listing.images && listing.images.length)
+        ? '<div style="width:64px;height:64px;border-radius:12px;background:url(\''+listing.images[0]+'\') center/cover no-repeat;flex-shrink:0"></div>'
+        : '<div style="width:64px;height:64px;border-radius:12px;background:#EEF2FF;display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="fas fa-bag-shopping" style="font-size:22px;color:#6366F1"></i></div>';
+
+      var sellerName = listing ? escHtml(listing.sellerNom) : (t.sellerEmail || '').split(',')[0];
+      var safeId = t.id.replace(/'/g, "\\'");
+
+      html +=
+        '<div onclick="_mkOpenTxDetail(\'' + safeId + '\')" style="background:#fff;border-radius:16px;padding:14px;margin-bottom:12px;display:flex;gap:12px;box-shadow:0 1px 6px rgba(0,0,0,.07);cursor:pointer">' +
+          imgHtml +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:14px;font-weight:800;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(t.listingTitle || 'Commande') + '</div>' +
+            '<div style="font-size:11.5px;color:#64748B;margin-top:3px"><i class="fas fa-user" style="margin-right:4px;color:#94A3B8"></i>' + sellerName + '</div>' +
+            '<div style="font-size:11px;color:#94A3B8;margin-top:2px"><i class="fas fa-calendar" style="margin-right:4px"></i>' + dt + ' · #' + shortId + '</div>' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px">' +
+              '<span style="font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:20px;background:#F0FDF4;color:#16A34A"><i class="fas fa-check" style="margin-right:3px"></i>Payé · ' + (t.amount||0).toFixed(2) + ' €</span>' +
+              (listing
+                ? '<button onclick="event.stopPropagation();_mkOpenDetail(\'' + (listing.id||'').replace(/'/g,"\\'") + '\')" style="font-size:11px;padding:4px 10px;background:#EEF2FF;color:#6366F1;border:none;border-radius:8px;font-weight:700;cursor:pointer">Voir l\'annonce</button>'
+                : '<span style="font-size:10.5px;color:#94A3B8">Annonce expirée</span>') +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  screen.innerHTML = html;
+}
+
+/* ══════════════════════════════════════════════════════════
+   MES VENTES — Annonces publiées + commandes reçues
+══════════════════════════════════════════════════════════ */
+function _mkOpenMySales() {
+  if (!_currentUser) { showToast('Connectez-vous', 'err'); return; }
+
+  var email    = _currentUser.email;
+  var listings = _mkGetListings().filter(function(l){ return l.sellerEmail === email; });
+  var txns     = _mkGetTxns().filter(function(t){ return (t.sellerEmail||'').indexOf(email) !== -1; });
+  var totalNet = txns.reduce(function(s,t){ return s + (t.sellerNet || (t.amount-(t.commission||0))); }, 0);
+
+  var existing = document.getElementById('mk-sales-screen');
+  if (existing) existing.remove();
+
+  var screen = document.createElement('div');
+  screen.id  = 'mk-sales-screen';
+  screen.style.cssText = 'position:fixed;left:50%;top:0;bottom:0;width:100%;max-width:430px;transform:translateX(-50%) translateX(100%);transition:transform .28s cubic-bezier(.4,0,.2,1);background:#F8FAFC;z-index:1400;overflow-y:auto;-webkit-overflow-scrolling:touch';
+  document.body.appendChild(screen);
+  requestAnimationFrame(function(){ screen.style.transform = 'translateX(-50%) translateX(0)'; });
+
+  /* ── Header ── */
+  var html =
+    '<div style="position:sticky;top:0;background:#fff;z-index:10;padding:14px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #E2E8F0;box-shadow:0 1px 4px rgba(0,0,0,.05)">' +
+      '<button onclick="_mkCloseScreen(\'mk-sales-screen\')" style="width:36px;height:36px;border:none;background:#F1F5F9;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;color:#374151;cursor:pointer"><i class="fas fa-arrow-left"></i></button>' +
+      '<div>' +
+        '<div style="font-size:17px;font-weight:800;color:#0F172A">Mes ventes</div>' +
+        '<div style="font-size:11px;color:#94A3B8">' + listings.length + ' annonce(s) · ' + txns.length + ' vente(s)</div>' +
+      '</div>' +
+      '<button onclick="_mkOpenCreate()" style="margin-left:auto;padding:8px 14px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-plus" style="margin-right:4px"></i>Nouvelle annonce</button>' +
+    '</div>';
+
+  /* ── Résumé financier ── */
+  html +=
+    '<div style="margin:16px;background:linear-gradient(135deg,#059669,#10B981);border-radius:16px;padding:18px;color:#fff">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<div>' +
+          '<div style="font-size:11px;opacity:.8;margin-bottom:4px">Total gagné (net)</div>' +
+          '<div style="font-size:30px;font-weight:800">' + totalNet.toFixed(2) + ' €</div>' +
+          '<div style="font-size:11px;opacity:.7;margin-top:4px">' + txns.length + ' vente(s) · après 1% commission</div>' +
+        '</div>' +
+        '<div style="text-align:right">' +
+          '<div style="font-size:11px;opacity:.8">Annonces actives</div>' +
+          '<div style="font-size:26px;font-weight:800">' + listings.filter(function(l){ return l.status==='active'; }).length + '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  /* ── Mes annonces ── */
+  html += '<div style="padding:0 16px">' +
+    '<div style="font-size:13px;font-weight:800;color:#0F172A;margin-bottom:10px">📋 Mes annonces</div>';
+
+  if (!listings.length) {
+    html +=
+      '<div style="text-align:center;padding:24px;background:#fff;border-radius:14px;margin-bottom:16px">' +
+        '<div style="font-size:13px;color:#64748B">Aucune annonce publiée.</div>' +
+        '<button onclick="_mkOpenCreate()" style="margin-top:10px;padding:10px 20px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">Créer ma première annonce</button>' +
+      '</div>';
+  } else {
+    listings.forEach(function(l) {
+      var cats      = l.type === 'service' ? _MK_SVC_CATS : _MK_PROD_CATS;
+      var catLabel  = cats[l.category] || l.category;
+      var safeLId   = (l.id||'').replace(/'/g,"\\'");
+      var nbOrders  = txns.filter(function(t){ return t.listingId === l.id; }).length;
+      var statusCss = l.status === 'active' ? 'background:#F0FDF4;color:#16A34A' : (l.status==='sold'?'background:#FEF3C7;color:#D97706':'background:#FEE2E2;color:#DC2626');
+      var statusLbl = l.status === 'active' ? '✓ Active' : (l.status==='sold'?'✓ Vendue':'Expirée');
+      var imgHtml   = (l.images && l.images.length)
+        ? '<div style="width:58px;height:58px;border-radius:10px;background:url(\''+l.images[0]+'\') center/cover no-repeat;flex-shrink:0"></div>'
+        : '<div style="width:58px;height:58px;border-radius:10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="fas fa-tag" style="color:#fff;font-size:18px"></i></div>';
+
+      html +=
+        '<div style="background:#fff;border-radius:14px;padding:12px;margin-bottom:10px;box-shadow:0 1px 5px rgba(0,0,0,.06)">' +
+          '<div style="display:flex;gap:10px;align-items:flex-start">' +
+            imgHtml +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:13.5px;font-weight:800;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(l.title) + '</div>' +
+              '<div style="font-size:11px;color:#64748B;margin-top:2px">' + escHtml(catLabel) + ' · ' + l.price.toFixed(2) + ' €</div>' +
+              '<div style="display:flex;align-items:center;gap:6px;margin-top:5px">' +
+                '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;' + statusCss + '">' + statusLbl + '</span>' +
+                (nbOrders ? '<span style="font-size:10px;color:#6366F1;font-weight:700"><i class="fas fa-shopping-cart" style="margin-right:3px"></i>' + nbOrders + ' commande(s)</span>' : '') +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          /* Actions */
+          '<div style="display:flex;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid #F1F5F9">' +
+            '<button onclick="_mkOpenDetail(\'' + safeLId + '\')" style="flex:1;padding:8px;background:#EEF2FF;color:#6366F1;border:none;border-radius:8px;font-size:11.5px;font-weight:700;cursor:pointer"><i class="fas fa-eye" style="margin-right:4px"></i>Voir</button>' +
+            (l.status === 'active'
+              ? '<button onclick="_mkEditListingPrice(\'' + safeLId + '\')" style="flex:1;padding:8px;background:#F0FDF4;color:#16A34A;border:none;border-radius:8px;font-size:11.5px;font-weight:700;cursor:pointer"><i class="fas fa-pen" style="margin-right:4px"></i>Modifier</button>' +
+                '<button onclick="_mkMarkSold(\'' + safeLId + '\');_mkCloseScreen(\'mk-sales-screen\');_mkOpenMySales();" style="flex:1;padding:8px;background:#FFF7ED;color:#EA580C;border:none;border-radius:8px;font-size:11.5px;font-weight:700;cursor:pointer"><i class="fas fa-handshake" style="margin-right:4px"></i>Vendu</button>'
+              : '') +
+            '<button onclick="_mkDeleteListing(\'' + safeLId + '\');_mkCloseScreen(\'mk-sales-screen\');_mkOpenMySales();" style="flex:1;padding:8px;background:#FEE2E2;color:#EF4444;border:none;border-radius:8px;font-size:11.5px;font-weight:700;cursor:pointer"><i class="fas fa-trash" style="margin-right:4px"></i>Suppr.</button>' +
+          '</div>' +
+        '</div>';
+    });
+  }
+  html += '</div>';
+
+  /* ── Commandes reçues ── */
+  html += '<div style="padding:0 16px 24px">' +
+    '<div style="font-size:13px;font-weight:800;color:#0F172A;margin:6px 0 10px">📦 Commandes reçues</div>';
+
+  if (!txns.length) {
+    html += '<div style="text-align:center;padding:20px;background:#fff;border-radius:14px;color:#94A3B8;font-size:13px">Aucune commande reçue pour l\'instant.</div>';
+  } else {
+    txns.forEach(function(t) {
+      var d       = new Date(t.date);
+      var dt      = d.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) + ' · ' + d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+      var net     = (t.sellerNet || (t.amount-(t.commission||0))).toFixed(2);
+      var safeId  = (t.id||'').replace(/'/g,"\\'");
+      html +=
+        '<div onclick="_mkOpenTxDetail(\'' + safeId + '\')" style="background:#fff;border-radius:14px;padding:13px;margin-bottom:9px;display:flex;align-items:center;gap:12px;box-shadow:0 1px 5px rgba(0,0,0,.06);cursor:pointer">' +
+          '<div style="width:44px;height:44px;border-radius:12px;background:#F0FDF4;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<i class="fas fa-box" style="color:#16A34A;font-size:18px"></i>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:700;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(t.listingTitle || 'Commande') + '</div>' +
+            '<div style="font-size:11px;color:#94A3B8;margin-top:2px"><i class="fas fa-user" style="margin-right:3px"></i>' + escHtml(t.buyerEmail || '—') + '</div>' +
+            '<div style="font-size:10.5px;color:#94A3B8;margin-top:1px"><i class="fas fa-clock" style="margin-right:3px"></i>' + dt + '</div>' +
+          '</div>' +
+          '<div style="text-align:right;flex-shrink:0">' +
+            '<div style="font-size:15px;font-weight:800;color:#10B981">+' + net + ' €</div>' +
+            '<div style="font-size:9.5px;color:#94A3B8">net reçu</div>' +
+            '<i class="fas fa-chevron-right" style="font-size:11px;color:#CBD5E1;margin-top:4px;display:block"></i>' +
+          '</div>' +
+        '</div>';
+    });
+  }
+  html += '</div>';
+
+  screen.innerHTML = html;
+}
+
+/* ── Modifier le prix d'une annonce ── */
+function _mkEditListingPrice(listingId) {
+  var listings = _mkGetListings();
+  var l = listings.find(function(x){ return x.id === listingId; });
+  if (!l) return;
+
+  var newPrice = prompt('Nouveau prix pour "' + l.title + '" (actuel : ' + l.price + ' €) :');
+  if (!newPrice) return;
+  var p = parseFloat(newPrice);
+  if (isNaN(p) || p < 0) { showToast('Prix invalide', 'err'); return; }
+  l.price = p;
+  _mkSaveListings(listings);
+  showToast('Prix mis à jour : ' + p.toFixed(2) + ' €', 'ok');
+  /* Rafraîchir l'écran */
+  _mkCloseScreen('mk-sales-screen');
+  setTimeout(_mkOpenMySales, 300);
+}
+
+/* ══════════════════════════════════════════
+   ÉCRAN ACHETER
+══════════════════════════════════════════ */
+var _achatCat  = 'all';
+var _achatType = 'all'; /* 'all' | 'service' | 'produit' */
+
+function openAchatScreen() {
+  var screen = document.getElementById('achat-screen');
+  if (!screen) return;
+  screen.classList.remove('hidden');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+  /* Reset filtres */
+  _achatCat  = 'all';
+  _achatType = 'all';
+  document.querySelectorAll('.achat-cat').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.cat === 'all');
+  });
+  document.querySelectorAll('.achat-type-btn').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.type === 'all');
+  });
+  var inp = document.getElementById('achat-search-input');
+  if (inp) inp.value = '';
+  _renderAchatCategoryPills();
+  renderAchatServices();
+}
+
+function closeAchatScreen() {
+  var screen = document.getElementById('achat-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  setTimeout(function() { screen.classList.add('hidden'); }, 280);
+}
+
+function selectAchatType(btn) {
+  _achatType = btn.dataset.type;
+  document.querySelectorAll('.achat-type-btn').forEach(function(b) {
+    b.classList.toggle('active', b === btn);
+  });
+  /* Réinitialise le filtre catégorie */
+  _achatCat = 'all';
+  _renderAchatCategoryPills();
+  renderAchatServices();
+}
+
+/* Reconstruit les pills de catégorie selon le type sélectionné */
+function _renderAchatCategoryPills() {
+  var row = document.getElementById('achat-cats-row');
+  if (!row) return;
+  var cats = _achatType === 'produit' ? _PROD_CATS : _SVC_CATS;
+  var html = '<button class="achat-cat active" data-cat="all" onclick="selectAchatCat(this)">Tous</button>';
+  Object.keys(cats).forEach(function(k) {
+    html += '<button class="achat-cat" data-cat="' + k + '" onclick="selectAchatCat(this)">' + cats[k] + '</button>';
+  });
+  row.innerHTML = html;
+}
+
+function selectAchatCat(btn) {
+  _achatCat = btn.dataset.cat;
+  document.querySelectorAll('.achat-cat').forEach(function(b) {
+    b.classList.toggle('active', b === btn);
+  });
+  renderAchatServices();
+}
+
+function filterAchatServices() { renderAchatServices(); }
+
+function renderAchatServices() {
+  var container = document.getElementById('achat-services-list');
+  if (!container) return;
+  var query = ((document.getElementById('achat-search-input') || {}).value || '').trim().toLowerCase();
+
+  /* Collecte tous les items publiés de tous les utilisateurs (sauf le sien) */
+  var all = [];
+  try {
+    var users = JSON.parse(localStorage.getItem('gw_users') || '[]');
+    users.forEach(function(u) {
+      if (_currentUser && u.email === _currentUser.email) return;
+      loadUserServices(u.email).forEach(function(svc) {
+        if (svc.showInMarketplace) { svc._ownerEmail = u.email; all.push(svc); }
+      });
+    });
+  } catch(e) {}
+
+  /* Filtre type + catégorie + recherche */
+  var filtered = all.filter(function(svc) {
+    var itype = svc.itemType || 'service';
+    if (_achatType !== 'all' && itype !== _achatType) return false;
+    if (_achatCat  !== 'all' && svc.category !== _achatCat) return false;
+    if (query) {
+      var haystack = (svc.title + ' ' + (svc.description || '') + ' ' + (svc.category || '')).toLowerCase();
+      return haystack.indexOf(query) !== -1;
+    }
+    return true;
+  });
+
+  if (!filtered.length) {
+    var typeLabel = _achatType === 'produit' ? 'produit' : 'service';
+    container.innerHTML =
+      '<div class="achat-empty">' +
+        '<i class="fas fa-store-slash"></i>' +
+        '<p>' + (all.length ? ('Aucun ' + typeLabel + ' pour cette recherche') : 'Aucun article disponible pour l\'instant') + '</p>' +
+        (all.length === 0 ? '<small>Les membres peuvent publier leurs services et produits via "Vendre"</small>' : '') +
+      '</div>';
+    return;
+  }
+
+  container.innerHTML = filtered.map(function(svc) {
+    var ownerEmail = svc._ownerEmail || svc.ownerEmail || '';
+    var profile    = loadUserProfile(ownerEmail) || {};
+    var sellerName = profile.nom || ownerEmail;
+    var itemType   = svc.itemType || 'service';
+    var cats       = itemType === 'produit' ? _PROD_CATS : _SVC_CATS;
+    var catLabel   = (cats && cats[svc.category]) || svc.category;
+    var priceStr   = _formatSvcPrice(svc);
+    var photo      = (svc.photos && svc.photos[0]) || null;
+    var saved      = isSvcSaved(svc.id, ownerEmail);
+
+    /* Badge de type */
+    var typeBadgeHtml = itemType === 'produit'
+      ? '<span class="achat-item-type-badge prod"><i class="fas fa-box"></i> Produit</span>'
+      : '<span class="achat-item-type-badge svc"><i class="fas fa-concierge-bell"></i> Service</span>';
+
+    /* Icône placeholder selon type */
+    var placeholderIco = itemType === 'produit' ? 'fa-box-open' : 'fa-briefcase';
+    var mediaHtml = photo
+      ? '<img src="' + photo + '" class="achat-svc-img" alt="">'
+      : '<div class="achat-svc-img achat-svc-img-ph mk-svc-cat-' + svc.category + '">' +
+          '<i class="fas ' + placeholderIco + '"></i></div>';
+
+    /* Bouton d'action : "Contacter" pour les services, "Panier" pour les produits */
+    var ownerSafe2 = ownerEmail.replace(/'/g,"\\'");
+    var actionBtn = itemType === 'produit'
+      ? '<button class="achat-svc-contact-btn achat-svc-order-btn" ' +
+          'onclick="addToCart(' + svc.id + ',\'' + ownerSafe2 + '\')">' +
+          '<i class="fas fa-cart-shopping"></i> Ajouter au panier' +
+        '</button>'
+      : '<button class="achat-svc-contact-btn" ' +
+          'onclick="_contactAboutService(' + svc.id + ',\'' + ownerSafe2 + '\')">' +
+          '<i class="fas fa-paper-plane"></i> Contacter' +
+        '</button>';
+
+    var sellerRole   = profile.domain || 'Membre Geniwork';
+    var sellerClickFn = ownerEmail
+      ? 'openUserProfileView({nom:\'' + sellerName.replace(/'/g,"\\'") + '\',role:\'' + sellerRole.replace(/'/g,"\\'") + '\',email:\'' + ownerSafe2 + '\'})'
+      : '';
+
+    return '<div class="achat-svc-card">' +
+      '<div class="achat-svc-media">' +
+        mediaHtml +
+        '<span class="achat-svc-cat">' + escHtml(catLabel) + '</span>' +
+        typeBadgeHtml +
+        '<button class="achat-svc-wish' + (saved ? ' saved' : '') + '" ' +
+          'onclick="event.stopPropagation();toggleSavedSvc(' + svc.id + ',\'' + ownerEmail.replace(/'/g,"\\'") + '\',this)">' +
+          '<i class="' + (saved ? 'fas' : 'far') + ' fa-heart"></i>' +
+        '</button>' +
+      '</div>' +
+      '<div class="achat-svc-body">' +
+        '<div class="achat-svc-seller mk-seller-clickable"' +
+          (sellerClickFn ? ' onclick="' + sellerClickFn + '"' : '') + '>' +
+          getAvatarHtml(ownerEmail, sellerName, 'xs') +
+          '<span class="mk-seller-name-link">' + escHtml(sellerName) + '</span>' +
+          (profile.badgeType ? getBadgeHtml(ownerEmail) : '') +
+          (sellerClickFn ? '<i class="fas fa-chevron-right mk-seller-arrow"></i>' : '') +
+        '</div>' +
+        '<p class="achat-svc-title">' + escHtml(svc.title) + '</p>' +
+        (svc.description
+          ? '<p class="achat-svc-desc">' + escHtml(svc.description.slice(0, 80)) + (svc.description.length > 80 ? '…' : '') + '</p>'
+          : '') +
+        '<div class="achat-svc-footer">' +
+          '<span class="achat-svc-price">' + escHtml(priceStr) + '</span>' +
+          actionBtn +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+/* ══════════════════════════════════════════
+   NOTIFICATIONS MARKETPLACE
+══════════════════════════════════════════ */
+function _mkNotifsKey() {
+  return _currentUser ? 'gw_mk_notifs_' + _currentUser.email : null;
+}
+function getMkNotifs() {
+  var k = _mkNotifsKey(); if (!k) return [];
+  try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch(e) { return []; }
+}
+function _saveMkNotifs(list) {
+  var k = _mkNotifsKey(); if (!k) return;
+  localStorage.setItem(k, JSON.stringify(list));
+}
+function _addMkNotif(notif) {
+  /* Notif pour un autre utilisateur (destinataire) */
+  var k = 'gw_mk_notifs_' + notif.toEmail;
+  try {
+    var list = JSON.parse(localStorage.getItem(k) || '[]');
+    list.unshift({ id: Date.now(), read: false, time: _nowTime(), type: notif.type,
+      text: notif.text, icon: notif.icon, iconBg: notif.iconBg, iconColor: notif.iconColor });
+    localStorage.setItem(k, JSON.stringify(list));
+  } catch(e) {}
+  _updateMkNotifBadge();
+}
+function _updateMkNotifBadge() {
+  var badge = document.getElementById('mk-notif-badge');
+  if (!badge) return;
+  var count = getMkNotifs().filter(function(n) { return !n.read; }).length;
+  badge.textContent = count > 9 ? '9+' : count;
+  badge.classList.toggle('hidden', count === 0);
+}
+function openMkNotifs() {
+  var notifs = getMkNotifs();
+  /* Marque tout comme lu */
+  notifs.forEach(function(n) { n.read = true; });
+  _saveMkNotifs(notifs);
+  _updateMkNotifBadge();
+
+  _closeGenericSheet('mk-notifs');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'mk-notifs-bg';
+  bg.onclick = function() { _closeGenericSheet('mk-notifs'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card mk-notifs-card'; card.id = 'mk-notifs-card';
+
+  var itemsHtml = notifs.length
+    ? notifs.slice(0, 20).map(function(n) {
+        return '<div class="mk-notif-item">' +
+          '<span class="mk-notif-ico" style="background:' + (n.iconBg || '#EFF6FF') + ';color:' + (n.iconColor || '#2563EB') + '">' +
+            '<i class="fas ' + (n.icon || 'fa-bell') + '"></i>' +
+          '</span>' +
+          '<div class="mk-notif-body">' +
+            '<p class="mk-notif-text">' + escHtml(n.text) + '</p>' +
+            '<span class="mk-notif-time">' + escHtml(n.at ? _notifTimeAgo(n.at) : (n.time || '')) + '</span>' +
+          '</div>' +
+        '</div>';
+      }).join('')
+    : '<div class="mk-notif-empty"><i class="fas fa-bell-slash"></i><p>Aucune notification</p></div>';
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="mk-notifs-head">' +
+      '<span class="mk-notifs-title">Notifications Marketplace</span>' +
+      (notifs.length ? '<button class="mk-notifs-clear" onclick="_clearMkNotifs()">Tout effacer</button>' : '') +
+    '</div>' +
+    '<div class="mk-notifs-list">' + itemsHtml + '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+}
+function _clearMkNotifs() {
+  _saveMkNotifs([]);
+  _updateMkNotifBadge();
+  _closeGenericSheet('mk-notifs');
+}
+
+/* ══════════════════════════════════════════
+   PANIER (CART)
+══════════════════════════════════════════ */
+function _cartKey() { return _currentUser ? 'gw_cart_' + _currentUser.email : null; }
+
+function loadCart() {
+  var k = _cartKey(); if (!k) return [];
+  try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch(e) { return []; }
+}
+function saveCart(list) {
+  var k = _cartKey(); if (!k) return;
+  localStorage.setItem(k, JSON.stringify(list));
+}
+
+function _updateCartBadge() {
+  var badge = document.getElementById('mk-cart-badge');
+  if (!badge) return;
+  var count = loadCart().reduce(function(acc, i) { return acc + (i.qty || 1); }, 0);
+  badge.textContent = count > 9 ? '9+' : count;
+  badge.classList.toggle('hidden', count === 0);
+}
+
+function addToCart(svcId, ownerEmail) {
+  if (!_currentUser) { showToast('Connectez-vous pour acheter', 'err'); return; }
+  var svc = loadUserServices(ownerEmail).find(function(s) { return s.id === svcId; });
+  if (!svc) return;
+  if (svc.priceType === 'negotiate') {
+    /* Prix sur devis → contact direct */
+    _contactAboutService(svcId, ownerEmail);
+    return;
+  }
+  var cart = loadCart();
+  var existing = cart.find(function(i) { return i.svcId === svcId && i.ownerEmail === ownerEmail; });
+  if (existing) {
+    existing.qty = (existing.qty || 1) + 1;
+    showToast('Quantité mise à jour ✓', 'ok');
+  } else {
+    cart.push({
+      id:         Date.now(),
+      svcId:      svc.id,
+      ownerEmail: ownerEmail,
+      title:      svc.title,
+      price:      svc.price || 0,
+      priceType:  svc.priceType || 'fixed',
+      itemType:   svc.itemType || 'produit',
+      qty:        1,
+      photo:      (svc.photos && svc.photos[0]) || null
+    });
+    showToast('Ajouté au panier ✓', 'ok');
+  }
+  saveCart(cart);
+  _updateCartBadge();
+}
+
+function removeFromCart(itemId) {
+  var cart = loadCart().filter(function(i) { return i.id !== itemId; });
+  saveCart(cart);
+  _updateCartBadge();
+  renderCartItems();
+}
+
+function updateCartQty(itemId, delta) {
+  var cart = loadCart();
+  var item = cart.find(function(i) { return i.id === itemId; });
+  if (!item) return;
+  item.qty = Math.max(1, (item.qty || 1) + delta);
+  saveCart(cart);
+  renderCartItems();
+}
+
+function openCartScreen() {
+  if (!_currentUser) { showToast('Connectez-vous pour voir votre panier', 'err'); return; }
+  var screen = document.getElementById('cart-screen');
+  if (!screen) return;
+  screen.classList.remove('hidden');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+  renderCartItems();
+}
+
+function closeCartScreen() {
+  var screen = document.getElementById('cart-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  setTimeout(function() { screen.classList.add('hidden'); }, 280);
+}
+
+function renderCartItems() {
+  var wrap     = document.getElementById('cart-list-wrap');
+  var footer   = document.getElementById('cart-footer');
+  var countLbl = document.getElementById('cart-count-label');
+  if (!wrap) return;
+
+  var cart = loadCart();
+  if (countLbl) {
+    countLbl.textContent = cart.length + (cart.length === 1 ? ' article' : ' articles');
+  }
+
+  if (!cart.length) {
+    if (footer) footer.classList.add('hidden');
+    wrap.innerHTML =
+      '<div class="cart-empty">' +
+        '<i class="fas fa-cart-shopping"></i>' +
+        '<p>Votre panier est vide</p>' +
+        '<small>Explorez la marketplace et ajoutez des produits</small>' +
+        '<button class="cart-empty-btn" onclick="closeCartScreen();openAchatScreen()">' +
+          '<i class="fas fa-bag-shopping"></i> Parcourir la marketplace' +
+        '</button>' +
+      '</div>';
+    return;
+  }
+
+  if (footer) footer.classList.remove('hidden');
+
+  var subtotal   = cart.reduce(function(acc, i) { return acc + (i.price || 0) * (i.qty || 1); }, 0);
+  var commission = Math.round(subtotal * _GW_COMMISSION_RATE * 100) / 100; /* 1% Geniwork */
+  var total      = Math.round((subtotal + commission) * 100) / 100;
+
+  var subEl = document.getElementById('cart-subtotal');
+  var feeEl = document.getElementById('cart-fees');
+  var totEl = document.getElementById('cart-total');
+  if (subEl) subEl.textContent = subtotal.toFixed(2) + ' €';
+  if (feeEl) feeEl.textContent = commission.toFixed(2) + ' €';
+  if (totEl) totEl.textContent = total.toFixed(2) + ' €';
+
+  wrap.innerHTML = cart.map(function(item) {
+    var profile     = loadUserProfile(item.ownerEmail) || {};
+    var sellerName  = profile.nom || item.ownerEmail || 'Vendeur';
+    var mediaHtml   = item.photo
+      ? '<img src="' + item.photo + '" class="cart-item-img" alt="">'
+      : '<div class="cart-item-img cart-item-img-ph"><i class="fas fa-' +
+          (item.itemType === 'produit' ? 'box-open' : 'concierge-bell') +
+        '"></i></div>';
+    var subtotalItem = ((item.price || 0) * (item.qty || 1)).toFixed(2);
+    return '<div class="cart-item">' +
+      mediaHtml +
+      '<div class="cart-item-body">' +
+        '<p class="cart-item-title">' + escHtml(item.title) + '</p>' +
+        '<p class="cart-item-seller"><i class="fas fa-user-circle"></i> ' + escHtml(sellerName) + '</p>' +
+        '<div class="cart-item-row">' +
+          '<div class="cart-qty-ctrl">' +
+            '<button onclick="updateCartQty('+item.id+',-1);renderCartItems()"><i class="fas fa-minus"></i></button>' +
+            '<span>' + (item.qty || 1) + '</span>' +
+            '<button onclick="updateCartQty('+item.id+',1);renderCartItems()"><i class="fas fa-plus"></i></button>' +
+          '</div>' +
+          '<span class="cart-item-price">' + subtotalItem + ' €</span>' +
+        '</div>' +
+      '</div>' +
+      '<button class="cart-item-remove" onclick="removeFromCart('+item.id+');renderCartItems()">' +
+        '<i class="fas fa-xmark"></i>' +
+      '</button>' +
+    '</div>';
+  }).join('');
+
+  /* Charger le bouton PayPal pour le panier */
+  _cartLoadPayPal(total);
+}
+
+/* ── Charge et affiche le bouton PayPal dans le panier ── */
+function _cartLoadPayPal(total) {
+  var wrap = document.getElementById('cart-paypal-btn-container');
+  if (!wrap) return;
+  wrap.innerHTML = '<div style="text-align:center;padding:10px;color:#94A3B8;font-size:12px"><i class="fas fa-spinner fa-spin"></i> Chargement PayPal…</div>';
+
+  function _renderCartPayPalBtn() {
+    if (typeof paypal === 'undefined') {
+      wrap.innerHTML = '<div style="font-size:12px;color:#EF4444;text-align:center;padding:8px"><i class="fas fa-exclamation-triangle"></i> PayPal indisponible. Vérifiez votre connexion.</div>';
+      return;
+    }
+    wrap.innerHTML = '<div id="cart-paypal-buttons"></div>';
+    var cart = loadCart();
+    var subtotal   = cart.reduce(function(acc, i) { return acc + (i.price || 0) * (i.qty || 1); }, 0);
+    var commission = Math.round(subtotal * _GW_COMMISSION_RATE * 100) / 100;
+    var grand      = (subtotal + commission).toFixed(2);
+
+    if (parseFloat(grand) <= 0) {
+      wrap.innerHTML = '<div style="font-size:12px;color:#EF4444;text-align:center;padding:8px">Le montant doit être supérieur à 0 € pour payer.</div>';
+      return;
+    }
+
+    try {
+      paypal.Buttons({
+        createOrder: function(data, actions) {
+          return actions.order.create({
+            purchase_units: [{
+              description: 'Commande Geniwork – ' + cart.length + ' article(s)',
+              amount: { value: grand, currency_code: 'EUR' },
+              payee: { email_address: _GW_PAYPAL_EMAIL }
+            }]
+          });
+        },
+        onApprove: function(data, actions) {
+          return actions.order.capture().then(function(details) {
+            _cartCheckoutSuccess(details, cart, parseFloat(grand), commission);
+          });
+        },
+        onError: function(err) {
+          showToast('Erreur PayPal. Réessayez.', 'err');
+        },
+        style: { layout: 'vertical', color: 'blue', shape: 'pill', label: 'pay', height: 44 }
+      }).render('#cart-paypal-buttons');
+    } catch(e) {
+      wrap.innerHTML = '<div style="font-size:12px;color:#EF4444;text-align:center">Erreur PayPal. Réessayez.</div>';
+    }
+  }
+
+  var existing = document.getElementById('paypal-sdk');
+  if (!existing) {
+    var script = document.createElement('script');
+    script.id  = 'paypal-sdk';
+    script.src = 'https://www.paypal.com/sdk/js?client-id=' + _GW_PAYPAL_CLIENT_ID + '&currency=EUR&intent=capture';
+    script.onload  = _renderCartPayPalBtn;
+    script.onerror = function() {
+      wrap.innerHTML = '<div style="font-size:12px;color:#EF4444;text-align:center;padding:8px"><i class="fas fa-exclamation-triangle"></i> PayPal indisponible.</div>';
+    };
+    document.head.appendChild(script);
+  } else {
+    _renderCartPayPalBtn();
+  }
+}
+
+/* ── Succès PayPal → notifie vendeurs, enregistre txn, vide panier ── */
+function _cartCheckoutSuccess(details, cart, grand, commission) {
+  var buyerProfile = loadUserProfile(_currentUser.email) || {};
+  var buyerName    = buyerProfile.nom || _currentUser.nom || 'Un acheteur';
+
+  /* Notifie chaque vendeur */
+  var sellers = {};
+  cart.forEach(function(item) {
+    if (!sellers[item.ownerEmail]) sellers[item.ownerEmail] = [];
+    sellers[item.ownerEmail].push(item.title);
+  });
+  Object.keys(sellers).forEach(function(email) {
+    if (email && email !== _currentUser.email) {
+      pushNotif(email, {
+        id: genNotifId(), type: 'system',
+        title: '💰 Nouvelle commande !',
+        message: buyerName + ' a commandé : ' + sellers[email].join(', ') + '\nMontant reçu via PayPal.',
+        date: new Date().toISOString(), read: false
+      });
+    }
+  });
+
+  /* Enregistre la transaction */
+  var txns = _mkGetTxns();
+  txns.unshift({
+    id:            'txn_cart_' + Date.now(),
+    listingTitle:  cart.length + ' article(s)',
+    amount:        grand,
+    commission:    commission,
+    sellerNet:     grand - commission,
+    sellerEmail:   Object.keys(sellers).join(', '),
+    buyerEmail:    _currentUser.email,
+    paypalOrderId: details.id,
+    status:        'completed',
+    date:          new Date().toISOString()
+  });
+  _mkSaveTxns(txns);
+
+  /* Vide le panier */
+  saveCart([]);
+  _updateCartBadge();
+  closeCartScreen();
+
+  showToast('Paiement réussi ✓ Les vendeurs ont été notifiés !', 'ok');
+}
+
+/* ══════════════════════════════════════════
+   FILTRES MARKETPLACE
+══════════════════════════════════════════ */
+var _mkFilters = { sort: 'recent', minPrice: '', maxPrice: '', type: 'all' };
+
+function openMkFilters() {
+  _closeGenericSheet('mk-filters');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'mk-filters-bg';
+  bg.onclick = function() { _closeGenericSheet('mk-filters'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card mk-filters-card'; card.id = 'mk-filters-card';
+
+  var sorts = [
+    { k: 'recent',    label: 'Plus récent',         ico: 'fa-clock' },
+    { k: 'price_asc', label: 'Prix croissant',       ico: 'fa-arrow-up-short-wide' },
+    { k: 'price_desc',label: 'Prix décroissant',     ico: 'fa-arrow-down-short-wide' }
+  ];
+  var sortHtml = sorts.map(function(s) {
+    return '<button class="mkf-sort-btn' + (_mkFilters.sort === s.k ? ' active' : '') + '" ' +
+      'data-sort="' + s.k + '" onclick="_mkfSetSort(this)">' +
+      '<i class="fas ' + s.ico + '"></i> ' + s.label + '</button>';
+  }).join('');
+
+  var typeHtml = [
+    { k: 'all',     label: 'Tout' },
+    { k: 'service', label: '<i class="fas fa-concierge-bell"></i> Services' },
+    { k: 'produit', label: '<i class="fas fa-box"></i> Produits' }
+  ].map(function(t) {
+    return '<button class="mkf-type-btn' + (_mkFilters.type === t.k ? ' active' : '') + '" ' +
+      'data-type="' + t.k + '" onclick="_mkfSetType(this)">' + t.label + '</button>';
+  }).join('');
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<p class="cam-sheet-title">Filtres</p>' +
+
+    '<div class="mkf-section">' +
+      '<p class="mkf-label">Trier par</p>' +
+      '<div class="mkf-sort-row">' + sortHtml + '</div>' +
+    '</div>' +
+
+    '<div class="mkf-section">' +
+      '<p class="mkf-label">Type</p>' +
+      '<div class="mkf-type-row">' + typeHtml + '</div>' +
+    '</div>' +
+
+    '<div class="mkf-section">' +
+      '<p class="mkf-label">Fourchette de prix (€)</p>' +
+      '<div class="mkf-price-row">' +
+        '<input class="mkf-price-input" id="mkf-min" type="number" min="0" placeholder="Min" ' +
+               'value="' + (_mkFilters.minPrice || '') + '"/>' +
+        '<span class="mkf-price-sep">–</span>' +
+        '<input class="mkf-price-input" id="mkf-max" type="number" min="0" placeholder="Max" ' +
+               'value="' + (_mkFilters.maxPrice || '') + '"/>' +
+      '</div>' +
+    '</div>' +
+
+    '<div class="mkf-btns">' +
+      '<button class="mkf-reset-btn" onclick="_mkfReset()">Réinitialiser</button>' +
+      '<button class="mkf-apply-btn" onclick="_mkfApply()">Appliquer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+}
+
+function _mkfSetSort(btn) {
+  document.querySelectorAll('.mkf-sort-btn').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  _mkFilters.sort = btn.dataset.sort;
+}
+function _mkfSetType(btn) {
+  document.querySelectorAll('.mkf-type-btn').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  _mkFilters.type = btn.dataset.type;
+}
+function _mkfReset() {
+  _mkFilters = { sort: 'recent', minPrice: '', maxPrice: '', type: 'all' };
+  _closeGenericSheet('mk-filters');
+  /* Retire indicateur actif sur le bouton Filtres */
+  var btn = document.getElementById('mk-filter-btn');
+  if (btn) btn.classList.remove('mk-filter-active');
+  renderMarketplaceUserServices();
+}
+function _mkfApply() {
+  _mkFilters.minPrice = parseFloat(document.getElementById('mkf-min').value) || '';
+  _mkFilters.maxPrice = parseFloat(document.getElementById('mkf-max').value) || '';
+  _closeGenericSheet('mk-filters');
+  /* Indique que des filtres sont actifs */
+  var btn = document.getElementById('mk-filter-btn');
+  if (btn) btn.classList.add('mk-filter-active');
+  renderMarketplaceUserServices();
+}
+
+/* ══════════════════════════════════════════
+   RECHERCHE
+══════════════════════════════════════════ */
+var _searchFilter = 'all';
+var _searchTimer  = null;
+
+/* Ouvre l'overlay avec animation slide-from-top */
+function openSearch() {
+  var ov = document.getElementById('search-overlay');
+  ov.classList.remove('hidden');
+  /* Force reflow pour que la transition se déclenche */
+  void ov.offsetWidth;
+  ov.classList.add('open');
+  /* Focus sur le champ après l'animation */
+  setTimeout(function() {
+    var inp = document.getElementById('search-input');
+    if (inp) inp.focus();
+  }, 310);
+}
+
+/* Ferme l'overlay */
+function closeSearch() {
+  var ov = document.getElementById('search-overlay');
+  ov.classList.remove('open');
+  setTimeout(function() { ov.classList.add('hidden'); }, 310);
+  /* Réinitialise le champ et les résultats */
+  var inp = document.getElementById('search-input');
+  if (inp) { inp.value = ''; inp.blur(); }
+  var clrBtn = document.getElementById('search-clear');
+  if (clrBtn) clrBtn.classList.add('hidden');
+  _renderSrchEmpty();
+  /* Remet le filtre sur "Tout" */
+  document.querySelectorAll('.srch-filter').forEach(function(b) { b.classList.remove('active'); });
+  var first = document.querySelector('.srch-filter');
+  if (first) first.classList.add('active');
+  _searchFilter = 'all';
+}
+
+/* Change le filtre actif et relance la recherche */
+function setSearchFilter(btn, filter) {
+  _searchFilter = filter;
+  document.querySelectorAll('.srch-filter').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  var inp = document.getElementById('search-input');
+  if (inp && inp.value.trim()) renderSrchResults(inp.value.trim());
+}
+
+/* Efface le champ */
+function clearSearch() {
+  var inp = document.getElementById('search-input');
+  if (inp) { inp.value = ''; inp.focus(); }
+  var clrBtn = document.getElementById('search-clear');
+  if (clrBtn) clrBtn.classList.add('hidden');
+  _renderSrchEmpty();
+}
+
+/* Déclenché à chaque frappe */
+function doSearch(query) {
+  var clrBtn = document.getElementById('search-clear');
+  if (clrBtn) clrBtn.classList.toggle('hidden', !query.trim());
+
+  if (!query.trim()) { _renderSrchEmpty(); return; }
+
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(function() { renderSrchResults(query.trim()); }, 220);
+}
+
+/* Affiche l'état vide */
+function _renderSrchEmpty() {
+  var box = document.getElementById('srch-results');
+  if (!box) return;
+  box.innerHTML =
+    '<div class="srch-empty-state">' +
+      '<i class="fas fa-magnifying-glass"></i>' +
+      '<p>Rechercher des utilisateurs<br/>ou des publications</p>' +
+    '</div>';
+}
+
+/* Rendu des résultats */
+function renderSrchResults(query) {
+  var box = document.getElementById('srch-results');
+  if (!box) return;
+
+  var q = query.toLowerCase();
+  var showUsers = _searchFilter === 'all' || _searchFilter === 'users';
+  var showPosts = _searchFilter === 'all' || _searchFilter === 'posts';
+
+  /* ── Recherche d'utilisateurs ── */
+  var matchedUsers = [];
+  var seenNames    = {};
+
+  /* Utilisateurs inscrits — toujours le nom actuel du profil */
+  getUsers().forEach(function(u) {
+    var currentNom  = getDisplayName(u.email, u.nom);
+    var currentRole = getDisplayRole(u.email, 'Membre Geniwork');
+    if (currentNom.toLowerCase().indexOf(q) !== -1 ||
+        currentRole.toLowerCase().indexOf(q) !== -1) {
+      seenNames[currentNom.toLowerCase()] = true;
+      matchedUsers.push({ nom: currentNom, email: u.email, role: currentRole });
+    }
+  });
+
+  /* Auteurs des posts démo — nom toujours à jour */
+  getAllPosts().forEach(function(p) {
+    var currentNom  = getDisplayName(p.ownerEmail, p.author);
+    var currentRole = getDisplayRole(p.ownerEmail, p.role);
+    var key = currentNom.toLowerCase();
+    if (!seenNames[key] &&
+        (key.indexOf(q) !== -1 || currentRole.toLowerCase().indexOf(q) !== -1)) {
+      seenNames[key] = true;
+      matchedUsers.push({ nom: currentNom, email: p.ownerEmail || null, role: currentRole || 'Entrepreneur' });
+    }
+  });
+
+  /* ── Recherche de publications — texte + nom auteur à jour ── */
+  var matchedPosts = getAllPosts().filter(function(p) {
+    var currentNom = getDisplayName(p.ownerEmail, p.author);
+    return (p.text       && p.text.toLowerCase().indexOf(q)      !== -1) ||
+           currentNom.toLowerCase().indexOf(q)                   !== -1  ||
+           (p.role       && p.role.toLowerCase().indexOf(q)      !== -1);
+  });
+
+  var html     = '';
+  var hasAny   = false;
+
+  if (showUsers && matchedUsers.length) {
+    hasAny = true;
+    if (_searchFilter === 'all') {
+      html += '<div class="srch-section-title">Utilisateurs</div>';
+    }
+    matchedUsers.slice(0, 6).forEach(function(u) {
+      var emailArg = u.email ? '\'' + u.email + '\'' : 'null';
+      html +=
+        '<div class="srch-user-item" onclick="srchOpenProfile(' +
+              '\'' + u.nom.replace(/'/g, "\\'") + '\',' +
+              '\'' + (u.role || '').replace(/'/g, "\\'") + '\',' +
+              emailArg + ')">' +
+          getAvatarHtml(u.email || null, u.nom, 'sm srch-av') +
+          '<div class="srch-user-info">' +
+            '<strong>' + _srchHighlight(escHtml(u.nom), query) + getBadgeHtml(u.email || null) + '</strong>' +
+            '<small>' + escHtml(u.role || 'Membre Geniwork') + '</small>' +
+          '</div>' +
+          '<i class="fas fa-chevron-right srch-chevron"></i>' +
+        '</div>';
+    });
+  }
+
+  if (showPosts && matchedPosts.length) {
+    hasAny = true;
+    if (_searchFilter === 'all') {
+      html += '<div class="srch-section-title">Publications</div>';
+    }
+    matchedPosts.slice(0, 10).forEach(function(p) {
+      var preview  = p.text ? p.text.slice(0, 90) + (p.text.length > 90 ? '…' : '') : '';
+      var mediaIco = '';
+      if (p.images && p.images.length) {
+        mediaIco = '<i class="fas fa-image srch-media-icon"></i>';
+      } else if (p.video) {
+        mediaIco = '<i class="fas fa-play srch-media-icon"></i>';
+      }
+      var postDisplayNom  = getDisplayName(p.ownerEmail, p.author);
+      var postDisplayRole = getDisplayRole(p.ownerEmail, p.role);
+      html +=
+        '<div class="srch-post-item" onclick="srchOpenPost(\'' + p.id + '\')">' +
+          '<div class="srch-post-header">' +
+            getAvatarHtml(p.ownerEmail || null, postDisplayNom, 'sm srch-av') +
+            '<div class="srch-post-meta">' +
+              '<strong>' + _srchHighlight(escHtml(postDisplayNom), query) + getBadgeHtml(p.ownerEmail || null) + '</strong>' +
+              '<small>' + escHtml(postDisplayRole || '') + ' · ' + escHtml(p.time || '') + '</small>' +
+            '</div>' +
+            mediaIco +
+          '</div>' +
+          (preview
+            ? '<p class="srch-post-preview">' + _srchHighlight(escHtml(preview), query) + '</p>'
+            : '') +
+        '</div>';
+    });
+  }
+
+  if (!hasAny) {
+    html =
+      '<div class="srch-no-results">' +
+        '<i class="fas fa-face-frown"></i>' +
+        '<p>Aucun résultat pour<br/>« ' + escHtml(query) + ' »</p>' +
+        '<small>Essayez avec d\'autres mots-clés</small>' +
+      '</div>';
+  }
+
+  box.innerHTML = html;
+}
+
+/* Surligne le mot cherché dans le texte (sans casser le HTML existant) */
+function _srchHighlight(html, query) {
+  if (!query) return html;
+  var q   = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  var rex = new RegExp('(' + q + ')', 'gi');
+  return html.replace(rex, '<mark class="srch-mark">$1</mark>');
+}
+
+/* Ouvre le profil complet depuis les résultats de recherche */
+function srchOpenProfile(nom, role, email) {
+  closeSearch();
+  openUserProfileView({ nom: nom, role: role, email: email || null });
+}
+
+/* Navigue vers un post depuis les résultats de recherche */
+function srchOpenPost(postId) {
+  closeSearch();
+  var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
+  navTo(homeBtn, 'p-home');
+  setTimeout(function() { highlightPost(postId); }, 400);
+}
+
+/* ══════════════════════════════════════════
+   DÉCONNEXION
+══════════════════════════════════════════ */
+function doLogout() {
+  _currentUser = null;
+  localStorage.removeItem('gw_session');
+  _pickedImages = [];
+  _clearVideo();
+  closeSidebar();
+  showToast('Déconnexion réussie', 'ok');
+  setTimeout(function() { goTo('screen-login'); }, 800);
+}
+
+/* ══════════════════════════════════════════
+   BOUTON RETOUR — Android / Capacitor
+══════════════════════════════════════════ */
+function _isScreenOpen(id) {
+  var el = document.getElementById(id);
+  return !!(el && el.classList.contains('open') && !el.classList.contains('hidden'));
+}
+
+function _handleBackButton(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  /* Ferme l'écran le plus profond en premier */
+  if (_isScreenOpen('change-pwd-screen'))       { closeChangePwdScreen();        return; }
+  if (_isScreenOpen('legal-cgu-screen'))        { closeLegalScreen('cgu');        return; }
+  if (_isScreenOpen('legal-privacy-screen'))    { closeLegalScreen('privacy');    return; }
+  if (_isScreenOpen('privacy-settings-screen')) { closePrivacySettings();         return; }
+  if (_isScreenOpen('settings-screen'))         { closeAppSettings();             return; }
+  if (_isScreenOpen('support-screen'))       { closeSupportScreen();       return; }
+  if (_isScreenOpen('sub-screen'))           { closeSubPage();             return; }
+  if (_isScreenOpen('badge-screen'))         { closeBadgePage();           return; }
+  if (_isScreenOpen('favoris-screen'))       { closeFavorisScreen();       return; }
+  if (_isScreenOpen('cart-screen'))          { closeCartScreen();          return; }
+  if (_isScreenOpen('achat-screen'))         { closeAchatScreen();         return; }
+  /* Sidebar */
+  var sb = document.getElementById('app-sidebar');
+  if (sb && sb.classList.contains('open'))   { closeSidebar();             return; }
+  /* Modal générique ouvert */
+  var modal = document.querySelector('.change-pwd-modal');
+  if (modal) { modal.remove(); return; }
+  /* Quitter l'app (Capacitor) */
+  try {
+    if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
+      window.Capacitor.Plugins.App.exitApp();
+    }
+  } catch(err) {}
+}
+
+document.addEventListener('backbutton', _handleBackButton, false);
+
+/* ══════════════════════════════════════════
+   PAGE ABONNEMENTS — 3 NIVEAUX
+══════════════════════════════════════════ */
+var _subBilling  = 'month'; /* 'month' | 'year' */
+var _subPending  = null;    /* plan en attente de confirmation */
+
+/* Prices */
+var _SUB_PRICES = {
+  premium:  { month: '4,99 €',  year: '49,99 €'  },
+  business: { month: '14,99 €', year: '149,99 €' }
+};
+var _SUB_LABELS = {
+  premium:  { month: 'par mois · annulation à tout moment', year: 'par an (≈ 4,17 €/mois) · annulation à tout moment' },
+  business: { month: 'par mois · annulation à tout moment', year: 'par an (≈ 12,50 €/mois) · annulation à tout moment' }
+};
+var _SUB_NOTES = {
+  premium:  { year: '49,99 € / an — économisez 9,89 €' },
+  business: { year: '149,99 € / an — économisez 29,89 €' }
+};
+
+/* Ouvre la page abonnements (slide depuis la droite, dans le cadre téléphone) */
+function openSubPage() {
+  if (!_currentUser) { showToast('Connectez-vous pour voir les abonnements', 'err'); return; }
+  var screen = document.getElementById('sub-screen');
+  if (!screen) return;
+  screen.classList.remove('hidden');
+  screen.classList.add('show');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+  _subBilling = 'month';
+  /* Reset toggle visuel */
+  var btnM = document.getElementById('sub-bill-month');
+  var btnY = document.getElementById('sub-bill-year');
+  if (btnM) btnM.classList.add('active');
+  if (btnY) btnY.classList.remove('active');
+  _subRenderPrices();
+  _subRenderCurrentPlan();
+}
+
+/* Ferme la page abonnements */
+function closeSubPage() {
+  var screen = document.getElementById('sub-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  screen.addEventListener('transitionend', function handler() {
+    screen.removeEventListener('transitionend', handler);
+    screen.classList.add('hidden');
+    screen.classList.remove('show');
+  });
+}
+
+/* Bascule mensuel / annuel */
+function _subSetBilling(type) {
+  _subBilling = type;
+  document.getElementById('sub-bill-month').classList.toggle('active', type === 'month');
+  document.getElementById('sub-bill-year').classList.toggle('active',  type === 'year');
+  _subRenderPrices();
+}
+
+/* Met à jour les prix affichés */
+function _subRenderPrices() {
+  ['premium', 'business'].forEach(function(plan) {
+    var priceEl  = document.getElementById('sub-price-' + plan);
+    var periodEl = document.getElementById('sub-period-' + plan);
+    var noteEl   = document.getElementById('sub-annual-note-' + plan);
+    if (priceEl)  priceEl.textContent  = _SUB_PRICES[plan][_subBilling];
+    if (periodEl) periodEl.textContent = _subBilling === 'month' ? '/ mois' : '/ an';
+    if (noteEl) {
+      if (_subBilling === 'year') {
+        noteEl.textContent = _SUB_NOTES[plan].year;
+        noteEl.classList.remove('hidden');
+      } else {
+        noteEl.classList.add('hidden');
+      }
+    }
+  });
+}
+
+/* Affiche le plan actuel de l'utilisateur */
+function _subRenderCurrentPlan() {
+  if (!_currentUser) return;
+  var profile  = loadUserProfile(_currentUser.email) || {};
+  var planType = profile.planType || 'free';
+
+  /* Réinitialise tous les badges et boutons */
+  ['free', 'premium', 'business'].forEach(function(p) {
+    var badge = document.getElementById('sub-current-' + p);
+    var btn   = document.getElementById('sub-btn-' + p);
+    if (badge) badge.classList.add('hidden');
+    if (btn) {
+      btn.classList.remove('sub-cta-current');
+      btn.disabled = false;
+    }
+  });
+
+  /* Active le badge du plan courant */
+  var curBadge = document.getElementById('sub-current-' + planType);
+  if (curBadge) curBadge.classList.remove('hidden');
+
+  /* ── Bouton du plan actuel ── */
+  var curBtn = document.getElementById('sub-btn-' + planType);
+  if (curBtn) {
+    curBtn.classList.add('sub-cta-current');
+    curBtn.disabled  = true;
+    curBtn.innerHTML = '<i class="fas fa-check"></i> Plan actuel';
+  }
+
+  /* ── Bouton Gratuit : toujours "Plan actuel" désactivé, jamais de résiliation ── */
+  var freeBtn = document.getElementById('sub-btn-free');
+  if (freeBtn) {
+    freeBtn.disabled         = true;
+    freeBtn.classList.remove('sub-cta-current');
+    freeBtn.innerHTML        = 'Plan actuel';
+    freeBtn.style.background = '';
+    freeBtn.style.color      = '';
+    freeBtn.style.cursor     = 'default';
+  }
+
+  /* ── Lien "Résilier" sous la carte du plan payant actif uniquement ── */
+  /* Supprimer l'ancien lien s'il existe */
+  var oldCancel = document.getElementById('sub-cancel-link');
+  if (oldCancel) oldCancel.remove();
+
+  if (planType === 'premium' || planType === 'business') {
+    var curCard = document.getElementById('sub-card-' + planType);
+    if (curCard) {
+      var cancelLink = document.createElement('div');
+      cancelLink.id  = 'sub-cancel-link';
+      cancelLink.className = 'sub-cancel-link';
+      if (profile.planCancelled) {
+        var renewalDate = profile.planRenewalDate
+          ? new Date(profile.planRenewalDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+          : '—';
+        cancelLink.innerHTML =
+          '<i class="fas fa-hourglass-half"></i> Annulation en cours · Actif jusqu\'au ' + renewalDate +
+          ' — <button class="sub-cancel-link-btn resume" onclick="_subResumePlan()">Réactiver</button>';
+      } else {
+        cancelLink.innerHTML =
+          '<button class="sub-cancel-link-btn" onclick="_subOpenCancelFlow()">' +
+            '<i class="fas fa-calendar-xmark"></i> Résilier l\'abonnement' +
+          '</button>';
+      }
+      curCard.appendChild(cancelLink);
+    }
+  }
+
+  /* ── Infos renouvellement / annulation sous la carte actuelle ── */
+  _subRenderRenewalInfo(profile, planType);
+
+  /* Chip sidebar */
+  _subUpdateSidebarChip(planType);
+
+  /* ── Appliquer l'état activé/désactivé des plans (config admin) ── */
+  var cfg = _admGetPlansConfig();
+  ['premium', 'business'].forEach(function(p) {
+    var card = document.getElementById('sub-card-' + p);
+    var btn  = document.getElementById('sub-btn-' + p);
+    var enabled = p === 'premium' ? cfg.premiumEnabled : cfg.businessEnabled;
+    if (!card || !btn) return;
+    if (!enabled) {
+      card.classList.add('sub-plan-disabled');
+      btn.disabled = true;
+      if (loadUserProfile(_currentUser.email || '').planType !== p) {
+        btn.innerHTML = '<i class="fas fa-ban"></i> Indisponible';
+      }
+      /* Ajouter/mettre à jour la bannière "indisponible" */
+      var bann = card.querySelector('.sub-unavail-banner');
+      if (!bann) {
+        bann = document.createElement('div');
+        bann.className = 'sub-unavail-banner';
+        bann.innerHTML = '<i class="fas fa-circle-pause"></i> Temporairement indisponible';
+        card.insertBefore(bann, card.firstChild);
+      }
+    } else {
+      card.classList.remove('sub-plan-disabled');
+      var existing = card.querySelector('.sub-unavail-banner');
+      if (existing) existing.remove();
+      /* Restaurer le bouton si pas plan courant */
+      var pBtns = { premium: '<i class="fas fa-crown"></i> Passer Premium', business: '<i class="fas fa-briefcase"></i> Passer Business Pro' };
+      if (btn && !btn.classList.contains('sub-cta-current')) {
+        btn.disabled = false;
+        btn.innerHTML = pBtns[p];
+      }
+    }
+  });
+}
+
+/* Affiche les infos de renouvellement / annulation sous la page abonnements */
+function _subRenderRenewalInfo(profile, planType) {
+  /* Supprimer l'ancien bandeau s'il existe */
+  var old = document.getElementById('sub-renewal-info');
+  if (old) old.remove();
+  if (planType === 'free' || !profile.planRenewalDate) return;
+
+  var renewalDate  = new Date(profile.planRenewalDate);
+  var renewalStr   = renewalDate.toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
+  var daysLeft     = Math.max(0, Math.round((renewalDate - new Date()) / (24 * 3600 * 1000)));
+  var planLabels   = { premium: 'Premium 👑', business: 'Business Pro 💼' };
+  var planLabel    = planLabels[planType] || planType;
+  var billingLabel = profile.planBilling === 'year' ? 'annuel' : 'mensuel';
+
+  var band = document.createElement('div');
+  band.id  = 'sub-renewal-info';
+  band.className = 'sub-renewal-band' + (profile.planCancelled ? ' cancelled' : '');
+
+  if (profile.planCancelled) {
+    band.innerHTML =
+      '<div class="sub-ren-icon"><i class="fas fa-hourglass-half"></i></div>' +
+      '<div class="sub-ren-text">' +
+        '<strong>Annulation programmée</strong><br>' +
+        'Votre plan ' + planLabel + ' reste actif jusqu\'au <strong>' + renewalStr + '</strong>.<br>' +
+        '<span class="sub-ren-days">Passage au plan Gratuit dans ' + daysLeft + ' jour' + (daysLeft > 1 ? 's' : '') + '</span>' +
+      '</div>' +
+      '<button class="sub-ren-resume-btn" onclick="_subResumePlan()">Réactiver</button>';
+  } else {
+    var deadlineStr = _subGetCancelDeadline(profile.planRenewalDate);
+    band.innerHTML =
+      '<div class="sub-ren-icon"><i class="fas fa-rotate"></i></div>' +
+      '<div class="sub-ren-text">' +
+        '<strong>Renouvellement automatique</strong><br>' +
+        'Abonnement ' + billingLabel + ' · Prochain prélèvement le <strong>' + renewalStr + '</strong><br>' +
+        '<span class="sub-ren-days">Annulation gratuite avant le ' + deadlineStr + '</span>' +
+      '</div>';
+  }
+
+  /* Insérer avant la garantie */
+  var guarantee = document.querySelector('.sub-guarantee');
+  if (guarantee) guarantee.parentNode.insertBefore(band, guarantee);
+}
+
+/* Réactiver un abonnement annulé */
+function _subResumePlan() {
+  if (!_currentUser) return;
+  var profile = loadUserProfile(_currentUser.email) || {};
+  if (!profile.planCancelled) return;
+
+  profile.planCancelled   = false;
+  profile.planCancelledAt = null;
+  saveUserProfile(_currentUser.email, profile);
+
+  var planLabels = { premium: 'Premium 👑', business: 'Business Pro 💼' };
+  var planLabel  = planLabels[profile.planType] || profile.planType;
+  var renewalStr = profile.planRenewalDate
+    ? new Date(profile.planRenewalDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+    : '—';
+
+  var notif = {
+    id: genNotifId(), type: 'plan_resumed',
+    msg: '✅ Votre abonnement ' + planLabel + ' a été réactivé. Renouvellement prévu le ' + renewalStr + '. Un e-mail de confirmation a été envoyé à ' + _currentUser.email + '.',
+    at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null
+  };
+  var ns = getNotifs(_currentUser.email); ns.unshift(notif); saveNotifs(_currentUser.email, ns);
+  try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+
+  _subRenderCurrentPlan();
+  showToast('Abonnement ' + planLabel + ' réactivé ✅', 'ok');
+}
+
+/* Met à jour le chip de plan dans la sidebar */
+function _subUpdateSidebarChip(planType) {
+  var chip = document.getElementById('sdb-plan-chip');
+  if (!chip) return;
+  var labels = { free: 'Gratuit', premium: 'Premium', business: 'Business Pro' };
+  chip.textContent = labels[planType] || 'Gratuit';
+  chip.className = 'sdb-plan-chip chip-' + (planType || 'free');
+}
+
+/* Sélection d'un plan → ouvre la confirmation ou le flux d'annulation */
+function _subChoosePlan(plan) {
+  if (!_currentUser) { showToast('Connectez-vous pour vous abonner', 'err'); return; }
+  var profile  = loadUserProfile(_currentUser.email) || {};
+  var current  = profile.planType || 'free';
+
+  /* Déjà sur ce plan, ou clic sur Gratuit (toujours bloqué) */
+  if (plan === current || plan === 'free') return;
+
+  /* Vérifier si le plan est activé par l'admin */
+  var cfg = _admGetPlansConfig();
+  if (plan === 'premium'  && !cfg.premiumEnabled)  { showToast('Ce plan est temporairement indisponible', 'err'); return; }
+  if (plan === 'business' && !cfg.businessEnabled) { showToast('Ce plan est temporairement indisponible', 'err'); return; }
+
+  _subPending = plan;
+
+  var titles  = { premium: 'Passer Premium 👑', business: 'Passer Business Pro 💼' };
+  var subs    = { premium: 'Badge vérifié · Visibilité accrue · Messages illimités',
+                  business: 'Tout Premium + Analytics · Recrutement · Publicités · IA' };
+
+  var titleEl = document.getElementById('sub-pay-title');
+  var subEl   = document.getElementById('sub-pay-sub');
+  var valEl   = document.getElementById('sub-pay-val');
+  var lblEl   = document.getElementById('sub-pay-lbl');
+  var ctaEl   = document.getElementById('sub-pay-cta');
+
+  if (titleEl) titleEl.textContent = titles[plan];
+  if (subEl)   subEl.textContent   = subs[plan];
+  if (valEl)   valEl.textContent   = _SUB_PRICES[plan][_subBilling];
+  if (lblEl)   lblEl.textContent   = _SUB_LABELS[plan][_subBilling];
+  if (ctaEl) {
+    ctaEl.className = 'sub-pay-cta' + (plan === 'business' ? ' business-cta' : '');
+    ctaEl.innerHTML = '<i class="fas fa-lock"></i> Confirmer l\'abonnement';
+  }
+
+  var modal = document.getElementById('sub-pay-modal');
+  if (modal) modal.classList.remove('hidden');
+
+  /* Charger / afficher le bouton PayPal */
+  setTimeout(_subLoadPayPal, 80);
+}
+
+function _subClosePayModal() {
+  var modal = document.getElementById('sub-pay-modal');
+  if (modal) modal.classList.add('hidden');
+  _subPending = null;
+  /* Vide le conteneur PayPal pour forcer un rechargement propre à la prochaine ouverture */
+  var wrap = document.getElementById('sub-paypal-btn-container');
+  if (wrap) wrap.innerHTML = '';
+}
+
+/* ── Charge le SDK PayPal et affiche le bouton de paiement ── */
+var _subPaypalLoading = false;
+function _subLoadPayPal() {
+  var container = document.getElementById('sub-paypal-btn-container');
+  if (!container) return;
+
+  /* Montant selon plan + billing */
+  var _subAmounts = { premium: { month: 4.99, year: 49.99 }, business: { month: 14.99, year: 149.99 } };
+  var plan    = _subPending;
+  var amount  = _subAmounts[plan] ? _subAmounts[plan][_subBilling || 'month'] : 4.99;
+
+  /* Si SDK déjà chargé → rendre directement */
+  if (window.paypal) {
+    _subRenderPayPalBtn(amount);
+    return;
+  }
+
+  /* Évite double chargement */
+  if (_subPaypalLoading) return;
+  _subPaypalLoading = true;
+
+  container.innerHTML = '<div style="text-align:center;padding:18px 0"><div style="width:28px;height:28px;border:3px solid #E2E8F0;border-top-color:#6366F1;border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 8px"></div><span style="font-size:12px;color:#94A3B8">Chargement PayPal…</span></div>';
+
+  var script   = document.createElement('script');
+  script.id    = 'paypal-sdk-script';
+  script.src   = 'https://www.paypal.com/sdk/js?client-id=' + _GW_PAYPAL_CLIENT_ID + '&currency=EUR&intent=capture';
+  script.onload = function() {
+    _subPaypalLoading = false;
+    _subRenderPayPalBtn(amount);
+  };
+  script.onerror = function() {
+    _subPaypalLoading = false;
+    if (container) container.innerHTML =
+      '<div style="color:#DC2626;font-size:12.5px;text-align:center;padding:14px;background:#FEF2F2;border-radius:10px">' +
+      '<i class="fas fa-circle-exclamation" style="margin-right:5px"></i>PayPal indisponible. Vérifiez votre connexion.</div>';
+  };
+  document.head.appendChild(script);
+}
+
+function _subRenderPayPalBtn(amount) {
+  var container = document.getElementById('sub-paypal-btn-container');
+  if (!container || !window.paypal) return;
+  container.innerHTML = '';
+
+  var plan    = _subPending;
+  var labels  = { premium: 'Geniwork Premium', business: 'Geniwork Business Pro' };
+  var billing = (_subBilling === 'year') ? 'Annuel' : 'Mensuel';
+  var descStr = (labels[plan] || 'Geniwork') + ' · ' + billing;
+
+  try {
+    paypal.Buttons({
+      style: { layout: 'vertical', color: 'blue', shape: 'rect', label: 'pay', height: 44 },
+      createOrder: function(data, actions) {
+        return actions.order.create({
+          purchase_units: [{
+            description: descStr,
+            amount: { value: amount.toFixed(2), currency_code: 'EUR' }
+          }]
+        });
+      },
+      onApprove: function(data, actions) {
+        return actions.order.capture().then(function(details) {
+          _subClosePayModal();
+          _subActivatePlan(plan, _subBilling, details);
+        });
+      },
+      onCancel: function() {
+        showToast('Paiement annulé', '');
+      },
+      onError: function(err) {
+        console.error('PayPal sub error', err);
+        showToast('Erreur PayPal. Réessayez.', 'err');
+      }
+    }).render('#sub-paypal-btn-container');
+  } catch(e) {
+    console.error('PayPal render error', e);
+  }
+}
+
+/* ── Active le plan après paiement PayPal confirmé ── */
+function _subActivatePlan(plan, billing, paypalDetails) {
+  if (!plan || !_currentUser) return;
+
+  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  profile.planType      = plan;
+  profile.planBilling   = billing || 'month';
+  profile.planSince     = new Date().toISOString();
+  profile.planCancelled = false;
+  var renewalMs = (billing === 'year') ? 365 * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000;
+  profile.planRenewalDate = new Date(Date.now() + renewalMs).toISOString();
+
+  /* Badge automatique */
+  if (plan === 'premium' || plan === 'business') {
+    profile.badgeType        = 'premium';
+    profile.badgeStatus      = 'approved';
+    profile.badgeApprovedAt  = new Date().toISOString();
+    profile.identityVerified = true;
+  }
+  saveUserProfile(_currentUser.email, profile);
+
+  /* ── Enregistrement du paiement (admin) ── */
+  var amounts = { premium: { month: '4,99 €', year: '49,99 €' }, business: { month: '14,99 €', year: '149,99 €' } };
+  var payment = {
+    id        : 'pay_' + (paypalDetails && paypalDetails.id ? paypalDetails.id : Date.now()),
+    email     : _currentUser.email,
+    nom       : _currentUser.nom || _currentUser.email,
+    plan      : plan,
+    billing   : billing,
+    amount    : amounts[plan] ? amounts[plan][billing || 'month'] : '—',
+    paypalTxId: paypalDetails && paypalDetails.id ? paypalDetails.id : null,
+    date      : new Date().toISOString(),
+    status    : 'completed'
+  };
+  var pays = _admGetPayments();
+  pays.unshift(payment);
+  _admSavePayments(pays);
+
+  /* ── Notification ── */
+  var labels = { premium: 'Premium 👑', business: 'Business Pro 💼' };
+  var notif = {
+    id      : genNotifId(),
+    type    : 'plan_activated',
+    msg     : '🎉 Paiement PayPal confirmé ! Votre abonnement ' + labels[plan] + ' est maintenant actif.',
+    time    : 'À l\'instant',
+    unread  : true,
+    fromUser: null
+  };
+  var notifs = getNotifs(_currentUser.email);
+  notifs.unshift(notif);
+  saveNotifs(_currentUser.email, notifs);
+  try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+
+  _subRenderCurrentPlan();
+  showToast('Abonnement ' + labels[plan] + ' activé ! 🎉', 'ok');
+  try { _renderBadgePage(); } catch(e) {}
+  try {
+    var ds = document.getElementById('dash-screen');
+    if (ds && ds.classList.contains('open')) _renderDashboard();
+  } catch(e) {}
+}
+
+/* ══════════════════════════════════════════
+   ANNULATION D'ABONNEMENT
+══════════════════════════════════════════ */
+
+/* Ouvre la feuille de résiliation */
+function _subOpenCancelFlow() {
+  if (!_currentUser) return;
+  var profile     = loadUserProfile(_currentUser.email) || {};
+  var plan        = profile.planType || 'free';
+  var planLabels  = { premium: 'Premium 👑', business: 'Business Pro 💼' };
+  var planLabel   = planLabels[plan] || plan;
+  var renewalDate = profile.planRenewalDate
+    ? new Date(profile.planRenewalDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+    : 'à la prochaine échéance';
+
+  /* Si déjà annulé → afficher l'état */
+  if (profile.planCancelled) {
+    showToast('Votre abonnement est déjà en cours d\'annulation — actif jusqu\'au ' + renewalDate, '');
+    return;
+  }
+
+  /* Construire la feuille */
+  var existing = document.getElementById('sub-cancel-modal');
+  if (existing) existing.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'sub-cancel-modal';
+  modal.className = 'plm-overlay';
+  modal.innerHTML =
+    '<div class="plm-sheet">' +
+      '<div class="plm-icon-wrap" style="background:linear-gradient(135deg,#FEE2E2,#FECACA)">' +
+        '<i class="fas fa-calendar-xmark" style="font-size:24px;color:#DC2626"></i>' +
+      '</div>' +
+      '<div class="plm-title">Annuler votre abonnement ' + planLabel + ' ?</div>' +
+      '<div class="plm-desc">' +
+        'Votre plan restera actif jusqu\'au <strong>' + renewalDate + '</strong>.<br><br>' +
+        'Passé cette date, votre compte passera automatiquement au plan Gratuit.<br>' +
+        'Un e-mail de confirmation vous sera envoyé.' +
+      '</div>' +
+      '<div class="sub-cancel-countdown">' +
+        '<i class="fas fa-clock"></i> Vous avez jusqu\'au <strong>' + _subGetCancelDeadline(profile.planRenewalDate) + '</strong> pour annuler sans frais' +
+      '</div>' +
+      '<button class="plm-upgrade-btn" style="background:linear-gradient(135deg,#DC2626,#B91C1C)" ' +
+        'onclick="_subConfirmCancel()">' +
+        '<i class="fas fa-calendar-xmark"></i> Confirmer l\'annulation' +
+      '</button>' +
+      '<button class="plm-close-btn" onclick="document.getElementById(\'sub-cancel-modal\').remove()">' +
+        'Garder mon abonnement' +
+      '</button>' +
+    '</div>';
+
+  var frame = document.querySelector('.phone-frame') || document.body;
+  frame.appendChild(modal);
+}
+
+/* Calcule la deadline d'annulation (14 jours avant renouvellement) */
+function _subGetCancelDeadline(renewalIso) {
+  if (!renewalIso) return 'la date de renouvellement';
+  var deadline = new Date(new Date(renewalIso).getTime() - 14 * 24 * 3600 * 1000);
+  return deadline.toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
+}
+
+/* Confirme l'annulation */
+function _subConfirmCancel() {
+  if (!_currentUser) return;
+  var modal   = document.getElementById('sub-cancel-modal');
+  if (modal) modal.remove();
+
+  var profile     = loadUserProfile(_currentUser.email) || {};
+  var plan        = profile.planType || 'free';
+  var planLabels  = { premium: 'Premium 👑', business: 'Business Pro 💼' };
+  var planLabel   = planLabels[plan] || plan;
+  var renewalDate = profile.planRenewalDate
+    ? new Date(profile.planRenewalDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+    : 'à la prochaine échéance';
+
+  /* Marquer comme annulé — reste actif jusqu'à la fin de période */
+  profile.planCancelled   = true;
+  profile.planCancelledAt = new Date().toISOString();
+  saveUserProfile(_currentUser.email, profile);
+
+  /* Notification + simulation email */
+  var notif = {
+    id      : genNotifId(),
+    type    : 'plan_cancelled',
+    msg     : '📧 Annulation confirmée — Votre abonnement ' + planLabel +
+              ' restera actif jusqu\'au ' + renewalDate +
+              '. Un e-mail de confirmation a été envoyé à ' + _currentUser.email +
+              '. Sans action de votre part, le plan passera automatiquement en Gratuit à cette date.',
+    time    : 'À l\'instant',
+    unread  : true,
+    fromUser: null
+  };
+  var notifs = getNotifs(_currentUser.email);
+  notifs.unshift(notif);
+  saveNotifs(_currentUser.email, notifs);
+  try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+
+  _subRenderCurrentPlan();
+  showToast('Annulation enregistrée · Actif jusqu\'au ' + renewalDate, 'ok');
+}
+
+/* ══════════════════════════════════════════
+   RENOUVELLEMENT AUTOMATIQUE & RAPPEL 14J
+   Appelé au démarrage de session (login)
+══════════════════════════════════════════ */
+function _subCheckRenewalAndExpiry() {
+  if (!_currentUser) return;
+  var profile = loadUserProfile(_currentUser.email) || {};
+  var plan    = profile.planType || 'free';
+  if (plan === 'free') return;
+
+  var renewalDate = profile.planRenewalDate ? new Date(profile.planRenewalDate) : null;
+  if (!renewalDate) return;
+
+  var now          = new Date();
+  var planLabels   = { premium: 'Premium 👑', business: 'Business Pro 💼' };
+  var planLabel    = planLabels[plan] || plan;
+  var renewalStr   = renewalDate.toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
+
+  /* ── Plan expiré ? ── */
+  if (now >= renewalDate) {
+    if (profile.planCancelled) {
+      /* Annulation → downgrade vers Gratuit */
+      profile.planType        = 'free';
+      profile.planBilling     = null;
+      profile.planRenewalDate = null;
+      profile.planCancelled   = false;
+      profile.planCancelledAt = null;
+      /* Retire le badge premium automatique */
+      if (profile.badgeType === 'premium') {
+        delete profile.badgeType;
+        delete profile.badgeStatus;
+        delete profile.badgeApprovedAt;
+      }
+      saveUserProfile(_currentUser.email, profile);
+      var expNotif = {
+        id: genNotifId(), type: 'plan_expired',
+        msg: '⚠️ Votre abonnement ' + planLabel + ' a expiré. Votre compte est maintenant sur le plan Gratuit. Repassez à Premium pour retrouver vos avantages.',
+        at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null
+      };
+      var ns = getNotifs(_currentUser.email); ns.unshift(expNotif); saveNotifs(_currentUser.email, ns);
+      try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+      showToast('Abonnement ' + planLabel + ' expiré — passage en Gratuit', 'err');
+    } else {
+      /* Renouvellement automatique */
+      var renewMs = profile.planBilling === 'year' ? 365 * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000;
+      profile.planRenewalDate = new Date(Date.now() + renewMs).toISOString();
+      profile.planSince       = new Date().toISOString();
+      saveUserProfile(_currentUser.email, profile);
+
+      /* Enregistre le renouvellement comme paiement */
+      var amounts = { premium: { month: '4,99 €', year: '49,99 €' }, business: { month: '14,99 €', year: '149,99 €' } };
+      var renewPay = {
+        id: 'pay_' + Date.now(), email: _currentUser.email,
+        nom: _currentUser.nom || _currentUser.email,
+        plan: plan, billing: profile.planBilling || 'month',
+        amount: amounts[plan] ? amounts[plan][profile.planBilling || 'month'] : '—',
+        date: new Date().toISOString(), status: 'completed'
+      };
+      var pays = _admGetPayments(); pays.unshift(renewPay); _admSavePayments(pays);
+
+      var newRenewalStr = new Date(profile.planRenewalDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
+      var renewNotif = {
+        id: genNotifId(), type: 'plan_renewed',
+        msg: '✅ Votre abonnement ' + planLabel + ' a été renouvelé automatiquement. Prochain renouvellement le ' + newRenewalStr + '. Un e-mail de confirmation a été envoyé à ' + _currentUser.email + '.',
+        at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null
+      };
+      var rns = getNotifs(_currentUser.email); rns.unshift(renewNotif); saveNotifs(_currentUser.email, rns);
+      try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+    }
+    return;
+  }
+
+  /* ── Rappel 14 jours avant renouvellement ── */
+  var daysLeft = Math.round((renewalDate - now) / (24 * 3600 * 1000));
+  if (daysLeft <= 14) {
+    /* N'envoyer le rappel qu'une seule fois par période */
+    var reminderKey = 'gw_renewal_reminder_' + _currentUser.email + '_' + renewalDate.toISOString().slice(0,10);
+    if (!localStorage.getItem(reminderKey)) {
+      localStorage.setItem(reminderKey, '1');
+      var action = profile.planCancelled
+        ? 'votre plan Gratuit sera actif après cette date.'
+        : 'votre abonnement sera renouvelé automatiquement. Pour annuler, rendez-vous dans Abonnements avant cette date.';
+      var remNotif = {
+        id: 'reminder_' + Date.now(), type: 'plan_reminder',
+        msg: '📧 Rappel — Votre abonnement ' + planLabel + ' arrive à échéance le ' + renewalStr +
+             ' (dans ' + daysLeft + ' jour' + (daysLeft > 1 ? 's' : '') + '). ' + action +
+             '\n\nUn e-mail a été envoyé à ' + _currentUser.email + '.',
+        at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null
+      };
+      var remNs = getNotifs(_currentUser.email); remNs.unshift(remNotif); saveNotifs(_currentUser.email, remNs);
+      try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+    }
+  }
+}
+
+function _subPayBackdrop(e) {
+  if (e.target.id === 'sub-pay-modal') _subClosePayModal();
+}
+
+/* Compatibilité — redirige vers PayPal */
+function _subConfirmPlan() {
+  /* Le bouton direct est retiré — le paiement passe uniquement par PayPal */
+  showToast('Utilisez le bouton PayPal pour confirmer', '');
+}
+
+/* ══════════════════════════════════════════════════════════════
+   TABLEAU DE BORD UTILISATEUR
+   Adapte le contenu selon profile.planType :
+     'free'     → stats basiques + sections verrouillées + CTA upgrade
+     'premium'  → stats complètes + engagement + badge + messagerie
+     'business' → tout premium + services / projets / analytics business
+════════════════════════════════════════════════════════════════ */
+
+function openDashboard() {
+  if (!_currentUser) { showToast('Connectez-vous pour accéder au tableau de bord', 'err'); return; }
+  var screen = document.getElementById('dash-screen');
+  if (!screen) return;
+  screen.classList.remove('hidden');
+  screen.classList.add('show');
+  requestAnimationFrame(function() { screen.classList.add('open'); });
+  _renderDashboard();
+}
+
+function closeDashboard() {
+  var screen = document.getElementById('dash-screen');
+  if (!screen) return;
+  screen.classList.remove('open');
+  screen.addEventListener('transitionend', function handler() {
+    screen.removeEventListener('transitionend', handler);
+    screen.classList.add('hidden');
+    screen.classList.remove('show');
+  });
+}
+
+/* ─── Rendu principal ─── */
+function _renderDashboard() {
+  if (!_currentUser) return;
+  var email   = _currentUser.email;
+  var nom     = _currentUser.nom;
+  var profile = loadUserProfile(email) || {};
+  var plan    = profile.planType || 'free';
+
+  /* ── Chip de plan ── */
+  var chip = document.getElementById('dash-plan-chip');
+  if (chip) {
+    chip.className = 'dash-plan-chip ' + plan;
+    chip.textContent = plan === 'free' ? 'Gratuit' : plan === 'premium' ? 'Premium 👑' : 'Business Pro 💼';
+  }
+
+  /* ── Données de base ── */
+  var posts       = getPostsByAuthor(email, nom);
+  var postsCount  = posts.length;
+  var profileKey  = getProfileKey({ nom: nom, email: email });
+  var followers   = _getTotalFollowers(profileKey, false);
+  var following   = getFollowing().length;
+  var projects    = loadProjects(email).length;
+  var completion  = getProfileCompletion(email);
+  var svcList     = [];
+  try { svcList = JSON.parse(localStorage.getItem('gw_services_' + email) || '[]'); } catch(e) {}
+  var services    = svcList.length;
+
+  /* Likes */
+  var likesReceived = 0;
+  posts.forEach(function(p) { likesReceived += loadPostLikers(p.id).length; });
+
+  /* Vues de profil — deterministic */
+  var profileViews = Math.max(30, followers * 4 + postsCount * 8 + _getDashSeed(email,'views') * 3);
+  var svcViews     = Math.max(10, services * 85 + _getDashSeed(email,'sv') * 12);
+  var inquiries    = Math.max(0, Math.round(svcViews * 0.08) + _getDashSeed(email,'inq') % 15);
+  var engagePct    = profileViews > 0 ? Math.min(99, Math.round(likesReceived / profileViews * 100 * 10) / 10) : 0;
+
+  /* Messages */
+  var notifs       = getNotifs(email);
+  var msgsReceived = Math.max(
+    notifs.filter(function(n){ return n.type === 'message' || n.type === 'msg'; }).length,
+    _getDashSeed(email, 'msgs')
+  );
+
+  /* Revenus */
+  var revenue = services * 150 + inquiries * 25 + _getDashSeed(email,'rev') * 18 + 150;
+
+  /* Tendances */
+  var tV   = (_getDashSeed(email,'tv')  % 25) + 5;
+  var tSV  = (_getDashSeed(email,'tsv') % 30) + 3;
+  var tInq = (_getDashSeed(email,'tinq')% 20) + 2;
+  var tRev = (_getDashSeed(email,'trev')% 25) + 8;
+  var tFlw = (_getDashSeed(email,'tflw')% 15) + 1;
+
+  /* Données graphes */
+  var wkLbls    = ['L','M','M','J','V','S','D'];
+  var wkViews   = _dashWeekData(email,0).map(function(v){ return Math.round(v * profileViews / 100); });
+  var wkSvcV    = _dashWeekData(email,7).map(function(v){ return Math.round(v * svcViews / 100); });
+  var wkRev     = _dashWeekData(email,14).map(function(v){ return Math.round(v * revenue / 100); });
+
+  /* Sources de trafic */
+  var tSrc = [
+    { label:'Recherche',       pct:45, color:'#6366F1' },
+    { label:'Marketplace',     pct:30, color:'#10B981' },
+    { label:'Réseaux sociaux', pct:15, color:'#8B5CF6' },
+    { label:'Accès direct',    pct:10, color:'#F59E0B' }
+  ];
+
+  /* Demandes breakdown */
+  var dNew  = Math.max(1, Math.round(inquiries * 0.58));
+  var dWip  = Math.max(0, Math.round(inquiries * 0.28));
+  var dDone = Math.max(0, inquiries - dNew - dWip);
+
+  var DSIZE = 110; /* taille donut */
+  var html  = '';
+
+  /* ══════════ EN-TÊTE ══════════ */
+  html += '<div class="dash-header2">';
+  html += '<div><div class="dash-title2">Tableau de bord</div>';
+  html += '<div class="dash-sub2">Bienvenue, ' + escHtml(nom.split(' ')[0]) + ' ! ' + (plan==='free'?'👋':plan==='premium'?'👑':'💼') + '</div></div>';
+  if (plan !== 'free') {
+    html += '<button class="dash-export-btn" onclick="_dashExport()"><i class="fas fa-download"></i> Exporter</button>';
+  }
+  html += '</div>';
+
+  /* ══════════ COMPLÉTION PROFIL ══════════ */
+  if (completion < 100) {
+    html += '<div class="dash-compl-card2">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+    html += '<div class="dash-card-label" style="margin:0">Complétion du profil</div>';
+    html += '<span class="dash-compl-pct">' + completion + '%</span>';
+    html += '</div>';
+    html += '<div class="dash-completion-bar"><div class="dash-completion-fill" style="width:' + completion + '%"></div></div>';
+    html += '<button class="dash-completion-cta" onclick="closeDashboard();showPage(\'p-profil\');renderProfilePage()">Compléter mon profil →</button>';
+    html += '</div>';
+  }
+
+  /* ══════════════════════════════════════
+     PLAN GRATUIT
+  ══════════════════════════════════════ */
+  if (plan === 'free') {
+
+    html += '<div class="dash-section-label">Mes statistiques</div>';
+    html += '<div class="dash-kpi-row">';
+    html += _dashKpiCard2('fas fa-pen-to-square','#EEF2FF','#6366F1', postsCount,  'Publications', tV,   _dashWeekData(email,2));
+    html += _dashKpiCard2('fas fa-user-group',   '#ECFDF5','#10B981', followers,   'Abonnés',      tFlw, _dashWeekData(email,3));
+    html += _dashKpiCard2('fas fa-rss',          '#FFFBEB','#F59E0B', following,   'Abonnements',  null, null);
+    html += '</div>';
+
+    /* Section verrouillée — stats avancées */
+    html += '<div class="dash-section-label">Statistiques avancées <span class="dash-lock-badge"><i class="fas fa-lock"></i> Premium</span></div>';
+    html += '<div class="dash-locked-card2">';
+    html += '<div class="dash-locked-blur">';
+    html += '<div class="dash-kpi-row" style="pointer-events:none">';
+    html += _dashKpiCard2('fas fa-eye',        '#F5F3FF','#8B5CF6', 1254,    'Vues du profil', 18, [40,55,60,72,68,80,90]);
+    html += _dashKpiCard2('fas fa-chart-line', '#EEF2FF','#6366F1', 3468,    'Vues services',  24, [30,45,50,60,72,68,80]);
+    html += _dashKpiCard2('fas fa-handshake',  '#ECFDF5','#10B981', 89,      'Demandes',       12, [20,30,25,40,38,55,60]);
+    html += _dashKpiCard2('fas fa-wallet',     '#FFFBEB','#F59E0B','2 450 €','Revenus',        15, [20,35,40,55,60,70,85]);
+    html += '</div>';
+    html += '<div style="padding:0 16px 12px">';
+    html += '<div class="dash-card-label" style="margin-bottom:8px">Évolution des vues</div>';
+    html += _dashSvgBars([65,70,58,80,75,88,95], '#8B5CF6', wkLbls);
+    html += '</div>';
+    html += '</div>'; /* fin blur */
+    html += '<div class="dash-locked-overlay2">';
+    html += '<div class="dash-locked-ico"><i class="fas fa-lock"></i></div>';
+    html += '<div class="dash-locked-title">Débloquez vos statistiques complètes</div>';
+    html += '<div class="dash-locked-desc2">Vues de profil, revenus, graphiques d\'analyse et bien plus.</div>';
+    html += '<button class="dash-upgrade-btn2" onclick="closeDashboard();openSubPage()"><i class="fas fa-crown"></i> Passer Premium</button>';
+    html += '</div>';
+    html += '</div>'; /* fin locked-card */
+
+    /* CTA upgrade */
+    html += '<div class="dash-upgrade-banner3">';
+    html += '<div style="display:flex;align-items:center;gap:14px">';
+    html += '<div class="dash-upgrade-ico2"><i class="fas fa-crown"></i></div>';
+    html += '<div><div class="dash-upgrade-title2">Passez Premium 👑</div>';
+    html += '<div class="dash-upgrade-sub2">Débloquez toutes vos statistiques, graphiques et outils d\'analyse.</div></div>';
+    html += '</div>';
+    html += '<button class="dash-upgrade-btn2" onclick="closeDashboard();openSubPage()" style="margin-top:14px">Voir les offres</button>';
+    html += '</div>';
+
+  /* ══════════════════════════════════════
+     PLAN PREMIUM
+  ══════════════════════════════════════ */
+  } else if (plan === 'premium') {
+
+    /* KPI row */
+    html += '<div class="dash-section-label">Vue d\'ensemble</div>';
+    html += '<div class="dash-kpi-row">';
+    html += _dashKpiCard2('fas fa-eye',        '#F5F3FF','#8B5CF6', profileViews,    'Vues du profil', tV,   wkViews);
+    html += _dashKpiCard2('fas fa-heart',      '#FEF2F2','#EF4444', likesReceived,   'Likes reçus',    tFlw, _dashWeekData(email,5));
+    html += _dashKpiCard2('fas fa-comment',    '#EFF6FF','#3B82F6', msgsReceived,    'Messages',       tInq, _dashWeekData(email,6));
+    html += _dashKpiCard2('fas fa-chart-line', '#EEF2FF','#6366F1', engagePct + '%', 'Engagement',     tSV,  _dashWeekData(email,4));
+    html += '</div>';
+
+    /* Graphe vues */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-chart-header"><div class="dash-card-label">Évolution des vues</div><span class="dash-chart-period">7 jours</span></div>';
+    html += _dashSvgLine(wkViews, '#8B5CF6', wkLbls);
+    html += '</div>';
+
+    /* Sources de trafic donut */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-card-label">Sources de trafic</div>';
+    html += '<div class="dash-donut-row">';
+    html += '<div class="dash-donut-wrap"><svg viewBox="0 0 ' + DSIZE + ' ' + DSIZE + '" style="width:' + DSIZE + 'px;height:' + DSIZE + 'px">';
+    html += _dashSvgDonut(tSrc, DSIZE);
+    html += '<text x="' + (DSIZE/2) + '" y="' + (DSIZE/2-3) + '" text-anchor="middle" fill="#0F172A" font-size="13" font-weight="800">' + _dashShortNum(profileViews) + '</text>';
+    html += '<text x="' + (DSIZE/2) + '" y="' + (DSIZE/2+12) + '" text-anchor="middle" fill="#94A3B8" font-size="8">Vues</text>';
+    html += '</svg></div>';
+    html += '<div class="dash-donut-legend">';
+    tSrc.forEach(function(s) {
+      html += '<div class="dash-legend-row"><span class="dash-legend-dot" style="background:' + s.color + '"></span><span class="dash-legend-lbl">' + s.label + '</span><span class="dash-legend-pct">' + s.pct + '%</span></div>';
+    });
+    html += '</div></div></div>';
+
+    /* Engagement bar */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-chart-header"><div class="dash-card-label">Engagement hebdomadaire</div><span class="dash-engage-pct2">' + engagePct + '%</span></div>';
+    html += _dashSvgBars(_dashWeekData(email,1), '#6366F1', wkLbls);
+    html += '</div>';
+
+    /* Mon activité */
+    html += '<div class="dash-section-label">Mon activité</div>';
+    html += '<div class="dash-kpi-row">';
+    html += _dashKpiCard2('fas fa-pen-to-square','#EEF2FF','#6366F1', postsCount, 'Publications', null, null);
+    html += _dashKpiCard2('fas fa-user-group',   '#ECFDF5','#10B981', followers,  'Abonnés',      tFlw, null);
+    html += _dashKpiCard2('fas fa-folder-open',  '#EFF6FF','#3B82F6', projects,   'Projets',      null, null);
+    html += '</div>';
+
+    /* Badge */
+    html += _dashBadgeSection(profile);
+
+    /* Section Business verrouillée */
+    html += '<div class="dash-section-label">Analytics Business <span class="dash-lock-badge biz"><i class="fas fa-lock"></i> Business Pro</span></div>';
+    html += '<div class="dash-locked-card2">';
+    html += '<div class="dash-locked-blur">';
+    html += '<div class="dash-kpi-row" style="pointer-events:none">';
+    html += _dashKpiCard2('fas fa-toolbox', '#FFFBEB','#F59E0B', 12,       'Services actifs', 20, [20,30,35,40,45,55,60]);
+    html += _dashKpiCard2('fas fa-wallet',  '#ECFDF5','#10B981','1 850 €', 'Revenus',          18, [20,30,40,45,55,65,80]);
+    html += _dashKpiCard2('fas fa-users',   '#EFF6FF','#3B82F6', 47,       'Clients',          15, [10,20,25,30,35,42,47]);
+    html += '</div></div>';
+    html += '<div class="dash-locked-overlay2">';
+    html += '<div class="dash-locked-ico" style="background:#FFFBEB;color:#F59E0B"><i class="fas fa-briefcase"></i></div>';
+    html += '<div class="dash-locked-title">Analytics Business Pro</div>';
+    html += '<div class="dash-locked-desc2">Services, revenus, clients et taux de conversion.</div>';
+    html += '<button class="dash-upgrade-btn2 biz" onclick="closeDashboard();openSubPage()"><i class="fas fa-briefcase"></i> Passer Business</button>';
+    html += '</div></div>';
+
+    /* CTA Business */
+    html += '<div class="dash-upgrade-banner3 biz">';
+    html += '<div style="display:flex;align-items:center;gap:14px">';
+    html += '<div class="dash-upgrade-ico2 biz"><i class="fas fa-briefcase"></i></div>';
+    html += '<div><div class="dash-upgrade-title2">Business Pro 💼</div>';
+    html += '<div class="dash-upgrade-sub2">Gérez vos services, analysez vos revenus et attirez plus de clients.</div></div>';
+    html += '</div>';
+    html += '<button class="dash-upgrade-btn2 biz" onclick="closeDashboard();openSubPage()" style="margin-top:14px">Voir Business Pro</button>';
+    html += '</div>';
+
+  /* ══════════════════════════════════════
+     PLAN BUSINESS PRO
+  ══════════════════════════════════════ */
+  } else {
+
+    /* KPI row principal */
+    html += '<div class="dash-section-label">Vue d\'ensemble</div>';
+    html += '<div class="dash-kpi-row">';
+    html += _dashKpiCard2('fas fa-eye',         '#F5F3FF','#8B5CF6', profileViews,  'Vues du profil',  tV,   wkViews);
+    html += _dashKpiCard2('fas fa-chart-line',  '#EFF6FF','#3B82F6', svcViews,      'Vues services',   tSV,  wkSvcV);
+    html += _dashKpiCard2('fas fa-paper-plane', '#ECFDF5','#10B981', inquiries,     'Demandes reçues', tInq, _dashWeekData(email,8));
+    html += _dashKpiCard2('fas fa-wallet',      '#FFFBEB','#F59E0B', revenue + ' €','Revenus',         tRev, wkRev);
+    html += '</div>';
+
+    /* Graphe évolution vues */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-chart-header"><div class="dash-card-label">Évolution des vues</div>';
+    html += '<div style="display:flex;gap:12px;font-size:11px;color:#64748B">';
+    html += '<span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#8B5CF6;margin-right:4px"></span>Profil</span>';
+    html += '<span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10B981;margin-right:4px"></span>Services</span>';
+    html += '</div></div>';
+    html += _dashSvgLine(wkViews, '#8B5CF6', wkLbls);
+    html += '</div>';
+
+    /* Sources trafic */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-card-label">Sources de trafic</div>';
+    html += '<div class="dash-donut-row">';
+    html += '<div class="dash-donut-wrap"><svg viewBox="0 0 ' + DSIZE + ' ' + DSIZE + '" style="width:' + DSIZE + 'px;height:' + DSIZE + 'px">';
+    html += _dashSvgDonut(tSrc, DSIZE);
+    html += '<text x="' + (DSIZE/2) + '" y="' + (DSIZE/2-3) + '" text-anchor="middle" fill="#0F172A" font-size="13" font-weight="800">' + _dashShortNum(svcViews) + '</text>';
+    html += '<text x="' + (DSIZE/2) + '" y="' + (DSIZE/2+12) + '" text-anchor="middle" fill="#94A3B8" font-size="8">Vues</text>';
+    html += '</svg></div>';
+    html += '<div class="dash-donut-legend">';
+    tSrc.forEach(function(s) {
+      html += '<div class="dash-legend-row"><span class="dash-legend-dot" style="background:' + s.color + '"></span><span class="dash-legend-lbl">' + s.label + '</span><span class="dash-legend-pct">' + s.pct + '%</span></div>';
+    });
+    html += '</div></div></div>';
+
+    /* Demandes + Revenus côte à côte */
+    html += '<div class="dash-two-col">';
+
+    /* Demandes donut */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-card-label">Demandes reçues</div>';
+    var DS2 = 90;
+    var demSegs = [
+      { pct: Math.round(dNew  / (inquiries||1) * 100), color: '#3B82F6' },
+      { pct: Math.round(dWip  / (inquiries||1) * 100), color: '#10B981' },
+      { pct: Math.max(0,100 - Math.round(dNew/(inquiries||1)*100) - Math.round(dWip/(inquiries||1)*100)), color: '#8B5CF6' }
+    ];
+    html += '<div class="dash-donut-row" style="gap:10px">';
+    html += '<div class="dash-donut-wrap"><svg viewBox="0 0 ' + DS2 + ' ' + DS2 + '" style="width:' + DS2 + 'px;height:' + DS2 + 'px">';
+    html += _dashSvgDonut(demSegs, DS2);
+    html += '<text x="' + (DS2/2) + '" y="' + (DS2/2+5) + '" text-anchor="middle" fill="#0F172A" font-size="13" font-weight="800">' + inquiries + '</text>';
+    html += '</svg></div>';
+    html += '<div class="dash-donut-legend" style="font-size:11px">';
+    [['Nouvelles',dNew,'#3B82F6'],['En cours',dWip,'#10B981'],['Terminées',dDone,'#8B5CF6']].forEach(function(r) {
+      html += '<div class="dash-legend-row"><span class="dash-legend-dot" style="background:' + r[2] + '"></span><span class="dash-legend-lbl">' + r[0] + '</span><span class="dash-legend-pct">' + r[1] + '</span></div>';
+    });
+    html += '</div></div></div>';
+
+    /* Revenus bar */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-chart-header"><div>';
+    html += '<div class="dash-card-label">Revenus</div>';
+    html += '<div style="font-size:18px;font-weight:800;color:#0F172A;margin-top:2px">' + revenue + ' €';
+    html += ' <span class="dash-kpi-trend up" style="font-size:10px"><i class="fas fa-arrow-up"></i> ' + tRev + '% vs mois</span></div>';
+    html += '</div></div>';
+    html += _dashSvgBars(wkRev, '#3B82F6', wkLbls);
+    html += '</div>';
+    html += '</div>'; /* fin two-col */
+
+    /* Services + Top pays */
+    html += '<div class="dash-two-col">';
+
+    /* Services les plus populaires */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-chart-header"><div class="dash-card-label">Services populaires</div><span class="dash-chart-period">30 jours</span></div>';
+    if (svcList.length) {
+      var maxSV = _getDashSeed(email,'msv') * 15 + 300;
+      svcList.slice(0,5).forEach(function(svc, i) {
+        var sv = Math.round(maxSV * Math.pow(0.75, i));
+        var bw = Math.round((sv / maxSV) * 100);
+        var photo = svc.photos && svc.photos[0] ? svc.photos[0] : null;
+        html += '<div class="dash-svc-row">';
+        html += '<span class="dash-svc-rank">' + (i+1) + '</span>';
+        html += photo
+          ? '<img src="' + escHtml(photo) + '" class="dash-svc-thumb" alt=""/>'
+          : '<div class="dash-svc-thumb dash-svc-thumb-ico"><i class="fas fa-toolbox"></i></div>';
+        html += '<div class="dash-svc-info">';
+        html += '<div class="dash-svc-name">' + escHtml((svc.title||'Service').slice(0,20)) + '</div>';
+        html += '<div class="dash-svc-bar-wrap"><div class="dash-svc-bar-fill" style="width:' + bw + '%"></div></div>';
+        html += '</div>';
+        html += '<span class="dash-svc-views">' + _dashShortNum(sv) + ' vues</span>';
+        html += '</div>';
+      });
+      html += '<button class="dash-svc-all" onclick="closeDashboard();showPage(\'p-profil\')">Voir tous les services</button>';
+    } else {
+      html += '<div class="dash-empty-services"><i class="fas fa-toolbox"></i><div>Aucun service actif</div><button class="dash-completion-cta" onclick="closeDashboard()">Ajouter un service</button></div>';
+    }
+    html += '</div>';
+
+    /* Top pays */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-card-label">Top pays</div>';
+    [['🇫🇷','France',55],['🇧🇪','Belgique',15],['🇲🇦','Maroc',10],['🇸🇳','Sénégal',8],['🇨🇮','Côte d\'Ivoire',5],['—','Autres',7]].forEach(function(p) {
+      html += '<div class="dash-pays-row"><span class="dash-pays-flag">' + p[0] + '</span>';
+      html += '<span class="dash-pays-name">' + escHtml(p[1]) + '</span>';
+      html += '<div class="dash-pays-bar-wrap"><div class="dash-pays-bar-fill" style="width:' + p[2] + '%;background:' + (p[1]==='Autres'?'#E2E8F0':'#6366F1') + '"></div></div>';
+      html += '<span class="dash-pays-pct">' + p[2] + '%</span></div>';
+    });
+    html += '</div>';
+    html += '</div>'; /* fin two-col */
+
+    /* Activité récente */
+    html += '<div class="dash-chart-card">';
+    html += '<div class="dash-chart-header"><div class="dash-card-label">Activité récente</div>';
+    html += '<span class="dash-chart-period" style="color:#6366F1">Voir tout</span></div>';
+    var acts = _dashGetActivities(email, svcList, postsCount, followers, msgsReceived, inquiries);
+    acts.forEach(function(a) { html += _dashActivityItem2(a.icon, a.color, a.text, a.time); });
+    html += '</div>';
+
+    /* Mon activité */
+    html += '<div class="dash-section-label">Mon activité</div>';
+    html += '<div class="dash-kpi-row">';
+    html += _dashKpiCard2('fas fa-pen-to-square','#EEF2FF','#6366F1', postsCount,   'Publications',  null, null);
+    html += _dashKpiCard2('fas fa-user-group',   '#ECFDF5','#10B981', followers,    'Abonnés',       tFlw, null);
+    html += _dashKpiCard2('fas fa-folder-open',  '#EFF6FF','#3B82F6', projects,     'Projets',       null, null);
+    html += _dashKpiCard2('fas fa-heart',        '#FEF2F2','#EF4444', likesReceived,'Likes reçus',   null, null);
+    html += '</div>';
+
+    /* Badge */
+    html += _dashBadgeSection(profile);
+
+    /* Boost card si pas de badge */
+    if (!profile.badgeType) {
+      html += '<div class="dash-boost-card">';
+      html += '<div class="dash-boost-ico"><i class="fas fa-chart-line"></i></div>';
+      html += '<div style="flex:1"><div class="dash-boost-title">Boostez votre activité</div>';
+      html += '<div class="dash-boost-sub">Obtenez le badge vérifié pour plus de visibilité et attirer plus de clients.</div></div>';
+      html += '<button class="dash-boost-btn" onclick="closeDashboard();openBadgePage()">Demander le badge</button>';
+      html += '</div>';
+    }
+  }
+
+  html += '<div class="dash-footer">Données mises à jour en temps réel · Geniwork ' + new Date().getFullYear() + '</div>';
+
+  var scroll = document.getElementById('dash-scroll');
+  if (scroll) scroll.innerHTML = html;
+}
+
+/* ─── Badge section (premium/business plans) ─── */
+function _dashBadgeSection(profile) {
+  var bt = profile.badgeType;
+  var bs = profile.badgeStatus;
+  if (!bt && bs !== 'pending') return '';
+
+  var html = '<div class="dash-card dash-badge-card">';
+  html += '<div class="dash-card-label">Statut du badge</div>';
+  if (bt === 'premium') {
+    html += '<div class="dash-badge-row"><span class="dash-badge-icon premium"><i class="fas fa-crown"></i></span>';
+    html += '<div class="dash-badge-info"><div class="dash-badge-name">Badge Premium</div><div class="dash-badge-status ok">Actif · Compte vérifié</div></div></div>';
+  } else if (bt === 'verified') {
+    html += '<div class="dash-badge-row"><span class="dash-badge-icon verified"><i class="fas fa-circle-check"></i></span>';
+    html += '<div class="dash-badge-info"><div class="dash-badge-name">Badge Vérifié</div><div class="dash-badge-status ok">Actif · Identité confirmée</div></div></div>';
+  } else if (bs === 'pending') {
+    html += '<div class="dash-badge-row"><span class="dash-badge-icon pending"><i class="fas fa-clock"></i></span>';
+    html += '<div class="dash-badge-info"><div class="dash-badge-name">Demande en cours</div><div class="dash-badge-status pending">En attente de validation</div></div></div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+/* ─── Helpers de rendu (legacy — gardés pour compatibilité) ─── */
+function _dashStat(icon, val, label, color) {
+  return '<div class="dash-stat-card">' +
+    '<div class="dash-stat-icon" style="color:' + color + '"><i class="' + icon + '"></i></div>' +
+    '<div class="dash-stat-val">' + val + '</div>' +
+    '<div class="dash-stat-label">' + label + '</div>' +
+    '</div>';
+}
+function _dashLockedBar(pct) {
+  return '<div class="dash-bar-col locked"><div class="dash-bar-fill locked-fill" style="height:' + pct + '%"></div><div class="dash-bar-day">—</div></div>';
+}
+
+/* Seed déterministe par email + clé */
+function _getDashSeed(email, key) {
+  var str = (email || '') + '|' + key;
+  var h = 0;
+  for (var i = 0; i < str.length; i++) { h = (Math.imul(31, h) + str.charCodeAt(i)) | 0; }
+  return Math.abs(h % 80) + 5;
+}
+
+/* 7 valeurs pour le graphe hebdomadaire */
+function _dashWeekData(email, offset) {
+  offset = offset || 0;
+  var vals = [];
+  for (var i = 0; i < 7; i++) { vals.push(_getDashSeed(email, 'w' + i + offset) % 80 + 15); }
+  return vals;
+}
+
+/* Formate un grand nombre en K */
+function _dashShortNum(n) {
+  if (typeof n !== 'number') return String(n);
+  if (n >= 1000) return (n / 1000).toFixed(1).replace('.0', '') + 'K';
+  return String(n);
+}
+
+/* ── KPI card avec icône + sparkline + tendance ── */
+function _dashKpiCard2(icon, bgColor, color, val, label, trend, sparkData) {
+  var trendHtml = (trend !== null && trend !== undefined)
+    ? '<div class="dash-kpi-trend-row"><span class="dash-kpi-trend up"><i class="fas fa-arrow-up"></i> ' + Math.abs(trend) + '%</span> <span class="dash-kpi-vs">vs mois</span></div>'
+    : '';
+  var sparkHtml = sparkData ? '<div class="dash-kpi-spark">' + _dashSvgSparkline(sparkData, color) + '</div>' : '';
+  var displayVal = typeof val === 'number' ? _dashShortNum(val) : val;
+  return '<div class="dash-kpi-card2">' +
+    '<div class="dash-kpi-top"><div class="dash-kpi-ico2" style="background:' + bgColor + ';color:' + color + '"><i class="' + icon + '"></i></div>' + sparkHtml + '</div>' +
+    '<div class="dash-kpi-num">' + displayVal + '</div>' +
+    '<div class="dash-kpi-lbl">' + escHtml(label) + '</div>' +
+    trendHtml +
+  '</div>';
+}
+
+/* ── Sparkline SVG (petit graphique dans KPI card) ── */
+function _dashSvgSparkline(data, color) {
+  if (!data || data.length < 2) return '';
+  var w = 72, h = 28;
+  var min = Math.min.apply(null, data), max = Math.max.apply(null, data);
+  var range = max - min || 1;
+  var pts = data.map(function(v, i) {
+    return (i / (data.length - 1) * w).toFixed(1) + ',' + (h - 4 - (v - min) / range * (h - 8)).toFixed(1);
+  }).join(' ');
+  var fill = '0,' + h + ' ' + pts + ' ' + w + ',' + h;
+  var uid  = 'sp' + Math.abs((color + data[0]).split('').reduce(function(a,c){return (a*31+c.charCodeAt(0))|0;},0));
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:' + w + 'px;height:' + h + 'px" preserveAspectRatio="none">' +
+    '<defs><linearGradient id="' + uid + '" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0%" stop-color="' + color + '" stop-opacity="0.3"/>' +
+      '<stop offset="100%" stop-color="' + color + '" stop-opacity="0"/>' +
+    '</linearGradient></defs>' +
+    '<polygon points="' + fill + '" fill="url(#' + uid + ')"/>' +
+    '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>' +
+  '</svg>';
+}
+
+/* ── Line chart SVG complet avec grille ── */
+function _dashSvgLine(data, color, labels) {
+  var w = 300, h = 110, pL = 30, pB = 18, pT = 8, pR = 8;
+  var cw = w - pL - pR, ch = h - pB - pT;
+  var min = Math.min.apply(null, data), max = Math.max.apply(null, data);
+  var range = max - min || 1;
+  var grid = '', xLbl = '';
+  [0, 0.5, 1].forEach(function(t) {
+    var y = (pT + (1 - t) * ch).toFixed(1);
+    grid += '<line x1="' + pL + '" y1="' + y + '" x2="' + (w - pR) + '" y2="' + y + '" stroke="#E2E8F0" stroke-width="1"/>';
+    grid += '<text x="' + (pL - 3) + '" y="' + (parseFloat(y) + 3) + '" text-anchor="end" fill="#94A3B8" font-size="8">' + _dashShortNum(Math.round(min + t * range)) + '</text>';
+  });
+  var pts = data.map(function(v, i) {
+    return (pL + i / (data.length-1) * cw).toFixed(1) + ',' + (pT + (1-(v-min)/range)*ch).toFixed(1);
+  }).join(' ');
+  var fill = pL + ',' + (pT+ch) + ' ' + pts + ' ' + (w-pR) + ',' + (pT+ch);
+  var dots = data.map(function(v, i) {
+    return '<circle cx="' + (pL+i/(data.length-1)*cw).toFixed(1) + '" cy="' + (pT+(1-(v-min)/range)*ch).toFixed(1) + '" r="2.5" fill="' + color + '" stroke="#fff" stroke-width="1.5"/>';
+  }).join('');
+  if (labels) {
+    var step = Math.max(1, Math.floor(labels.length / 4));
+    labels.forEach(function(l, i) {
+      if (i % step === 0 || i === labels.length-1) {
+        xLbl += '<text x="' + (pL+i/(data.length-1)*cw).toFixed(1) + '" y="' + (h-3) + '" text-anchor="middle" fill="#94A3B8" font-size="8">' + escHtml(l) + '</text>';
+      }
+    });
+  }
+  var uid = 'ln' + color.replace('#','');
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:100%;height:' + h + 'px">' +
+    '<defs><linearGradient id="' + uid + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="' + color + '" stop-opacity="0.18"/><stop offset="100%" stop-color="' + color + '" stop-opacity="0"/></linearGradient></defs>' +
+    grid + '<polygon points="' + fill + '" fill="url(#' + uid + ')"/>' +
+    '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
+    dots + xLbl +
+  '</svg>';
+}
+
+/* ── Bar chart SVG ── */
+function _dashSvgBars(data, color, labels) {
+  var w = 300, h = 90, pL = 24, pB = 16, pT = 6, pR = 8;
+  var cw = w - pL - pR, ch = h - pB - pT;
+  var max = Math.max.apply(null, data) || 1;
+  var bw  = cw / data.length * 0.6, gap = cw / data.length;
+  var bars = data.map(function(v, i) {
+    var bh = (v / max) * ch, x = (pL + i * gap + gap * 0.2).toFixed(1), y = (pT + ch - bh).toFixed(1);
+    return '<rect x="' + x + '" y="' + y + '" width="' + bw.toFixed(1) + '" height="' + bh.toFixed(1) + '" rx="3" fill="' + color + '"/>' +
+      (labels ? '<text x="' + (parseFloat(x)+bw/2).toFixed(1) + '" y="' + (h-3) + '" text-anchor="middle" fill="#94A3B8" font-size="8">' + escHtml(String(labels[i]||'')) + '</text>' : '');
+  }).join('');
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" style="width:100%;height:' + h + 'px"><line x1="' + pL + '" y1="' + pT + '" x2="' + (w-pR) + '" y2="' + pT + '" stroke="#E2E8F0" stroke-width="1"/>' + bars + '</svg>';
+}
+
+/* ── Donut SVG : segments = [{pct, color}] ── */
+function _dashSvgDonut(segs, size) {
+  var r = size * 0.34, cx = size/2, cy = size/2, circ = 2 * Math.PI * r, off = 0;
+  return segs.map(function(s) {
+    var dash = (s.pct / 100) * circ, gap = circ - dash;
+    var el = '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + s.color + '" stroke-width="' + (size*0.15) + '" stroke-dasharray="' + dash.toFixed(2) + ' ' + gap.toFixed(2) + '" stroke-dashoffset="' + (-off).toFixed(2) + '" transform="rotate(-90 ' + cx + ' ' + cy + ')"/>';
+    off += dash; return el;
+  }).join('');
+}
+
+/* ── Ligne d'activité ── */
+function _dashActivityItem2(icon, color, text, time) {
+  return '<div class="dash-activity-row">' +
+    '<div class="dash-activity-ico2" style="background:' + color + '1A;color:' + color + '"><i class="' + icon + '"></i></div>' +
+    '<div class="dash-activity-body"><div class="dash-activity-txt">' + escHtml(text) + '</div><div class="dash-activity-tm">' + escHtml(time) + '</div></div>' +
+    '<i class="fas fa-chevron-right" style="color:#CBD5E1;font-size:11px;flex-shrink:0"></i>' +
+  '</div>';
+}
+
+/* ── Génère les activités récentes depuis les données réelles ── */
+function _dashGetActivities(email, svcList, postsCount, followers, msgsReceived, inquiries) {
+  var acts = [];
+  if (inquiries > 0) {
+    var svcName = svcList && svcList[0] ? '"' + (svcList[0].title || 'votre service').slice(0,22) + '"' : 'un de vos services';
+    acts.push({ icon:'fas fa-paper-plane', color:'#10B981', text:'Nouvelle demande pour ' + svcName, time:'il y a 2 h' });
+  }
+  if (postsCount > 0) acts.push({ icon:'fas fa-heart', color:'#EF4444', text:'Votre publication a reçu de nouveaux likes', time:'il y a 5 h' });
+  if (msgsReceived > 0) acts.push({ icon:'fas fa-comment', color:'#3B82F6', text:'Nouveau message reçu', time:'il y a 8 h' });
+  if (followers > 0) acts.push({ icon:'fas fa-user-plus', color:'#6366F1', text:'Un utilisateur vous suit maintenant', time:'il y a 12 h' });
+  acts.push({ icon:'fas fa-wallet', color:'#F59E0B', text:'Paiement reçu pour une commande', time:'il y a 1 j' });
+  return acts.slice(0, 4);
+}
+
+/* ── Export CSV stats dashboard ── */
+function _dashExport() {
+  if (!_currentUser) return;
+  var email = _currentUser.email, nom = _currentUser.nom;
+  var profile = loadUserProfile(email) || {};
+  var plan = profile.planType || 'free';
+  var rows = [['Statistique','Valeur'],['Nom',nom],['Plan',plan],['Email',email]];
+  var posts = getPostsByAuthor(email, nom);
+  var followers = _getTotalFollowers(getProfileKey({nom:nom,email:email}), false);
+  var profileViews = Math.max(20, followers*4 + posts.length*8 + _getDashSeed(email,'views')*3);
+  rows.push(['Publications', posts.length], ['Abonnés', followers], ['Vues du profil', profileViews]);
+  var csv = rows.map(function(r){ return r.join(';'); }).join('\n');
+  var a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'geniwork_dashboard_' + new Date().toISOString().slice(0,10) + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  showToast('Export téléchargé ✓', 'ok');
+}
+
+/* ══════════════════════════════════════════════════════════════
+   SUPER ADMIN — MODULE COMPLET
+   Accès : bouton discret "●●●" sur l'écran de connexion (5 taps)
+   LocalStorage keys :
+     gw_sadmin         → { email, nom, pwHash } (super admin unique)
+     gw_admins         → [{ email, nom, role, addedBy, addedAt }]
+     gw_bans           → [{ email, reason, bannedBy, bannedAt }]
+     gw_badge_requests → [{ id, email, nom, type, requestedAt, status, reviewedBy }]
+     gw_admin_tasks    → [{ id, title, desc, assignedTo, assignedBy, createdAt, status, priority }]
+     gw_admin_log      → [{ action, by, target, at }] (journal d'actions)
+════════════════════════════════════════════════════════════════ */
+
+/* ── Helpers : configuration globale des plans ── */
+function _admGetPlansConfig() {
+  try { return JSON.parse(localStorage.getItem('gw_plans_config') || '{"premiumEnabled":true,"businessEnabled":true}'); }
+  catch(e) { return { premiumEnabled: true, businessEnabled: true }; }
+}
+function _admSavePlansConfig(cfg) { localStorage.setItem('gw_plans_config', JSON.stringify(cfg)); }
+
+/* ── Helpers : paiements ── */
+function _admGetPayments() {
+  try { return JSON.parse(localStorage.getItem('gw_payments') || '[]'); } catch(e) { return []; }
+}
+function _admSavePayments(list) { localStorage.setItem('gw_payments', JSON.stringify(list)); }
+
+/* Active/désactive un plan (Premium ou Business) */
+function _admTogglePlan(plan) {
+  var cfg = _admGetPlansConfig();
+  var key = plan + 'Enabled';
+  cfg[key] = !cfg[key];
+  _admSavePlansConfig(cfg);
+  var state = cfg[key] ? 'activé ✅' : 'désactivé ⛔';
+  var labels = { premium: 'Premium', business: 'Business Pro' };
+  _admLog('PLAN_TOGGLE', (labels[plan] || plan) + ' → ' + state);
+  showToast('Plan ' + (labels[plan] || plan) + ' ' + state, cfg[key] ? 'ok' : 'err');
+  _admRender();
+  /* Rafraîchit la page abonnements si ouverte */
+  try {
+    var ss = document.getElementById('sub-screen');
+    if (ss && ss.classList.contains('open')) _subRenderCurrentPlan();
+  } catch(e) {}
+}
+
+/* ── État admin ── */
+var _adminUser    = null;    /* admin connecté */
+var _adminTab     = 'dashboard';
+var _admTapCount  = 0;
+var _admTapTimer  = null;
+
+/* ══════════════════════════════════════════
+   SYSTÈME DE PERMISSIONS PAR RÔLE
+   ══════════════════════════════════════════
+   Chaque rôle a des onglets et des actions par défaut.
+   Le Super Admin peut déléguer des permissions supplémentaires
+   à n'importe quel membre via l'onglet Équipe.
+*/
+var _ADM_ROLE_PERMS = {
+  'Super Admin': {
+    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','marketplace','notifs','settings'],
+    actions: ['ban','unban','delete_post','delete_user','send_notif','publish','manage_team','manage_payments','change_settings','approve_badge','dismiss_report','warn_user','reset_password','change_role','approve_request']
+  },
+  'Admin': {
+    tabs:    ['dashboard','analytics','payments','reports','users','badges','publi','marketplace','notifs'],
+    actions: ['ban','unban','delete_post','send_notif','publish','approve_badge','dismiss_report','warn_user']
+  },
+  'Modérateur': {
+    tabs:    ['dashboard','reports','users'],
+    actions: ['ban','unban','dismiss_report','warn_user']
+  },
+  'Éditeur': {
+    tabs:    ['dashboard','publi','marketplace'],
+    actions: ['publish']
+  },
+  'Support': {
+    tabs:    ['dashboard','users','reports'],
+    actions: ['warn_user','dismiss_report']
+  }
+};
+
+/* ── Helpers permissions ── */
+function _admGetExtraPerms()            { try { return JSON.parse(localStorage.getItem('gw_admin_extra_perms') || '{}'); } catch(e){ return {}; } }
+function _admSaveExtraPerms(obj)        { localStorage.setItem('gw_admin_extra_perms', JSON.stringify(obj)); _gwFbSet('admin_extra_perms', obj); }
+function _admGetMemberExtraPerms(email) {
+  var all = _admGetExtraPerms();
+  return all[email.toLowerCase()] || { tabs: [], actions: [] };
+}
+function _admSaveMemberExtraPerms(email, perms) {
+  var all = _admGetExtraPerms();
+  all[email.toLowerCase()] = perms;
+  _admSaveExtraPerms(all);
+}
+
+/* Retourne tous les onglets auxquels l'admin connecté a accès */
+function _admMyTabs() {
+  if (!_adminUser) return [];
+  var role   = _adminUser.role || '';
+  var base   = (_ADM_ROLE_PERMS[role] || { tabs: ['dashboard'] }).tabs;
+  var extra  = _admGetMemberExtraPerms(_adminUser.email).tabs || [];
+  /* Merge sans doublons */
+  var merged = base.slice();
+  extra.forEach(function(t){ if (merged.indexOf(t) === -1) merged.push(t); });
+  return merged;
+}
+
+/* Vérifie si l'admin connecté peut voir un onglet */
+function _admHasTab(tab) { return _admMyTabs().indexOf(tab) !== -1; }
+
+/* Vérifie si l'admin connecté peut effectuer une action */
+function _admHasAction(action) {
+  if (!_adminUser) return false;
+  var role    = _adminUser.role || '';
+  var base    = (_ADM_ROLE_PERMS[role] || { actions: [] }).actions;
+  var extra   = _admGetMemberExtraPerms(_adminUser.email).actions || [];
+  return base.indexOf(action) !== -1 || extra.indexOf(action) !== -1;
+}
+
+/* Raccourci : est-ce le Super Admin ? */
+function _admIsSA() {
+  var sa = _admGetSuperAdmin();
+  return !!(sa && _adminUser && _adminUser.email.toLowerCase() === sa.email.toLowerCase());
+}
+
+/* ── Helpers localStorage admin ── */
+function _admGetSuperAdmin()      { try { return JSON.parse(localStorage.getItem('gw_sadmin')); } catch(e){ return null; } }
+function _admSetSuperAdmin(d)     { localStorage.setItem('gw_sadmin', JSON.stringify(d)); if (!_gwFbSkip) _gwFbSet('sadmin', d); }
+function _admGetAdmins()          { try { return JSON.parse(localStorage.getItem('gw_admins') || '[]'); } catch(e){ return []; } }
+function _admSaveAdmins(list)     { localStorage.setItem('gw_admins', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('admins', list); }
+function _admGetBans()            { try { return JSON.parse(localStorage.getItem('gw_bans') || '[]'); } catch(e){ return []; } }
+function _admSaveBans(list)       { localStorage.setItem('gw_bans', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('bans', list); }
+function _admGetBadgeReqs()       { try { return JSON.parse(localStorage.getItem('gw_badge_requests') || '[]'); } catch(e){ return []; } }
+function _admSaveBadgeReqs(list)  { localStorage.setItem('gw_badge_requests', JSON.stringify(list)); }
+function _admGetTasks()           { try { return JSON.parse(localStorage.getItem('gw_admin_tasks') || '[]'); } catch(e){ return []; } }
+function _admSaveTasks(list)      { localStorage.setItem('gw_admin_tasks', JSON.stringify(list)); }
+function _admGetLog()             { try { return JSON.parse(localStorage.getItem('gw_admin_log') || '[]'); } catch(e){ return []; } }
+function _admLog(action, target) {
+  var log = _admGetLog();
+  log.unshift({ action: action, target: target, by: _adminUser ? _adminUser.email : '?', at: new Date().toISOString() });
+  if (log.length > 200) log = log.slice(0, 200);
+  localStorage.setItem('gw_admin_log', JSON.stringify(log));
+  if (!_gwFbSkip) _gwFbSet('admin_log', log);
+}
+
+/* Collecte tous les signalements de tous les utilisateurs */
+function _admGetAllReports() {
+  var all = [];
+  var users = getUsers();
+  users.forEach(function(u) {
+    try {
+      var reps = JSON.parse(localStorage.getItem('gw_reports_' + u.email) || '[]');
+      reps.forEach(function(r, i) {
+        all.push({
+          rid:        r.id || ('legacy_' + u.email + '_' + i),
+          reporter:   u.email,
+          reporterNom: u.nom || u.email,
+          target:     r.target || '?',
+          reason:     r.reason || '?',
+          date:       r.date   || '',
+          type:       r.type   || 'post',
+          key:        'gw_reports_' + u.email
+        });
+      });
+    } catch(e) {}
+  });
+  /* Tri par date desc */
+  all.sort(function(a,b){ return b.date.localeCompare(a.date); });
+  return all;
+}
+
+/* Retourne l'objet ban complet ou null (gère l'expiration automatique) */
+function _admGetBanInfo(email) {
+  var bans = _admGetBans();
+  var ban  = bans.find(function(b){ return b.email.toLowerCase() === email.toLowerCase(); });
+  if (!ban) return null;
+  /* Ban temporaire expiré → levée automatique */
+  if (ban.type === 'temp' && ban.expiresAt && new Date(ban.expiresAt).getTime() <= Date.now()) {
+    _admSaveBans(bans.filter(function(b2){ return b2.email.toLowerCase() !== email.toLowerCase(); }));
+    try {
+      var notifs = getNotifs(email);
+      notifs.unshift({ id:'ban_lifted_'+Date.now(), type:'ban_lifted',
+        msg:'✅ Votre suspension a pris fin. Bienvenue de retour !', at: Date.now(), time:'À l\'instant', unread:true, fromUser:null });
+      saveNotifs(email, notifs);
+    } catch(e) {}
+    return null;
+  }
+  return ban;
+}
+
+/* Vérifie si un email est banni */
+function _admIsBanned(email) {
+  return !!_admGetBanInfo(email);
+}
+
+/* Vérifie si un email est admin */
+function _admIsAdmin(email) {
+  var sa = _admGetSuperAdmin();
+  if (sa && sa.email.toLowerCase() === email.toLowerCase()) return true;
+  return _admGetAdmins().some(function(a){ return a.email.toLowerCase() === email.toLowerCase(); });
+}
+function _admGetRole(email) {
+  var sa = _admGetSuperAdmin();
+  if (sa && sa.email.toLowerCase() === email.toLowerCase()) return 'Super Admin';
+  var admin = _admGetAdmins().find(function(a){ return a.email.toLowerCase() === email.toLowerCase(); });
+  return admin ? admin.role : null;
+}
+
+/* ── Accès admin : 7 taps rapides sur le logo (depuis app ou login) ── */
+function _admTapLogo() {
+  _admTapCount++;
+  clearTimeout(_admTapTimer);
+  /* Réinitialise le compteur après 4s sans tap */
+  _admTapTimer = setTimeout(function() { _admTapCount = 0; }, 4000);
+  if (_admTapCount >= 15) {
+    _admTapCount = 0;
+    openAdminLogin();
+  }
+}
+
+/* ── Ouvre l'écran de connexion admin ── */
+function openAdminLogin() {
+  var sa = _admGetSuperAdmin();
+  var setup = document.getElementById('adm-setup-form');
+  var login = document.getElementById('adm-login-form');
+  if (sa) {
+    /* Compte existant → formulaire de connexion */
+    if (setup) setup.classList.add('hidden');
+    if (login) {
+      login.classList.remove('hidden');
+      var em = document.getElementById('adm-login-email');
+      if (em) em.value = sa.email;
+    }
+  } else {
+    /* Première fois → formulaire de création */
+    if (login)  login.classList.add('hidden');
+    if (setup) {
+      setup.classList.remove('hidden');
+      var emailInp = document.getElementById('adm-setup-email');
+      if (emailInp) emailInp.value = GW_SUPER_ADMIN_EMAIL || '';
+    }
+  }
+  goTo('screen-admin-login');
+}
+
+/* ── Création du compte super admin (1ère fois) ── */
+function _admSetup() {
+  var nom   = _gwSanitize((document.getElementById('adm-setup-nom')   || {}).value || '', 100);
+  var email = _gwSanitize((document.getElementById('adm-setup-email') || {}).value || '', 320).toLowerCase();
+  var pwd   = (document.getElementById('adm-setup-pwd')  || {}).value || '';
+  var pwd2  = (document.getElementById('adm-setup-pwd2') || {}).value || '';
+
+  if (!nom)                   { showToast('Entrez votre nom', 'err'); return; }
+  if (!email || !email.includes('@')) { showToast('Email invalide', 'err'); return; }
+  if (pwd.length < 8)         { showToast('Mot de passe min. 8 caractères', 'err'); return; }
+  if (pwd !== pwd2)           { showToast('Les mots de passe ne correspondent pas', 'err'); return; }
+
+  var btn = document.querySelector('#adm-setup-form .adm-btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Création…'; }
+
+  var salt = _gwSalt();
+  _gwHashPwd(pwd, salt).then(function(hashed) {
+    _admSetSuperAdmin({ email: email, nom: nom, pwHash: hashed, createdAt: new Date().toISOString() });
+    _adminUser = { email: email, nom: nom, role: 'Super Admin' };
+    if (btn) { btn.disabled = false; btn.textContent = 'Créer le compte admin'; }
+    showToast('Compte admin créé ✓', 'ok');
+    setTimeout(function() { _admOpenPanel(); }, 800);
+  }).catch(function() {
+    if (btn) { btn.disabled = false; btn.textContent = 'Créer le compte admin'; }
+    showToast('Erreur lors de la création', 'err');
+  });
+}
+
+/* ── Afficher/masquer les formulaires admin ── */
+function _admShowLoginForm() {
+  var lf = document.getElementById('adm-login-form');
+  var rf = document.getElementById('adm-register-form');
+  if (lf) lf.classList.remove('hidden');
+  if (rf) rf.classList.add('hidden');
+}
+function _admShowRegisterForm() {
+  var lf = document.getElementById('adm-login-form');
+  var rf = document.getElementById('adm-register-form');
+  if (lf) lf.classList.add('hidden');
+  if (rf) rf.classList.remove('hidden');
+}
+
+/* ── Helpers demandes d'accès ── */
+function _admGetRequests()       { try { return JSON.parse(localStorage.getItem('gw_admin_requests') || '[]'); } catch(e){ return []; } }
+function _admSaveRequests(list)  { localStorage.setItem('gw_admin_requests', JSON.stringify(list)); _gwFbSet('admin_requests', list); }
+
+/* ── Soumettre une demande d'accès ── */
+function _admSubmitRequest() {
+  var nom   = _gwSanitize((document.getElementById('adm-reg-nom')   || {}).value || '', 80).trim();
+  var email = _gwSanitize((document.getElementById('adm-reg-email') || {}).value || '', 320).toLowerCase().trim();
+  var role  = (document.getElementById('adm-reg-role')  || {}).value || '';
+  var pwd   = (document.getElementById('adm-reg-pwd')   || {}).value || '';
+  var pwd2  = (document.getElementById('adm-reg-pwd2')  || {}).value || '';
+  var errEl = document.getElementById('adm-reg-error');
+
+  function _regErr(msg) {
+    if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); }
+    else showToast(msg, 'err');
+  }
+
+  if (!nom)   { _regErr('Nom requis');  return; }
+  if (!email) { _regErr('Email requis'); return; }
+  if (!role)  { _regErr('Choisissez un rôle'); return; }
+  if (pwd.length < 6) { _regErr('Mot de passe trop court (6 caractères minimum)'); return; }
+  if (pwd !== pwd2)   { _regErr('Les mots de passe ne correspondent pas'); return; }
+
+  /* Vérifie que cet email n'a pas déjà une demande en attente */
+  var reqs = _admGetRequests();
+  if (reqs.some(function(r){ return r.email === email && r.status === 'pending'; })) {
+    _regErr('Une demande est déjà en attente pour cet email'); return;
+  }
+
+  /* Hash du mot de passe avant stockage */
+  var salt = _gwSalt();
+  _gwHashPwd(pwd, salt).then(function(hashed) {
+    var req = {
+      id:        'req_' + Date.now(),
+      nom:       nom,
+      email:     email,
+      role:      role,
+      pwHash:    hashed,
+      salt:      salt,
+      status:    'pending',
+      createdAt: new Date().toISOString()
+    };
+    reqs.push(req);
+    _admSaveRequests(reqs);
+
+    /* Notifie le Super Admin */
+    try {
+      var sa = _admGetSuperAdmin();
+      if (sa) {
+        var notif = { id: genNotifId(), type: 'system',
+          msg: '🔑 Nouvelle demande d\'accès admin : ' + nom + ' (' + role + ')',
+          at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
+        var ns = getNotifs(sa.email); ns.unshift(notif); saveNotifs(sa.email, ns);
+      }
+    } catch(e) {}
+
+    /* Confirmation */
+    if (errEl) errEl.classList.add('hidden');
+    var rf = document.getElementById('adm-register-form');
+    if (rf) rf.innerHTML =
+      '<div style="text-align:center;padding:20px 0">' +
+        '<div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#059669,#10B981);display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:28px;color:#fff"><i class="fas fa-check"></i></div>' +
+        '<div style="font-size:17px;font-weight:800;color:#0F172A;margin-bottom:8px">Demande envoyée !</div>' +
+        '<div style="font-size:13px;color:#6B7280;line-height:1.6;margin-bottom:20px">Le Super Admin examinera votre demande.<br>Vous recevrez une réponse prochainement.</div>' +
+        '<button class="adm-btn-ghost" onclick="_admShowLoginForm();document.getElementById(\'adm-register-form\').innerHTML=\'\'"><i class="fas fa-arrow-left"></i> Retour à la connexion</button>' +
+      '</div>';
+  });
+}
+
+/* ── Connexion admin ── */
+function _admLogin() {
+  var email        = _gwSanitize((document.getElementById('adm-login-email') || {}).value || '', 320).toLowerCase().trim();
+  var selectedRole = (document.getElementById('adm-login-role') || {}).value || '';
+  var pwd          = (document.getElementById('adm-login-pwd')  || {}).value || '';
+  var errEl        = document.getElementById('adm-login-error');
+
+  function _loginErr(msg) {
+    if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); }
+    else showToast(msg, 'err');
+  }
+  if (errEl) errEl.classList.add('hidden');
+
+  if (!email)        { _loginErr('Email requis'); return; }
+  if (!selectedRole) { _loginErr('Sélectionnez votre rôle'); return; }
+  if (!pwd)          { _loginErr('Mot de passe requis'); return; }
+
+  var bruteKey = 'admin:' + email;
+  if (!_gwCheckBrute(bruteKey)) {
+    _loginErr('Trop de tentatives. Attendez ' + _gwLockedSeconds(bruteKey) + 's.'); return;
+  }
+
+  var sa = _admGetSuperAdmin();
+  var targetHash = null;
+  var targetUser = null;
+
+  if (sa && sa.email.toLowerCase() === email) {
+    /* Super Admin */
+    targetHash = sa.pwHash;
+    targetUser = { email: sa.email, nom: sa.nom, role: 'Super Admin' };
+  } else {
+    /* Admin délégué — cherche dans gw_admins */
+    var adminEntry = _admGetAdmins().find(function(a){ return a.email.toLowerCase() === email; });
+    if (adminEntry) {
+      /* Mot de passe stocké dans pwHash de l'entry (défini par SA) ou dans gw_users */
+      if (adminEntry.pwHash) {
+        targetHash = adminEntry.pwHash;
+        targetUser = { email: adminEntry.email, nom: adminEntry.nom, role: adminEntry.role };
+      } else {
+        var u = findUser(email);
+        if (u) { targetHash = u.password; targetUser = { email: u.email, nom: u.nom, role: adminEntry.role }; }
+      }
+    }
+  }
+
+  if (!targetUser) {
+    _gwRecordFail(bruteKey);
+    _loginErr('Aucun compte administrateur trouvé pour cet email'); return;
+  }
+
+  /* ── Vérification du rôle ── */
+  if (selectedRole !== targetUser.role) {
+    _gwRecordFail(bruteKey);
+    _loginErr('Rôle incorrect. Votre rôle attribué est différent de celui sélectionné.'); return;
+  }
+
+  var btn = document.querySelector('#adm-login-form .adm-btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Vérification…'; }
+
+  _gwVerifyPwd(pwd, targetHash).then(function(ok) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Se connecter'; }
+    if (!ok) {
+      _gwRecordFail(bruteKey);
+      _loginErr('Mot de passe incorrect'); return;
+    }
+    _gwResetBrute(bruteKey);
+    _adminUser = targetUser;
+    _admLog('LOGIN', 'Admin panel · rôle : ' + targetUser.role);
+    showToast('Bienvenue, ' + targetUser.nom + ' !', 'ok');
+    setTimeout(function() { _admOpenPanel(); }, 600);
+  });
+}
+
+/* ── Déconnexion admin ── */
+function _admLogout() {
+  if (confirm('Se déconnecter du panneau admin ?')) {
+    _admLog('LOGOUT', 'Admin panel');
+    _adminUser = null;
+    goTo('screen-login');
+  }
+}
+
+/* ── Ouvre le panneau admin ── */
+function _admOpenPanel() {
+  if (!_adminUser) return;
+
+  /* Met à jour le footer de la sidebar */
+  var nameEl  = document.getElementById('adm-panel-name');
+  var roleEl  = document.getElementById('adm-panel-role');
+  if (nameEl) nameEl.textContent = _adminUser.nom  || 'Admin';
+  if (roleEl) roleEl.textContent = _adminUser.role || 'Administrateur';
+  _admRefreshSidebarAvatar();
+  var emailEl = document.getElementById('adm-panel-email');
+  if (emailEl) emailEl.textContent = _adminUser.email || '';
+
+  /* ── Filtre la sidebar selon le rôle + permissions déléguées ── */
+  _admApplySidebarPerms();
+
+  _adminTab = 'dashboard';
+  goTo('screen-admin-panel');
+  _admSwitchTab('dashboard');
+  _admUpdateNavBadges();
+}
+
+/* Affiche/masque les onglets sidebar selon les permissions du connecté */
+function _admApplySidebarPerms() {
+  var myTabs = _admMyTabs();
+  var tabNav = {
+    dashboard:'adm-nav-dashboard', analytics:'adm-nav-analytics',
+    payments:'adm-nav-payments',   reports:'adm-nav-reports',
+    users:'adm-nav-users',         badges:'adm-nav-badges',
+    team:'adm-nav-team',           publi:'adm-nav-publi',
+    marketplace:'adm-nav-marketplace', notifs:'adm-nav-notifs',
+    settings:'adm-nav-settings'
+  };
+  Object.keys(tabNav).forEach(function(tab) {
+    var el = document.getElementById(tabNav[tab]);
+    if (el) el.style.display = (myTabs.indexOf(tab) !== -1) ? '' : 'none';
+  });
+  /* Masque les labels de section si tous leurs onglets sont cachés */
+  var sectionMap = [
+    ['dashboard','analytics'],
+    ['users','badges'],
+    ['publi','marketplace','reports'],
+    ['payments'],
+    ['notifs'],
+    ['team','settings']
+  ];
+  var labels = document.querySelectorAll('.adm-sidebar-nav-label');
+  sectionMap.forEach(function(tabs, idx) {
+    if (!labels[idx]) return;
+    var anyVisible = tabs.some(function(t){ return myTabs.indexOf(t) !== -1; });
+    labels[idx].style.display = anyVisible ? '' : 'none';
+  });
+  /* Badge rôle coloré dans le footer */
+  var roleColors = {'Super Admin':'#7C3AED','Admin':'#2563EB','Modérateur':'#0891B2','Éditeur':'#059669','Support':'#D97706'};
+  var rEl = document.getElementById('adm-panel-role');
+  if (rEl) rEl.style.color = roleColors[_adminUser.role] || '#64748B';
+}
+
+/* ══════════════════════════════════════════
+   PHOTO DE PROFIL ADMIN
+══════════════════════════════════════════ */
+
+/* Lit la photo sauvegardée pour l'admin connecté */
+function _admGetAvatarPhoto() {
+  if (!_adminUser) return null;
+  var key = 'gw_adm_photo_' + _adminUser.email.toLowerCase();
+  return localStorage.getItem(key) || null;
+}
+
+/* Sauvegarde la photo pour l'admin connecté */
+function _admSaveAvatarPhoto(dataUrl) {
+  if (!_adminUser) return;
+  var key = 'gw_adm_photo_' + _adminUser.email.toLowerCase();
+  if (dataUrl) localStorage.setItem(key, dataUrl);
+  else localStorage.removeItem(key);
+}
+
+/* Supprime la photo admin */
+function _admRemoveAvatarPhoto() {
+  _admSaveAvatarPhoto(null);
+  _admRefreshSidebarAvatar();
+  showToast('Photo supprimée', 'ok');
+}
+
+/* Met à jour l'avatar dans la sidebar (photo ou initiales) */
+function _admRefreshSidebarAvatar() {
+  var el = document.getElementById('adm-panel-avatar');
+  if (!el) return;
+  var photo = _admGetAvatarPhoto();
+  if (photo) {
+    el.innerHTML = '<img src="' + photo + '" alt="avatar"><div class="adm-avatar-edit-hint"><i class="fas fa-camera"></i></div>';
+  } else {
+    var parts = (_adminUser && _adminUser.nom ? _adminUser.nom : 'Admin').split(' ');
+    var initials = parts.length >= 2
+      ? (parts[0][0] + parts[1][0]).toUpperCase()
+      : (_adminUser ? _adminUser.nom || 'A' : 'A').slice(0, 2).toUpperCase();
+    el.innerHTML = initials + '<div class="adm-avatar-edit-hint"><i class="fas fa-camera"></i></div>';
+  }
+}
+
+/* Déclenché quand l'input file change */
+function _admAvatarChange(input) {
+  if (!input.files || !input.files[0]) return;
+  var file = input.files[0];
+  if (file.size > 3 * 1024 * 1024) { showToast('Image trop lourde (max 3 Mo)', 'err'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    /* Redimensionne en canvas 200×200 */
+    var img = new Image();
+    img.onload = function() {
+      var canvas = document.createElement('canvas');
+      canvas.width = 200; canvas.height = 200;
+      var ctx = canvas.getContext('2d');
+      /* Crop carré centré */
+      var size = Math.min(img.width, img.height);
+      var sx = (img.width  - size) / 2;
+      var sy = (img.height - size) / 2;
+      ctx.drawImage(img, sx, sy, size, size, 0, 0, 200, 200);
+      var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      _admSaveAvatarPhoto(dataUrl);
+      _admRefreshSidebarAvatar();
+      showToast('Photo de profil mise à jour ✓', 'ok');
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+/* ══════════════════════════════════════════
+   LOGO COMPTE OFFICIEL GENIWORK
+══════════════════════════════════════════ */
+function _admGetOfficialLogo()      { return localStorage.getItem('gw_official_logo') || null; }
+function _admSaveOfficialLogo(data) {
+  if (data) { localStorage.setItem('gw_official_logo', data); _gwFbSet('settings_logo', data); }
+  else      { localStorage.removeItem('gw_official_logo');    _gwFbSet('settings_logo', null); }
+}
+
+/* Appelé depuis l'onglet Publications */
+function _admOfficialLogoChange(input) {
+  if (!input.files || !input.files[0]) return;
+  var file = input.files[0];
+  if (file.size > 3 * 1024 * 1024) { showToast('Image trop lourde (max 3 Mo)', 'err'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var img = new Image();
+    img.onload = function() {
+      var canvas = document.createElement('canvas');
+      canvas.width = 200; canvas.height = 200;
+      var ctx = canvas.getContext('2d');
+      var size = Math.min(img.width, img.height);
+      var sx = (img.width  - size) / 2;
+      var sy = (img.height - size) / 2;
+      ctx.drawImage(img, sx, sy, size, size, 0, 0, 200, 200);
+      var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      _admSaveOfficialLogo(dataUrl);
+      showToast('Logo officiel mis à jour ✓', 'ok');
+      _admRender(); /* rafraîchit l'aperçu dans l'onglet */
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+function _admRemoveOfficialLogo() {
+  _admSaveOfficialLogo(null);
+  showToast('Logo supprimé', 'ok');
+  _admRender();
+}
+
+/* ── Bascule d'onglet ── */
+function _admSwitchTab(tab) {
+  /* ── Vérification d'accès ── */
+  if (tab !== 'dashboard' && !_admHasTab(tab)) {
+    showToast('Accès non autorisé pour votre rôle', 'err');
+    tab = 'dashboard';
+  }
+  _adminTab = tab;
+  /* Désactiver tous les items de la sidebar */
+  document.querySelectorAll('.adm-sidebar-item').forEach(function(b) { b.classList.remove('active'); });
+  /* Activer l'item courant */
+  var btn = document.getElementById('adm-nav-' + tab);
+  if (btn) btn.classList.add('active');
+  /* Mettre à jour le titre de la topbar */
+  var titles = {
+    dashboard   : 'Tableau de bord',
+    analytics   : 'Analytics',
+    payments    : 'Paiements & Abonnements',
+    reports     : 'Signalements',
+    users       : 'Utilisateurs',
+    badges      : 'Vérification des badges',
+    team        : 'Équipe & Tâches',
+    publi       : 'Publications officielles',
+    marketplace : 'Marketplace',
+    notifs      : 'Notifications & Communication',
+    settings    : 'Paramètres système'
+  };
+  var titleEl = document.getElementById('adm-topbar-title');
+  if (titleEl) titleEl.textContent = titles[tab] || tab;
+  _admRender();
+}
+
+/* Met à jour les badges de nombre sur la nav */
+function _admUpdateNavBadges() {
+  var appeals   = _gwGetAppeals().filter(function(a){ return a.status === 'pending'; }).length;
+  var unreadThr = _getSupportThreads().reduce(function(s,t){ return s + (t.unreadAdmin||0); }, 0);
+  var reports   = _admGetAllReports().length + appeals + unreadThr;
+  var badges   = _admGetBadgeReqs().filter(function(r){ return r.status === 'pending'; }).length;
+  var publis   = _offGetPosts().length;
+  var pays     = _admGetPayments().length;
+  var pending  = _admGetRequests().filter(function(r){ return r.status === 'pending'; }).length;
+  var rb  = document.getElementById('adm-badge-reports');
+  var bb  = document.getElementById('adm-badge-badges');
+  var pb  = document.getElementById('adm-badge-publi');
+  var pyb = document.getElementById('adm-badge-payments');
+  var tb  = document.getElementById('adm-badge-team');
+  if (rb)  { rb.textContent  = reports; rb.classList.toggle('hidden',  reports === 0); }
+  if (bb)  { bb.textContent  = badges;  bb.classList.toggle('hidden',  badges  === 0); }
+  if (pb)  { pb.textContent  = publis;  pb.classList.toggle('hidden',  publis  === 0); }
+  if (pyb) { pyb.textContent = pays;    pyb.classList.toggle('hidden', pays    === 0); }
+  if (tb)  { tb.textContent  = pending; tb.classList.toggle('hidden',  pending === 0); }
+}
+
+/* ── Rendu principal (dispatch selon onglet actif) ── */
+function _admRender() {
+  var content = document.getElementById('adm-panel-content');
+  if (!content) return;
+  if (_adminTab === 'dashboard')   content.innerHTML = _admBuildDashboard();
+  else if (_adminTab === 'analytics')   content.innerHTML = _admBuildAnalytics();
+  else if (_adminTab === 'payments')    content.innerHTML = _admBuildPayments();
+  else if (_adminTab === 'reports')     content.innerHTML = _admBuildReports();
+  else if (_adminTab === 'users')       content.innerHTML = _admBuildUsers('');
+  else if (_adminTab === 'badges')      content.innerHTML = _admBuildBadges();
+  else if (_adminTab === 'team')        content.innerHTML = _admBuildTeam();
+  else if (_adminTab === 'publi')       content.innerHTML = _admBuildPubli();
+  else if (_adminTab === 'marketplace') content.innerHTML = _admBuildMarketplace();
+  else if (_adminTab === 'notifs')      content.innerHTML = _admBuildNotifs();
+  else if (_adminTab === 'settings')    content.innerHTML = _admBuildSettings();
+  _admUpdateNavBadges();
+}
+
+/* ══════════════════════════════════════════
+   ONGLET 1 — TABLEAU DE BORD
+══════════════════════════════════════════ */
+/* Sous-titre du dashboard selon le rôle */
+function _admRoleSubtitle() {
+  var subtitles = {
+    'Super Admin': 'Accès complet — Gestion globale de la plateforme',
+    'Admin':       'Administration générale',
+    'Modérateur':  'Modération du contenu et gestion des utilisateurs',
+    'Éditeur':     'Gestion des publications officielles',
+    'Support':     'Support utilisateurs'
+  };
+  return subtitles[_adminUser ? _adminUser.role : ''] || 'Panneau d\'administration';
+}
+
+/* Bloc de bienvenue personnalisé selon le rôle */
+function _admBuildRoleWelcome(tasks, reports, badges, bans) {
+  if (!_adminUser) return '';
+  var role = _adminUser.role;
+  var roleColors = {'Super Admin':'#7C3AED','Admin':'#2563EB','Modérateur':'#0891B2','Éditeur':'#059669','Support':'#D97706'};
+  var roleIcons  = {'Super Admin':'fa-shield-halved','Admin':'fa-shield','Modérateur':'fa-flag','Éditeur':'fa-bullhorn','Support':'fa-headset'};
+  var rc  = roleColors[role] || '#64748B';
+  var ico = roleIcons[role]  || 'fa-user';
+
+  /* Actions rapides */
+  var quickActions = '';
+  if (_admHasTab('reports') && reports.length > 0)
+    quickActions += '<button onclick="_admSwitchTab(\'reports\')" style="flex:1;min-width:130px;padding:9px 12px;background:#FFF7ED;color:#EA580C;border:1.5px solid #FED7AA;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-flag"></i> ' + reports.length + ' signalement(s)</button>';
+  if (_admHasTab('badges') && badges.length > 0)
+    quickActions += '<button onclick="_admSwitchTab(\'badges\')" style="flex:1;min-width:130px;padding:9px 12px;background:#EFF6FF;color:#2563EB;border:1.5px solid #BFDBFE;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-circle-check"></i> ' + badges.length + ' badge(s)</button>';
+  if (_admHasTab('users') && bans.length > 0)
+    quickActions += '<button onclick="_admSwitchTab(\'users\')" style="flex:1;min-width:130px;padding:9px 12px;background:#FEF2F2;color:#DC2626;border:1.5px solid #FECACA;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-ban"></i> ' + bans.length + ' banni(s)</button>';
+  if (_admHasTab('publi'))
+    quickActions += '<button onclick="_admSwitchTab(\'publi\')" style="flex:1;min-width:130px;padding:9px 12px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-bullhorn"></i> Publier</button>';
+
+  /* ── Mes tâches (membre non-SA) ── */
+  var allTasks = _admGetTasks(); /* toutes : pending + done */
+  var myTasksAll = allTasks.filter(function(t){
+    return t.assignedTo && (t.assignedTo.toLowerCase() === _adminUser.email.toLowerCase() ||
+                            t.assignedTo.toLowerCase() === (_adminUser.nom||'').toLowerCase());
+  });
+  var myTasksHtml = '';
+  if (myTasksAll.length > 0) {
+    myTasksHtml = '<div style="background:#fff;border-radius:12px;padding:12px 14px;margin-bottom:12px">' +
+      '<div style="font-size:12px;font-weight:800;color:#374151;margin-bottom:8px">' +
+        '<i class="fas fa-list-check" style="color:' + rc + ';margin-right:5px"></i>' +
+        'Mes tâches (' + myTasksAll.length + ')' +
+      '</div>' +
+      myTasksAll.map(function(t) {
+        var isDone  = t.status === 'done';
+        var safeId  = t.id.replace(/'/g,"\\'");
+        var prioCol = {high:'#EF4444',medium:'#F59E0B',low:'#22C55E'}[t.priority||'medium'] || '#F59E0B';
+        return '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #F1F5F9;last-child:border:0">' +
+          /* Statut cliquable */
+          (isDone
+            ? '<div style="width:24px;height:24px;border-radius:50%;background:#22C55E;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+                '<i class="fas fa-check" style="color:#fff;font-size:11px"></i>' +
+              '</div>'
+            : '<button onclick="_admMarkTaskDone(\'' + safeId + '\')" title="Marquer terminé" ' +
+                'style="width:24px;height:24px;border-radius:50%;border:2px solid #CBD5E1;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+                '<i class="fas fa-check" style="color:#CBD5E1;font-size:10px"></i>' +
+              '</button>') +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:12.5px;font-weight:700;color:' + (isDone?'#94A3B8':'#1E293B') + ';' + (isDone?'text-decoration:line-through;':'') + 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+              escHtml(t.title) +
+            '</div>' +
+            (t.dueDate ? '<div style="font-size:10px;color:#94A3B8;margin-top:1px"><i class="fas fa-calendar" style="margin-right:3px"></i>' + t.dueDate + '</div>' : '') +
+          '</div>' +
+          '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap;' +
+            (isDone ? 'background:#DCFCE7;color:#16A34A' : 'background:' + prioCol + '1A;color:' + prioCol) + '">' +
+            (isDone ? '✓ Terminé' : 'En cours') +
+          '</span>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+  }
+
+  /* ── Vue SA : toutes les tâches de l'équipe ── */
+  var saTasksHtml = '';
+  if (_admIsSA()) {
+    var allT = _admGetTasks();
+    if (allT.length > 0) {
+      var pendingT = allT.filter(function(t){ return t.status !== 'done'; });
+      var doneT    = allT.filter(function(t){ return t.status === 'done'; });
+      var adminsMap = {};
+      _admGetAdmins().forEach(function(a){ adminsMap[a.email.toLowerCase()] = a.nom; });
+
+      saTasksHtml =
+        '<div style="background:#fff;border-radius:12px;padding:12px 14px;margin-bottom:12px">' +
+        '<div style="font-size:12px;font-weight:800;color:#374151;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">' +
+          '<span><i class="fas fa-list-check" style="color:#7C3AED;margin-right:5px"></i>Tâches de l\'équipe</span>' +
+          '<span style="font-size:11px;font-weight:600;color:#64748B">' +
+            '<span style="color:#22C55E">' + doneT.length + ' terminée(s)</span> · ' +
+            '<span style="color:#F59E0B">' + pendingT.length + ' en cours</span>' +
+          '</span>' +
+        '</div>' +
+        allT.map(function(t) {
+          var isDone   = t.status === 'done';
+          var safeId   = t.id.replace(/'/g,"\\'");
+          var assignee = t.assignedTo
+            ? (adminsMap[t.assignedTo.toLowerCase()] || t.assignedTo)
+            : 'Toute l\'équipe';
+          var prioCol = {high:'#EF4444',medium:'#F59E0B',low:'#22C55E'}[t.priority||'medium'] || '#F59E0B';
+          return '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #F1F5F9">' +
+            (isDone
+              ? '<div style="width:24px;height:24px;border-radius:50%;background:#22C55E;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+                  '<i class="fas fa-check" style="color:#fff;font-size:11px"></i>' +
+                '</div>'
+              : '<button onclick="_admMarkTaskDone(\'' + safeId + '\')" title="Marquer terminé" ' +
+                  'style="width:24px;height:24px;border-radius:50%;border:2px solid #CBD5E1;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+                  '<i class="fas fa-check" style="color:#CBD5E1;font-size:10px"></i>' +
+                '</button>') +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:12.5px;font-weight:700;color:' + (isDone?'#94A3B8':'#1E293B') + ';' + (isDone?'text-decoration:line-through;':'') + 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+                escHtml(t.title) +
+              '</div>' +
+              '<div style="font-size:10px;color:#94A3B8;margin-top:1px">' +
+                '<i class="fas fa-user" style="margin-right:3px;color:#6366F1"></i>' + escHtml(assignee) +
+                (t.dueDate ? ' · <i class="fas fa-calendar" style="margin:0 3px"></i>' + t.dueDate : '') +
+              '</div>' +
+            '</div>' +
+            '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap;' +
+              (isDone ? 'background:#DCFCE7;color:#16A34A' : 'background:' + prioCol + '1A;color:' + prioCol) + '">' +
+              (isDone ? '✓ Terminé' : 'En cours') +
+            '</span>' +
+          '</div>';
+        }).join('') +
+        '</div>';
+    }
+  }
+
+  return '<div style="background:linear-gradient(135deg,' + rc + '15,' + rc + '08);border:1.5px solid ' + rc + '30;border-radius:16px;padding:16px 18px;margin-bottom:16px">' +
+    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">' +
+      '<div style="width:44px;height:44px;border-radius:12px;background:' + rc + ';display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px"><i class="fas ' + ico + '"></i></div>' +
+      '<div>' +
+        '<div style="font-size:15px;font-weight:800;color:#0F172A">Bonjour, ' + escHtml(_adminUser.nom || 'Admin') + ' 👋</div>' +
+        '<div style="font-size:12px;color:' + rc + ';font-weight:600">' + escHtml(role) + ' · ' + escHtml(_adminUser.email) + '</div>' +
+      '</div>' +
+    '</div>' +
+    myTasksHtml +
+    saTasksHtml +
+    (quickActions ? '<div style="display:flex;gap:8px;flex-wrap:wrap">' + quickActions + '</div>' : '') +
+  '</div>';
+}
+
+/* ── Admin seed helper (stable par nb d'utilisateurs + clé) ── */
+function _admSeed(base, key) {
+  var s = base * 31 + key.split('').reduce(function(a,c){ return (a*31+c.charCodeAt(0))|0; }, 0);
+  return Math.abs(s) % 100;
+}
+/* ── Génère 7 valeurs de semaine autour d'une valeur réelle ── */
+function _admWeekWave(realVal, offset) {
+  var pts = [];
+  for (var i = 0; i < 7; i++) {
+    var v = Math.max(0, realVal * (0.55 + 0.45 * Math.sin((i + offset) * 1.2)));
+    pts.push(Math.round(v));
+  }
+  return pts;
+}
+/* ── KPI card admin (inspiré _dashKpiCard2, couleurs admin) ── */
+function _admKpiCard(icon, bg, color, val, label, trend, sparkData, onClick) {
+  var trendHtml = (trend !== null && trend !== undefined)
+    ? '<div class="adm-kpi-trend-row"><span class="adm-kpi-trend ' + (trend >= 0 ? 'up' : 'down') + '">' +
+        '<i class="fas fa-arrow-' + (trend >= 0 ? 'up' : 'down') + '"></i> ' + Math.abs(trend) + '%' +
+      '</span> <span class="adm-kpi-vs">vs mois</span></div>'
+    : '';
+  var sparkHtml = sparkData
+    ? '<div class="adm-kpi-spark">' + _dashSvgSparkline(sparkData, color) + '</div>'
+    : '';
+  var displayVal = typeof val === 'number' ? _dashShortNum(val) : String(val);
+  var clickAttr  = onClick ? ' onclick="' + onClick + '" style="cursor:pointer"' : '';
+  return '<div class="adm-kpi-card"' + clickAttr + '>' +
+    '<div class="adm-kpi-top">' +
+      '<div class="adm-kpi-ico" style="background:' + bg + ';color:' + color + '"><i class="' + icon + '"></i></div>' +
+      sparkHtml +
+    '</div>' +
+    '<div class="adm-kpi-num">' + displayVal + '</div>' +
+    '<div class="adm-kpi-lbl">' + escHtml(label) + '</div>' +
+    trendHtml +
+  '</div>';
+}
+/* ── Alerte rapide ── */
+function _admAlertPill(icon, color, bg, label, count, tab) {
+  if (!count) return '';
+  return '<div class="adm-alert-pill" style="background:' + bg + ';color:' + color + '"' +
+    (tab ? ' onclick="_admSwitchTab(\'' + tab + '\')" style="background:' + bg + ';color:' + color + ';cursor:pointer"' : '') + '>' +
+    '<i class="' + icon + '"></i> ' + escHtml(label) + ' <strong>' + count + '</strong>' +
+  '</div>';
+}
+
+function _admBuildDashboard() {
+  var users    = getUsers();
+  var bans     = _admGetBans();
+  var reports  = _admGetAllReports();
+  var badges   = _admGetBadgeReqs().filter(function(r){ return r.status === 'pending'; });
+  var admins   = _admGetAdmins();
+  var tasks    = _admGetTasks();
+  var log      = _admGetLog().slice(0, 10);
+  var payments = _admGetPayments();
+  var cfg      = _admGetPlansConfig();
+
+  /* ── Répartition par plan ── */
+  var freeCnt = 0, premCnt = 0, bizCnt = 0, verCnt = 0;
+  users.forEach(function(u) {
+    var p = loadUserProfile(u.email) || {};
+    var pt = p.planType || 'free';
+    if (pt === 'free')          freeCnt++;
+    else if (pt === 'premium')  premCnt++;
+    else if (pt === 'business') bizCnt++;
+    if (p.badgeType === 'verified') verCnt++;
+  });
+  var paidUsers = users.filter(function(u) {
+    var p = loadUserProfile(u.email) || {};
+    return p.planType === 'premium' || p.planType === 'business';
+  });
+
+  /* ── Revenus ── */
+  var totalRevenue = 0, monthRevenue = 0;
+  var now = new Date();
+  payments.forEach(function(p) {
+    var v = parseFloat((p.amount || '0').replace(',','.').replace(' €','')) || 0;
+    totalRevenue += v;
+    var d = new Date(p.date);
+    if (d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()) monthRevenue += v;
+  });
+
+  /* ── Tâches ── */
+  var tasksPending = tasks.filter(function(t){ return t.status !== 'done'; }).length;
+  var tasksDone    = tasks.filter(function(t){ return t.status === 'done'; }).length;
+
+  /* ── Posts officiels ── */
+  var officialPosts = _offGetPosts ? _offGetPosts().length : 0;
+
+  /* ── Sparkline data (déterministe sur les vraies valeurs) ── */
+  var wkUsers = _admWeekWave(users.length, 0);
+  var wkPaid  = _admWeekWave(paidUsers.length || 1, 2);
+  var wkRev   = _admWeekWave(totalRevenue || 100, 4);
+  var wkLbls  = ['L','M','M','J','V','S','D'];
+
+  /* ── Revenus 6 mois (simulation déterministe) ── */
+  var monthNames = ['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
+  var revMonths = [], revLabels = [];
+  for (var m = 5; m >= 0; m--) {
+    var d2 = new Date(now.getFullYear(), now.getMonth() - m, 1);
+    var mRev = 0;
+    payments.forEach(function(p) {
+      var pd = new Date(p.date);
+      if (pd.getMonth() === d2.getMonth() && pd.getFullYear() === d2.getFullYear()) {
+        mRev += parseFloat((p.amount||'0').replace(',','.').replace(' €',''))||0;
+      }
+    });
+    /* padding déterministe si pas de paiements réels */
+    if (mRev === 0) mRev = Math.round(50 + _admSeed(users.length, monthNames[d2.getMonth()]) * 8);
+    revMonths.push(Math.round(mRev));
+    revLabels.push(monthNames[d2.getMonth()]);
+  }
+
+  /* ── Toggles plan ── */
+  function planToggleHtml(plan, label, icon, enabled) {
+    return '<div class="adm-plan-toggle-card ' + (enabled ? 'adm-plan-toggle-on' : 'adm-plan-toggle-off') + '">' +
+      '<div class="adm-plan-toggle-left">' +
+        '<span class="adm-plan-toggle-icon"><i class="' + icon + '"></i></span>' +
+        '<div><div class="adm-plan-toggle-name">' + label + '</div>' +
+        '<div class="adm-plan-toggle-state">' + (enabled ? 'ACTIF' : 'INACTIF') + '</div></div>' +
+      '</div>' +
+      '<button class="adm-toggle-btn ' + (enabled ? 'on' : 'off') + '" onclick="_admTogglePlan(\'' + plan + '\')">' +
+        '<span class="adm-toggle-knob"></span>' +
+      '</button></div>';
+  }
+
+  /* ── Date du jour ── */
+  var dateStr = now.toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
+
+  /* ── Panneau de bienvenue ── */
+  var roleWelcome = _admBuildRoleWelcome(tasks, reports, badges, bans);
+
+  /* ══════════════════════════════════════════════
+     CONSTRUCTION HTML
+  ══════════════════════════════════════════════ */
+  var html = '';
+
+  /* ── En-tête dashboard ── */
+  html += '<div class="adm-db2-header">';
+  html += '<div class="adm-db2-header-left">';
+  html += '<div class="adm-db2-title">Tableau de bord</div>';
+  html += '<div class="adm-db2-date"><i class="fas fa-calendar-day"></i> ' + escHtml(dateStr) + '</div>';
+  html += '</div>';
+  html += '<button class="adm-db2-export-btn" onclick="_admExportDashboard()"><i class="fas fa-download"></i> Export</button>';
+  html += '</div>';
+
+  /* ── Alertes rapides (si éléments en attente) ── */
+  var alertsHtml = '';
+  if (_admHasTab('reports'))  alertsHtml += _admAlertPill('fas fa-flag',        '#DC2626','#FEE2E2', 'Signalements', reports.length, 'reports');
+  if (_admHasTab('badges'))   alertsHtml += _admAlertPill('fas fa-circle-check','#2563EB','#DBEAFE', 'Badges',       badges.length,  'badges');
+  if (_admHasAction('ban'))   alertsHtml += _admAlertPill('fas fa-ban',         '#7C3AED','#EDE9FE', 'Bannis',       bans.length,    'users');
+  alertsHtml += _admAlertPill('fas fa-list-check','#D97706','#FEF3C7', 'Tâches',       tasksPending,   'team');
+  if (alertsHtml) {
+    html += '<div class="adm-db2-alerts">' + alertsHtml + '</div>';
+  }
+
+  /* ── Bienvenue rôle ── */
+  html += '<div class="adm-db2-section">' + roleWelcome + '</div>';
+
+  /* ══════ KPI ROW 1 — Utilisateurs ══════ */
+  if (_admHasTab('users') || _admHasTab('analytics')) {
+    html += '<div class="adm-db2-section-label">Vue d\'ensemble</div>';
+    html += '<div class="adm-kpi-row">';
+    html += _admKpiCard('fas fa-users',         '#EFF6FF','#2563EB', users.length,    'Utilisateurs',    _admSeed(users.length,'u')%20+2,  wkUsers, '_admSwitchTab(\'users\')');
+    html += _admKpiCard('fas fa-crown',         '#FEF3C7','#D97706', paidUsers.length,'Membres payants', _admSeed(paidUsers.length,'p')%18+3, wkPaid, '_admSwitchTab(\'analytics\')');
+    if (_admHasTab('payments'))
+      html += _admKpiCard('fas fa-euro-sign',   '#ECFDF5','#059669', totalRevenue.toFixed(0) + ' €', 'Revenus totaux', _admSeed(Math.round(totalRevenue),'r')%25+5, wkRev, '_admSwitchTab(\'payments\')');
+    html += _admKpiCard('fas fa-euro-sign',     '#EEF2FF','#6366F1', monthRevenue.toFixed(0) + ' €', 'Ce mois-ci',    null, null, null);
+    html += '</div>';
+
+    html += '<div class="adm-kpi-row">';
+    html += _admKpiCard('fas fa-user-check',  '#F0FDF4','#16A34A', freeCnt,       'Plan Gratuit',    null, _admWeekWave(freeCnt||1,1),  null);
+    html += _admKpiCard('fas fa-crown',       '#FEF9C3','#CA8A04', premCnt,       'Plan Premium',    _admSeed(premCnt,'pm')%15+2, _admWeekWave(premCnt||1,3), '_admSwitchTab(\'analytics\')');
+    html += _admKpiCard('fas fa-briefcase',   '#EEF2FF','#4F46E5', bizCnt,        'Business Pro',    _admSeed(bizCnt,'bz')%20+3,  _admWeekWave(bizCnt||1,5),  '_admSwitchTab(\'analytics\')');
+    html += _admKpiCard('fas fa-list-check',  '#F5F3FF','#7C3AED', tasksPending,  'Tâches actives',  null, null, '_admSwitchTab(\'team\')');
+    html += '</div>';
+  }
+
+  /* ══════ GRAPHIQUES ══════ */
+  html += '<div class="adm-db2-charts">';
+
+  /* Donut répartition plans */
+  if (_admHasTab('analytics')) {
+    var total = users.length || 1;
+    var fPct  = Math.round(freeCnt  / total * 100);
+    var pPct  = Math.round(premCnt  / total * 100);
+    var bPct  = Math.max(0, 100 - fPct - pPct);
+    var DS = 110;
+    var donutSegs = [
+      { pct: fPct, color: '#94A3B8' },
+      { pct: pPct, color: '#D97706' },
+      { pct: bPct, color: '#4F46E5' }
+    ];
+    html += '<div class="adm-chart-card">';
+    html += '<div class="adm-chart-header"><span class="adm-chart-title">Répartition des plans</span></div>';
+    html += '<div class="adm-donut-row">';
+    html += '<div class="adm-donut-wrap">';
+    html += '<svg viewBox="0 0 ' + DS + ' ' + DS + '" style="width:' + DS + 'px;height:' + DS + 'px">';
+    html += _dashSvgDonut(donutSegs, DS);
+    html += '<text x="' + (DS/2) + '" y="' + (DS/2-4) + '" text-anchor="middle" fill="#0F172A" font-size="14" font-weight="800">' + users.length + '</text>';
+    html += '<text x="' + (DS/2) + '" y="' + (DS/2+11) + '" text-anchor="middle" fill="#94A3B8" font-size="8">users</text>';
+    html += '</svg></div>';
+    html += '<div class="adm-donut-legend">';
+    [['Gratuit', freeCnt, fPct, '#94A3B8'],['Premium 👑', premCnt, pPct, '#D97706'],['Business 💼', bizCnt, bPct, '#4F46E5']].forEach(function(r) {
+      html += '<div class="adm-legend-row"><span class="adm-legend-dot" style="background:' + r[3] + '"></span>';
+      html += '<span class="adm-legend-lbl">' + r[0] + '</span>';
+      html += '<span class="adm-legend-pct"><strong>' + r[1] + '</strong> <small>(' + r[2] + '%)</small></span></div>';
+    });
+    html += '</div></div></div>';
+  }
+
+  /* Revenus 6 mois */
+  if (_admHasTab('payments')) {
+    html += '<div class="adm-chart-card">';
+    html += '<div class="adm-chart-header"><span class="adm-chart-title">Revenus 6 mois</span><span class="adm-chart-period">' + totalRevenue.toFixed(0) + ' € total</span></div>';
+    html += _dashSvgBars(revMonths, '#10B981', revLabels);
+    html += '</div>';
+  }
+
+  html += '</div>'; /* fin adm-db2-charts */
+
+  /* ══════ TAUX DE CONVERSION ══════ */
+  if (_admHasTab('analytics') && users.length > 0) {
+    var convRate  = Math.round((paidUsers.length / users.length) * 100);
+    var premRate  = Math.round((premCnt / users.length) * 100);
+    var bizRate   = Math.round((bizCnt  / users.length) * 100);
+    html += '<div class="adm-db2-section-label">Taux de conversion</div>';
+    html += '<div class="adm-conv-row">';
+    /* Barre globale */
+    html += '<div class="adm-conv-card">';
+    html += '<div class="adm-conv-top"><span class="adm-conv-label">Gratuit → Payant</span><span class="adm-conv-pct">' + convRate + '%</span></div>';
+    html += '<div class="adm-conv-bar-wrap"><div class="adm-conv-bar-fill" style="width:' + convRate + '%;background:linear-gradient(90deg,#6366F1,#8B5CF6)"></div></div>';
+    html += '</div>';
+    html += '<div class="adm-conv-card">';
+    html += '<div class="adm-conv-top"><span class="adm-conv-label">→ Premium</span><span class="adm-conv-pct">' + premRate + '%</span></div>';
+    html += '<div class="adm-conv-bar-wrap"><div class="adm-conv-bar-fill" style="width:' + premRate + '%;background:linear-gradient(90deg,#D97706,#F59E0B)"></div></div>';
+    html += '</div>';
+    html += '<div class="adm-conv-card">';
+    html += '<div class="adm-conv-top"><span class="adm-conv-label">→ Business</span><span class="adm-conv-pct">' + bizRate + '%</span></div>';
+    html += '<div class="adm-conv-bar-wrap"><div class="adm-conv-bar-fill" style="width:' + bizRate + '%;background:linear-gradient(90deg,#4F46E5,#7C3AED)"></div></div>';
+    html += '</div>';
+    html += '</div>';
+  }
+
+  /* ══════ CONTRÔLE DES PLANS ══════ */
+  if (_admHasAction('change_settings')) {
+    html += '<div class="adm-db2-section-label">Contrôle des abonnements</div>';
+    html += '<div class="adm-plan-toggles">';
+    html += planToggleHtml('premium',  'Plan Premium 👑',      'fas fa-crown',     cfg.premiumEnabled);
+    html += planToggleHtml('business', 'Plan Business Pro 💼', 'fas fa-briefcase', cfg.businessEnabled);
+    html += '</div>';
+  }
+
+  /* ══════ MEMBRES PAYANTS ══════ */
+  html += '<div class="adm-db2-section-label">Membres payants <span class="adm-premium-count">' + paidUsers.length + '</span></div>';
+  html += '<div class="adm-premium-grid">';
+  if (!paidUsers.length) {
+    html += '<div class="adm-empty" style="grid-column:1/-1"><i class="fas fa-crown" style="color:#D97706"></i>Aucun membre payant</div>';
+  } else {
+    paidUsers.forEach(function(u) {
+      var p        = loadUserProfile(u.email) || {};
+      var initials = (u.nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+      var pt       = p.planType || 'free';
+      var planIcon = pt === 'business' ? '💼' : '👑';
+      var planLbl  = pt === 'business' ? 'Business Pro' : 'Premium';
+      var planBg   = pt === 'business' ? '#EEF2FF' : '#FEF3C7';
+      var planCol  = pt === 'business' ? '#4F46E5'  : '#D97706';
+      var esc      = u.email.replace(/'/g,"\\'");
+      html += '<div class="adm-premium-card">' +
+        '<div class="adm-premium-av" style="background:' + (pt === 'business' ? 'linear-gradient(135deg,#4F46E5,#7C3AED)' : 'linear-gradient(135deg,#D97706,#F59E0B)') + '">' + escHtml(initials) + '</div>' +
+        '<div class="adm-premium-info">' +
+          '<div class="adm-premium-nom">' + escHtml(u.nom || u.email) + ' ' + planIcon + '</div>' +
+          '<div class="adm-premium-email">' + escHtml(u.email) + '</div>' +
+          '<span class="adm-plan-badge" style="background:' + planBg + ';color:' + planCol + '">' + planLbl + '</span>' +
+        '</div>' +
+        '<div class="adm-premium-actions">' +
+          '<button class="adm-btn-sm adm-btn-revoke-badge" onclick="_admRevokeBadge(\'' + esc + '\')"><i class="fas fa-shield-xmark"></i></button>' +
+          '<button class="adm-btn-sm adm-btn-ban"          onclick="_admBanUser(\''    + esc + '\')"><i class="fas fa-ban"></i></button>' +
+        '</div></div>';
+    });
+  }
+  html += '</div>';
+
+  /* ══════ JOURNAL D'ACTIONS ══════ */
+  html += '<div class="adm-db2-section-label">Journal d\'actions <span style="font-size:11px;font-weight:500;color:#94A3B8">(' + log.length + ' récentes)</span></div>';
+  html += '<div class="adm-db2-log">';
+  if (!log.length) {
+    html += '<div class="adm-empty"><i class="fas fa-scroll"></i>Aucune action enregistrée</div>';
+  } else {
+    log.forEach(function(entry) {
+      var color = '#3B82F6', bg = '#EFF6FF', ico = 'fa-circle-info';
+      if (entry.action.indexOf('BAN')         !== -1) { color='#EF4444'; bg='#FEF2F2'; ico='fa-ban'; }
+      if (entry.action.indexOf('DELETE')      !== -1) { color='#DC2626'; bg='#FEF2F2'; ico='fa-trash'; }
+      if (entry.action.indexOf('APPROVE')     !== -1) { color='#22C55E'; bg='#F0FDF4'; ico='fa-circle-check'; }
+      if (entry.action.indexOf('REJECT')      !== -1) { color='#F59E0B'; bg='#FFFBEB'; ico='fa-circle-xmark'; }
+      if (entry.action.indexOf('POST')        !== -1) { color='#6366F1'; bg='#EEF2FF'; ico='fa-bullhorn'; }
+      if (entry.action.indexOf('PLAN_TOGGLE') !== -1) { color='#8B5CF6'; bg='#F5F3FF'; ico='fa-sliders'; }
+      if (entry.action.indexOf('BADGE')       !== -1) { color='#0891B2'; bg='#E0F2FE'; ico='fa-circle-check'; }
+      var d  = new Date(entry.at);
+      var dt = d.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) + ' ' +
+               d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+      html += '<div class="adm-db2-log-item">';
+      html += '<div class="adm-db2-log-ico" style="background:' + bg + ';color:' + color + '"><i class="fas ' + ico + '"></i></div>';
+      html += '<div class="adm-db2-log-body">';
+      html += '<div class="adm-db2-log-action">' + escHtml(entry.action) + (entry.target ? '<span class="adm-db2-log-target"> · ' + escHtml(entry.target) + '</span>' : '') + '</div>';
+      html += '<div class="adm-db2-log-meta"><i class="fas fa-user-shield"></i> ' + escHtml(entry.by || '?') + '</div>';
+      html += '</div>';
+      html += '<div class="adm-db2-log-time">' + dt + '</div>';
+      html += '</div>';
+    });
+  }
+  html += '</div>';
+
+  /* Wrapper global */
+  return '<div class="adm-tab-header"><h2>Tableau de bord</h2><p>' + _admRoleSubtitle() + '</p></div>' +
+         '<div class="adm-dash">' + html + '</div>';
+}
+
+/* ── Export dashboard CSV ── */
+function _admExportDashboard() {
+  var users    = getUsers();
+  var payments = _admGetPayments();
+  var freeCnt = 0, premCnt = 0, bizCnt = 0;
+  users.forEach(function(u) {
+    var p = loadUserProfile(u.email) || {};
+    var pt = p.planType || 'free';
+    if (pt === 'free') freeCnt++; else if (pt === 'premium') premCnt++; else bizCnt++;
+  });
+  var totalRev = 0;
+  payments.forEach(function(p) { totalRev += parseFloat((p.amount||'0').replace(',','.').replace(' €',''))||0; });
+  var rows = [
+    ['Indicateur','Valeur'],
+    ['Utilisateurs totaux', users.length],
+    ['Plan Gratuit', freeCnt],
+    ['Plan Premium', premCnt],
+    ['Plan Business', bizCnt],
+    ['Revenus totaux (€)', totalRev.toFixed(2)],
+    ['Transactions', payments.length],
+    ['Date export', new Date().toLocaleDateString('fr-FR')]
+  ];
+  var csv = rows.map(function(r){ return r.join(';'); }).join('\n');
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'geniwork_dashboard_' + new Date().toISOString().slice(0,10) + '.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  showToast('Export téléchargé', 'success');
+}
+
+function _admStatCard(bg, color, ico, val, lbl) {
+  return '<div class="adm-stat-card">' +
+    '<div class="adm-stat-ico" style="background:' + bg + ';color:' + color + '"><i class="' + ico + '"></i></div>' +
+    '<div class="adm-stat-val">' + val + '</div>' +
+    '<div class="adm-stat-lbl">' + escHtml(lbl) + '</div>' +
+  '</div>';
+}
+
+/* ══════════════════════════════════════════
+   ONGLET PAIEMENTS & ABONNEMENTS
+══════════════════════════════════════════ */
+function _admBuildPayments() {
+  var payments = _admGetPayments();
+  var users    = getUsers();
+
+  /* ── Revenus ── */
+  var totalRevenue = 0;
+  var now = new Date();
+  var thisMonth = payments.filter(function(p) {
+    var d = new Date(p.date);
+    return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+  });
+  payments.forEach(function(p) {
+    totalRevenue += parseFloat((p.amount || '0').replace(',','.').replace(' €','')) || 0;
+  });
+  var monthRevenue = 0;
+  thisMonth.forEach(function(p) {
+    monthRevenue += parseFloat((p.amount || '0').replace(',','.').replace(' €','')) || 0;
+  });
+
+  /* ── Revenus par plan ── */
+  var premRevenue = 0, bizRevenue = 0;
+  payments.forEach(function(p) {
+    var v = parseFloat((p.amount || '0').replace(',','.').replace(' €','')) || 0;
+    if (p.plan === 'premium')  premRevenue += v;
+    if (p.plan === 'business') bizRevenue  += v;
+  });
+
+  /* ── Stats par plan ── */
+  var premCnt = 0, bizCnt = 0;
+  users.forEach(function(u) {
+    var p = loadUserProfile(u.email) || {};
+    if (p.planType === 'premium')  premCnt++;
+    if (p.planType === 'business') bizCnt++;
+  });
+
+  var html = '<div class="adm-tab-header"><h2>Paiements & Abonnements</h2><p>Historique des transactions et revenus</p></div>' +
+    '<div class="adm-dash">';
+
+  /* ── Cards revenus ── */
+  html += '<div class="adm-dash-title"><i class="fas fa-euro-sign" style="color:#10B981;margin-right:6px"></i>Vue d\'ensemble financière</div>';
+  html += '<div class="adm-pay-overview">' +
+    '<div class="adm-pay-card total">' +
+      '<div class="adm-pay-card-icon"><i class="fas fa-chart-line"></i></div>' +
+      '<div class="adm-pay-card-val">' + totalRevenue.toFixed(2).replace('.',',') + ' €</div>' +
+      '<div class="adm-pay-card-lbl">Revenus totaux</div>' +
+    '</div>' +
+    '<div class="adm-pay-card month">' +
+      '<div class="adm-pay-card-icon"><i class="fas fa-calendar-day"></i></div>' +
+      '<div class="adm-pay-card-val">' + monthRevenue.toFixed(2).replace('.',',') + ' €</div>' +
+      '<div class="adm-pay-card-lbl">Ce mois</div>' +
+    '</div>' +
+    '<div class="adm-pay-card premium">' +
+      '<div class="adm-pay-card-icon"><i class="fas fa-crown"></i></div>' +
+      '<div class="adm-pay-card-val">' + premRevenue.toFixed(2).replace('.',',') + ' €</div>' +
+      '<div class="adm-pay-card-lbl">Premium <span class="adm-pay-cnt">' + premCnt + '</span></div>' +
+    '</div>' +
+    '<div class="adm-pay-card business">' +
+      '<div class="adm-pay-card-icon"><i class="fas fa-briefcase"></i></div>' +
+      '<div class="adm-pay-card-val">' + bizRevenue.toFixed(2).replace('.',',') + ' €</div>' +
+      '<div class="adm-pay-card-lbl">Business <span class="adm-pay-cnt">' + bizCnt + '</span></div>' +
+    '</div>' +
+  '</div>';
+
+  /* ── Tableau des transactions ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-list-ul" style="color:#6366F1;margin-right:6px"></i>Historique des transactions</div>';
+
+  if (!payments.length) {
+    html += '<div class="adm-empty"><i class="fas fa-receipt"></i>Aucune transaction enregistrée</div>';
+  } else {
+    html += '<div class="adm-pay-table-wrap"><table class="adm-pay-table">' +
+      '<thead><tr>' +
+        '<th>Utilisateur</th>' +
+        '<th>Plan</th>' +
+        '<th>Facturation</th>' +
+        '<th>Montant</th>' +
+        '<th>Date</th>' +
+        '<th>Statut</th>' +
+      '</tr></thead><tbody>';
+
+    payments.forEach(function(pay) {
+      var planLabels = { premium: '👑 Premium', business: '💼 Business Pro' };
+      var billLabels = { month: 'Mensuel', year: 'Annuel' };
+      var d = new Date(pay.date);
+      var dt = d.toLocaleDateString('fr-FR') + ' ' +
+               d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+      var statusClass = pay.status === 'completed' ? 'adm-pay-status-ok' : 'adm-pay-status-pend';
+      var statusLabel = pay.status === 'completed' ? '✓ Complété' : '⏳ En attente';
+      html += '<tr>' +
+        '<td><div class="adm-pay-user">' +
+          '<div class="adm-pay-av">' + escHtml((pay.nom || pay.email || '?')[0].toUpperCase()) + '</div>' +
+          '<div><div class="adm-pay-nom">' + escHtml(pay.nom || pay.email) + '</div>' +
+          '<div class="adm-pay-email">' + escHtml(pay.email) + '</div></div>' +
+        '</div></td>' +
+        '<td><span class="adm-pay-plan ' + (pay.plan || '') + '">' + (planLabels[pay.plan] || pay.plan) + '</span></td>' +
+        '<td>' + (billLabels[pay.billing] || pay.billing || '—') + '</td>' +
+        '<td><strong>' + escHtml(pay.amount || '—') + '</strong></td>' +
+        '<td class="adm-pay-date">' + dt + '</td>' +
+        '<td><span class="' + statusClass + '">' + statusLabel + '</span></td>' +
+      '</tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  /* ── Abonnés actifs ── */
+  var activeSubs = users.filter(function(u) {
+    var p = loadUserProfile(u.email) || {};
+    return p.planType === 'premium' || p.planType === 'business';
+  });
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-users" style="color:#2563EB;margin-right:6px"></i>Abonnés actifs (' + activeSubs.length + ')</div>';
+  if (!activeSubs.length) {
+    html += '<div class="adm-empty"><i class="fas fa-users"></i>Aucun abonné actif</div>';
+  } else {
+    html += '<div class="adm-premium-grid">';
+    activeSubs.forEach(function(u) {
+      var p   = loadUserProfile(u.email) || {};
+      var pt  = p.planType || 'free';
+      var ini = (u.nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+      var planInfo = pt === 'business'
+        ? { icon:'💼', lbl:'Business Pro', bg:'linear-gradient(135deg,#4F46E5,#7C3AED)', chip:'#EEF2FF', chipCol:'#4F46E5' }
+        : { icon:'👑', lbl:'Premium',      bg:'linear-gradient(135deg,#D97706,#F59E0B)', chip:'#FEF3C7', chipCol:'#D97706' };
+      var since = p.planSince ? new Date(p.planSince).toLocaleDateString('fr-FR') : '—';
+      var esc   = u.email.replace(/'/g,"\\'");
+      html +=
+        '<div class="adm-premium-card">' +
+          '<div class="adm-premium-av" style="background:' + planInfo.bg + '">' + escHtml(ini) + '</div>' +
+          '<div class="adm-premium-info">' +
+            '<div class="adm-premium-nom">' + escHtml(u.nom || u.email) + ' ' + planInfo.icon + '</div>' +
+            '<div class="adm-premium-email">' + escHtml(u.email) + '</div>' +
+            '<span class="adm-plan-badge" style="background:' + planInfo.chip + ';color:' + planInfo.chipCol + '">' + planInfo.lbl + '</span>' +
+            '<div style="font-size:10px;color:#9CA3AF;margin-top:3px">Depuis le ' + since + '</div>' +
+          '</div>' +
+          '<div class="adm-premium-actions">' +
+            '<button class="adm-btn-sm adm-btn-revoke-badge" onclick="_admRevokeBadge(\'' + esc + '\')">' +
+              '<i class="fas fa-shield-xmark"></i> Retirer' +
+            '</button>' +
+          '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* ── Commissions Marketplace ── */
+  try { html += _admBuildMkCommissions(); } catch(e){}
+
+  html += '</div>';
+  return html;
+}
+
+/* ══════════════════════════════════════════
+   ONGLET ANALYTICS
+══════════════════════════════════════════ */
+function _admBuildAnalytics() {
+  var users    = getUsers();
+  var payments = _admGetPayments();
+  var posts    = _offGetPosts();
+  var log      = _admGetLog();
+  var reports  = _admGetAllReports();
+  var badges   = _admGetBadgeReqs().filter(function(r){ return r.status === 'pending'; });
+  var now      = new Date();
+
+  /* ── Répartition par plan ── */
+  var freeCnt = 0, premCnt = 0, bizCnt = 0, verCnt = 0, bannedCnt = 0;
+  var bans = _admGetBans();
+  users.forEach(function(u) {
+    var p = loadUserProfile(u.email) || {};
+    var pt = p.planType || 'free';
+    if (pt === 'free')          freeCnt++;
+    else if (pt === 'premium')  premCnt++;
+    else if (pt === 'business') bizCnt++;
+    if (p.badgeType === 'verified') verCnt++;
+    if (bans.indexOf(u.email.toLowerCase()) !== -1) bannedCnt++;
+  });
+
+  /* ── Revenus par mois (6 derniers mois) ── */
+  var monthLabels = [], monthData = [];
+  for (var m = 5; m >= 0; m--) {
+    var d = new Date(now.getFullYear(), now.getMonth() - m, 1);
+    var lbl = d.toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' });
+    monthLabels.push(lbl);
+    var rev = 0;
+    payments.forEach(function(p) {
+      var pd = new Date(p.date);
+      if (pd.getMonth() === d.getMonth() && pd.getFullYear() === d.getFullYear()) {
+        rev += parseFloat((p.amount || '0').replace(',','.').replace(' €','')) || 0;
+      }
+    });
+    monthData.push(rev);
+  }
+  var maxRev = Math.max.apply(null, monthData.concat([1]));
+
+  /* ── Revenus totaux & abonnés ── */
+  var totalRevenue = 0;
+  payments.forEach(function(p) {
+    totalRevenue += parseFloat((p.amount || '0').replace(',','.').replace(' €','')) || 0;
+  });
+  var paidCnt = premCnt + bizCnt;
+
+  /* ── Services sur la plateforme ── */
+  var totalServices = 0;
+  users.forEach(function(u) {
+    totalServices += (loadUserServices(u.email) || []).length;
+  });
+
+  /* ── Activité admin (7 derniers jours) ── */
+  var sevenAgo = Date.now() - 7 * 24 * 3600 * 1000;
+  var recentActions = log.filter(function(e) { return new Date(e.at).getTime() > sevenAgo; }).length;
+
+  /* ── HTML ── */
+  var html = '<div class="adm-tab-header"><h2>Analytics</h2><p>Statistiques détaillées de la plateforme</p></div>' +
+    '<div class="adm-dash">';
+
+  /* ── KPIs principaux ── */
+  html += '<div class="adm-dash-title"><i class="fas fa-gauge-high" style="color:#6366F1;margin-right:6px"></i>Indicateurs clés</div>';
+  html += '<div class="adm-stats-grid">' +
+    _admStatCard('#EFF6FF','#2563EB','fas fa-users',         users.length,     'Utilisateurs total') +
+    _admStatCard('#FEF3C7','#D97706','fas fa-crown',         paidCnt,          'Abonnés payants') +
+    _admStatCard('#F0FDF4','#16A34A','fas fa-euro-sign',     totalRevenue.toFixed(0) + ' €', 'Revenus totaux') +
+    _admStatCard('#EEF2FF','#4F46E5','fas fa-store',         totalServices,    'Services publiés') +
+    _admStatCard('#F0FDF4','#059669','fas fa-newspaper',     posts.length,     'Posts officiels') +
+    _admStatCard('#FEE2E2','#DC2626','fas fa-flag',          reports.length,   'Signalements') +
+    _admStatCard('#FFF7ED','#EA580C','fas fa-circle-check',  verCnt,           'Comptes vérifiés') +
+    _admStatCard('#F5F3FF','#7C3AED','fas fa-bolt',          recentActions,    'Actions (7j)') +
+  '</div>';
+
+  /* ── Graphique revenus ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-chart-bar" style="color:#10B981;margin-right:6px"></i>Revenus mensuels (6 mois)</div>';
+  html += '<div class="adm-analytics-chart">';
+  monthLabels.forEach(function(lbl, i) {
+    var pct  = Math.round(monthData[i] / maxRev * 100);
+    var rev  = monthData[i].toFixed(0);
+    var isLast = (i === monthLabels.length - 1);
+    html +=
+      '<div class="adm-chart-bar-wrap">' +
+        '<div class="adm-chart-bar-val">' + (rev > 0 ? rev + '€' : '') + '</div>' +
+        '<div class="adm-chart-bar-outer">' +
+          '<div class="adm-chart-bar-inner ' + (isLast ? 'current' : '') + '" style="height:' + pct + '%"></div>' +
+        '</div>' +
+        '<div class="adm-chart-bar-lbl">' + lbl + '</div>' +
+      '</div>';
+  });
+  html += '</div>';
+
+  /* ── Répartition plans ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-chart-pie" style="color:#8B5CF6;margin-right:6px"></i>Répartition des abonnements</div>';
+  html += '<div class="adm-analytics-plans">';
+  var planRows = [
+    { lbl:'Gratuit',      cnt:freeCnt, color:'#6B7280', pct: Math.round(freeCnt / (users.length||1) * 100) },
+    { lbl:'Premium 👑',   cnt:premCnt, color:'#D97706', pct: Math.round(premCnt / (users.length||1) * 100) },
+    { lbl:'Business 💼',  cnt:bizCnt,  color:'#4F46E5', pct: Math.round(bizCnt  / (users.length||1) * 100) }
+  ];
+  planRows.forEach(function(row) {
+    html +=
+      '<div class="adm-analytics-plan-row">' +
+        '<div class="adm-analytics-plan-info">' +
+          '<span class="adm-analytics-plan-dot" style="background:' + row.color + '"></span>' +
+          '<span class="adm-analytics-plan-lbl">' + row.lbl + '</span>' +
+          '<span class="adm-analytics-plan-cnt">' + row.cnt + ' utilisateurs</span>' +
+        '</div>' +
+        '<div class="adm-analytics-plan-bar-wrap">' +
+          '<div class="adm-analytics-plan-bar" style="width:' + row.pct + '%;background:' + row.color + '"></div>' +
+        '</div>' +
+        '<span class="adm-analytics-plan-pct">' + row.pct + '%</span>' +
+      '</div>';
+  });
+  html += '</div>';
+
+  /* ── Taux de conversion ── */
+  var convRate = users.length ? Math.round(paidCnt / users.length * 100) : 0;
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-arrows-turn-right" style="color:#F59E0B;margin-right:6px"></i>Métriques de conversion</div>';
+  html += '<div class="adm-analytics-metrics">' +
+    '<div class="adm-analytics-metric">' +
+      '<div class="adm-analytics-metric-val" style="color:#10B981">' + convRate + '%</div>' +
+      '<div class="adm-analytics-metric-lbl">Taux de conversion<br><small>Gratuit → Payant</small></div>' +
+    '</div>' +
+    '<div class="adm-analytics-metric">' +
+      '<div class="adm-analytics-metric-val" style="color:#D97706">' + (paidCnt ? (totalRevenue / paidCnt).toFixed(0) + '€' : '—') + '</div>' +
+      '<div class="adm-analytics-metric-lbl">Revenu moyen<br><small>par abonné payant</small></div>' +
+    '</div>' +
+    '<div class="adm-analytics-metric">' +
+      '<div class="adm-analytics-metric-val" style="color:#6366F1">' + (users.length ? (totalServices / users.length).toFixed(1) : 0) + '</div>' +
+      '<div class="adm-analytics-metric-lbl">Services moyens<br><small>par utilisateur</small></div>' +
+    '</div>' +
+    '<div class="adm-analytics-metric">' +
+      '<div class="adm-analytics-metric-val" style="color:#EF4444">' + bannedCnt + '</div>' +
+      '<div class="adm-analytics-metric-lbl">Comptes bannis<br><small>total</small></div>' +
+    '</div>' +
+  '</div>';
+
+  /* ── Dernières inscriptions ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-user-plus" style="color:#2563EB;margin-right:6px"></i>Dernières inscriptions</div>';
+  var lastUsers = users.slice().reverse().slice(0, 8);
+  if (!lastUsers.length) {
+    html += '<div class="adm-empty"><i class="fas fa-users"></i>Aucun utilisateur</div>';
+  } else {
+    html += '<div class="adm-analytics-user-list">';
+    lastUsers.forEach(function(u) {
+      var p    = loadUserProfile(u.email) || {};
+      var pt   = p.planType || 'free';
+      var ini  = (u.nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+      var chipColor = pt === 'business' ? '#4F46E5' : pt === 'premium' ? '#D97706' : '#6B7280';
+      var chipBg    = pt === 'business' ? '#EEF2FF' : pt === 'premium' ? '#FEF3C7' : '#F3F4F6';
+      var chipLbl   = pt === 'business' ? 'Business' : pt === 'premium' ? 'Premium' : 'Gratuit';
+      html +=
+        '<div class="adm-analytics-user-row">' +
+          '<div class="adm-user-avatar" style="background:linear-gradient(135deg,#3B82F6,#6366F1);font-size:12px;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;flex-shrink:0">' + escHtml(ini) + '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:600;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(u.nom || u.email) + '</div>' +
+            '<div style="font-size:11px;color:#9CA3AF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(u.email) + '</div>' +
+          '</div>' +
+          '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;background:' + chipBg + ';color:' + chipColor + ';white-space:nowrap">' + chipLbl + '</span>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+/* ══════════════════════════════════════════
+   ONGLET MARKETPLACE
+══════════════════════════════════════════ */
+function _admBuildMarketplace() {
+  var users    = getUsers();
+  var allSvcs  = [];
+
+  users.forEach(function(u) {
+    var svcs = loadUserServices(u.email) || [];
+    svcs.forEach(function(svc) {
+      allSvcs.push({ user: u, svc: svc });
+    });
+  });
+
+  /* Trier par date décroissante si disponible */
+  allSvcs.sort(function(a, b) {
+    var da = a.svc.createdAt || a.svc.date || '';
+    var db = b.svc.createdAt || b.svc.date || '';
+    return db.localeCompare(da);
+  });
+
+  /* Stats */
+  var totalSvcs    = allSvcs.length;
+  var usersWithSvc = users.filter(function(u){ return (loadUserServices(u.email)||[]).length > 0; }).length;
+  var avgSvcs      = users.length ? (totalSvcs / users.length).toFixed(1) : 0;
+
+  var html = '<div class="adm-tab-header"><h2>Marketplace</h2><p>Tous les services et offres publiés sur la plateforme</p></div>' +
+    '<div class="adm-dash">';
+
+  /* ── Stats rapides ── */
+  html += '<div class="adm-stats-grid">' +
+    _admStatCard('#EFF6FF','#2563EB','fas fa-store',     totalSvcs,    'Services total') +
+    _admStatCard('#F0FDF4','#16A34A','fas fa-user-tie',  usersWithSvc, 'Prestataires actifs') +
+    _admStatCard('#FEF3C7','#D97706','fas fa-chart-bar', avgSvcs,      'Moyenne / utilisateur') +
+  '</div>';
+
+  /* ── Filtre rapide ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-list" style="color:#6366F1;margin-right:6px"></i>Tous les services (' + totalSvcs + ')</div>';
+
+  if (!allSvcs.length) {
+    html += '<div class="adm-empty"><i class="fas fa-store"></i>Aucun service publié pour le moment</div>';
+  } else {
+    html += '<div class="adm-mkt-grid">';
+    allSvcs.slice(0, 50).forEach(function(item) {
+      var u   = item.user;
+      var svc = item.svc;
+      var ini = (u.nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+      var p   = loadUserProfile(u.email) || {};
+      var pt  = p.planType || 'free';
+      var badgeColor = pt === 'business' ? '#4F46E5' : pt === 'premium' ? '#D97706' : '#6B7280';
+      var title  = escHtml(svc.title  || svc.nom  || 'Sans titre');
+      var desc   = escHtml((svc.description || svc.desc || '').slice(0, 80));
+      var price  = svc.price  ? '<strong>' + escHtml(String(svc.price)) + ' €</strong>' : '';
+      var cat    = svc.category || svc.categorie || '';
+      var escEmail = u.email.replace(/'/g,"\\'");
+      html +=
+        '<div class="adm-mkt-card">' +
+          (svc.image ? '<div class="adm-mkt-img"><img src="' + svc.image + '" alt="' + title + '"/></div>' : '') +
+          '<div class="adm-mkt-body">' +
+            '<div class="adm-mkt-title">' + title + '</div>' +
+            (desc ? '<div class="adm-mkt-desc">' + desc + '</div>' : '') +
+            '<div class="adm-mkt-meta">' +
+              (cat ? '<span class="adm-mkt-cat"><i class="fas fa-tag"></i> ' + escHtml(cat) + '</span>' : '') +
+              (price ? '<span class="adm-mkt-price">' + price + '</span>' : '') +
+            '</div>' +
+            '<div class="adm-mkt-footer">' +
+              '<div style="display:flex;align-items:center;gap:6px">' +
+                '<div style="width:24px;height:24px;border-radius:50%;background:linear-gradient(135deg,#3B82F6,#6366F1);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff">' + escHtml(ini) + '</div>' +
+                '<span style="font-size:11px;color:#374151;font-weight:600">' + escHtml(u.nom || u.email) + '</span>' +
+                '<span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:10px;background:#EEF2FF;color:' + badgeColor + '">' + (pt === 'business' ? 'Business' : pt === 'premium' ? 'Premium' : 'Free') + '</span>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+    if (allSvcs.length > 50) {
+      html += '<p style="text-align:center;font-size:12px;color:#9CA3AF;padding:12px">Affichage limité aux 50 premiers services</p>';
+    }
+  }
+
+  html += '</div>';
+  return html;
+}
+
+/* ══════════════════════════════════════════
+   ONGLET NOTIFICATIONS & COMMUNICATION
+══════════════════════════════════════════ */
+function _admBuildNotifs() {
+  var users    = getUsers();
+  var log      = _admGetLog().filter(function(e){ return e.action && e.action.indexOf('NOTIF') !== -1; }).slice(0, 20);
+
+  /* Options utilisateurs */
+  var userOpts = '<option value="all">📢 Tous les utilisateurs</option>';
+  users.forEach(function(u) {
+    userOpts += '<option value="' + escHtml(u.email) + '">' + escHtml(u.nom || u.email) + ' (' + escHtml(u.email) + ')</option>';
+  });
+
+  /* Compter les notifs non lues par utilisateur */
+  var totalUnread = 0;
+  users.forEach(function(u) {
+    var notifs = getNotifs(u.email) || [];
+    totalUnread += notifs.filter(function(n){ return n.unread; }).length;
+  });
+
+  var html = '<div class="adm-tab-header"><h2>Notifications & Communication</h2><p>Envoyez des messages et notifications aux utilisateurs</p></div>' +
+    '<div class="adm-dash">';
+
+  /* ── Stats notifs ── */
+  html += '<div class="adm-stats-grid">' +
+    _admStatCard('#FEF3C7','#D97706','fas fa-bell',       totalUnread,  'Notifs non lues') +
+    _admStatCard('#EFF6FF','#2563EB','fas fa-users',       users.length, 'Destinataires') +
+    _admStatCard('#F0FDF4','#16A34A','fas fa-paper-plane', log.length,   'Envois enregistrés') +
+  '</div>';
+
+  /* ── Composer notification ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-bell" style="color:#F59E0B;margin-right:6px"></i>Envoyer une notification</div>';
+  html +=
+    '<div class="adm-notif-composer" style="margin-bottom:20px">' +
+      '<div class="adm-notif-composer-head"><i class="fas fa-paper-plane"></i> Nouvelle notification</div>' +
+      '<div class="adm-notif-composer-body">' +
+        '<div class="adm-modal-field"><label>Destinataires</label>' +
+          '<select id="adm-notif-target">' + userOpts + '</select>' +
+        '</div>' +
+        '<div class="adm-modal-field"><label>Titre du message</label>' +
+          '<input id="adm-notif-title" placeholder="Ex: Nouvelle fonctionnalité disponible…"/>' +
+        '</div>' +
+        '<div class="adm-modal-field"><label>Détails (optionnel)</label>' +
+          '<textarea id="adm-notif-body" style="min-height:70px" placeholder="Message complémentaire…"></textarea>' +
+        '</div>' +
+        '<div class="adm-notif-type-row">' +
+          '<label style="font-size:12px;font-weight:600;color:#374151">Type :</label>' +
+          '<select id="adm-notif-type" style="flex:1;border:1px solid #E5E7EB;border-radius:8px;padding:6px 10px;font-size:12px">' +
+            '<option value="info">ℹ️ Information</option>' +
+            '<option value="promo">🎁 Promotion</option>' +
+            '<option value="alert">⚠️ Alerte</option>' +
+            '<option value="news">📰 Actualité</option>' +
+          '</select>' +
+        '</div>' +
+        '<button class="adm-publi-send-btn" style="background:linear-gradient(135deg,#6366F1,#4F46E5);margin-top:8px" onclick="_admSendNotif()"><i class="fas fa-paper-plane"></i> Envoyer</button>' +
+      '</div>' +
+    '</div>';
+
+  /* ── Historique des envois ── */
+  html += '<div class="adm-dash-title"><i class="fas fa-clock-rotate-left" style="color:#6366F1;margin-right:6px"></i>Historique des notifications envoyées</div>';
+  if (!log.length) {
+    html += '<div class="adm-empty"><i class="fas fa-bell-slash"></i>Aucune notification envoyée pour le moment</div>';
+  } else {
+    html += '<div class="adm-recent-list">';
+    log.forEach(function(entry) {
+      var d  = new Date(entry.at);
+      var dt = d.toLocaleDateString('fr-FR') + ' ' + d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+      html +=
+        '<div class="adm-recent-item">' +
+          '<div class="adm-recent-dot" style="background:#6366F1"></div>' +
+          '<div class="adm-recent-text">' +
+            '<strong>' + escHtml(entry.target || 'Tous') + '</strong>' +
+            '<br><span style="font-size:11px;color:#6B7280">par ' + escHtml(entry.by || '?') + '</span>' +
+          '</div>' +
+          '<div class="adm-recent-time">' + dt + '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* ── Notifs non lues par utilisateur ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-inbox" style="color:#EF4444;margin-right:6px"></i>Boîte de réception utilisateurs</div>';
+  var usersWithNotifs = users
+    .map(function(u) {
+      var notifs  = getNotifs(u.email) || [];
+      var unread  = notifs.filter(function(n){ return n.unread; }).length;
+      return { u: u, unread: unread, total: notifs.length };
+    })
+    .filter(function(x){ return x.total > 0; })
+    .sort(function(a,b){ return b.unread - a.unread; });
+
+  if (!usersWithNotifs.length) {
+    html += '<div class="adm-empty"><i class="fas fa-inbox"></i>Aucune notification dans les boîtes utilisateurs</div>';
+  } else {
+    html += '<div class="adm-analytics-user-list">';
+    usersWithNotifs.slice(0, 15).forEach(function(item) {
+      var ini = (item.u.nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+      html +=
+        '<div class="adm-analytics-user-row">' +
+          '<div style="width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#4F46E5);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex-shrink:0">' + escHtml(ini) + '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:600;color:#0F172A">' + escHtml(item.u.nom || item.u.email) + '</div>' +
+            '<div style="font-size:11px;color:#9CA3AF">' + item.total + ' notif(s) · ' + item.unread + ' non lue(s)</div>' +
+          '</div>' +
+          (item.unread > 0 ? '<span style="background:#EF4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px">' + item.unread + '</span>' : '') +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+/* ══════════════════════════════════════════
+   ONGLET PARAMÈTRES SYSTÈME
+══════════════════════════════════════════ */
+function _admBuildSettings() {
+  var log     = _admGetLog();
+  var users   = getUsers();
+  var admins  = _admGetAdmins();
+  var sa      = _admGetSuperAdmin();
+  var cfg     = _admGetPlansConfig();
+  var payments = _admGetPayments();
+
+  /* Infos système */
+  var totalData = 0;
+  try {
+    for (var k in localStorage) {
+      if (k.indexOf('gw_') === 0) {
+        totalData += (localStorage.getItem(k) || '').length;
+      }
+    }
+  } catch(e) {}
+  var totalKb = (totalData / 1024).toFixed(1);
+
+  /* Logo */
+  var currentLogo = _admGetOfficialLogo();
+  var logoPreview = currentLogo
+    ? '<img src="' + currentLogo + '" alt="logo" style="width:100%;height:100%;object-fit:cover;border-radius:14px">'
+    : '<i class="fas fa-star" style="font-size:22px;color:#fff"></i>';
+
+  var html = '<div class="adm-tab-header"><h2>Paramètres système</h2><p>Configuration et administration de la plateforme</p></div>' +
+    '<div class="adm-dash">';
+
+  /* ── Logo officiel ── */
+  html += '<div class="adm-dash-title"><i class="fas fa-star" style="color:#D97706;margin-right:6px"></i>Identité de marque</div>';
+  html += '<div class="adm-settings-section">' +
+    '<div class="adm-photo-section" style="padding:0">' +
+      '<div class="adm-photo-preview" style="width:64px;height:64px;border-radius:16px;background:linear-gradient(135deg,#1D4ED8,#7C3AED);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0">' + logoPreview + '</div>' +
+      '<div class="adm-photo-info">' +
+        '<div class="adm-photo-label">Logo Geniwork Officiel</div>' +
+        '<div class="adm-photo-sub">Affiché sur toutes les publications officielles dans le feed des utilisateurs.</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' +
+          '<button class="adm-photo-btn" style="margin:0" onclick="document.getElementById(\'adm-off-logo-input-s\').click()">' +
+            '<i class="fas fa-camera"></i> ' + (currentLogo ? 'Changer' : 'Ajouter') +
+          '</button>' +
+          (currentLogo ? '<button class="adm-btn-sm adm-btn-ban" style="font-size:11px" onclick="_admRemoveOfficialLogo()"><i class="fas fa-trash"></i> Supprimer</button>' : '') +
+        '</div>' +
+        '<input type="file" id="adm-off-logo-input-s" accept="image/*" style="display:none" onchange="_admOfficialLogoChange(this)">' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+
+  /* ── Contrôle des plans ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-sliders" style="color:#7C3AED;margin-right:6px"></i>Contrôle des abonnements</div>';
+  html += '<div class="adm-settings-section">';
+  function settingsToggleHtml(plan, label, icon, enabled) {
+    return '<div class="adm-settings-toggle-row">' +
+      '<div style="display:flex;align-items:center;gap:10px">' +
+        '<span style="font-size:20px">' + icon + '</span>' +
+        '<div>' +
+          '<div style="font-size:13px;font-weight:700;color:#0F172A">' + label + '</div>' +
+          '<div style="font-size:11px;color:' + (enabled ? '#16A34A' : '#EF4444') + '">' + (enabled ? '✓ Actif — Souscriptions autorisées' : '✗ Inactif — Bouton grisé pour les utilisateurs') + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<button class="adm-toggle-btn ' + (enabled ? 'on' : 'off') + '" onclick="_admTogglePlan(\'' + plan + '\')">' +
+        '<span class="adm-toggle-knob"></span>' +
+      '</button>' +
+    '</div>';
+  }
+  html += settingsToggleHtml('premium',  'Plan Premium 👑',      '👑', cfg.premiumEnabled);
+  html += settingsToggleHtml('business', 'Plan Business Pro 💼', '💼', cfg.businessEnabled);
+  html += '</div>';
+
+  /* ── Informations système ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-server" style="color:#6366F1;margin-right:6px"></i>Informations système</div>';
+  html += '<div class="adm-settings-section">';
+  var sysRows = [
+    { ico:'fas fa-users',         lbl:'Utilisateurs enregistrés', val: users.length },
+    { ico:'fas fa-user-shield',   lbl:'Administrateurs',          val: admins.length + (sa ? 1 : 0) },
+    { ico:'fas fa-receipt',       lbl:'Transactions enregistrées',val: payments.length },
+    { ico:'fas fa-database',      lbl:'Données stockées (localStorage)', val: totalKb + ' Ko' },
+    { ico:'fas fa-scroll',        lbl:'Entrées journal d\'actions', val: log.length },
+    { ico:'fas fa-newspaper',     lbl:'Publications officielles', val: (_offGetPosts()).length }
+  ];
+  sysRows.forEach(function(row) {
+    html +=
+      '<div class="adm-settings-info-row">' +
+        '<div style="display:flex;align-items:center;gap:8px">' +
+          '<i class="' + row.ico + '" style="color:#6B7280;width:16px;text-align:center"></i>' +
+          '<span style="font-size:13px;color:#374151">' + row.lbl + '</span>' +
+        '</div>' +
+        '<strong style="font-size:13px;color:#0F172A">' + row.val + '</strong>' +
+      '</div>';
+  });
+  html += '</div>';
+
+  /* ── Journal complet ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-scroll" style="color:#6B7280;margin-right:6px"></i>Journal d\'actions complet (' + log.length + ')</div>';
+  if (!log.length) {
+    html += '<div class="adm-empty"><i class="fas fa-scroll"></i>Aucune action enregistrée</div>';
+  } else {
+    html += '<div class="adm-recent-list">';
+    log.slice(0, 40).forEach(function(entry) {
+      var color = '#3B82F6';
+      if (entry.action.indexOf('BAN')         !== -1) color = '#EF4444';
+      if (entry.action.indexOf('DELETE')      !== -1) color = '#DC2626';
+      if (entry.action.indexOf('APPROVE')     !== -1) color = '#22C55E';
+      if (entry.action.indexOf('REJECT')      !== -1) color = '#F59E0B';
+      if (entry.action.indexOf('POST')        !== -1) color = '#2563EB';
+      if (entry.action.indexOf('PLAN_TOGGLE') !== -1) color = '#8B5CF6';
+      if (entry.action.indexOf('NOTIF')       !== -1) color = '#D97706';
+      var d  = new Date(entry.at);
+      var dt = d.toLocaleDateString('fr-FR') + ' ' + d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+      html +=
+        '<div class="adm-recent-item">' +
+          '<div class="adm-recent-dot" style="background:' + color + '"></div>' +
+          '<div class="adm-recent-text">' +
+            '<strong>' + escHtml(entry.action) + '</strong>' +
+            (entry.target ? ' · <span style="color:#6B7280">' + escHtml(entry.target) + '</span>' : '') +
+            '<br><span style="font-size:10px;color:#9CA3AF">par ' + escHtml(entry.by || '?') + '</span>' +
+          '</div>' +
+          '<div class="adm-recent-time">' + dt + '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+    if (log.length > 40) {
+      html += '<p style="text-align:center;font-size:12px;color:#9CA3AF;padding:8px">Affichage limité aux 40 dernières entrées</p>';
+    }
+  }
+
+  /* ── Firebase Sync ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-cloud" style="color:#6366F1;margin-right:6px"></i>Synchronisation Firebase</div>';
+  html += '<div class="adm-settings-section">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
+      '<div>' +
+        '<div style="font-size:13px;font-weight:700;color:#0F172A">Statut Firebase</div>' +
+        '<div style="margin-top:4px">' + _gwFbStatusHtml() + '</div>' +
+      '</div>' +
+    '</div>' +
+    (_gwFbReady
+      ? '<button onclick="_gwFbUploadAll()" style="width:100%;padding:11px;background:linear-gradient(135deg,#6366F1,#4F46E5);color:#fff;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:8px">' +
+          '<i class="fas fa-cloud-arrow-up"></i> Envoyer les données locales vers Firebase</button>' +
+        '<p style="font-size:11.5px;color:#6B7280;text-align:center;margin:0">⚠️ À faire une seule fois pour initialiser les données sur le cloud</p>'
+      : '<div style="background:#FEF3C7;border-radius:10px;padding:12px;font-size:12px;color:#92400E">' +
+          '<b>⚙️ Configuration requise :</b><br>' +
+          '1. Crée un projet sur <b>console.firebase.google.com</b><br>' +
+          '2. Active "Realtime Database"<br>' +
+          '3. Copie ta config dans le fichier <b>js/app.js</b> (ligne 1, bloc <code>_GW_FIREBASE_CONFIG</code>)<br>' +
+          '4. Relance l\'application' +
+        '</div>') +
+  '</div>';
+
+  /* ── Danger zone ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px;color:#EF4444"><i class="fas fa-triangle-exclamation" style="color:#EF4444;margin-right:6px"></i>Zone sensible</div>';
+  html += '<div class="adm-settings-section adm-settings-danger">' +
+    '<div class="adm-settings-danger-row">' +
+      '<div>' +
+        '<div style="font-size:13px;font-weight:700;color:#DC2626">Effacer le journal d\'actions</div>' +
+        '<div style="font-size:11px;color:#6B7280">Supprime toutes les entrées du journal administrateur (irréversible).</div>' +
+      '</div>' +
+      '<button class="adm-btn-sm adm-btn-ban" onclick="_admClearLog()"><i class="fas fa-trash"></i> Effacer</button>' +
+    '</div>' +
+  '</div>';
+
+  html += '</div>';
+  return html;
+}
+
+/* ── Vider le journal d'actions ── */
+function _admClearLog() {
+  if (!confirm('Effacer tout le journal d\'actions ? Cette action est irréversible.')) return;
+  localStorage.removeItem('gw_admin_log');
+  showToast('Journal effacé ✓', 'ok');
+  _admRender();
+}
+
+/* ══════════════════════════════════════════
+   ONGLET 2 — SIGNALEMENTS
+══════════════════════════════════════════ */
+function _admBuildReports() {
+  var reports = _admGetAllReports();
+  var appeals = _gwGetAppeals();
+  var pendingAppeals = appeals.filter(function(a){ return a.status === 'pending'; });
+  var html =
+    '<div class="adm-tab-header"><h2>Signalements & Recours</h2><p>' + reports.length + ' signalement(s) · ' + pendingAppeals.length + ' recours en attente</p></div>' +
+    '<div class="adm-dash">';
+
+  /* ══ SECTION RECOURS ══ */
+  html += '<div class="adm-dash-title"><i class="fas fa-gavel" style="color:#7C3AED;margin-right:6px"></i>Recours de comptes bannis <span style="background:#EDE9FE;color:#7C3AED;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;margin-left:6px">' + pendingAppeals.length + '</span></div>';
+  if (!pendingAppeals.length) {
+    html += '<div class="adm-empty" style="margin-bottom:20px"><i class="fas fa-gavel"></i>Aucun recours en attente</div>';
+  } else {
+    html += '<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px">';
+    pendingAppeals.forEach(function(a) {
+      var banInfo = _admGetBanInfo(a.email);
+      var d = new Date(a.date).toLocaleDateString('fr-FR') + ' ' +
+              new Date(a.date).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+      var ini = (a.nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+      var escId  = a.id.replace(/'/g,"\\'");
+      html +=
+        '<div class="adm-appeal-card">' +
+          '<div class="adm-appeal-head">' +
+            '<div style="display:flex;align-items:center;gap:10px">' +
+              '<div class="adm-appeal-av">' + escHtml(ini) + '</div>' +
+              '<div>' +
+                '<div class="adm-appeal-nom">' + escHtml(a.nom || a.email) + '</div>' +
+                '<div class="adm-appeal-email">' + escHtml(a.email) + '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="adm-appeal-date">' + d + '</div>' +
+          '</div>' +
+          (a.banReason ? '<div class="adm-appeal-ban-reason"><i class="fas fa-ban" style="color:#EF4444;margin-right:5px"></i>Suspendu pour : <strong>' + escHtml(a.banReason) + '</strong>' +
+            (a.banType === 'perm' ? ' (définitif)' : banInfo && banInfo.expiresAt ? ' — jusqu\'au ' + new Date(banInfo.expiresAt).toLocaleDateString('fr-FR') : '') + '</div>' : '') +
+          '<div class="adm-appeal-msg">' +
+            '<i class="fas fa-quote-left" style="color:#9CA3AF;margin-right:6px;font-size:10px"></i>' +
+            escHtml(a.message) +
+          '</div>' +
+          '<div class="adm-appeal-actions">' +
+            (_admHasAction('dismiss_report') || _admHasAction('unban') ?
+              '<button class="adm-btn-sm adm-btn-approve" onclick="_admResolveAppeal(\'' + escId + '\',\'accept\')">' +
+                '<i class="fas fa-check"></i> Accepter le recours' +
+              '</button>' : '') +
+            (_admHasAction('dismiss_report') ?
+              '<button class="adm-btn-sm adm-btn-dismiss" onclick="_admResolveAppeal(\'' + escId + '\',\'reject\')">' +
+                '<i class="fas fa-times"></i> Rejeter' +
+              '</button>' : '') +
+            (banInfo && _admHasAction('ban') ? '<button class="adm-btn-sm adm-btn-ban" onclick="_admBanUser(\'' + a.email.replace(/'/g,"\\'") + '\')">' +
+              '<i class="fas fa-clock"></i> Modifier la sanction' +
+            '</button>' : '') +
+          '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* Recours traités (résumé) */
+  var resolved = appeals.filter(function(a){ return a.status !== 'pending'; });
+  if (resolved.length) {
+    html += '<div class="adm-dash-title" style="margin-bottom:8px"><i class="fas fa-history" style="color:#6B7280;margin-right:6px"></i>Recours traités (' + resolved.length + ')</div>';
+    html += '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:20px">';
+    resolved.slice(0, 5).forEach(function(a) {
+      var isAcc = a.status === 'accepted';
+      html +=
+        '<div style="display:flex;align-items:center;gap:10px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:10px 12px">' +
+          '<span style="font-size:16px">' + (isAcc ? '✅' : '❌') + '</span>' +
+          '<div style="flex:1">' +
+            '<span style="font-size:12px;font-weight:700;color:#374151">' + escHtml(a.nom || a.email) + '</span>' +
+            '<span style="font-size:11px;color:#9CA3AF;margin-left:8px">' + escHtml(a.email) + '</span>' +
+          '</div>' +
+          '<span style="font-size:11px;font-weight:700;color:' + (isAcc ? '#16A34A' : '#EF4444') + '">' + (isAcc ? 'Accepté' : 'Rejeté') + '</span>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* ══ SECTION TICKETS SUPPORT (messagerie) ══ */
+  var supportThreads = _getSupportThreads();
+  var openThreads    = supportThreads.filter(function(t) { return t.status !== 'closed'; });
+  var closedThreads  = supportThreads.filter(function(t) { return t.status === 'closed'; });
+  var totalUnread    = supportThreads.reduce(function(s, t) { return s + (t.unreadAdmin || 0); }, 0);
+
+  html += '<div class="adm-dash-title">' +
+    '<i class="fas fa-bug" style="color:#EF4444;margin-right:6px"></i>Tickets Support' +
+    (totalUnread > 0 ? ' <span style="background:#EF4444;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;margin-left:6px">' + totalUnread + ' nouveau' + (totalUnread > 1 ? 'x' : '') + '</span>' : '') +
+  '</div>';
+
+  if (!supportThreads.length) {
+    html += '<div class="adm-empty" style="margin-bottom:20px"><i class="fas fa-inbox"></i>Aucun ticket reçu pour le moment</div>';
+  } else {
+    /* Tickets ouverts en premier */
+    var allToShow = openThreads.concat(closedThreads);
+    allToShow.forEach(function(t) {
+      var escTid = t.id.replace(/'/g,"\\'");
+      var escEmail = (t.userEmail || '').replace(/'/g,"\\'");
+      var isOpen   = t.status !== 'closed';
+      var unread   = t.unreadAdmin || 0;
+      var d = new Date(t.createdAt).toLocaleDateString('fr-FR') + ' ' +
+              new Date(t.createdAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+
+      /* Bulle de message pour chaque message du thread */
+      var msgsHtml = (t.messages || []).map(function(m) {
+        var isAdm  = !!m.isAdmin;
+        var who    = isAdm ? '🛡️ ' + escHtml(m.fromNom || 'Admin') : '👤 ' + escHtml(t.userNom || t.userEmail);
+        var bg     = isAdm ? '#F0FDF4' : '#EFF6FF';
+        var border = isAdm ? '#BBF7D0' : '#BFDBFE';
+        var col    = isAdm ? '#15803D' : '#1D4ED8';
+        var mDate  = new Date(m.at).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) +
+                     ' · ' + new Date(m.at).toLocaleDateString('fr-FR');
+        return '<div style="margin-bottom:8px">' +
+          '<div style="font-size:11px;font-weight:700;color:' + col + ';margin-bottom:3px">' + who + ' <span style="font-weight:400;color:#9CA3AF">· ' + mDate + '</span></div>' +
+          '<div style="background:' + bg + ';border:1px solid ' + border + ';border-radius:10px;padding:10px 12px;font-size:13px;color:#111;line-height:1.55;white-space:pre-wrap">' + escHtml(m.text) + '</div>' +
+        '</div>';
+      }).join('');
+
+      html +=
+        '<div style="background:#fff;border:1.5px solid ' + (unread ? '#FCA5A5' : '#E5E7EB') + ';border-radius:14px;padding:16px;margin-bottom:12px;' + (unread ? 'box-shadow:0 0 0 3px #FEE2E2;' : '') + '">' +
+          /* En-tête ticket */
+          '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:8px">' +
+            '<div style="display:flex;align-items:center;gap:10px;min-width:0">' +
+              '<div style="width:36px;height:36px;border-radius:50%;background:#DBEAFE;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-weight:700;font-size:14px;color:#1D4ED8">' +
+                (t.userNom ? escHtml(t.userNom.charAt(0).toUpperCase()) : '?') +
+              '</div>' +
+              '<div style="min-width:0">' +
+                '<div style="font-weight:700;font-size:13px;color:#111;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(t.userNom || t.userEmail) + '</div>' +
+                '<div style="font-size:11px;color:#9CA3AF">' + escHtml(t.userEmail) + ' · ' + d + '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">' +
+              (unread ? '<span style="background:#EF4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px">' + unread + ' nouveau</span>' : '') +
+              '<span style="background:' + (isOpen ? '#DCFCE7' : '#F3F4F6') + ';color:' + (isOpen ? '#15803D' : '#6B7280') + ';font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px">' + (isOpen ? 'Ouvert' : 'Fermé') + '</span>' +
+              '<span style="background:#FEF3C7;color:#D97706;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px">🐛 ' + escHtml(t.catLabel || t.category || 'Bug') + '</span>' +
+            '</div>' +
+          '</div>' +
+
+          /* Messages */
+          '<div style="background:#F8FAFC;border-radius:10px;padding:12px;margin-bottom:12px;max-height:320px;overflow-y:auto">' +
+            msgsHtml +
+          '</div>' +
+
+          /* Zone de réponse admin */
+          (isOpen ? (
+            '<div style="display:flex;gap:8px;align-items:flex-end">' +
+              '<textarea id="adm-reply-' + t.id + '" placeholder="Répondre à ' + escHtml(t.userNom || t.userEmail) + '…" rows="2" ' +
+                'style="flex:1;padding:10px 12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:13px;resize:none;font-family:inherit;outline:none;box-sizing:border-box"></textarea>' +
+              '<button onclick="_admReplyThread(\'' + escTid + '\')" ' +
+                'style="padding:10px 16px;background:#2563EB;color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">' +
+                '<i class="fas fa-paper-plane"></i> Répondre' +
+              '</button>' +
+            '</div>'
+          ) : '') +
+
+          /* Actions */
+          '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">' +
+            (_admHasAction('dismiss_report') ? (
+              '<button onclick="_admCloseThread(\'' + escTid + '\')" class="adm-btn-sm" style="background:' + (isOpen ? '#F3F4F6' : '#DCFCE7') + ';color:' + (isOpen ? '#374151' : '#15803D') + '">' +
+                '<i class="fas ' + (isOpen ? 'fa-check-circle' : 'fa-undo') + '"></i> ' + (isOpen ? 'Fermer le ticket' : 'Rouvrir') +
+              '</button>'
+            ) : '') +
+            '<button onclick="_admDeleteThread(\'' + escTid + '\')" class="adm-btn-sm adm-btn-del" style="margin-left:auto">' +
+              '<i class="fas fa-trash"></i> Supprimer' +
+            '</button>' +
+            (_admHasAction('warn_user') ? (
+              '<button onclick="_admWarnUser(\'' + escEmail + '\')" class="adm-btn-sm adm-btn-warn">' +
+                '<i class="fas fa-triangle-exclamation"></i> Avertir' +
+              '</button>'
+            ) : '') +
+          '</div>' +
+        '</div>';
+    });
+  }
+
+  /* ══ SECTION SIGNALEMENTS CLASSIQUES (posts/chats) ══ */
+  var classicReports = reports.filter(function(r) { return r.type !== 'bug'; });
+  if (classicReports.length) {
+    html += '<div class="adm-dash-title" style="margin-top:16px"><i class="fas fa-flag" style="color:#EA580C;margin-right:6px"></i>Signalements utilisateurs (' + classicReports.length + ')</div>';
+    html += '<div class="adm-list-wrap" style="margin-top:8px">';
+    classicReports.forEach(function(r) {
+      var d = r.date ? new Date(r.date).toLocaleDateString('fr-FR') + ' ' +
+              new Date(r.date).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '—';
+      var banned      = _admIsBanned(r.target);
+      var escRid      = r.rid.replace(/'/g,"\\'");
+      var escReporter = r.reporter.replace(/'/g,"\\'");
+      var escTarget   = r.target.replace(/'/g,"\\'");
+      var typeIcon    = r.type === 'chat' ? '<i class="fas fa-comment" style="color:#3B82F6;margin-right:4px"></i>Chat'
+                      : '<i class="fas fa-image" style="color:#8B5CF6;margin-right:4px"></i>Post';
+      html +=
+        '<div class="adm-report-card">' +
+          '<div class="adm-report-head">' +
+            '<div class="adm-report-target"><i class="fas fa-user" style="color:#EF4444;margin-right:5px"></i>' + escHtml(r.target) + '</div>' +
+            '<div style="display:flex;align-items:center;gap:8px">' +
+              '<span style="font-size:10px;color:#6B7280">' + typeIcon + '</span>' +
+              '<div class="adm-report-date">' + d + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="adm-report-reason"><i class="fas fa-comment-dots" style="margin-right:4px;color:#EA580C"></i>' + escHtml(r.reason) + '</div>' +
+          '<div class="adm-report-by">Signalé par : <strong>' + escHtml(r.reporterNom) + '</strong></div>' +
+          '<div class="adm-report-actions">' +
+            (_admHasAction('dismiss_report') ? '<button class="adm-btn-sm adm-btn-dismiss" onclick="_admDismissReport(\'' + escRid + '\',\'' + escReporter + '\')">Ignorer</button>' : '') +
+            (_admHasAction('warn_user') ? '<button class="adm-btn-sm adm-btn-warn" onclick="_admWarnUser(\'' + escTarget + '\')"><i class="fas fa-triangle-exclamation"></i> Avertir</button>' : '') +
+            (banned
+              ? (_admHasAction('unban') ? '<button class="adm-btn-sm adm-btn-unban" onclick="_admUnbanUser(\'' + escTarget + '\')">Débannir</button>' : '')
+              : (_admHasAction('ban')   ? '<button class="adm-btn-sm adm-btn-ban" onclick="_admBanUser(\'' + escTarget + '\')"><i class="fas fa-ban"></i> Bannir</button>' : '')) +
+          '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+/* ── Actions signalements ── */
+function _admDismissReport(rid, reporterEmail) {
+  var key = 'gw_reports_' + reporterEmail;
+  try {
+    var reps = JSON.parse(localStorage.getItem(key) || '[]');
+    /* Filtre par id unique — compatible avec anciens signalements (legacy_*) */
+    var before = reps.length;
+    reps = reps.filter(function(r, i) {
+      var rId = r.id || ('legacy_' + reporterEmail + '_' + i);
+      return rId !== rid;
+    });
+    if (reps.length === before) {
+      /* Fallback : aucun trouvé par id (très vieux format), on supprime le premier */
+      reps.shift();
+    }
+    localStorage.setItem(key, JSON.stringify(reps));
+    _gwFbSet('reports/' + _gwFbKey(reporterEmail), reps);
+    _admLog('DISMISS_REPORT', reporterEmail);
+    showToast('Signalement supprimé ✓', 'ok');
+    _admRender();
+  } catch(e) { showToast('Erreur', 'err'); }
+}
+
+function _admWarnUser(email) {
+  /* En production : notification push / email. En démo : toast + log */
+  _admLog('WARN', email);
+  showToast('Avertissement enregistré pour ' + email, 'ok');
+}
+
+/* ══════════════════════════════════════════
+   ONGLET 3 — UTILISATEURS
+══════════════════════════════════════════ */
+function _admBuildUsers(search) {
+  var users    = getUsers();
+  var filtered = users.filter(function(u) {
+    if (!search) return true;
+    var s = search.toLowerCase();
+    return (u.nom || '').toLowerCase().includes(s) || (u.email || '').toLowerCase().includes(s);
+  });
+
+  var html =
+    '<div class="adm-tab-header">' +
+      '<h2>Utilisateurs</h2>' +
+      '<p>' + filtered.length + ' / ' + users.length + ' utilisateur(s)</p>' +
+    '</div>' +
+    '<div class="adm-search-bar">' +
+      '<input class="adm-search-input" id="adm-user-search" placeholder="Rechercher par nom ou email…"' +
+        ' oninput="_admSearchUsers(this.value)" value="' + escHtml(search) + '" />' +
+    '</div>' +
+    '<div class="adm-list-wrap">';
+
+  if (!filtered.length) {
+    html += '<div class="adm-empty"><i class="fas fa-users"></i>Aucun utilisateur trouvé</div>';
+  } else {
+    filtered.forEach(function(u) {
+      var banned  = _admIsBanned(u.email);
+      var role    = _admGetRole(u.email);
+      var profile = loadUserProfile(u.email);
+      var initials = getInitials(u.nom || 'U');
+
+      var avatarHtml = profile && profile.photo
+        ? '<img src="' + profile.photo + '" alt=""/>'
+        : initials;
+
+      /* Badge actif sur ce profil */
+      var hasBadge   = profile && profile.badgeType;
+      var badgeLabel = hasBadge
+        ? (profile.badgeType === 'premium' ? '👑 Premium' : '✅ Vérifié')
+        : '';
+      var safeEmail  = u.email.replace(/'/g,"\\'");
+
+      html +=
+        '<div class="adm-user-card' + (banned ? ' banned' : '') + '">' +
+          '<div class="adm-user-top">' +
+            '<div class="adm-user-avatar">' + avatarHtml + '</div>' +
+            '<div class="adm-user-info">' +
+              '<div class="adm-user-name">' + escHtml(u.nom || '?') + '</div>' +
+              '<div class="adm-user-email">' + escHtml(u.email) + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="adm-user-tags">' +
+            (banned ? '<span class="adm-tag adm-tag-banned">Banni</span>' : '<span class="adm-tag adm-tag-active">Actif</span>') +
+            (hasBadge ? '<span class="adm-tag ' + (profile.badgeType === 'premium' ? 'adm-tag-gold' : 'adm-tag-blue') + '">' + badgeLabel + '</span>' : '') +
+            (role === 'Super Admin' ? '<span class="adm-tag adm-tag-super">Super Admin</span>' : '') +
+            (role && role !== 'Super Admin' ? '<span class="adm-tag adm-tag-admin">' + escHtml(role) + '</span>' : '') +
+            (u.loginMethod === 'google' ? '<span class="adm-tag adm-tag-google"><i class="fab fa-google"></i> Google</span>' : '') +
+            (u.verified ? '' : '<span class="adm-tag adm-tag-pending">Non vérifié</span>') +
+          '</div>' +
+          '<div class="adm-user-actions">' +
+            (banned
+              ? (_admHasAction('unban') ? '<button class="adm-btn-sm adm-btn-unban" onclick="_admUnbanUser(\'' + safeEmail + '\')"><i class="fas fa-unlock"></i> Débannir</button>' : '')
+              : (_admHasAction('ban')   ? '<button class="adm-btn-sm adm-btn-ban"   onclick="_admBanUser(\'' + safeEmail + '\')"><i class="fas fa-ban"></i> Bannir</button>' : '')) +
+            (_admHasAction('delete_user') ? '<button class="adm-btn-sm adm-btn-del" onclick="_admDeleteUser(\'' + safeEmail + '\')"><i class="fas fa-trash"></i> Supprimer</button>' : '') +
+            (hasBadge && _admHasAction('approve_badge')
+              ? '<button class="adm-btn-sm adm-btn-revoke-badge" onclick="_admRevokeBadge(\'' + safeEmail + '\')"><i class="fas fa-shield-xmark"></i> Retirer badge</button>'
+              : '') +
+            (_admIsSA() && !role ? '<button class="adm-btn-sm adm-btn-promote" onclick="_admOpenPromote(\'' + safeEmail + '\',\'' + escHtml(u.nom||'').replace(/'/g,"\\'") + '\')"><i class="fas fa-user-tie"></i> Nommer admin</button>' : '') +
+            (_admIsSA() && role && role !== 'Super Admin' ? '<button class="adm-btn-sm adm-btn-revoke" onclick="_admRevokeAdmin(\'' + safeEmail + '\')"><i class="fas fa-user-xmark"></i> Retirer admin</button>' : '') +
+          '</div>' +
+        '</div>';
+    });
+  }
+  html += '</div>';
+  return html;
+}
+
+/* Recherche utilisateur (live) */
+function _admSearchUsers(val) {
+  var content = document.getElementById('adm-panel-content');
+  if (content) content.innerHTML = _admBuildUsers(val || '');
+}
+
+/* ── Helpers recours ── */
+function _gwGetAppeals()      { try { return JSON.parse(localStorage.getItem('gw_ban_appeals') || '[]'); } catch(e){ return []; } }
+function _gwSaveAppeals(list) { localStorage.setItem('gw_ban_appeals', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('ban_appeals', list); }
+
+/* ── Ouvrir modal de sanction ── */
+var _admBanType = 'temp';
+function _admBanUser(email) {
+  var users = getUsers();
+  var u = users.find(function(x){ return x.email.toLowerCase() === email.toLowerCase(); });
+  var nom = u ? (u.nom || email) : email;
+  _admBanType = 'temp';
+  var existing = document.getElementById('adm-ban-modal');
+  if (existing) existing.remove();
+  var modal = document.createElement('div');
+  modal.id = 'adm-ban-modal';
+  modal.className = 'adm-ban-modal-overlay';
+  modal.innerHTML =
+    '<div class="adm-ban-modal-card">' +
+      '<div class="adm-ban-modal-head">' +
+        '<div>' +
+          '<div style="font-size:15px;font-weight:800;color:#DC2626"><i class="fas fa-ban" style="margin-right:8px"></i>Sanctionner le compte</div>' +
+          '<div style="font-size:12px;color:#6B7280;margin-top:2px">' + escHtml(nom) + ' · ' + escHtml(email) + '</div>' +
+        '</div>' +
+        '<button style="border:none;background:none;cursor:pointer;font-size:18px;color:#9CA3AF" onclick="document.getElementById(\'adm-ban-modal\').remove()"><i class="fas fa-times"></i></button>' +
+      '</div>' +
+      '<div class="adm-ban-modal-body">' +
+        /* Type de sanction */
+        '<div class="adm-ban-field"><label>Type de sanction</label>' +
+          '<div class="adm-ban-type-row">' +
+            '<button class="adm-ban-type-btn active" id="adm-btype-temp" onclick="_admSetBanType(\'temp\')">' +
+              '<i class="fas fa-clock"></i> Temporaire' +
+            '</button>' +
+            '<button class="adm-ban-type-btn" id="adm-btype-perm" onclick="_admSetBanType(\'perm\')">' +
+              '<i class="fas fa-skull"></i> Définitif' +
+            '</button>' +
+          '</div>' +
+        '</div>' +
+        /* Durée */
+        '<div class="adm-ban-field" id="adm-ban-dur-field"><label>Durée de suspension</label>' +
+          '<select id="adm-ban-dur" class="adm-ban-select">' +
+            '<option value="1">1 jour</option>' +
+            '<option value="3">3 jours</option>' +
+            '<option value="7" selected>7 jours</option>' +
+            '<option value="14">14 jours</option>' +
+            '<option value="30">30 jours</option>' +
+            '<option value="90">90 jours</option>' +
+          '</select>' +
+        '</div>' +
+        /* Motif */
+        '<div class="adm-ban-field"><label>Motif de la sanction</label>' +
+          '<select id="adm-ban-reason" class="adm-ban-select" onchange="_admBanReasonChange(this.value)">' +
+            '<option value="Contenu inapproprié">Contenu inapproprié</option>' +
+            '<option value="Spam">Spam / publicité abusive</option>' +
+            '<option value="Harcèlement">Harcèlement ou intimidation</option>' +
+            '<option value="Fausses informations">Diffusion de fausses informations</option>' +
+            '<option value="Fraude">Fraude ou escroquerie</option>' +
+            '<option value="Autre">Autre motif (préciser ci-dessous)</option>' +
+          '</select>' +
+        '</div>' +
+        '<div class="adm-ban-field hidden" id="adm-ban-reason-custom-field"><label>Précisez le motif</label>' +
+          '<input id="adm-ban-reason-custom" class="adm-ban-input" placeholder="Motif personnalisé…"/>' +
+        '</div>' +
+        /* Message utilisateur */
+        '<div class="adm-ban-field"><label>Message pour l\'utilisateur <span style="color:#9CA3AF">(optionnel)</span></label>' +
+          '<textarea id="adm-ban-msg" class="adm-ban-textarea" placeholder="Informations complémentaires que l\'utilisateur verra…"></textarea>' +
+        '</div>' +
+        /* Boutons */
+        '<div style="display:flex;gap:8px;margin-top:16px">' +
+          '<button class="adm-ban-confirm-btn" onclick="_admConfirmBan(\'' + email.replace(/'/g,"\\'") + '\')">' +
+            '<i class="fas fa-ban"></i> Appliquer la sanction' +
+          '</button>' +
+          '<button class="adm-ban-cancel-btn" onclick="document.getElementById(\'adm-ban-modal\').remove()">Annuler</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(modal);
+}
+
+function _admSetBanType(type) {
+  _admBanType = type;
+  var t = document.getElementById('adm-btype-temp');
+  var p = document.getElementById('adm-btype-perm');
+  var d = document.getElementById('adm-ban-dur-field');
+  if (t) t.classList.toggle('active', type === 'temp');
+  if (p) p.classList.toggle('active', type === 'perm');
+  if (d) d.classList.toggle('hidden', type === 'perm');
+}
+
+function _admBanReasonChange(val) {
+  var f = document.getElementById('adm-ban-reason-custom-field');
+  if (f) f.classList.toggle('hidden', val !== 'Autre');
+}
+
+function _admConfirmBan(email) {
+  var type      = _admBanType || 'temp';
+  var days      = parseInt((document.getElementById('adm-ban-dur') || {}).value || '7', 10);
+  var rSel      = (document.getElementById('adm-ban-reason') || {}).value || 'Contenu inapproprié';
+  var rCustom   = ((document.getElementById('adm-ban-reason-custom') || {}).value || '').trim();
+  var reason    = (rSel === 'Autre' && rCustom) ? rCustom : rSel;
+  var message   = ((document.getElementById('adm-ban-msg') || {}).value || '').trim();
+  var expiresAt = (type === 'temp') ? new Date(Date.now() + days * 86400000).toISOString() : null;
+  /* Trouver le nom */
+  var u = getUsers().find(function(x){ return x.email.toLowerCase() === email.toLowerCase(); });
+  var nom = u ? (u.nom || email) : email;
+  /* Sauvegarder le ban */
+  var bans = _admGetBans().filter(function(b){ return b.email.toLowerCase() !== email.toLowerCase(); });
+  bans.push({ email:email, nom:nom, type:type, reason:reason, message:message,
+              bannedAt:new Date().toISOString(), expiresAt:expiresAt,
+              bannedBy: _adminUser ? _adminUser.email : 'admin' });
+  _admSaveBans(bans);
+  /* Invalider session */
+  try {
+    var s = JSON.parse(localStorage.getItem('gw_session') || 'null');
+    if (s && s.email && s.email.toLowerCase() === email.toLowerCase()) localStorage.removeItem('gw_session');
+  } catch(e) {}
+  /* Notification à l'utilisateur */
+  try {
+    var banMsg = type === 'perm'
+      ? '🚫 Votre compte a été suspendu définitivement. Motif : ' + reason
+      : '⏸️ Votre compte est suspendu pour ' + days + ' jour' + (days > 1 ? 's' : '') + '. Motif : ' + reason;
+    var notifs = getNotifs(email);
+    notifs.unshift({ id:'ban_notice_'+Date.now(), type:'ban',
+      msg: banMsg + (message ? '\n\n' + message : ''), at: Date.now(), time:'À l\'instant', unread:true, fromUser:null });
+    saveNotifs(email, notifs);
+  } catch(e) {}
+  _admLog('BAN:' + type.toUpperCase() + (type === 'temp' ? ':' + days + 'j' : ''), email + ' — ' + reason);
+  var modal = document.getElementById('adm-ban-modal');
+  if (modal) modal.remove();
+  showToast(nom + ' suspendu ' + (type === 'perm' ? 'définitivement' : days + ' j') + ' ✓', 'ok');
+  _admRender();
+}
+
+/* ── Débannir ── */
+function _admUnbanUser(email) {
+  var bans = _admGetBans().filter(function(b){ return b.email.toLowerCase() !== email.toLowerCase(); });
+  _admSaveBans(bans);
+  /* Notifier l'utilisateur */
+  try {
+    var notifs = getNotifs(email);
+    notifs.unshift({ id:'ban_lifted_'+Date.now(), type:'ban_lifted',
+      msg:'✅ Votre suspension a été levée. Vous pouvez vous reconnecter.', at: Date.now(), time:'À l\'instant', unread:true, fromUser:null });
+    saveNotifs(email, notifs);
+  } catch(e) {}
+  _admLog('UNBAN', email);
+  showToast(email + ' débanni ✓', 'ok');
+  _admRender();
+}
+
+/* ── Supprimer un compte ── */
+function _admDeleteUser(email) {
+  var sa = _admGetSuperAdmin();
+  if (sa && sa.email.toLowerCase() === email.toLowerCase()) {
+    showToast('Impossible de supprimer le Super Admin', 'err'); return;
+  }
+  if (!confirm('Supprimer définitivement le compte de ' + email + ' ? Cette action est irréversible.')) return;
+
+  /* Retire de gw_users */
+  var users = getUsers().filter(function(u){ return u.email.toLowerCase() !== email.toLowerCase(); });
+  saveUsers(users);
+
+  /* Supprime les données associées */
+  var prefixes = ['gw_profile_','gw_services_','gw_projects_','gw_favorites_','gw_cart_','gw_reports_','gw_privacy_','gw_blocked_','gw_badge_'];
+  prefixes.forEach(function(p){ localStorage.removeItem(p + email); });
+
+  /* Retire des admins */
+  _admSaveAdmins(_admGetAdmins().filter(function(a){ return a.email.toLowerCase() !== email.toLowerCase(); }));
+
+  /* Invalide la session */
+  try {
+    var sess = JSON.parse(localStorage.getItem('gw_session') || 'null');
+    if (sess && sess.email && sess.email.toLowerCase() === email.toLowerCase()) localStorage.removeItem('gw_session');
+  } catch(e) {}
+
+  _admLog('DELETE', email);
+  showToast('Compte supprimé ✓', 'ok');
+  _admRender();
+}
+
+/* ── Promouvoir un utilisateur en admin ── */
+function _admOpenPromote(email, nom) {
+  _admCloseModal();
+  var bg   = document.createElement('div');
+  bg.className = 'adm-modal-bg'; bg.id = 'adm-modal-bg';
+  bg.onclick = function(e){ if(e.target===bg) _admCloseModal(); };
+
+  var card = document.createElement('div');
+  card.className = 'adm-modal-card'; card.id = 'adm-modal-card';
+  card.innerHTML =
+    '<div class="adm-modal-title"><i class="fas fa-user-tie" style="color:#7C3AED"></i>Nommer administrateur</div>' +
+    '<p style="font-size:12px;color:#64748B;margin:0">Utilisateur : <strong>' + escHtml(nom) + '</strong> (' + escHtml(email) + ')</p>' +
+    '<div class="adm-modal-field">' +
+      '<label>Rôle à attribuer</label>' +
+      '<select id="adm-promote-role">' +
+        '<option value="Administrateur">Administrateur</option>' +
+        '<option value="Modérateur">Modérateur</option>' +
+        '<option value="Support">Support</option>' +
+      '</select>' +
+    '</div>' +
+    '<div class="adm-modal-btns">' +
+      '<button class="adm-modal-cancel" onclick="_admCloseModal()">Annuler</button>' +
+      '<button class="adm-modal-save" onclick="_admSavePromote(\'' + email.replace(/'/g,"\\'") + '\',\'' + escHtml(nom).replace(/'/g,"\\'") + '\')">Confirmer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg); document.body.appendChild(card);
+  requestAnimationFrame(function(){ bg.classList.add('open'); });
+}
+
+function _admSavePromote(email, nom) {
+  var roleEl = document.getElementById('adm-promote-role');
+  var role = roleEl ? roleEl.value : 'Administrateur';
+  var admins = _admGetAdmins();
+  /* Évite les doublons */
+  admins = admins.filter(function(a){ return a.email.toLowerCase() !== email.toLowerCase(); });
+  admins.push({ email: email, nom: nom, role: role, addedBy: _adminUser ? _adminUser.email : '?', addedAt: new Date().toISOString() });
+  _admSaveAdmins(admins);
+  _admLog('PROMOTE:' + role, email);
+  _admCloseModal();
+  showToast(nom + ' nommé ' + role + ' ✓', 'ok');
+  _admRender();
+}
+
+/* ── Approuver une demande d'accès ── */
+function _admApproveRequest(id) {
+  var reqs = _admGetRequests();
+  var req  = reqs.find(function(r){ return r.id === id; });
+  if (!req) return;
+
+  /* Vérifie que cet email n'est pas déjà admin */
+  var already = _admGetAdmins().some(function(a){ return a.email.toLowerCase() === req.email.toLowerCase(); });
+  if (already) { showToast('Cet email est déjà administrateur', 'err'); return; }
+
+  /* Ajoute dans gw_admins avec le mot de passe hashé de la demande */
+  var admins = _admGetAdmins();
+  admins.push({ email: req.email, nom: req.nom, role: req.role, pwHash: req.pwHash, grantedBy: _adminUser.email, grantedAt: new Date().toISOString() });
+  _admSaveAdmins(admins);
+
+  /* Marque la demande comme approuvée */
+  req.status = 'approved'; req.resolvedAt = new Date().toISOString();
+  _admSaveRequests(reqs);
+
+  /* Notifie le membre */
+  try {
+    var notif = { id: genNotifId(), type: 'system',
+      msg: '✅ Votre demande d\'accès admin a été approuvée ! Rôle : ' + req.role + '. Vous pouvez maintenant vous connecter.',
+      at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
+    var ns = getNotifs(req.email); ns.unshift(notif); saveNotifs(req.email, ns);
+  } catch(e) {}
+
+  _admLog('APPROVE_REQUEST', req.email + ' · ' + req.role);
+  showToast(req.nom + ' approuvé en tant que ' + req.role + ' ✓', 'ok');
+  _admRender();
+}
+
+/* ── Rejeter une demande d'accès ── */
+function _admRejectRequest(id) {
+  if (!confirm('Refuser cette demande d\'accès ?')) return;
+  var reqs = _admGetRequests();
+  var req  = reqs.find(function(r){ return r.id === id; });
+  if (!req) return;
+  req.status = 'rejected'; req.resolvedAt = new Date().toISOString();
+  _admSaveRequests(reqs);
+  try {
+    var notif = { id: genNotifId(), type: 'system',
+      msg: '❌ Votre demande d\'accès admin a été refusée. Contactez le Super Admin pour plus d\'informations.',
+      at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
+    var ns = getNotifs(req.email); ns.unshift(notif); saveNotifs(req.email, ns);
+  } catch(e) {}
+  _admLog('REJECT_REQUEST', req.email);
+  showToast('Demande refusée', 'ok');
+  _admRender();
+}
+
+/* ── Réinitialiser le mot de passe d'un membre (Super Admin uniquement) ── */
+function _admResetMemberPassword(email, nom) {
+  /* Vérification Super Admin */
+  var sa = _admGetSuperAdmin();
+  if (!sa || !_adminUser || _adminUser.email.toLowerCase() !== sa.email.toLowerCase()) {
+    showToast('Seul le Super Admin peut modifier les mots de passe', 'err'); return;
+  }
+  var newPwd = prompt('Définir un nouveau mot de passe pour ' + nom + ' :\n(Minimum 6 caractères)');
+  if (!newPwd) return;
+  if (newPwd.length < 6) { showToast('Mot de passe trop court (6 min)', 'err'); return; }
+
+  var salt = _gwSalt();
+  _gwHashPwd(newPwd, salt).then(function(hashed) {
+    /* Met à jour le pwHash dans gw_admins */
+    var admins = _admGetAdmins();
+    var entry  = admins.find(function(a){ return a.email.toLowerCase() === email.toLowerCase(); });
+    if (entry) {
+      entry.pwHash = hashed;
+      _admSaveAdmins(admins);
+    }
+    /* Met aussi à jour dans gw_users si le compte existe */
+    var users = getUsers();
+    var u = users.find(function(x){ return x.email.toLowerCase() === email.toLowerCase(); });
+    if (u) { u.password = hashed; saveUsers(users); }
+
+    /* Notifie le membre */
+    try {
+      var notif = { id: genNotifId(), type: 'system',
+        msg: '🔑 Votre mot de passe admin a été réinitialisé par le Super Admin. Nouveau mot de passe : ' + newPwd,
+        at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
+      var ns = getNotifs(email); ns.unshift(notif); saveNotifs(email, ns);
+    } catch(e) {}
+
+    _admLog('RESET_PASSWORD', email);
+    showToast('Mot de passe de ' + nom + ' réinitialisé ✓', 'ok');
+    alert('✅ Nouveau mot de passe défini pour ' + nom + ' :\n\n' + newPwd + '\n\nCommuniquez-le lui de façon sécurisée.');
+  });
+}
+
+/* ── Changer le rôle d'un membre (Super Admin uniquement) ── */
+function _admChangeRole(email) {
+  var sa = _admGetSuperAdmin();
+  if (!sa || !_adminUser || _adminUser.email.toLowerCase() !== sa.email.toLowerCase()) {
+    showToast('Seul le Super Admin peut modifier les rôles', 'err'); return;
+  }
+  var roles = ['Admin','Modérateur','Éditeur','Support'];
+  var newRole = prompt('Nouveau rôle pour ' + email + ' :\n\n' + roles.map(function(r,i){ return (i+1)+'. '+r; }).join('\n') + '\n\nTapez le nom exact du rôle :');
+  if (!newRole) return;
+  newRole = newRole.trim();
+  if (roles.indexOf(newRole) === -1) { showToast('Rôle invalide', 'err'); return; }
+  var admins = _admGetAdmins();
+  var entry  = admins.find(function(a){ return a.email.toLowerCase() === email.toLowerCase(); });
+  if (!entry) { showToast('Membre introuvable', 'err'); return; }
+  var oldRole = entry.role;
+  entry.role = newRole;
+  _admSaveAdmins(admins);
+  try {
+    var notif = { id: genNotifId(), type: 'system',
+      msg: '👤 Votre rôle admin a été modifié : ' + oldRole + ' → ' + newRole,
+      at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
+    var ns = getNotifs(email); ns.unshift(notif); saveNotifs(email, ns);
+  } catch(e) {}
+  _admLog('CHANGE_ROLE', email + ' : ' + oldRole + ' → ' + newRole);
+  showToast('Rôle mis à jour : ' + newRole + ' ✓', 'ok');
+  _admRender();
+}
+
+/* ── Retirer le rôle admin ── */
+function _admRevokeAdmin(email) {
+  if (!confirm('Retirer les droits d\'administration à ' + email + ' ?')) return;
+  _admSaveAdmins(_admGetAdmins().filter(function(a){ return a.email.toLowerCase() !== email.toLowerCase(); }));
+  _admLog('REVOKE', email);
+  showToast('Droits admin retirés ✓', 'ok');
+  _admRender();
+}
+
+/* ══════════════════════════════════════════
+   ONGLET 4 — BADGES
+══════════════════════════════════════════ */
+function _admBuildBadges() {
+  var reqs     = _admGetBadgeReqs();
+  var pending  = reqs.filter(function(r){ return r.status === 'pending'; });
+  var reviewed = reqs.filter(function(r){ return r.status !== 'pending'; });
+
+  var html =
+    '<div class="adm-tab-header"><h2>Vérification des badges</h2>' +
+    '<p>' + pending.length + ' en attente · ' + reviewed.length + ' traité(s)</p></div>' +
+    '<div class="adm-list-wrap">';
+
+  if (!pending.length && !reviewed.length) {
+    html += '<div class="adm-empty"><i class="fas fa-circle-check"></i>Aucune demande de badge pour le moment</div>';
+  }
+
+  /* ── Demandes en attente ── */
+  pending.forEach(function(req) {
+    var d      = req.requestedAt ? new Date(req.requestedAt).toLocaleDateString('fr-FR') : '—';
+    var isPrem = req.type === 'premium';
+    var safeId = req.id.replace(/'/g,"\\'");
+    var docCount   = (req.documents || []).length;
+    var docLabel   = docCount > 0
+      ? '<div class="adm-badge-doc-count"><i class="fas fa-paperclip"></i>' + docCount + ' document(s) joint(s)</div>'
+      : '<div class="adm-badge-doc-count" style="color:#EF4444"><i class="fas fa-exclamation-triangle"></i> Aucun document joint</div>';
+    var msgHtml    = req.message
+      ? '<div class="adm-badge-msg"><i class="fas fa-comment" style="color:#2563EB;margin-right:5px"></i>' + escHtml(req.message.slice(0,200)) + '</div>'
+      : '';
+
+    /* Profil utilisateur */
+    var userProfile = loadUserProfile(req.email) || {};
+    var domain      = userProfile.domain || '';
+    var location    = userProfile.location || '';
+
+    html +=
+      '<div class="adm-badge-card' + (isPrem ? ' premium' : '') + '">' +
+        '<div class="adm-badge-head">' +
+          '<div class="adm-badge-ico ' + (isPrem ? 'adm-badge-ico-gold' : 'adm-badge-ico-blue') + '">' +
+            '<i class="fas ' + (isPrem ? 'fa-crown' : 'fa-circle-check') + '"></i>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div class="adm-badge-name">' + escHtml(req.nom || req.email) +
+              (isPrem ? ' <span style="font-size:10px;background:#FEF3C7;color:#D97706;padding:1px 7px;border-radius:20px;font-weight:800">PREMIUM 👑</span>' : '') +
+            '</div>' +
+            '<div class="adm-badge-email">' + escHtml(req.email) +
+              (domain   ? ' · ' + escHtml(domain)   : '') +
+              (location ? ' · ' + escHtml(location) : '') +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="adm-badge-date">📅 ' + d + ' · <strong>' + (isPrem ? 'Badge Premium 👑' : 'Badge Vérifié ✓') + '</strong></div>' +
+        docLabel +
+        msgHtml +
+        '<div class="adm-badge-actions" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">' +
+          (docCount > 0
+            ? '<button class="adm-badge-docs-btn" onclick="_admViewDocs(\'' + safeId + '\')"><i class="fas fa-eye"></i> Voir les documents</button>'
+            : '') +
+          '<button class="adm-badge-profile-btn" onclick="_admViewBadgeProfile(\'' + req.email.replace(/'/g,"\\'") + '\')"><i class="fas fa-user"></i> Voir le profil</button>' +
+          (_admHasAction('approve_badge') ? '<button class="adm-btn-sm adm-btn-approve" onclick="_admApproveBadge(\'' + safeId + '\')"><i class="fas fa-check"></i> Approuver</button>' : '') +
+          (_admHasAction('approve_badge') ? '<button class="adm-btn-sm adm-btn-reject"  onclick="_admRejectBadge(\'' + safeId + '\')"><i class="fas fa-times"></i> Refuser</button>' : '') +
+        '</div>' +
+      '</div>';
+  });
+
+  /* ── Demandes traitées ── */
+  if (reviewed.length) {
+    html += '<p style="font-size:12px;font-weight:700;color:#94A3B8;padding:12px 0 4px">— Demandes traitées —</p>';
+    reviewed.slice(0, 20).forEach(function(req) {
+      var isApproved = req.status === 'approved';
+      var isRevoked  = req.status === 'revoked';
+      var ico   = isApproved ? 'fa-check' : (isRevoked ? 'fa-shield-xmark' : 'fa-times');
+      var color = isApproved ? '#22C55E'  : (isRevoked ? '#F59E0B' : '#EF4444');
+      var label = isApproved ? 'Approuvé ✓' : (isRevoked ? 'Badge retiré ⚠️' : 'Refusé ✗');
+      var d       = req.reviewedAt ? new Date(req.reviewedAt).toLocaleDateString('fr-FR') : '—';
+      var safeId  = req.id.replace(/'/g,"\\'");
+      var safeEmail = req.email.replace(/'/g,"\\'");
+      var docCount  = (req.documents || []).length;
+
+      /* Vérifier si le badge est encore actif (l'utilisateur a toujours le badge) */
+      var currentProfile = loadUserProfile(req.email) || {};
+      var stillHasBadge  = isApproved && currentProfile.badgeType;
+
+      html +=
+        '<div class="adm-badge-card" style="opacity:.75;border-left-color:' + color + '">' +
+          '<div class="adm-badge-head">' +
+            '<div class="adm-badge-ico" style="background:#F1F5F9;color:' + color + '"><i class="fas ' + ico + '"></i></div>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div class="adm-badge-name">' + escHtml(req.nom || req.email) + '</div>' +
+              '<div class="adm-badge-email">' + escHtml(req.email) + ' · ' + label + ' le ' + d + '</div>' +
+              (req.revokedMotif ? '<div class="adm-badge-msg" style="margin-top:4px"><i class="fas fa-comment" style="color:#F59E0B"></i> ' + escHtml(req.revokedMotif.slice(0,120)) + '</div>' : '') +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">' +
+            (docCount > 0
+              ? '<button class="adm-badge-docs-btn" onclick="_admViewDocs(\'' + safeId + '\')"><i class="fas fa-eye"></i> Documents</button>'
+              : '') +
+            (stillHasBadge && _admHasAction('approve_badge')
+              ? '<button class="adm-btn-sm adm-btn-revoke-badge" onclick="_admRevokeBadge(\'' + safeEmail + '\')"><i class="fas fa-shield-xmark"></i> Retirer le badge</button>'
+              : '') +
+          '</div>' +
+        '</div>';
+    });
+  }
+  html += '</div>';
+  return html;
+}
+
+/* ── Visionneuse de documents ── */
+function _admViewDocs(id) {
+  var reqs = _admGetBadgeReqs();
+  var req  = reqs.find(function(r){ return r.id === id; });
+  if (!req) return;
+  var viewer = document.getElementById('adm-doc-viewer');
+  var title  = document.getElementById('adm-dv-title');
+  var body   = document.getElementById('adm-dv-body');
+  if (!viewer) return;
+  if (title) title.textContent = 'Documents — ' + (req.nom || req.email);
+
+  var html = '';
+  /* Info utilisateur */
+  html += '<div class="adm-dv-user-info">' +
+    '<div class="adm-dv-user-nom">' + escHtml(req.nom || '—') + '</div>' +
+    '<div class="adm-dv-user-email">' + escHtml(req.email) + ' · ' +
+      new Date(req.requestedAt).toLocaleDateString('fr-FR') + '</div>' +
+  '</div>';
+  /* Message utilisateur */
+  if (req.message) {
+    html += '<div class="adm-dv-message"><strong>Message :</strong> ' + escHtml(req.message) + '</div>';
+  }
+  /* Documents */
+  if (!req.documents || !req.documents.length) {
+    html += '<div class="adm-dv-empty"><i class="fas fa-folder-open"></i><br>Aucun document joint</div>';
+  } else {
+    req.documents.forEach(function(doc) {
+      var isImg = doc.type && doc.type.startsWith('image/');
+      html += '<div class="adm-dv-doc-item">';
+      if (isImg) {
+        html += '<img src="' + doc.data + '" class="adm-dv-doc-img" alt="' + escHtml(doc.name) + '">';
+        html += '<div class="adm-dv-doc-caption">' + escHtml(doc.name) + '</div>';
+      } else {
+        html += '<div class="adm-dv-doc-pdf">' +
+          '<i class="fas fa-file-pdf"></i>' +
+          '<div>' +
+            '<div class="adm-dv-doc-name">' + escHtml(doc.name) + '</div>' +
+            '<a href="' + doc.data + '" download="' + escHtml(doc.name) + '" class="adm-dv-doc-download">' +
+              '<i class="fas fa-download"></i> Télécharger le PDF' +
+            '</a>' +
+          '</div>' +
+        '</div>';
+      }
+      html += '</div>';
+    });
+  }
+  if (body) body.innerHTML = html;
+  viewer.classList.remove('hidden');
+}
+
+function _admDocViewerBackdrop(e) {
+  if (e.target.id === 'adm-doc-viewer') {
+    document.getElementById('adm-doc-viewer').classList.add('hidden');
+  }
+}
+
+/* ── Aperçu rapide du profil utilisateur depuis le panel badges ── */
+function _admViewBadgeProfile(email) {
+  var user    = findUser(email);
+  var profile = loadUserProfile(email) || {};
+  var viewer  = document.getElementById('adm-doc-viewer');
+  var title   = document.getElementById('adm-dv-title');
+  var body    = document.getElementById('adm-dv-body');
+  if (!viewer) return;
+  if (title) title.textContent = 'Profil — ' + (profile.nom || email);
+
+  var check   = checkVerifiedConditions(email);
+  var condHtml = check.conditions.map(function(c) {
+    return '<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;color:#374151">' +
+      '<span style="color:' + (c.met ? '#22C55E' : '#EF4444') + ';font-size:13px">' +
+        '<i class="fas ' + (c.met ? 'fa-check' : 'fa-xmark') + '"></i></span>' +
+      escHtml(c.label) + '</li>';
+  }).join('');
+
+  var html =
+    '<div class="adm-dv-user-info">' +
+      '<div class="adm-dv-user-nom">' + escHtml(profile.nom || user && user.nom || email) + '</div>' +
+      '<div class="adm-dv-user-email">' + escHtml(email) + '</div>' +
+    '</div>' +
+    '<div style="background:#fff;border-radius:12px;border:1px solid #E2E8F0;padding:14px;display:flex;flex-direction:column;gap:6px">' +
+      '<div style="font-size:13px;font-weight:700;color:#1E293B;margin-bottom:4px"><i class="fas fa-list-check" style="color:#2563EB"></i> Conditions badge (' + check.metCount + '/' + check.total + ')</div>' +
+      '<ul style="list-style:none;padding:0;margin:0">' + condHtml + '</ul>' +
+    '</div>';
+
+  if (profile.bio) {
+    html += '<div class="adm-dv-message"><strong>Bio :</strong> ' + escHtml(profile.bio.slice(0,200)) + '</div>';
+  }
+  if (body) body.innerHTML = html;
+  viewer.classList.remove('hidden');
+}
+
+/* ── Approuver un badge ── */
+function _admApproveBadge(id) {
+  var reqs = _admGetBadgeReqs();
+  var idx  = reqs.findIndex(function(r){ return r.id === id; });
+  if (idx === -1) return;
+  var req  = reqs[idx];
+  req.status     = 'approved';
+  req.reviewedBy = _adminUser ? _adminUser.email : 'admin';
+  req.reviewedAt = new Date().toISOString();
+  _admSaveBadgeReqs(reqs);
+
+  /* Applique le badge sur le profil utilisateur */
+  var profile = loadUserProfile(req.email) || {};
+  profile.badgeType         = req.type || 'verified';
+  profile.badgeStatus       = 'approved';
+  profile.identityVerified  = true;
+  profile.badgeApprovedAt   = new Date().toISOString();
+  saveUserProfile(req.email, profile);
+
+  /* ── Notifie l'utilisateur ── */
+  var isPrem = req.type === 'premium';
+  var notif = {
+    id:       genNotifId(),
+    type:     'badge_approved',
+    msg:      isPrem
+      ? '👑 Félicitations ! Votre Badge Premium a été approuvé. Profitez de tous vos avantages !'
+      : '✅ Félicitations ! Votre Badge Vérifié a été approuvé par notre équipe.',
+    at: Date.now(), time:     'À l\'instant',
+    unread:   true,
+    fromUser: null
+  };
+  try {
+    var notifs = getNotifs(req.email);
+    notifs.unshift(notif);
+    saveNotifs(req.email, notifs);
+    /* Si l'utilisateur est connecté → refresh immédiat */
+    if (_currentUser && _currentUser.email === req.email) {
+      renderNotifs(); updateNotifBadge();
+    }
+  } catch(e) {}
+
+  _admLog('APPROVE_BADGE:' + req.type, req.email);
+  showToast('Badge accordé à ' + (req.nom || req.email) + ' ✓', 'ok');
+  _admRender();
+}
+
+/* ── Retirer un badge d'un utilisateur (avec motif) ── */
+function _admRevokeBadge(email) {
+  var profile = loadUserProfile(email) || {};
+  if (!profile.badgeType) { showToast('Cet utilisateur n\'a aucun badge actif', 'err'); return; }
+
+  var badgeLabel = profile.badgeType === 'premium' ? 'Premium 👑' : 'Vérifié ✅';
+  var motif = prompt(
+    'Retirer le badge ' + badgeLabel + ' de ' + email + '\n\nMotif du retrait (obligatoire) :'
+  );
+  if (motif === null) return;          /* annulé */
+  if (!motif.trim()) {
+    showToast('Un motif est obligatoire', 'err'); return;
+  }
+
+  var oldBadge = profile.badgeType;
+
+  /* Supprime le badge du profil */
+  delete profile.badgeType;
+  delete profile.badgeApprovedAt;
+  profile.badgeStatus = 'revoked';
+  profile.badgeRevokedAt     = new Date().toISOString();
+  profile.badgeRevokedMotif  = motif.trim();
+  profile.badgeRevokedBy     = _adminUser ? _adminUser.email : 'admin';
+
+  /* Réinitialise aussi le plan si c'était Premium/Business */
+  if (profile.planType === 'premium' || profile.planType === 'business') {
+    profile.planType = 'free';
+  }
+
+  saveUserProfile(email, profile);
+
+  /* Mise à jour de la demande dans gw_badge_requests */
+  var reqs = _admGetBadgeReqs();
+  reqs.forEach(function(r) {
+    if (r.email === email && r.status === 'approved') {
+      r.status      = 'revoked';
+      r.revokedBy   = _adminUser ? _adminUser.email : 'admin';
+      r.revokedAt   = new Date().toISOString();
+      r.revokedMotif = motif.trim();
+    }
+  });
+  _admSaveBadgeReqs(reqs);
+
+  /* Notification à l'utilisateur */
+  var notif = {
+    id:       genNotifId(),
+    type:     'badge_revoked',
+    msg:      '⚠️ Votre badge ' + badgeLabel + ' a été retiré par l\'équipe Geniwork.\n' +
+              'Motif : ' + motif.trim().slice(0, 200),
+    at: Date.now(), time:     'À l\'instant',
+    unread:   true,
+    fromUser: null
+  };
+  try {
+    var notifs = getNotifs(email);
+    notifs.unshift(notif);
+    saveNotifs(email, notifs);
+    /* Refresh immédiat si l'utilisateur est connecté */
+    if (_currentUser && _currentUser.email === email) {
+      renderNotifs(); updateNotifBadge();
+    }
+  } catch(e) {}
+
+  _admLog('REVOKE_BADGE:' + oldBadge, email + ' — ' + motif.slice(0, 60));
+  showToast('Badge retiré · ' + email + ' notifié ✓', 'ok');
+  _admRender();
+}
+
+/* ── Refuser un badge ── */
+function _admRejectBadge(id) {
+  var reqs = _admGetBadgeReqs();
+  var idx  = reqs.findIndex(function(r){ return r.id === id; });
+  if (idx === -1) return;
+
+  var reason = prompt('Motif du refus (optionnel — sera envoyé à l\'utilisateur) :') || '';
+  var req    = reqs[idx];
+  req.status     = 'rejected';
+  req.reviewedBy = _adminUser ? _adminUser.email : 'admin';
+  req.reviewedAt = new Date().toISOString();
+  req.rejectReason = reason;
+  _admSaveBadgeReqs(reqs);
+
+  /* Met à jour le statut sur le profil */
+  var profile = loadUserProfile(req.email) || {};
+  profile.badgeStatus = 'rejected';
+  delete profile.badgeType; /* retire un éventuel badge existant */
+  saveUserProfile(req.email, profile);
+
+  /* ── Notifie l'utilisateur ── */
+  var notif = {
+    id:       genNotifId(),
+    type:     'badge_rejected',
+    msg:      '❌ Votre demande de badge a été refusée.' +
+              (reason ? ' Motif : ' + reason.slice(0, 150) : ' Vous pouvez soumettre à nouveau après correction.'),
+    at: Date.now(), time:     'À l\'instant',
+    unread:   true,
+    fromUser: null
+  };
+  try {
+    var notifs = getNotifs(req.email);
+    notifs.unshift(notif);
+    saveNotifs(req.email, notifs);
+    if (_currentUser && _currentUser.email === req.email) {
+      renderNotifs(); updateNotifBadge();
+    }
+  } catch(e) {}
+
+  _admLog('REJECT_BADGE', req.email);
+  showToast('Demande refusée — utilisateur notifié', 'ok');
+  _admRender();
+}
+
+/* ══════════════════════════════════════════
+   ONGLET 5 — ÉQUIPE
+══════════════════════════════════════════ */
+function _admBuildTeam() {
+  var admins = _admGetAdmins();
+  var sa     = _admGetSuperAdmin();
+  var tasks  = _admGetTasks();
+  var reqs   = _admGetRequests().filter(function(r){ return r.status === 'pending'; });
+  var isSuperAdmin = sa && _adminUser && _adminUser.email.toLowerCase() === sa.email.toLowerCase();
+
+  var html =
+    '<div class="adm-tab-header"><h2>Équipe & Tâches</h2><p>' + (admins.length + 1) + ' membre(s) · ' + tasks.length + ' tâche(s)</p></div>' +
+    '<div class="adm-list-wrap">';
+
+  /* ── Demandes d'accès en attente (Super Admin uniquement) ── */
+  if (isSuperAdmin && reqs.length > 0) {
+    html += '<div class="adm-team-section">' +
+      '<div class="adm-team-section-title" style="color:#D97706"><i class="fas fa-clock" style="margin-right:6px;color:#F59E0B"></i>Demandes d\'accès en attente (' + reqs.length + ')</div>';
+    reqs.forEach(function(r) {
+      var parts = (r.nom||'?').split(' ');
+      var ini = parts.length>=2 ? (parts[0][0]+parts[1][0]).toUpperCase() : (r.nom||'?').slice(0,2).toUpperCase();
+      html +=
+        '<div class="adm-request-card">' +
+          '<div class="adm-member-top">' +
+            '<div class="adm-user-avatar" style="background:linear-gradient(135deg,#F59E0B,#D97706)">' + ini + '</div>' +
+            '<div class="adm-member-info">' +
+              '<div class="adm-member-name">' + escHtml(r.nom) + '</div>' +
+              '<div class="adm-member-role">' + escHtml(r.email) + '</div>' +
+              '<div style="margin-top:3px">' +
+                '<span class="adm-request-role-badge">' + escHtml(r.role) + '</span>' +
+                '<span style="font-size:10px;color:#9CA3AF;margin-left:6px">demandé le ' + new Date(r.createdAt).toLocaleDateString('fr') + '</span>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="adm-member-actions" style="gap:8px">' +
+            '<button class="adm-btn-sm adm-btn-approve" onclick="_admApproveRequest(\'' + r.id + '\')"><i class="fas fa-check"></i> Approuver</button>' +
+            '<button class="adm-btn-sm adm-btn-dismiss" onclick="_admRejectRequest(\'' + r.id + '\')"><i class="fas fa-times"></i> Refuser</button>' +
+          '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* ── Section : membres de l'équipe ── */
+  html += '<div class="adm-team-section">' +
+    '<div class="adm-team-section-title">Membres de l\'équipe</div>';
+
+  /* Super Admin */
+  if (sa) {
+    html += _admMemberCard(sa.email, sa.nom, 'Super Admin', '#7C3AED', 'fa-shield-halved', isSuperAdmin, false);
+  }
+  /* Admins délégués */
+  if (!admins.length) {
+    html += '<div class="adm-empty" style="padding:12px"><i class="fas fa-user-plus"></i>Aucun administrateur délégué</div>';
+  } else {
+    admins.forEach(function(a) {
+      html += _admMemberCard(a.email, a.nom, a.role, '#2563EB', 'fa-user-tie', isSuperAdmin, true);
+    });
+  }
+  html += '</div>';
+
+  /* ── Section : tâches ── */
+  html += '<div class="adm-team-section">' +
+    '<div class="adm-team-section-title" style="display:flex;justify-content:space-between;align-items:center">Tâches' +
+    '<button class="adm-btn-sm adm-btn-approve" onclick="_admOpenAddTask()" style="font-size:11px;padding:5px 10px"><i class="fas fa-plus"></i> Nouvelle tâche</button>' +
+    '</div>';
+
+  if (!tasks.length) {
+    html += '<div class="adm-empty" style="padding:12px"><i class="fas fa-list-check"></i>Aucune tâche</div>';
+  } else {
+    var myEmail = _adminUser ? _adminUser.email.toLowerCase() : '';
+    var isSA    = _admIsSA();
+    tasks.forEach(function(t) {
+      var isDone      = t.status === 'done';
+      var safeId      = t.id.replace(/'/g,"\\'");
+      var priorityColors = { high:'#EF4444', medium:'#F59E0B', low:'#22C55E' };
+      var priorityLabel  = { high:'🔴 Haute', medium:'🟡 Moyenne', low:'🟢 Basse' };
+      var pc = priorityColors[t.priority||'medium'] || '#F59E0B';
+      var pl = priorityLabel[t.priority||'medium']  || '🟡 Moyenne';
+
+      /* Qui est assigné */
+      var assignLabel = t.assignedTo ? escHtml(t.assignedTo) : 'Toute l\'équipe';
+      /* Vrai nom si on le trouve */
+      var assignedAdm = _admGetAdmins().find(function(a){ return a.email.toLowerCase() === (t.assignedTo||'').toLowerCase(); });
+      if (assignedAdm) assignLabel = escHtml(assignedAdm.nom) + ' <span style="font-size:10px;color:#94A3B8">(' + escHtml(t.assignedTo) + ')</span>';
+
+      /* Bouton "✓ Terminé" : visible par le membre assigné ET par le SA */
+      var isMyTask = myEmail && t.assignedTo && t.assignedTo.toLowerCase() === myEmail;
+      var canDone  = !isDone && (isSA || isMyTask || !t.assignedTo);
+
+      /* Bouton supprimer : SA uniquement */
+      var canDel = isSA;
+
+      /* Badge "accompli par" */
+      var doneByAdm = isDone && t.doneBy ? _admGetAdmins().find(function(a){ return a.email.toLowerCase() === (t.doneBy||'').toLowerCase(); }) : null;
+      var doneByLabel = isDone ? (doneByAdm ? escHtml(doneByAdm.nom) : escHtml(t.doneBy || 'Équipe')) : '';
+
+      html +=
+        '<div class="adm-task-card' + (isDone ? ' done' : '') + '" style="border-left:3px solid ' + (isDone ? '#22C55E' : pc) + ';margin-bottom:10px">' +
+          '<div class="adm-task-head">' +
+            '<div class="adm-task-title" style="font-size:13.5px">' +
+              (isDone ? '<i class="fas fa-circle-check" style="color:#22C55E;margin-right:5px"></i>' : '') +
+              escHtml(t.title) +
+            '</div>' +
+            '<span style="font-size:10px;font-weight:700;color:' + pc + ';background:' + pc + '1A;padding:2px 7px;border-radius:20px;white-space:nowrap">' + pl + '</span>' +
+          '</div>' +
+          (t.desc ? '<div class="adm-task-desc" style="margin:4px 0">' + escHtml(t.desc) + '</div>' : '') +
+          '<div class="adm-task-meta" style="font-size:11px;color:#64748B;margin:6px 0">' +
+            '<i class="fas fa-user" style="margin-right:4px;color:#6366F1"></i>Assigné à : <strong>' + assignLabel + '</strong>' +
+            (t.dueDate ? ' &nbsp;·&nbsp; <i class="fas fa-calendar" style="margin-right:3px;color:#EA580C"></i>' + escHtml(t.dueDate) : '') +
+          '</div>' +
+          (isDone && doneByLabel ?
+            '<div style="font-size:11px;color:#16A34A;margin-bottom:6px;font-weight:600">' +
+              '<i class="fas fa-circle-check" style="margin-right:4px"></i>Accompli par : ' + doneByLabel +
+              (t.doneAt ? ' · ' + new Date(t.doneAt).toLocaleDateString('fr-FR') : '') +
+            '</div>' : '') +
+          '<div class="adm-task-actions">' +
+            (canDone ?
+              '<button class="adm-btn-sm adm-btn-done" onclick="_admMarkTaskDone(\'' + safeId + '\')" style="gap:5px">' +
+                '<i class="fas fa-check"></i> Marquer terminé' +
+              '</button>' : '') +
+            (canDel ?
+              '<button class="adm-btn-sm adm-btn-dismiss" onclick="_admDeleteTask(\'' + safeId + '\')"><i class="fas fa-trash"></i></button>' : '') +
+          '</div>' +
+        '</div>';
+    });
+  }
+  html += '</div></div>';
+  return html;
+}
+
+function _admMemberCard(email, nom, role, color, ico, isSuperAdmin, canRevoke) {
+  var parts = (nom||'A').split(' ');
+  var initials = parts.length>=2 ? (parts[0][0]+parts[1][0]).toUpperCase() : (nom||'A').slice(0,2).toUpperCase();
+  var safeEmail = email.replace(/'/g,"\\'");
+  var roleColors = { 'Super Admin':'#7C3AED','Admin':'#2563EB','Modérateur':'#0891B2','Éditeur':'#059669','Support':'#D97706' };
+  var rc = roleColors[role] || '#64748B';
+  return '<div class="adm-member-card">' +
+    '<div class="adm-member-top">' +
+      '<div class="adm-user-avatar" style="background:linear-gradient(135deg,' + color + ',#8B5CF6)">' + initials + '</div>' +
+      '<div class="adm-member-info">' +
+        '<div class="adm-member-name">' + escHtml(nom||'?') + '</div>' +
+        '<div class="adm-member-role">' + escHtml(email) + '</div>' +
+        '<span style="display:inline-block;margin-top:3px;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;color:#fff;background:' + rc + '">' + escHtml(role) + '</span>' +
+      '</div>' +
+    '</div>' +
+    (isSuperAdmin && canRevoke ?
+      '<div class="adm-member-actions" style="gap:6px;flex-wrap:wrap">' +
+        '<button class="adm-btn-sm" style="background:#EFF6FF;color:#2563EB;border:none;cursor:pointer" onclick="_admResetMemberPassword(\'' + safeEmail + '\',\'' + escHtml(nom||'?').replace(/'/g,"\\'") + '\')"><i class="fas fa-key"></i> Changer mdp</button>' +
+        '<button class="adm-btn-sm" style="background:#FEF3C7;color:#D97706;border:none;cursor:pointer" onclick="_admChangeRole(\'' + safeEmail + '\')"><i class="fas fa-user-gear"></i> Rôle</button>' +
+        '<button class="adm-btn-sm" style="background:#F0FDF4;color:#059669;border:none;cursor:pointer" onclick="_admOpenDelegate(\'' + safeEmail + '\',\'' + escHtml(nom||'?').replace(/'/g,"\\'") + '\')"><i class="fas fa-unlock-keyhole"></i> Déléguer</button>' +
+        '<button class="adm-btn-sm adm-btn-revoke" onclick="_admRevokeAdmin(\'' + safeEmail + '\')"><i class="fas fa-user-xmark"></i> Retirer</button>' +
+      '</div>'
+      : '') +
+  '</div>';
+}
+
+/* ── Variable globale pour stocker l'email en cours de délégation ── */
+var _admDelegateTarget = '';
+
+/* ── Toggle ON/OFF inline ── */
+function _admDelToggle(key) {
+  var el = document.getElementById('del-tog-' + key);
+  if (!el) return;
+  var isOn = el.getAttribute('data-on') === '1';
+  el.setAttribute('data-on', isOn ? '0' : '1');
+  el.style.background    = isOn ? '#E2E8F0' : '#6366F1';
+  el.querySelector('span').style.transform = isOn ? 'translateX(0)' : 'translateX(20px)';
+}
+
+/* ── Modal de délégation — méthode ON/OFF ── */
+function _admOpenDelegate(email, nom) {
+  if (!_admIsSA()) { showToast('Réservé au Super Admin', 'err'); return; }
+  _admCloseModal();
+  _admDelegateTarget = email;   /* stocké globalement, aucun problème de guillemets */
+
+  var extra      = _admGetMemberExtraPerms(email);
+  var extraTabs  = extra.tabs    || [];
+  var extraActs  = extra.actions || [];
+
+  var allTabs    = ['analytics','payments','reports','users','badges','team','publi','marketplace','notifs','settings'];
+  var allActions = ['ban','unban','delete_user','send_notif','publish','approve_badge','dismiss_report','warn_user','change_settings','manage_team'];
+  var tabLabels  = { analytics:'Statistiques', payments:'Paiements', reports:'Signalements', users:'Utilisateurs', badges:'Badges', team:'Équipe', publi:'Publications', marketplace:'Marketplace', notifs:'Notifications', settings:'Paramètres' };
+  var actLabels  = { ban:'Bannir', unban:'Débannir', delete_user:'Supprimer util.', send_notif:'Envoyer notif', publish:'Publier', approve_badge:'Approuver badge', dismiss_report:'Ignorer signalement', warn_user:'Avertir', change_settings:'Paramètres', manage_team:'Gérer équipe' };
+
+  function togRow(key, label, isOn) {
+    var bg  = isOn ? '#6366F1' : '#E2E8F0';
+    var pos = isOn ? 'translateX(20px)' : 'translateX(0)';
+    return '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F1F5F9">' +
+      '<span style="font-size:13px;color:#1E293B;font-weight:600">' + label + '</span>' +
+      '<div id="del-tog-' + key + '" data-on="' + (isOn?'1':'0') + '" onclick="_admDelToggle(\'' + key + '\')" ' +
+        'style="width:44px;height:24px;border-radius:12px;background:' + bg + ';position:relative;cursor:pointer;transition:background .2s;flex-shrink:0">' +
+        '<span style="position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .2s;transform:' + pos + ';display:block"></span>' +
+      '</div>' +
+    '</div>';
+  }
+
+  var tabsHtml = allTabs.map(function(t){ return togRow(t, tabLabels[t]||t, extraTabs.indexOf(t)!==-1); }).join('');
+  var actsHtml = allActions.map(function(a){ return togRow(a, actLabels[a]||a, extraActs.indexOf(a)!==-1); }).join('');
+
+  var bg = document.createElement('div');
+  bg.className = 'adm-modal-bg'; bg.id = 'adm-modal-bg';
+  bg.onclick = function(e){ if(e.target===bg) _admCloseModal(); };
+
+  var card = document.createElement('div');
+  card.className = 'adm-modal-card'; card.id = 'adm-modal-card';
+  card.innerHTML =
+    '<div class="adm-modal-title" style="gap:8px"><i class="fas fa-unlock-keyhole" style="color:#6366F1"></i>Déléguer des permissions</div>' +
+    '<div style="font-size:12px;color:#6B7280;margin:-4px 0 12px;padding:8px 12px;background:#EEF2FF;border-radius:8px">' +
+      '<i class="fas fa-user" style="margin-right:5px;color:#6366F1"></i>' + escHtml(nom) + ' · ' + escHtml(email) +
+    '</div>' +
+    '<div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#94A3B8;letter-spacing:.5px;margin-bottom:4px">Onglets supplémentaires</div>' +
+    tabsHtml +
+    '<div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#94A3B8;letter-spacing:.5px;margin:14px 0 4px">Actions supplémentaires</div>' +
+    actsHtml +
+    '<div style="display:flex;gap:8px;margin-top:16px">' +
+      '<button class="adm-modal-cancel" onclick="_admCloseModal()" style="flex:1">Annuler</button>' +
+      '<button class="adm-modal-save"   onclick="_admSaveDelegate()" style="flex:2"><i class="fas fa-check"></i> Enregistrer</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function(){ bg.classList.add('open'); });
+}
+
+function _admSaveDelegate() {
+  var email = _admDelegateTarget;
+  if (!email) { showToast('Erreur : membre introuvable', 'err'); return; }
+
+  var allTabs    = ['analytics','payments','reports','users','badges','team','publi','marketplace','notifs','settings'];
+  var allActions = ['ban','unban','delete_user','send_notif','publish','approve_badge','dismiss_report','warn_user','change_settings','manage_team'];
+
+  var tabs = allTabs.filter(function(t) {
+    var el = document.getElementById('del-tog-' + t);
+    return el && el.getAttribute('data-on') === '1';
+  });
+  var actions = allActions.filter(function(a) {
+    var el = document.getElementById('del-tog-' + a);
+    return el && el.getAttribute('data-on') === '1';
+  });
+
+  _admSaveMemberExtraPerms(email, { tabs: tabs, actions: actions });
+  _admLog('DELEGATE_PERMS', email);
+
+  try {
+    var admins = _admGetAdmins();
+    var m = admins.find(function(a){ return a.email.toLowerCase() === email.toLowerCase(); });
+    if (m) {
+      var txt = (tabs.length || actions.length)
+        ? 'Le Super Admin vous a accordé de nouvelles permissions.'
+        : 'Le Super Admin a retiré vos permissions supplémentaires.';
+      pushNotif(m.email, { id: genNotifId(), type:'system', title:'Permissions mises à jour', message: txt, date: new Date().toISOString(), read: false });
+    }
+  } catch(e) {}
+
+  _admDelegateTarget = '';
+  _admCloseModal();
+  showToast('Permissions enregistrées ✓', 'ok');
+  _admRender();
+}
+
+/* ── Ajouter une tâche (modal) ── */
+function _admOpenAddTask() {
+  _admCloseModal();
+  var admins = _admGetAdmins();
+  var sa     = _admGetSuperAdmin();
+  var teamOptions = '<option value="">Toute l\'équipe</option>';
+  if (sa) teamOptions += '<option value="' + escHtml(sa.email) + '">' + escHtml(sa.nom) + ' (Super Admin)</option>';
+  admins.forEach(function(a) { teamOptions += '<option value="' + escHtml(a.email) + '">' + escHtml(a.nom) + ' (' + escHtml(a.role) + ')</option>'; });
+
+  var bg = document.createElement('div');
+  bg.className = 'adm-modal-bg'; bg.id = 'adm-modal-bg';
+  bg.onclick = function(e){ if(e.target===bg) _admCloseModal(); };
+
+  var card = document.createElement('div');
+  card.className = 'adm-modal-card'; card.id = 'adm-modal-card';
+  card.innerHTML =
+    '<div class="adm-modal-title"><i class="fas fa-list-check" style="color:#2563EB"></i>Nouvelle tâche</div>' +
+    '<div class="adm-modal-field"><label>Titre</label><input id="adm-task-title" placeholder="Titre de la tâche…"/></div>' +
+    '<div class="adm-modal-field"><label>Description</label><textarea id="adm-task-desc" placeholder="Décrivez la tâche…"></textarea></div>' +
+    '<div class="adm-modal-field"><label>Assigner à</label><select id="adm-task-assign">' + teamOptions + '</select></div>' +
+    '<div class="adm-modal-field"><label>Priorité</label>' +
+      '<select id="adm-task-priority">' +
+        '<option value="high">🔴 Haute</option>' +
+        '<option value="medium" selected>🟡 Moyenne</option>' +
+        '<option value="low">🟢 Basse</option>' +
+      '</select>' +
+    '</div>' +
+    '<div class="adm-modal-field"><label>Échéance (optionnelle)</label><input id="adm-task-due" type="date"/></div>' +
+    '<div class="adm-modal-btns">' +
+      '<button class="adm-modal-cancel" onclick="_admCloseModal()">Annuler</button>' +
+      '<button class="adm-modal-save" onclick="_admSaveTask()">Créer la tâche</button>' +
+    '</div>';
+
+  document.body.appendChild(bg); document.body.appendChild(card);
+  requestAnimationFrame(function(){ bg.classList.add('open'); });
+}
+
+function _admSaveTask() {
+  var title    = _gwSanitize((document.getElementById('adm-task-title')    || {}).value || '', 200);
+  var desc     = _gwSanitize((document.getElementById('adm-task-desc')     || {}).value || '', 500);
+  var assign   = (document.getElementById('adm-task-assign')   || {}).value || '';
+  var priority = (document.getElementById('adm-task-priority') || {}).value || 'medium';
+  var due      = (document.getElementById('adm-task-due')      || {}).value || '';
+
+  if (!title) { showToast('Le titre est requis', 'err'); return; }
+
+  var priorityLabels = { high:'🔴 Haute', medium:'🟡 Moyenne', low:'🟢 Basse' };
+  var taskId = 'task_' + Date.now();
+
+  var tasks = _admGetTasks();
+  tasks.unshift({
+    id:         taskId,
+    title:      title,
+    desc:       desc,
+    assignedTo: assign,
+    assignedBy: _adminUser ? _adminUser.email : 'admin',
+    createdAt:  new Date().toISOString(),
+    status:     'pending',
+    priority:   priority,
+    dueDate:    due
+  });
+  _admSaveTasks(tasks);
+  _admLog('CREATE_TASK', title);
+
+  /* ── Notifier le membre assigné ── */
+  if (assign) {
+    try {
+      var byNom = _adminUser ? (_adminUser.nom || _adminUser.email) : 'Admin';
+      var msg = '📋 Nouvelle tâche assignée par ' + byNom + ' :\n\n' +
+                '• ' + title + (desc ? '\n' + desc : '') +
+                '\n• Priorité : ' + (priorityLabels[priority] || priority) +
+                (due ? '\n• Échéance : ' + due : '');
+      pushNotif(assign, {
+        id:      genNotifId(),
+        type:    'task_assigned',
+        title:   '📋 Nouvelle tâche',
+        message: msg,
+        taskId:  taskId,
+        date:    new Date().toISOString(),
+        read:    false
+      });
+    } catch(e) {}
+  }
+
+  _admCloseModal();
+  showToast('Tâche créée ✓' + (assign ? ' · Membre notifié' : ''), 'ok');
+  _admRender();
+}
+
+function _admMarkTaskDone(id) {
+  var tasks = _admGetTasks();
+  var t = tasks.find(function(x){ return x.id === id; });
+  if (!t) return;
+  t.status = 'done';
+  t.doneAt = new Date().toISOString();
+  t.doneBy = _adminUser ? _adminUser.email : '';
+  _admSaveTasks(tasks);
+  _admLog('TASK_DONE', t.title);
+
+  /* ── Notifier le SA que la tâche est accomplie ── */
+  try {
+    var sa = _admGetSuperAdmin();
+    /* Pas besoin de notifier le SA s'il est lui-même celui qui coche */
+    if (sa && _adminUser && sa.email.toLowerCase() !== _adminUser.email.toLowerCase()) {
+      var doerNom = _adminUser.nom || _adminUser.email;
+      pushNotif(sa.email, {
+        id:      genNotifId(),
+        type:    'task_done',
+        title:   '✅ Tâche accomplie',
+        message: '✅ ' + doerNom + ' a accompli la tâche :\n"' + t.title + '"',
+        taskId:  id,
+        date:    new Date().toISOString(),
+        read:    false
+      });
+    }
+    /* Notifier aussi l'assigneur si ce n'est pas le SA ni l'exécuteur */
+    if (t.assignedBy && _adminUser && t.assignedBy.toLowerCase() !== _adminUser.email.toLowerCase() &&
+        (!sa || t.assignedBy.toLowerCase() !== sa.email.toLowerCase())) {
+      var doerNom2 = _adminUser.nom || _adminUser.email;
+      pushNotif(t.assignedBy, {
+        id:      genNotifId(),
+        type:    'task_done',
+        title:   '✅ Tâche accomplie',
+        message: '✅ ' + doerNom2 + ' a accompli la tâche :\n"' + t.title + '"',
+        taskId:  id,
+        date:    new Date().toISOString(),
+        read:    false
+      });
+    }
+  } catch(e) {}
+
+  showToast('Tâche marquée comme terminée ✓', 'ok');
+  _admRender();
+}
+
+function _admDeleteTask(id) {
+  if (!confirm('Supprimer cette tâche ?')) return;
+  _admSaveTasks(_admGetTasks().filter(function(t){ return t.id !== id; }));
+  _admLog('DELETE_TASK', id);
+  showToast('Tâche supprimée', 'ok');
+  _admRender();
+}
+
+/* ── Ferme les modals admin ── */
+function _admCloseModal() {
+  var bg   = document.getElementById('adm-modal-bg');
+  var card = document.getElementById('adm-modal-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+}
+
+/* ══════════════════════════════════════════
+   SYSTÈME BAN — VERROUILLAGE TOTAL DU COMPTE
+   Le compte banni ne peut rien faire :
+   - connexion bloquée
+   - reset mot de passe bloqué
+   - l'écran ban REMPLACE le formulaire
+══════════════════════════════════════════ */
+
+/* Vérifie le ban → affiche l'écran ban intégré dans le formulaire */
+function _gwCheckBanOnLogin(email) {
+  var banInfo = _admGetBanInfo(email);
+  if (banInfo) {
+    _gwShowLoginBanScreen(email, banInfo);
+    return false;
+  }
+  return true;
+}
+
+/* Remplace le contenu de l'écran de connexion par l'écran de ban */
+function _gwShowLoginBanScreen(email, banInfo) {
+  /* Trouver le auth-screen dans screen-login */
+  var loginScreen = document.getElementById('screen-login');
+  if (!loginScreen) return;
+  var phoneFrame = loginScreen.querySelector('.phone-frame');
+  if (!phoneFrame) return;
+
+  /* Supprimer un éventuel ancien écran ban */
+  var old = phoneFrame.querySelector('#ban-screen-full');
+  if (old) old.remove();
+
+  /* Cacher le formulaire de connexion */
+  var authScreen = phoneFrame.querySelector('.auth-screen');
+  if (authScreen) authScreen.style.display = 'none';
+
+  var nom    = banInfo.nom || email;
+  var isPerm = banInfo.type === 'perm';
+  var expiry = '';
+  if (!isPerm && banInfo.expiresAt) {
+    var exDate = new Date(banInfo.expiresAt);
+    expiry = exDate.toLocaleDateString('fr-FR', { day:'2-digit', month:'long', year:'numeric' });
+    /* Calculer jours restants */
+    var daysLeft = Math.ceil((exDate.getTime() - Date.now()) / 86400000);
+    if (daysLeft < 1) daysLeft = 1;
+  }
+  var appeals = _gwGetAppeals();
+  var hasAppeal = appeals.find(function(a){
+    return a.email.toLowerCase() === email.toLowerCase() && a.status === 'pending';
+  });
+  var escEmail = email.replace(/'/g,"\\'");
+
+  var banDiv = document.createElement('div');
+  banDiv.id = 'ban-screen-full';
+  banDiv.className = 'ban-screen-full';
+  banDiv.innerHTML =
+    /* ─── En-tête ─── */
+    '<div class="ban-screen-top">' +
+      '<div class="ban-screen-badge">' +
+        '<i class="fas fa-ban"></i>' +
+      '</div>' +
+      '<div class="ban-screen-status ' + (isPerm ? 'perm' : 'temp') + '">' +
+        (isPerm ? '🚫 Compte suspendu définitivement' : '⏸️ Compte suspendu temporairement') +
+      '</div>' +
+      '<div class="ban-screen-user">' + escHtml(nom) + '</div>' +
+    '</div>' +
+
+    /* ─── Infos suspension ─── */
+    '<div class="ban-screen-info-block">' +
+      '<div class="ban-screen-info-row">' +
+        '<span class="ban-info-label"><i class="fas fa-comment-alt"></i> Motif</span>' +
+        '<span class="ban-info-value">' + escHtml(banInfo.reason || 'Non précisé') + '</span>' +
+      '</div>' +
+      (!isPerm && expiry
+        ? '<div class="ban-screen-info-row">' +
+            '<span class="ban-info-label"><i class="fas fa-clock"></i> Durée</span>' +
+            '<span class="ban-info-value">Jusqu\'au ' + expiry + ' (' + daysLeft + ' j. restant' + (daysLeft > 1 ? 's' : '') + ')</span>' +
+          '</div>'
+        : '') +
+      (banInfo.message
+        ? '<div class="ban-screen-info-row ban-info-msg">' +
+            '<span class="ban-info-label"><i class="fas fa-info-circle"></i> Message</span>' +
+            '<span class="ban-info-value">' + escHtml(banInfo.message) + '</span>' +
+          '</div>'
+        : '') +
+    '</div>' +
+
+    /* ─── Notice : mot de passe inutile ─── */
+    '<div class="ban-screen-notice">' +
+      '<i class="fas fa-lock"></i>' +
+      '<span>Aucune action n\'est possible sur ce compte tant que la suspension est en vigueur. Le changement de mot de passe ne lèvera pas la suspension.</span>' +
+    '</div>' +
+
+    /* ─── Recours ─── */
+    (hasAppeal
+      ? '<div class="ban-screen-appeal-sent"><i class="fas fa-paper-plane"></i> Votre recours est en cours d\'examen par notre équipe.</div>'
+      : '<div class="ban-screen-appeal-block">' +
+          '<div class="ban-screen-appeal-title"><i class="fas fa-gavel"></i> Contester cette décision</div>' +
+          '<p class="ban-screen-appeal-desc">Pensez-vous que cette suspension est injuste ? Expliquez votre situation et notre équipe examinera votre demande.</p>' +
+          '<textarea id="ban-appeal-msg" class="ban-screen-textarea" placeholder="Expliquez votre situation en détail…" rows="3"></textarea>' +
+          '<button class="ban-screen-submit-btn" onclick="_gwSubmitAppeal(\'' + escEmail + '\')">' +
+            '<i class="fas fa-paper-plane"></i> Envoyer ma contestation' +
+          '</button>' +
+        '</div>') +
+
+    /* ─── Lien "autre compte" ─── */
+    '<button class="ban-screen-other-btn" onclick="_gwBanScreenReset()">' +
+      '<i class="fas fa-user-slash"></i> Se connecter avec un autre compte' +
+    '</button>';
+
+  phoneFrame.appendChild(banDiv);
+
+  /* S'assurer que screen-login est visible */
+  loginScreen.classList.add('active');
+  document.querySelectorAll('.screen').forEach(function(s){
+    if (s.id !== 'screen-login') s.classList.remove('active');
+  });
+}
+
+/* Réinitialise l'écran de connexion (bouton "autre compte") */
+function _gwBanScreenReset() {
+  var loginScreen = document.getElementById('screen-login');
+  if (!loginScreen) return;
+  var banDiv = loginScreen.querySelector('#ban-screen-full');
+  if (banDiv) banDiv.remove();
+  var authScreen = loginScreen.querySelector('.auth-screen');
+  if (authScreen) authScreen.style.display = '';
+  /* Vider les champs */
+  var emailEl = document.getElementById('login-email');
+  var pwdEl   = document.getElementById('login-pwd');
+  if (emailEl) emailEl.value = '';
+  if (pwdEl)   pwdEl.value   = '';
+}
+
+/* ── Overlay ban sur un profil utilisateur vu par d'autres ── */
+function _gwShowProfileBanOverlay(email, nom, banInfo) {
+  var existing = document.getElementById('upv-ban-overlay');
+  if (existing) existing.remove();
+  var appeals = _gwGetAppeals();
+  var hasAppeal = _currentUser && appeals.find(function(a){
+    return a.email.toLowerCase() === (_currentUser.email || '').toLowerCase() && a.status === 'pending';
+  });
+  var isOwnBanned = _currentUser && _currentUser.email.toLowerCase() === email.toLowerCase();
+  var ov = document.createElement('div');
+  ov.id = 'upv-ban-overlay';
+  ov.className = 'upv-ban-overlay';
+  ov.innerHTML =
+    '<div class="upv-ban-content">' +
+      '<div class="ban-screen-icon small"><i class="fas fa-ban"></i></div>' +
+      '<h3 class="ban-screen-title" style="font-size:16px">Compte suspendu</h3>' +
+      '<p style="font-size:13px;color:#6B7280;margin:6px 0 14px">' +
+        (isOwnBanned ? 'Votre compte a été suspendu par l\'équipe Geniwork.' : 'Ce compte a été suspendu par l\'équipe Geniwork.') +
+      '</p>' +
+      (banInfo.reason ? '<div class="ban-screen-reason"><i class="fas fa-comment-alt"></i> <strong>Motif :</strong> ' + escHtml(banInfo.reason) + '</div>' : '') +
+      (banInfo.type === 'temp' && banInfo.expiresAt
+        ? '<div class="ban-screen-expiry" style="margin-top:8px"><i class="fas fa-clock"></i> Jusqu\'au <strong>' +
+          new Date(banInfo.expiresAt).toLocaleDateString('fr-FR', { day:'2-digit', month:'long' }) + '</strong></div>' : '') +
+      (isOwnBanned
+        ? '<div class="ban-screen-sep" style="margin:14px 0"></div>' +
+          (hasAppeal
+            ? '<div class="ban-screen-appeal-sent"><i class="fas fa-paper-plane"></i> Recours envoyé · En cours d\'examen</div>'
+            : '<div class="ban-screen-appeal-form">' +
+                '<div class="ban-screen-appeal-title"><i class="fas fa-gavel"></i> Faire un recours</div>' +
+                '<textarea id="ban-appeal-msg-upv" class="ban-screen-textarea" placeholder="Expliquez votre situation…"></textarea>' +
+                '<button class="ban-screen-submit-btn" onclick="_gwSubmitAppeal(\'' + email.replace(/'/g,"\\'") + '\',\'upv\')">' +
+                  '<i class="fas fa-paper-plane"></i> Envoyer' +
+                '</button>' +
+              '</div>')
+        : '') +
+    '</div>';
+  var upvEl = document.getElementById('user-profile-view');
+  if (upvEl) upvEl.appendChild(ov);
+}
+
+/* ── Soumettre un recours ── */
+function _gwSubmitAppeal(email, source) {
+  var msgEl = document.getElementById(source === 'upv' ? 'ban-appeal-msg-upv' : 'ban-appeal-msg');
+  var msg   = msgEl ? msgEl.value.trim() : '';
+  if (!msg) { showToast('Expliquez votre situation avant d\'envoyer', 'err'); return; }
+  var appeals = _gwGetAppeals();
+  if (appeals.find(function(a){ return a.email.toLowerCase() === email.toLowerCase() && a.status === 'pending'; })) {
+    showToast('Un recours est déjà en cours pour ce compte', 'err'); return;
+  }
+  var banInfo = _admGetBanInfo(email);
+  var u = getUsers().find(function(x){ return x.email.toLowerCase() === email.toLowerCase(); });
+  appeals.push({ id:'appeal_'+Date.now(), email:email, nom:(u ? u.nom : email),
+    message:msg, date:new Date().toISOString(), status:'pending',
+    banReason: banInfo ? banInfo.reason : '', banType: banInfo ? banInfo.type : '' });
+  _gwSaveAppeals(appeals);
+  /* Notif aux admins */
+  try {
+    var sa = _admGetSuperAdmin();
+    if (sa) {
+      var admNotifs = getNotifs(sa.email);
+      admNotifs.unshift({ id:'appeal_adm_'+Date.now(), type:'appeal',
+        msg:'📨 Recours reçu de ' + escHtml(u ? u.nom : email) + ' — en attente d\'examen',
+        at: Date.now(), time:'À l\'instant', unread:true, fromUser:email });
+      saveNotifs(sa.email, admNotifs);
+    }
+  } catch(e) {}
+  showToast('Recours envoyé ✓ Notre équipe vous répondra bientôt.', 'ok');
+  /* Rafraîchir l'overlay */
+  if (source === 'upv') {
+    _gwShowProfileBanOverlay(email, (u ? u.nom : email), banInfo || {});
+  } else {
+    _gwShowLoginBanScreen(email, banInfo || {});
+  }
+}
+
+/* ── Résoudre un recours (admin) ── */
+function _admResolveAppeal(id, action) {
+  /* action : 'accept' | 'reject' | 'extend' */
+  var appeals = _gwGetAppeals();
+  var appeal  = appeals.find(function(a){ return a.id === id; });
+  if (!appeal) return;
+  appeal.status    = action === 'accept' ? 'accepted' : 'rejected';
+  appeal.resolvedAt = new Date().toISOString();
+  appeal.resolvedBy = _adminUser ? _adminUser.email : 'admin';
+  _gwSaveAppeals(appeals);
+  if (action === 'accept') {
+    /* Lever le ban */
+    _admUnbanUser(appeal.email);
+    showToast('Recours accepté — compte réactivé ✓', 'ok');
+  } else {
+    /* Notifier le refus */
+    try {
+      var notifs = getNotifs(appeal.email);
+      notifs.unshift({ id:'appeal_rej_'+Date.now(), type:'appeal_rejected',
+        msg:'❌ Votre recours a été examiné et rejeté. La sanction reste en vigueur.',
+        at: Date.now(), time:'À l\'instant', unread:true, fromUser:null });
+      saveNotifs(appeal.email, notifs);
+    } catch(e) {}
+    _admLog('APPEAL_REJECTED', appeal.email);
+    showToast('Recours rejeté', 'ok');
+    _admRender();
+  }
+}
+
+/* ══════════════════════════════════════════
+   GENIWORK OFFICIAL — PUBLICATIONS & NOTIFICATIONS
+   gw_official_posts → posts officiels dans le feed
+   gw_publishers     → éditeurs autorisés
+   localStorage: gw_notifs_{email} (existant) pour notifications broadcast
+══════════════════════════════════════════ */
+
+/* ── Helpers ── */
+function _offGetPosts()        { try { return JSON.parse(localStorage.getItem('gw_official_posts') || '[]'); } catch(e){ return []; } }
+function _offSavePosts(list)   { localStorage.setItem('gw_official_posts', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('official_posts', list); }
+function _offGetPublishers()   { try { return JSON.parse(localStorage.getItem('gw_publishers') || '[]'); } catch(e){ return []; } }
+function _offSavePublishers(l) { localStorage.setItem('gw_publishers', JSON.stringify(l)); }
+
+/* Vérifie si un email est éditeur autorisé */
+function _offIsPublisher(email) {
+  if (!email) return false;
+  var sa = _admGetSuperAdmin();
+  if (sa && sa.email.toLowerCase() === email.toLowerCase()) return true;
+  if (_admGetRole(email)) return true; /* tous les admins sont éditeurs */
+  return _offGetPublishers().some(function(p){ return p.email.toLowerCase() === email.toLowerCase(); });
+}
+
+/* Met à jour la visibilité du bouton éditeur dans la sidebar */
+function _offUpdateSidebarBtn() {
+  var btn = document.getElementById('sdb-publisher-btn');
+  if (!btn || !_currentUser) return;
+  btn.classList.toggle('hidden', !_offIsPublisher(_currentUser.email));
+}
+
+/* ── Formate une date relative ── */
+function _offTimeAgo(iso) {
+  if (!iso) return '';
+  var diff = Date.now() - new Date(iso).getTime();
+  var mins = Math.floor(diff / 60000);
+  if (mins < 1)  return 'À l\'instant';
+  if (mins < 60) return 'Il y a ' + mins + ' min';
+  var hrs = Math.floor(mins / 60);
+  if (hrs < 24)  return 'Il y a ' + hrs + 'h';
+  var days = Math.floor(hrs / 24);
+  return 'Il y a ' + days + 'j';
+}
+
+/* ══════════════════════════════════════════
+   ONGLET 6 — PUBLICATIONS (ADMIN PANEL)
+══════════════════════════════════════════ */
+function _admBuildPubli() {
+  var posts      = _offGetPosts();
+  var publishers = _offGetPublishers();
+  var admins     = _admGetAdmins();
+  var sa         = _admGetSuperAdmin();
+
+  /* Options pour la liste des éditeurs cibles de notif */
+  var userOpts = '<option value="all">📢 Tous les utilisateurs</option>';
+  getUsers().forEach(function(u) {
+    userOpts += '<option value="' + escHtml(u.email) + '">' + escHtml(u.nom) + ' (' + escHtml(u.email) + ')</option>';
+  });
+
+  /* Logo officiel actuel */
+  var currentLogo = _admGetOfficialLogo();
+  var logoPreview = currentLogo
+    ? '<img src="' + currentLogo + '" alt="logo" style="width:100%;height:100%;object-fit:cover;border-radius:18px">'
+    : '<i class="fas fa-star" style="font-size:26px;color:#fff"></i>';
+  var logoRemoveBtn = currentLogo
+    ? '<button class="adm-photo-remove" onclick="_admRemoveOfficialLogo()"><i class="fas fa-trash"></i> Supprimer</button>'
+    : '';
+
+  var html =
+    '<div class="adm-tab-header"><h2>Publications officielles</h2><p>Publiez et notifiez en tant que Geniwork</p></div>' +
+    '<div class="adm-publi-wrap">' +
+
+    /* ── Logo du compte officiel ── */
+    '<div class="adm-photo-section">' +
+      '<div class="adm-photo-preview">' + logoPreview + '</div>' +
+      '<div class="adm-photo-info">' +
+        '<div class="adm-photo-label">Logo du compte Geniwork Officiel</div>' +
+        '<div class="adm-photo-sub">Cette photo apparaît sur toutes les publications officielles dans le feed des utilisateurs.</div>' +
+        '<button class="adm-photo-btn" onclick="document.getElementById(\'adm-off-logo-input\').click()">' +
+          '<i class="fas fa-camera"></i> ' + (currentLogo ? 'Changer le logo' : 'Ajouter un logo') +
+        '</button>' +
+        logoRemoveBtn +
+        '<input type="file" id="adm-off-logo-input" accept="image/*" style="display:none" onchange="_admOfficialLogoChange(this)">' +
+      '</div>' +
+    '</div>' +
+
+    /* ── Composer post officiel ── */
+    '<div class="adm-publi-composer">' +
+      '<div class="adm-publi-composer-head">' +
+        '<i class="fas fa-star"></i> Publier en tant que Geniwork Officiel' +
+      '</div>' +
+      '<div class="adm-publi-composer-body">' +
+        '<textarea class="adm-publi-textarea" id="adm-off-text" placeholder="Rédigez votre message officiel Geniwork…"></textarea>' +
+
+        /* Inputs cachés */
+        '<input type="file" id="adm-off-img-input"   accept="image/*" style="display:none" onchange="_admOffPreviewImg(this)"/>' +
+        '<input type="file" id="adm-off-vid-input"   accept="video/*" style="display:none" onchange="_admOffPreviewVideo(this)"/>' +
+
+        /* Preview image */
+        '<img id="adm-off-img-preview" src="" alt="" style="display:none;width:100%;border-radius:10px;max-height:200px;object-fit:cover;margin:6px 0"/>' +
+
+        /* Preview vidéo */
+        '<div id="adm-off-vid-preview-wrap" style="display:none;position:relative;margin:6px 0">' +
+          '<video id="adm-off-vid-preview" controls playsinline style="width:100%;border-radius:10px;max-height:220px;background:#000"></video>' +
+          '<button onclick="_admOffRemoveVideo()" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:50%;width:28px;height:28px;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>' +
+        '</div>' +
+
+        '<div class="adm-publi-composer-footer">' +
+          '<div style="display:flex;gap:8px">' +
+            '<button class="adm-publi-img-btn" title="Ajouter une image" onclick="document.getElementById(\'adm-off-img-input\').click()"><i class="fas fa-image"></i></button>' +
+            '<button class="adm-publi-img-btn adm-publi-vid-btn" title="Ajouter une vidéo" onclick="document.getElementById(\'adm-off-vid-input\').click()"><i class="fas fa-video"></i></button>' +
+          '</div>' +
+          '<button class="adm-publi-send-btn" onclick="_admPublishOfficial()"><i class="fas fa-paper-plane"></i> Publier</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+
+    /* ── Envoyer une notification ── */
+    '<div class="adm-notif-composer">' +
+      '<div class="adm-notif-composer-head"><i class="fas fa-bell"></i> Envoyer une notification</div>' +
+      '<div class="adm-notif-composer-body">' +
+        '<div class="adm-modal-field"><label>Destinataires</label>' +
+          '<select id="adm-notif-target">' + userOpts + '</select>' +
+        '</div>' +
+        '<div class="adm-modal-field"><label>Titre / message</label>' +
+          '<input id="adm-notif-title" placeholder="Titre de la notification…"/>' +
+        '</div>' +
+        '<div class="adm-modal-field"><label>Détails (optionnel)</label>' +
+          '<textarea id="adm-notif-body" style="min-height:55px" placeholder="Message détaillé…"></textarea>' +
+        '</div>' +
+        '<button class="adm-publi-send-btn" style="background:linear-gradient(135deg,#F59E0B,#D97706)" onclick="_admSendNotif()"><i class="fas fa-bell"></i> Envoyer</button>' +
+      '</div>' +
+    '</div>' +
+
+    /* ── Éditeurs autorisés ── */
+    '<div>' +
+      '<div class="adm-team-section-title" style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px">' +
+        'Éditeurs autorisés' +
+        '<button class="adm-btn-sm adm-btn-approve" onclick="_admOpenAddPublisher()"><i class="fas fa-plus"></i> Ajouter</button>' +
+      '</div>';
+
+  /* Super Admin (toujours éditeur) */
+  if (sa) {
+    html += _admPublisherCard(sa.email, sa.nom, null, false);
+  }
+  /* Admins (toujours éditeurs) */
+  admins.forEach(function(a) { html += _admPublisherCard(a.email, a.nom, null, false); });
+  /* Éditeurs délégués */
+  if (!publishers.length) {
+    html += '<p style="font-size:12px;color:#9CA3AF;padding:8px 0">Aucun éditeur délégué pour l\'instant</p>';
+  } else {
+    publishers.forEach(function(p) { html += _admPublisherCard(p.email, p.nom, p.grantedBy, true); });
+  }
+  html += '</div>' +
+
+  /* ── Historique des publications ── */
+  '<div>' +
+    '<div class="adm-team-section-title" style="padding-bottom:8px">Historique des publications (' + posts.length + ')</div>';
+
+  if (!posts.length) {
+    html += '<div class="adm-empty"><i class="fas fa-newspaper"></i>Aucune publication pour l\'instant</div>';
+  } else {
+    posts.slice().reverse().slice(0,15).forEach(function(p) {
+      html +=
+        '<div class="adm-publi-hist-item">' +
+          '<div class="adm-publi-hist-text">' + escHtml(p.text || '') + '</div>' +
+          '<div class="adm-publi-hist-meta">' +
+            '<span>par ' + escHtml(p.publishedByNom || '?') + '</span>' +
+            '<span style="display:flex;gap:8px;align-items:center">' +
+              _offTimeAgo(p.publishedAt) +
+              ' <button class="adm-btn-sm adm-btn-del" style="padding:3px 8px" onclick="_admDeleteOfficialPost(\'' + p.id + '\')"><i class="fas fa-trash"></i></button>' +
+            '</span>' +
+          '</div>' +
+        '</div>';
+    });
+  }
+  html += '</div></div>';
+  return html;
+}
+
+function _admPublisherCard(email, nom, grantedBy, canRevoke) {
+  var initials = getInitials(nom || 'G');
+  return '<div class="adm-publisher-card">' +
+    '<div class="adm-user-avatar" style="background:linear-gradient(135deg,#1D4ED8,#7C3AED)">' + initials + '</div>' +
+    '<div style="flex:1">' +
+      '<div style="font-size:13px;font-weight:700;color:#0F172A;display:flex;align-items:center;gap:6px">' +
+        escHtml(nom || '?') +
+        '<span class="adm-publisher-badge"><i class="fas fa-bullhorn" style="font-size:8px"></i> Éditeur</span>' +
+      '</div>' +
+      '<div style="font-size:11px;color:#64748B">' + escHtml(email) + (grantedBy ? ' · ajouté par ' + escHtml(grantedBy) : '') + '</div>' +
+    '</div>' +
+    (canRevoke ? '<button class="adm-btn-sm adm-btn-revoke" onclick="_admRevokePublisher(\'' + email.replace(/'/g,"\\'") + '\')"><i class="fas fa-times"></i></button>' : '') +
+  '</div>';
+}
+
+/* ── Publier un post officiel depuis le panneau admin ── */
+function _admPublishOfficial() {
+  var text    = _gwSanitize((document.getElementById('adm-off-text') || {}).value || '', 2000).trim();
+  var imgPrev = document.getElementById('adm-off-img-preview');
+  var vidPrev = document.getElementById('adm-off-vid-preview');
+  var vidWrap = document.getElementById('adm-off-vid-preview-wrap');
+  var imgData = (imgPrev && imgPrev.style.display !== 'none') ? imgPrev.src : null;
+  var hasVid  = (vidPrev && vidWrap && vidWrap.style.display !== 'none' && vidPrev.src);
+
+  if (!text && !imgData && !hasVid) { showToast('Écrivez un message ou ajoutez un média avant de publier', 'err'); return; }
+
+  /* ── Réinitialise le formulaire (helper) ── */
+  function _resetAdmForm() {
+    var ta = document.getElementById('adm-off-text');
+    if (ta) ta.value = '';
+    if (imgPrev) { imgPrev.style.display = 'none'; imgPrev.src = ''; }
+    var imgInp = document.getElementById('adm-off-img-input');
+    if (imgInp) imgInp.value = '';
+    _admOffRemoveVideo();
+    showToast('Publication officielle envoyée ✓', 'ok');
+    _admRender();
+  }
+
+  /* ── Vidéo : sauvegarde dans IndexedDB pour persistance ── */
+  if (hasVid && _admOffVidFile) {
+    var videoIdbId = 'vid_off_' + Date.now();
+    /* Sauvegarde le Blob dans IndexedDB en arrière-plan */
+    _gwSaveVideoBlob(videoIdbId, _admOffVidFile, function() {});
+    /* Publie immédiatement avec l'idbId (pas de blob URL → valide après redémarrage) */
+    _offPublishPost(text, imgData, _adminUser ? _adminUser.nom : 'Geniwork', { idbId: videoIdbId });
+  } else {
+    _offPublishPost(text, imgData, _adminUser ? _adminUser.nom : 'Geniwork', null);
+  }
+
+  _resetAdmForm();
+}
+
+function _admOffPreviewImg(input) {
+  if (!input.files || !input.files[0]) return;
+  /* Efface la vidéo si on choisit une image */
+  _admOffRemoveVideo();
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var prev = document.getElementById('adm-off-img-preview');
+    if (prev) { prev.src = e.target.result; prev.style.display = 'block'; }
+  };
+  reader.readAsDataURL(input.files[0]);
+}
+
+/* Blob URL + File admin vidéo */
+var _admOffVidBlobUrl = null;
+var _admOffVidFile    = null;   /* Fichier réel → IndexedDB */
+
+function _admOffPreviewVideo(input) {
+  if (!input.files || !input.files[0]) return;
+  var file = input.files[0];
+
+  /* Accepte tous formats vidéo courants */
+  var ext = (file.name || '').split('.').pop().toLowerCase();
+  var allowedExts = ['mp4','mov','m4v','mkv','avi','webm','3gp','ts','wmv','flv'];
+  if (!file.type.startsWith('video/') && allowedExts.indexOf(ext) === -1) {
+    showToast('Format non supporté. Utilisez MP4, MOV, MKV…', 'err');
+    input.value = '';
+    return;
+  }
+
+  /* Taille max 500 Mo */
+  if (file.size > 500 * 1024 * 1024) {
+    showToast('Fichier trop lourd — maximum 500 Mo', 'err');
+    input.value = '';
+    return;
+  }
+
+  /* Révoquer l'ancien blob si existant */
+  if (_admOffVidBlobUrl) { URL.revokeObjectURL(_admOffVidBlobUrl); }
+  _admOffVidBlobUrl = URL.createObjectURL(file);
+  _admOffVidFile    = file;   /* ← gardé pour IndexedDB */
+
+  /* Efface l'image si on choisit une vidéo */
+  var imgPrev = document.getElementById('adm-off-img-preview');
+  if (imgPrev) { imgPrev.style.display = 'none'; imgPrev.src = ''; }
+  var imgInp = document.getElementById('adm-off-img-input');
+  if (imgInp) imgInp.value = '';
+
+  var vid  = document.getElementById('adm-off-vid-preview');
+  var wrap = document.getElementById('adm-off-vid-preview-wrap');
+  if (vid && wrap) {
+    vid.src = _admOffVidBlobUrl;
+    wrap.style.display = 'block';
+  }
+}
+
+function _admOffRemoveVideo() {
+  if (_admOffVidBlobUrl) { URL.revokeObjectURL(_admOffVidBlobUrl); _admOffVidBlobUrl = null; }
+  _admOffVidFile = null;
+  var vid  = document.getElementById('adm-off-vid-preview');
+  var wrap = document.getElementById('adm-off-vid-preview-wrap');
+  var inp  = document.getElementById('adm-off-vid-input');
+  if (vid)  { vid.src = ''; }
+  if (wrap) { wrap.style.display = 'none'; }
+  if (inp)  { inp.value = ''; }
+}
+
+/* ── Publie un post officiel (partagé entre admin panel + user composer) ── */
+function _offPublishPost(text, imgData, publisherNom, videoData) {
+  var posts = _offGetPosts();
+  var newPost = {
+    id:             'off_' + Date.now(),
+    isOfficial:     true,
+    text:           text,
+    images:         imgData ? [imgData] : [],
+    video:          videoData || null,
+    publishedBy:    _adminUser ? _adminUser.email : (_currentUser ? _currentUser.email : 'admin'),
+    publishedByNom: publisherNom || 'Geniwork',
+    publishedAt:    new Date().toISOString(),
+    baseLikes:      0,
+    likers:         [],
+    comments:       []
+  };
+  posts.unshift(newPost); /* Insère en tête */
+  _offSavePosts(posts);
+  _admLog('OFFICIAL_POST', text.slice(0, 60));
+
+  /* ── Notification automatique broadcast à TOUS les utilisateurs ── */
+  var notifMsg = '📣 Geniwork : ' + (text ? text.slice(0, 120) : 'Nouvelle publication officielle');
+  var broadcastNotif = {
+    id:       genNotifId(),
+    type:     'official',
+    msg:      notifMsg,
+    at: Date.now(), time:     'À l\'instant',
+    unread:   true,
+    fromUser: null
+  };
+  try {
+    getUsers().forEach(function(u) {
+      var notifs = getNotifs(u.email);
+      notifs.unshift(broadcastNotif);
+      saveNotifs(u.email, notifs);
+    });
+  } catch(e) {}
+
+  /* ── Rebuild le feed pour intégrer le nouveau post officiel dans le pool ── */
+  if (document.getElementById('feed-list')) {
+    renderFeed(getAllPosts());
+  }
+
+  /* ── Si un utilisateur est connecté → refresh notifs + bannière ── */
+  if (_currentUser) {
+    try { renderNotifs(); } catch(e) {}
+    try { updateNotifBadge(); } catch(e) {}
+    _showOfficialBanner(publisherNom || 'Geniwork', text);
+  }
+
+  return newPost;
+}
+
+/* Bannière in-app quand un post officiel arrive */
+function _showOfficialBanner(nom, text) {
+  /* Retire l'ancienne bannière si présente */
+  var old = document.getElementById('gw-official-banner');
+  if (old) old.remove();
+
+  var banner = document.createElement('div');
+  banner.id = 'gw-official-banner';
+  banner.className = 'gw-official-banner';
+  banner.innerHTML =
+    '<div class="gw-official-banner-left">' +
+      '<div class="gw-official-banner-icon"><i class="fas fa-bullhorn"></i></div>' +
+      '<div>' +
+        '<div class="gw-official-banner-title">📣 ' + escHtml(nom || 'Geniwork') + ' · Publication officielle</div>' +
+        (text ? '<div class="gw-official-banner-text">' + escHtml(text.slice(0, 80)) + (text.length > 80 ? '…' : '') + '</div>' : '') +
+      '</div>' +
+    '</div>' +
+    '<button class="gw-official-banner-close" onclick="document.getElementById(\'gw-official-banner\').remove()"><i class="fas fa-xmark"></i></button>';
+
+  /* Ajoute au body (au-dessus de tout) */
+  document.body.appendChild(banner);
+
+  /* Auto-disparaît après 6 secondes */
+  setTimeout(function() {
+    if (banner.parentNode) {
+      banner.style.animation = 'bannerSlideOut 0.4s ease forwards';
+      setTimeout(function() { if (banner.parentNode) banner.remove(); }, 400);
+    }
+  }, 6000);
+}
+
+/* ── Supprimer un post officiel ── */
+function _admDeleteOfficialPost(id) {
+  if (!confirm('Supprimer ce post officiel ?')) return;
+  /* Nettoie le Blob vidéo dans IndexedDB si présent */
+  var allOff = _offGetPosts();
+  var target = allOff.find(function(p){ return p.id === id; });
+  if (target && target.video && typeof target.video === 'object' && target.video.idbId) {
+    _gwDeleteVideoBlob(target.video.idbId);
+  }
+  _offSavePosts(allOff.filter(function(p){ return p.id !== id; }));
+  _admLog('DELETE_OFFICIAL_POST', id);
+  showToast('Post supprimé', 'ok');
+  /* Rebuild le feed pour retirer le post du pool */
+  if (_currentUser && document.getElementById('feed-list')) renderFeed(getAllPosts());
+  _admRender();
+}
+
+/* ── Envoyer une notification broadcast ── */
+function _admSendNotif() {
+  var target = (document.getElementById('adm-notif-target') || {}).value || 'all';
+  var title  = _gwSanitize((document.getElementById('adm-notif-title') || {}).value || '', 200).trim();
+  var body   = _gwSanitize((document.getElementById('adm-notif-body') || {}).value || '', 500).trim();
+
+  if (!title) { showToast('Le titre est requis', 'err'); return; }
+
+  var notifObj = {
+    id:      genNotifId(),
+    type:    'official',
+    msg:     title + (body ? ' — ' + body : ''),
+    at: Date.now(), time:    'À l\'instant',
+    unread:  true,
+    fromUser: null  /* null = Geniwork Officiel */
+  };
+
+  var users = getUsers();
+  var count = 0;
+
+  if (target === 'all') {
+    users.forEach(function(u) {
+      var notifs = getNotifs(u.email);
+      notifs.unshift(notifObj);
+      saveNotifs(u.email, notifs);
+      count++;
+    });
+    showToast('Notification envoyée à ' + count + ' utilisateur(s) ✓', 'ok');
+  } else {
+    /* Utilisateur spécifique */
+    var notifs = getNotifs(target);
+    notifs.unshift(notifObj);
+    saveNotifs(target, notifs);
+    showToast('Notification envoyée à ' + target + ' ✓', 'ok');
+  }
+
+  /* Si l'utilisateur connecté est dans les destinataires → refresh notifs */
+  if (_currentUser && (target === 'all' || target === _currentUser.email)) {
+    renderNotifs();
+    updateNotifBadge();
+  }
+
+  _admLog('SEND_NOTIF:' + target, title);
+
+  /* Réinitialise */
+  ['adm-notif-title','adm-notif-body'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.value = '';
+  });
+  _admRender();
+}
+
+/* ── Ajouter un éditeur ── */
+function _admOpenAddPublisher() {
+  _admCloseModal();
+  var userOpts = '<option value="">-- Choisir un utilisateur --</option>';
+  getUsers().forEach(function(u) {
+    if (!_offIsPublisher(u.email)) {
+      userOpts += '<option value="' + escHtml(u.email) + '">' + escHtml(u.nom) + ' (' + escHtml(u.email) + ')</option>';
+    }
+  });
+
+  var bg = document.createElement('div');
+  bg.className = 'adm-modal-bg'; bg.id = 'adm-modal-bg';
+  bg.onclick = function(e){ if(e.target===bg) _admCloseModal(); };
+
+  var card = document.createElement('div');
+  card.className = 'adm-modal-card'; card.id = 'adm-modal-card';
+  card.innerHTML =
+    '<div class="adm-modal-title"><i class="fas fa-bullhorn" style="color:#2563EB"></i>Autoriser un éditeur Geniwork</div>' +
+    '<p style="font-size:12px;color:#64748B;margin:0">L\'éditeur pourra publier des posts officiels Geniwork depuis son compte.</p>' +
+    '<div class="adm-modal-field"><label>Utilisateur</label><select id="adm-pub-email">' + userOpts + '</select></div>' +
+    '<div class="adm-modal-btns">' +
+      '<button class="adm-modal-cancel" onclick="_admCloseModal()">Annuler</button>' +
+      '<button class="adm-modal-save" onclick="_admSavePublisher()">Autoriser</button>' +
+    '</div>';
+
+  document.body.appendChild(bg); document.body.appendChild(card);
+  requestAnimationFrame(function(){ bg.classList.add('open'); });
+}
+
+function _admSavePublisher() {
+  var email = (document.getElementById('adm-pub-email') || {}).value || '';
+  if (!email) { showToast('Choisissez un utilisateur', 'err'); return; }
+  var user = findUser(email);
+  if (!user) { showToast('Utilisateur introuvable', 'err'); return; }
+
+  var pubs = _offGetPublishers();
+  pubs.push({ email: email, nom: user.nom, grantedBy: _adminUser ? _adminUser.email : 'admin', grantedAt: new Date().toISOString() });
+  _offSavePublishers(pubs);
+  _admLog('ADD_PUBLISHER', email);
+  _admCloseModal();
+  showToast(user.nom + ' peut maintenant publier en tant que Geniwork ✓', 'ok');
+  _admRender();
+}
+
+function _admRevokePublisher(email) {
+  if (!confirm('Retirer les droits d\'éditeur à ' + email + ' ?')) return;
+  _offSavePublishers(_offGetPublishers().filter(function(p){ return p.email.toLowerCase() !== email.toLowerCase(); }));
+  _admLog('REVOKE_PUBLISHER', email);
+  showToast('Droits d\'éditeur retirés ✓', 'ok');
+  _admRender();
+}
+
+/* ══════════════════════════════════════════
+   FEED — INJECTION DES POSTS OFFICIELS
+══════════════════════════════════════════ */
+
+/* Redistribue les posts officiels dans le feed existant (1 officiel / 4 réguliers)
+   Appelé lors des mises à jour Firebase pour ne pas réinitialiser le scroll */
+function _injectOfficialPosts() {
+  var list = document.getElementById('feed-list');
+  if (!list) return;
+
+  /* Retire les anciennes cards officielles du DOM */
+  list.querySelectorAll('.post-card.post-official').forEach(function(el){ el.remove(); });
+
+  var officialPosts = _offGetPosts().slice(0, 10);
+  if (!officialPosts.length) return;
+
+  /* Trie du plus récent au plus ancien */
+  var offs = officialPosts.slice().sort(function(a, b) {
+    return new Date(b.publishedAt) - new Date(a.publishedAt);
+  });
+
+  /* Récupère les cards régulières dans l'ordre DOM actuel */
+  var regularCards = Array.from(list.querySelectorAll('.post-card:not(.post-official)'));
+  var loader       = document.getElementById('feed-inf-loader');
+  var INTERVAL     = 4; /* 1 officiel toutes les 4 régulières */
+
+  offs.forEach(function(p, i) {
+    var card       = _buildOfficialCard(p);
+    var targetIdx  = (i + 1) * INTERVAL - 1; /* après la 3e, 7e, 11e card régulière… */
+    var refCard    = regularCards[targetIdx];
+    if (refCard) {
+      /* Insère après la card de référence */
+      var after = refCard.nextSibling;
+      list.insertBefore(card, after || loader);
+    } else if (regularCards.length) {
+      /* Pas assez de cards régulières → insère après la dernière */
+      var last = regularCards[regularCards.length - 1];
+      list.insertBefore(card, last.nextSibling || loader);
+    } else {
+      /* Feed vide → insère avant le loader */
+      list.insertBefore(card, loader);
+    }
+  });
+  /* Lance l'observer sur les nouvelles vidéos officielles */
+  _initFeedVideoObserver();
+}
+
+/* Construit une card de post officiel */
+function _buildOfficialCard(p) {
+  var card = document.createElement('div');
+  card.className = 'post-card post-official';
+  card.id = 'post-' + p.id;
+
+  var timeStr   = _offTimeAgo(p.publishedAt);
+  var mediaHtml = '';
+  if (p.video) {
+    /* Vidéo en priorité — p.video peut être une chaîne (ancien format) ou {idbId,url} */
+    var vidSrc   = typeof p.video === 'string' ? p.video : (p.video.url || '');
+    var vidIdbId = (p.video && typeof p.video === 'object') ? (p.video.idbId || null) : null;
+
+    var offVViews = _getVideoViews('off_' + p.id);
+    var offVDur   = (p.video && typeof p.video === 'object' && p.video.duration)
+                    ? formatDuration(p.video.duration) : '';
+
+    mediaHtml =
+      '<div class="post-video-wrap off-post-video-wrap" id="off-pvw-' + p.id + '"' +
+          ' onclick="_openOfficialVideo(\'' + p.id + '\')">' +
+        '<video class="off-post-video" id="off-fv-' + p.id + '"' +
+          (vidSrc ? ' src="' + escHtml(vidSrc) + '"' : '') +
+          ' muted playsinline preload="metadata" loop' +
+          ' style="width:100%;display:block;max-height:320px;pointer-events:none"></video>' +
+        /* Overlay play */
+        '<div class="post-video-thumb-overlay" id="off-fvo-' + p.id + '">' +
+          '<div class="post-video-play-ico"><i class="fas fa-play"></i></div>' +
+        '</div>' +
+        /* Badge son coupé */
+        '<div class="post-video-muted-badge" id="off-fvm-' + p.id + '">' +
+          '<i class="fas fa-volume-mute"></i>' +
+        '</div>' +
+        /* Badge vues */
+        '<span class="post-video-views-badge" id="vid-views-off_' + p.id + '">' +
+          '<i class="fas fa-eye"></i> <span>' + (offVViews > 0 ? _fmtViews(offVViews) : '0') + '</span>' +
+        '</span>' +
+        /* Badge durée */
+        (offVDur ? '<span class="post-video-dur-badge"><i class="fas fa-clock" style="margin-right:4px"></i>' + escHtml(offVDur) + '</span>' : '') +
+      '</div>';
+
+    /* Si pas d'URL valide → charge depuis IndexedDB puis réenregistre le onclick */
+    if (!vidSrc && vidIdbId) {
+      (function(pid, idbId) {
+        _gwLoadVideoBlob(idbId, function(blob) {
+          if (!blob) return;
+          var bUrl = URL.createObjectURL(blob);
+          var el = document.getElementById('off-fv-' + pid);
+          if (el) el.src = bUrl;
+          /* Cache en mémoire */
+          var list = _offGetPosts();
+          var post = list.find(function(x) { return x.id === pid; });
+          if (post && post.video && typeof post.video === 'object') post.video.url = bUrl;
+          /* Enregistre l'observer maintenant que la src est disponible */
+          _initFeedVideoObserver();
+        });
+      })(p.id, vidIdbId);
+    }
+  } else if (p.images && p.images.length) {
+    mediaHtml = '<img src="' + escHtml(p.images[0]) + '" alt="" class="off-post-img"/>';
+  }
+  var imgHtml = mediaHtml; /* compat avec le reste du code */
+
+  var likers    = Array.isArray(p.likers) ? p.likers : [];
+  var userEmail = _currentUser ? _currentUser.email : '';
+  var liked     = likers.indexOf(userEmail) !== -1;
+  var likeCount = (p.baseLikes || 0) + likers.length;
+
+  /* Logo officiel Geniwork (photo ou icône étoile) */
+  var officialLogo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
+  var avatarHtml = officialLogo
+    ? '<div class="post-official-avatar" style="padding:0;overflow:hidden"><img src="' + officialLogo + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:14px"></div>'
+    : '<div class="post-official-avatar"><i class="fas fa-star"></i></div>';
+
+  var comments   = Array.isArray(p.comments) ? p.comments : [];
+  var cmtCount   = comments.length;
+
+  card.innerHTML =
+    '<div class="post-official-header">' +
+      avatarHtml +
+      '<div style="flex:1">' +
+        '<div class="post-official-name">Geniwork' +
+          '<span class="post-official-badge"><i class="fas fa-circle-check"></i> Officiel</span>' +
+        '</div>' +
+        '<div class="post-official-sub">Compte certifié · Publication officielle</div>' +
+      '</div>' +
+      '<div class="post-official-time">' + timeStr + '</div>' +
+    '</div>' +
+    (p.text ? '<div class="post-official-text">' + escHtml(p.text) + '</div>' : '') +
+    imgHtml +
+
+    /* ── Footer : Like + Commentaire ── */
+    '<div class="post-official-footer">' +
+      '<div class="post-official-actions">' +
+
+        /* Like */
+        '<button class="post-official-action-btn" id="off-like-btn-' + p.id + '" onclick="_offToggleLike(\'' + p.id + '\',this)">' +
+          '<i class="fas fa-heart' + (liked ? '' : '-o') + '" style="color:' + (liked ? '#EF4444' : '#94A3B8') + '"></i>' +
+          ' <span id="off-likes-' + p.id + '">' + likeCount + '</span>' +
+        '</button>' +
+
+        /* Commentaire */
+        '<button class="post-official-action-btn" onclick="_offToggleComments(\'' + p.id + '\')">' +
+          '<i class="fas fa-comment" style="color:#6366F1"></i>' +
+          ' <span id="off-cmts-' + p.id + '">' + cmtCount + '</span>' +
+        '</button>' +
+
+        /* Republier */
+        (function() {
+          var alreadyRp = _hasReposted('off_' + p.id);
+          var rpCount   = _getRepostCount('off_' + p.id);
+          return '<button class="post-official-action-btn' + (alreadyRp ? ' reposted' : '') + '" ' +
+            'id="repost-btn-off_' + p.id + '" onclick="_offOpenRepostSheet(\'' + p.id + '\')">' +
+            '<i class="fas fa-retweet" style="color:' + (alreadyRp ? '#16A34A' : '#94A3B8') + '"></i>' +
+            ' <span id="rcount-off_' + p.id + '">' + (rpCount > 0 ? rpCount : '') + '</span>' +
+          '</button>';
+        })() +
+
+      '</div>' +
+      '<div class="post-official-powered"><i class="fas fa-shield-halved"></i> Geniwork</div>' +
+    '</div>' +
+
+    /* ── Section commentaires (masquée par défaut) ── */
+    '<div class="off-cmt-section hidden" id="off-cmt-sec-' + p.id + '">' +
+      '<div class="off-cmt-list" id="off-cmt-list-' + p.id + '">' +
+        (cmtCount === 0
+          ? '<div class="off-cmt-empty">Soyez le premier à commenter…</div>'
+          : comments.map(function(c) { return _offBuildCommentHTML(c); }).join('')) +
+      '</div>' +
+      '<div class="off-cmt-input-row">' +
+        '<div class="off-cmt-av" id="off-cmt-av-' + p.id + '">' +
+          (_currentUser ? (_currentUser.nom || '?').slice(0,1).toUpperCase() : '?') +
+        '</div>' +
+        '<input class="off-cmt-input" id="off-cmt-inp-' + p.id + '"' +
+          ' placeholder="Écrire un commentaire…" maxlength="300"' +
+          ' onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();_offSubmitComment(\'' + p.id + '\')}">' +
+        '<button class="off-cmt-send" onclick="_offSubmitComment(\'' + p.id + '\')">' +
+          '<i class="fas fa-paper-plane"></i>' +
+        '</button>' +
+      '</div>' +
+    '</div>';
+
+  return card;
+}
+
+/* ── Sheet republier un post officiel ── */
+function _offOpenRepostSheet(postId) {
+  if (!_currentUser) { showToast('Connectez-vous pour republier', 'err'); return; }
+  _closeGenericSheet('repost');
+
+  var p = _offGetPosts().find(function(x) { return String(x.id) === String(postId); });
+  if (!p) return;
+
+  var alreadyDone = _hasReposted('off_' + postId);
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'repost-bg';
+  bg.onclick = function() { _closeGenericSheet('repost'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card repost-sheet-card'; card.id = 'repost-card';
+
+  card.innerHTML =
+    '<div class="repost-sheet-handle"></div>' +
+    '<div class="repost-sheet-title"><i class="fas fa-retweet"></i> Republier</div>' +
+
+    (alreadyDone
+      ? '<div class="repost-already-done">Vous avez déjà republié cette publication</div>'
+      : '') +
+
+    '<button class="repost-opt-btn' + (alreadyDone ? ' disabled' : '') + '" ' +
+        'onclick="' + (alreadyDone ? '' : '_offDoRepost(\'' + postId + '\')') + '">' +
+      '<span class="repost-opt-ico" style="background:#ECFDF5;color:#16A34A">' +
+        '<i class="fas fa-retweet"></i>' +
+      '</span>' +
+      '<div class="repost-opt-info">' +
+        '<strong>Republier</strong>' +
+        '<small>Partager instantanément sur votre profil</small>' +
+      '</div>' +
+    '</button>' +
+
+    '<button class="repost-cancel-btn" onclick="_closeGenericSheet(\'repost\')">' +
+      'Annuler' +
+    '</button>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* ── Effectue le repost d'un post officiel ── */
+function _offDoRepost(postId) {
+  _closeGenericSheet('repost');
+  if (!_currentUser) return;
+  if (_hasReposted('off_' + postId)) { showToast('Déjà republié', ''); return; }
+
+  var p = _offGetPosts().find(function(x) { return String(x.id) === String(postId); });
+  if (!p) return;
+
+  var vidSrc = p.video
+    ? (typeof p.video === 'string' ? p.video : (p.video.url || ''))
+    : null;
+
+  var rpId = Date.now();
+  var repostPost = {
+    id:         rpId,
+    author:     _currentUser.nom,
+    role:       'Geniwork Member',
+    verified:   false,
+    at:         Date.now(),
+    time:       'À l\'instant',
+    text:       '',
+    images:     [],
+    video:      null,
+    doc:        null,
+    baseLikes:  0,
+    likers:     [],
+    comments:   [],
+    ownerEmail: _currentUser.email,
+    type:       'repost',
+    repostOf: {
+      id:         'off_' + postId,
+      author:     'Geniwork',
+      ownerEmail: null,
+      role:       'Publication officielle',
+      text:       p.text || '',
+      images:     p.images || [],
+      video:      p.video || null,
+      doc:        null,
+      at:         p.publishedAt || null,
+      time:       'Publication officielle'
+    }
+  };
+
+  DEMO_POSTS.unshift(repostPost);
+  persistNewPost(repostPost);
+
+  /* Marque comme republié et met à jour le compteur */
+  _markReposted('off_' + postId);
+  /* Met à jour le badge dans le DOM de la card officielle */
+  var rpCount = _getRepostCount('off_' + postId);
+  var rpCountEl = document.getElementById('rcount-off_' + postId);
+  if (rpCountEl) rpCountEl.textContent = rpCount > 0 ? rpCount : '';
+  var rpBtn = document.getElementById('repost-btn-off_' + postId);
+  if (rpBtn) {
+    rpBtn.classList.add('reposted');
+    var ico = rpBtn.querySelector('i.fa-retweet');
+    if (ico) ico.style.color = '#16A34A';
+  }
+
+  renderFeed(getAllPosts());
+  showToast('Publication officielle republiée ✓', 'ok');
+}
+
+/* Construit le HTML d'un commentaire officiel */
+function _offBuildCommentHTML(c) {
+  var initials = (c.nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+  var timeStr  = c.time || 'À l\'instant';
+  return '<div class="off-cmt-item">' +
+    '<div class="off-cmt-item-av">' + escHtml(initials) + '</div>' +
+    '<div class="off-cmt-item-body">' +
+      '<div class="off-cmt-item-nom">' + escHtml(c.nom || 'Membre') + '</div>' +
+      '<div class="off-cmt-item-text">' + escHtml(c.text) + '</div>' +
+      '<div class="off-cmt-item-time">' + escHtml(timeStr) + '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+/* Affiche / masque la section commentaires */
+function _offToggleComments(postId) {
+  var sec = document.getElementById('off-cmt-sec-' + postId);
+  if (!sec) return;
+  var isHidden = sec.classList.contains('hidden');
+  sec.classList.toggle('hidden', !isHidden);
+  if (isHidden) {
+    var inp = document.getElementById('off-cmt-inp-' + postId);
+    if (inp) setTimeout(function(){ inp.focus(); }, 100);
+  }
+}
+
+/* Soumet un commentaire sur un post officiel */
+function _offSubmitComment(postId) {
+  if (!_currentUser) { showToast('Connectez-vous pour commenter', 'err'); return; }
+  var inp  = document.getElementById('off-cmt-inp-' + postId);
+  if (!inp) return;
+  var text = inp.value.trim();
+  if (!text) return;
+  text = _gwSanitize(text, 300);
+
+  var posts = _offGetPosts();
+  var p     = posts.find(function(x){ return x.id === postId; });
+  if (!p) return;
+
+  if (!Array.isArray(p.comments)) p.comments = [];
+
+  var newCmt = {
+    id:   'oc_' + Date.now(),
+    nom:  _currentUser.nom || 'Membre',
+    email: _currentUser.email,
+    text: text,
+    at: Date.now(), time: 'À l\'instant'
+  };
+  p.comments.push(newCmt);
+  _offSavePosts(posts);
+
+  /* Mise à jour DOM sans reconstruire la card */
+  var list = document.getElementById('off-cmt-list-' + postId);
+  if (list) {
+    var empty = list.querySelector('.off-cmt-empty');
+    if (empty) empty.remove();
+    var div = document.createElement('div');
+    div.innerHTML = _offBuildCommentHTML(newCmt);
+    list.appendChild(div.firstChild);
+    /* Scroll vers le nouveau commentaire */
+    list.scrollTop = list.scrollHeight;
+  }
+
+  /* Mise à jour du compteur */
+  var countEl = document.getElementById('off-cmts-' + postId);
+  if (countEl) countEl.textContent = p.comments.length;
+
+  inp.value = '';
+}
+
+/* Like/unlike un post officiel */
+function _offToggleLike(postId, btn) {
+  if (!_currentUser) { showToast('Connectez-vous pour liker', 'err'); return; }
+  var posts = _offGetPosts();
+  var p     = posts.find(function(x){ return x.id === postId; });
+  if (!p) return;
+
+  var likers = Array.isArray(p.likers) ? p.likers : [];
+  var idx    = likers.indexOf(_currentUser.email);
+  var liked;
+  if (idx === -1) { likers.push(_currentUser.email); liked = true; }
+  else            { likers.splice(idx, 1);            liked = false; }
+  p.likers = likers;
+  _offSavePosts(posts);
+
+  /* Mise à jour visuelle */
+  var count = (p.baseLikes || 0) + likers.length;
+  var countEl = document.getElementById('off-likes-' + postId);
+  if (countEl) countEl.textContent = count;
+  var ico = btn ? btn.querySelector('i') : null;
+  if (ico) {
+    ico.style.color = liked ? '#EF4444' : '#94A3B8';
+    ico.className   = liked ? 'fas fa-heart' : 'fas fa-heart-o';
+  }
+}
+
+/* ══════════════════════════════════════════
+   COMPOSER OFFICIEL — CÔTÉ UTILISATEUR
+   Accessible aux éditeurs autorisés depuis la sidebar
+══════════════════════════════════════════ */
+function openOfficialComposer() {
+  /* Ferme si déjà ouvert */
+  _closeOfficialComposer();
+
+  if (!_currentUser || !_offIsPublisher(_currentUser.email)) {
+    showToast('Accès refusé', 'err'); return;
+  }
+
+  var bg = document.createElement('div');
+  bg.className = 'official-composer-bg'; bg.id = 'off-composer-bg';
+  bg.onclick = function(e){ if(e.target===bg) _closeOfficialComposer(); };
+
+  var card = document.createElement('div');
+  card.className = 'official-composer-card'; card.id = 'off-composer-card';
+  card.innerHTML =
+    '<div class="official-composer-header">' +
+      '<div class="official-composer-title">' +
+        '<i class="fas fa-star"></i> Publication officielle Geniwork' +
+      '</div>' +
+      '<button class="official-composer-close" onclick="_closeOfficialComposer()"><i class="fas fa-times"></i></button>' +
+    '</div>' +
+    '<div class="official-composer-body">' +
+      '<div class="official-composer-preview">' +
+        '<div class="official-composer-preview-ico"><i class="fas fa-star"></i></div>' +
+        '<div>' +
+          '<div class="official-composer-preview-name">Geniwork <span class="post-official-badge" style="font-size:9px"><i class="fas fa-circle-check"></i> Officiel</span></div>' +
+          '<div class="official-composer-preview-sub">Publiera en votre nom · Compte certifié</div>' +
+        '</div>' +
+      '</div>' +
+      '<textarea class="official-composer-textarea" id="off-user-text" placeholder="Rédigez votre message officiel…"></textarea>' +
+      '<input type="file" id="off-user-img-input" accept="image/*" style="display:none" onchange="_offUserPreviewImg(this)"/>' +
+      '<img id="off-user-img-preview" src="" alt="" class="official-composer-img-preview"/>' +
+      '<div class="official-composer-imgbar">' +
+        '<button class="official-composer-img-btn" onclick="document.getElementById(\'off-user-img-input\').click()">' +
+          '<i class="fas fa-image"></i> Ajouter une image' +
+        '</button>' +
+        '<button class="official-composer-img-btn" onclick="_offClearUserImg()" style="color:#EF4444;border-color:#FECACA" id="off-clear-img" hidden>' +
+          '<i class="fas fa-times"></i>' +
+        '</button>' +
+      '</div>' +
+      '<button class="official-composer-send-btn" onclick="_offUserPublish()">' +
+        '<i class="fas fa-paper-plane"></i> Publier en tant que Geniwork' +
+      '</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function(){ bg.classList.add('open'); card.classList.add('open'); });
+  setTimeout(function(){ var ta = document.getElementById('off-user-text'); if(ta) ta.focus(); }, 200);
+}
+
+function _offUserPreviewImg(input) {
+  if (!input.files || !input.files[0]) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var prev = document.getElementById('off-user-img-preview');
+    var clr  = document.getElementById('off-clear-img');
+    if (prev) { prev.src = e.target.result; prev.style.display = 'block'; }
+    if (clr)  clr.removeAttribute('hidden');
+  };
+  reader.readAsDataURL(input.files[0]);
+}
+
+function _offClearUserImg() {
+  var prev = document.getElementById('off-user-img-preview');
+  var clr  = document.getElementById('off-clear-img');
+  var inp  = document.getElementById('off-user-img-input');
+  if (prev) { prev.src = ''; prev.style.display = 'none'; }
+  if (clr)  clr.setAttribute('hidden', '');
+  if (inp)  inp.value = '';
+}
+
+function _offUserPublish() {
+  var text = _gwSanitize((document.getElementById('off-user-text') || {}).value || '', 2000).trim();
+  var prev = document.getElementById('off-user-img-preview');
+  var img  = (prev && prev.style.display !== 'none') ? prev.src : null;
+
+  if (!text && !img) { showToast('Écrivez un message avant de publier', 'err'); return; }
+
+  _offPublishPost(text, img, 'Geniwork · ' + (_currentUser.nom || ''));
+  _closeOfficialComposer();
+  showToast('Publication officielle envoyée ✓', 'ok');
+}
+
+function _closeOfficialComposer() {
+  var bg   = document.getElementById('off-composer-bg');
+  var card = document.getElementById('off-composer-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+}
+
+/* ══════════════════════════════════════════
+   FIN MODULE SUPER ADMIN
+══════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════
+   POLLING GLOBAL — badge messages (fond)
+   Vérifie les nouveaux messages toutes les 5s
+   même quand le chat n'est pas ouvert
+══════════════════════════════════════════ */
+/* ══════════════════════════════════════════
+   DM INBOX — Créer auto la conv côté destinataire
+══════════════════════════════════════════ */
+
+/* X écrit dans l'inbox de Y pour que Y sache qu'il a un message */
+function _writeDMInbox(toEmail, fromEmail, fromName, fromRole, lastMsg) {
+  if (!toEmail || !fromEmail) return;
+  var key = 'gw_dm_inbox_' + toEmail;
+  try {
+    var inbox = JSON.parse(localStorage.getItem(key) || '[]');
+    var entry = inbox.find(function(e) { return e.fromEmail === fromEmail; });
+    if (entry) {
+      entry.lastMsg = lastMsg;
+      entry.at = Date.now();
+    } else {
+      inbox.push({
+        fromEmail: fromEmail,
+        fromName:  fromName,
+        fromRole:  fromRole || 'Membre Geniwork',
+        lastMsg:   lastMsg,
+        at:        Date.now()
+      });
+    }
+    localStorage.setItem(key, JSON.stringify(inbox));
+  } catch(e) {}
+}
+
+/* Y vérifie son inbox et crée les conversations manquantes */
+function _checkDMInbox() {
+  if (!_currentUser) return;
+  var key = 'gw_dm_inbox_' + _currentUser.email;
+  try {
+    var inbox = JSON.parse(localStorage.getItem(key) || '[]');
+    if (!inbox.length) return;
+    var changed = false;
+    inbox.forEach(function(entry) {
+      if (!entry.fromEmail) return;
+      /* Conversation déjà dans la liste ? */
+      var existing = DEMO_CONVERSATIONS.find(function(c) {
+        return c.email === entry.fromEmail;
+      });
+      if (!existing) {
+        /* Crée la conversation automatiquement */
+        var nom = entry.fromName || entry.fromEmail;
+        var _profile2 = loadUserProfile(entry.fromEmail) || {};
+        var hasBadge = _profile2.badgeType === 'verified' || _profile2.badgeType === 'premium';
+
+        /* Pré-charge les messages depuis le storage partagé pour compter les unread */
+        var _dmKey2  = _getDMKey(_currentUser.email, entry.fromEmail);
+        var _dmData2 = null;
+        try { _dmData2 = JSON.parse(localStorage.getItem(_dmKey2)); } catch(e2) {}
+        var _dmMsgs2 = (_dmData2 && Array.isArray(_dmData2.messages))
+          ? _dmData2.messages.filter(function(m) {
+              return m && m.from && m.from !== 'them' && m.from !== 'me' &&
+                     m.from !== 'system' && String(m.from).indexOf('@') !== -1;
+            })
+          : [];
+        /* Unread = tous les messages du DM qui viennent de l'expéditeur */
+        var _initUnread = _dmMsgs2.filter(function(m) {
+          return m.from === entry.fromEmail;
+        }).length;
+        var _lastStoredMsg = _dmMsgs2.length
+          ? (_dmMsgs2[_dmMsgs2.length - 1].text || entry.lastMsg || '...')
+          : (entry.lastMsg || '...');
+
+        var newConv = {
+          id:       _newConvId(),
+          name:     nom,
+          email:    entry.fromEmail,
+          role:     entry.fromRole || _profile2.domain || 'Membre Geniwork',
+          verified: hasBadge,
+          online:   false,
+          avatar:   { type: 'color', color: '#6366F1', initials: getInitials(nom) },
+          at:       entry.at,
+          time:     'À l\'instant',
+          lastMsg:  _lastStoredMsg,
+          lastAt:   entry.at,
+          unread:   _initUnread,
+          archived: false,
+          messages: _dmMsgs2
+        };
+        DEMO_CONVERSATIONS.unshift(newConv);
+        changed = true;
+      } else {
+        /* Conversation existe déjà → mettre à jour le nom/role si profil enrichi */
+        if (!existing.email) existing.email = entry.fromEmail;
+      }
+    });
+    if (changed) {
+      _saveDMConvList(); /* Persiste les nouvelles convs pour les retrouver après refresh */
+      renderConversations();
+    }
+  } catch(e) {}
+}
+
+function _globalMsgPoll() {
+  if (!_currentUser) return;
+
+  /* Vérifie les changements de profil (photo/nom) de tous les utilisateurs */
+  _checkProfileChanges();
+
+  /* Vérifie l'inbox en premier — crée les convs manquantes */
+  _checkDMInbox();
+
+  /* Vérifie l'inbox de groupe — crée les groupes reçus hors connexion */
+  _checkGroupInbox();
+
+  /* Poll des groupes en arrière-plan (convs non ouvertes) */
+  var hadGroupNew = false;
+  _pollGroupsBackground();
+  /* Vérifie si les groupes ont des non-lus */
+  DEMO_CONVERSATIONS.forEach(function(c) { if (c.isGroup && (c.unread || 0) > 0) hadGroupNew = true; });
+
+  var hasNew = hadGroupNew;
+  DEMO_CONVERSATIONS.forEach(function(conv) {
+    if (conv.isGroup || !conv.email) return;
+    /* Si ce chat est ouvert → _pollChatMessages s'en charge */
+    if (conv.id === _chatConvId) return;
+    var key = _getDMKey(_currentUser.email, conv.email);
+    try {
+      var data = JSON.parse(localStorage.getItem(key));
+      if (!data || !Array.isArray(data.messages)) return;
+      /* Filtrer les messages démo avant tout traitement */
+      var stored = data.messages.filter(function(m) {
+        return m && m.from && m.from !== 'them' && m.from !== 'me' &&
+               m.from !== 'system' && String(m.from).indexOf('@') !== -1;
+      });
+
+      /* Comparaison par ID pour éviter le bug d'écrasement */
+      var convMap = {};
+      conv.messages.forEach(function(m) { convMap[String(m.id)] = true; });
+
+      var newOnes = stored.filter(function(m) {
+        return !convMap[String(m.id)] &&
+               m.from !== _currentUser.email &&
+               m.from !== 'me';
+      });
+
+      /* Merger tous les vrais messages du storage (y compris les nôtres) */
+      var allNew = stored.filter(function(m) { return !convMap[String(m.id)]; });
+      if (allNew.length > 0) {
+        allNew.forEach(function(m) { conv.messages.push(m); });
+        conv.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+      }
+
+      if (newOnes.length > 0) {
+        var last = newOnes[newOnes.length - 1];
+        conv.unread  = (conv.unread || 0) + newOnes.length;
+        conv.lastMsg = last.text || conv.lastMsg;
+        conv.lastAt  = last.at   || Date.now();
+        hasNew = true;
+      }
+    } catch(e) {}
+  });
+
+  /* Trier les convs par lastAt décroissant pour que la plus récente remonte */
+  if (hasNew) {
+    DEMO_CONVERSATIONS.sort(function(a, b) {
+      return (b.lastAt || b.at || 0) - (a.lastAt || a.at || 0);
+    });
+  }
+
+  /* Badge nav Messages — toujours mis à jour */
+  var totalUnread = DEMO_CONVERSATIONS.reduce(function(s,c){ return s + (c.unread||0); }, 0);
+  _updateMsgNavBadge(totalUnread);
+
+  /* Re-rendre la liste si nouveaux messages et page visible */
+  if (hasNew) {
+    var msgPage = document.getElementById('p-messages');
+    if (msgPage && msgPage.classList.contains('active')) {
+      renderConversations();
+    }
+  }
+}
+setInterval(_globalMsgPoll, 3000);
+
+/* ── Poll admin tickets support : refresh l'onglet reports toutes les 8s ── */
+setInterval(function() {
+  if (!_adminUser) return;
+  /* Met à jour le badge nav en permanence */
+  try { _admUpdateNavBadges(); } catch(e) {}
+  /* Re-rend l'onglet reports si actif + nouveaux tickets */
+  if (_adminTab === 'reports') {
+    var unread = _getSupportThreads().reduce(function(s,t){ return s + (t.unreadAdmin||0); }, 0);
+    if (unread > 0) {
+      try { _admRender(); } catch(e) {}
+    }
+  }
+}, 8000);
+
+/* ══════════════════════════════════════════
+   MARKETPLACE — MODULE COMPLET
+   Annonces, PayPal, Ads sponsorisées
+══════════════════════════════════════════ */
+
+/* ── Data helpers ── */
+function _mkGetListings()      { try { return JSON.parse(localStorage.getItem('gw_mk_listings') || '[]'); } catch(e){ return []; } }
+function _mkSaveListings(list) { localStorage.setItem('gw_mk_listings', JSON.stringify(list)); _gwFbSet('mk_listings', list); }
+function _mkGetTxns()          { try { return JSON.parse(localStorage.getItem('gw_mk_txns') || '[]'); } catch(e){ return []; } }
+function _mkSaveTxns(list)     { localStorage.setItem('gw_mk_txns', JSON.stringify(list)); _gwFbSet('mk_txns', list); }
+
+function _mkGetUserPlanKey(email) {
+  if (!email) return 'free';
+  var profile = loadUserProfile(email) || {};
+  return profile.planType || 'free';
+}
+
+function _mkCanPublish(email) {
+  var plan   = _mkGetUserPlanKey(email);
+  var limits = _MK_PLAN_LIMITS[plan] || _MK_PLAN_LIMITS.free;
+  if (limits.maxListings === Infinity) return true;
+  var mine = _mkGetListings().filter(function(l){ return l.sellerEmail === email && l.status === 'active'; });
+  return mine.length < limits.maxListings;
+}
+
+function _mkDistanceKm(lat1, lng1, lat2, lng2) {
+  var R = 6371;
+  var dLat = (lat2-lat1)*Math.PI/180;
+  var dLng = (lng2-lng1)*Math.PI/180;
+  var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function _mkCheckExpired() {
+  var listings = _mkGetListings();
+  var changed  = false;
+  var now = Date.now();
+  listings.forEach(function(l) {
+    if (l.status === 'active' && l.expiresAt && new Date(l.expiresAt).getTime() < now) {
+      l.status  = 'expired';
+      changed   = true;
+    }
+  });
+  if (changed) _mkSaveListings(listings);
+}
+
+/* ── Créer une annonce ── */
+function _mkOpenCreate() {
+  if (!_currentUser) { showToast('Connectez-vous pour vendre', 'err'); return; }
+  if (!_mkCanPublish(_currentUser.email)) {
+    var plan = _mkGetUserPlanKey(_currentUser.email);
+    showToast('Limite atteinte (' + (_MK_PLAN_LIMITS[plan]||_MK_PLAN_LIMITS.free).maxListings + ' annonces max). Passez Premium !', 'err');
+    return;
+  }
+  _mkPickedImages = [];
+
+  var existing = document.getElementById('mk-create-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('mk-create-card');
+  if (existingCard) existingCard.remove();
+
+  var bg = document.createElement('div');
+  bg.id = 'mk-create-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+  bg.onclick = function(e){ if(e.target===bg){ bg.remove(); card.remove(); } };
+
+  var svcOpts  = Object.keys(_MK_SVC_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_SVC_CATS[k]+'</option>'; }).join('');
+  var prodOpts = Object.keys(_MK_PROD_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_PROD_CATS[k]+'</option>'; }).join('');
+  var country  = (_mkUserLocation && _mkUserLocation.country) || 'default';
+  var radii    = _MK_RADIUS_BY_COUNTRY[country] || _MK_RADIUS_BY_COUNTRY['default'];
+  var radOpts  = radii.map(function(r){ return '<option value="'+r+'">'+r+' km</option>'; }).join('');
+
+  var card = document.createElement('div');
+  card.id = 'mk-create-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>'+
+    '<div style="padding:16px 20px 24px">'+
+    '<div style="font-size:16px;font-weight:800;color:#0F172A;margin-bottom:16px"><i class="fas fa-store" style="color:#6366F1;margin-right:8px"></i>Créer une annonce</div>'+
+
+    /* Type */
+    '<div style="margin-bottom:14px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Type</label>'+
+      '<div style="display:flex;gap:8px;margin-top:6px">'+
+        '<button id="mk-type-svc" onclick="_mkSetType(\'service\')" style="flex:1;padding:10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">🛠️ Service</button>'+
+        '<button id="mk-type-prod" onclick="_mkSetType(\'product\')" style="flex:1;padding:10px;background:#F1F5F9;color:#64748B;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">📦 Produit</button>'+
+      '</div>'+
+    '</div>'+
+
+    /* Catégorie */
+    '<div style="margin-bottom:12px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Catégorie</label>'+
+      '<select id="mk-cat-sel" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;background:#F8FAFC;color:#0F172A">'+svcOpts+'</select>'+
+    '</div>'+
+
+    /* Titre */
+    '<div style="margin-bottom:12px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Titre</label>'+
+      '<input id="mk-title-inp" placeholder="Ex: Création de logo professionnel..." style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box">'+
+    '</div>'+
+
+    /* Description */
+    '<div style="margin-bottom:12px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Description</label>'+
+      '<textarea id="mk-desc-inp" placeholder="Décrivez votre offre..." rows="3" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;resize:none;box-sizing:border-box"></textarea>'+
+    '</div>'+
+
+    /* Prix */
+    '<div style="margin-bottom:12px;display:flex;gap:10px">'+
+      '<div style="flex:2">'+
+        '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Prix (€)</label>'+
+        '<input id="mk-price-inp" type="number" min="0" placeholder="0.00" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box">'+
+      '</div>'+
+      '<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end">'+
+        '<label style="display:flex;align-items:center;gap:6px;padding:10px 0;cursor:pointer;font-size:12.5px;color:#374151">'+
+          '<input type="checkbox" id="mk-offer-chk" style="accent-color:#6366F1"> Offre possible'+
+        '</label>'+
+      '</div>'+
+    '</div>'+
+
+    /* PayPal du vendeur */
+    '<div style="margin-bottom:12px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Votre email PayPal</label>'+
+      '<input id="mk-paypal-inp" type="email" placeholder="votre@paypal.com" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
+      '<div style="font-size:10.5px;color:#94A3B8;margin-top:3px"><i class="fas fa-info-circle"></i> L\'acheteur vous paiera via PayPal (1% de commission Geniwork)</div>'+
+    '</div>'+
+
+    /* Photos */
+    '<div style="margin-bottom:12px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Photos (max 5)</label>'+
+      '<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap" id="mk-img-previews">'+
+        '<button onclick="document.getElementById(\'mk-img-inp\').click()" style="width:64px;height:64px;border:2px dashed #CBD5E1;border-radius:12px;background:#F8FAFC;color:#94A3B8;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-plus"></i></button>'+
+      '</div>'+
+      '<input type="file" id="mk-img-inp" accept="image/*" multiple style="display:none" onchange="_mkPickImages(this)">'+
+    '</div>'+
+
+    /* Localisation */
+    '<div style="margin-bottom:12px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Localisation</label>'+
+      '<div style="display:flex;gap:8px;margin-top:6px">'+
+        '<input id="mk-city-inp" placeholder="Ville" style="flex:2;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
+        '<input id="mk-country-inp" placeholder="Pays" style="flex:2;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
+        '<button onclick="_mkDetectLocation()" title="GPS" style="flex:1;padding:10px;border:1.5px solid #E2E8F0;border-radius:10px;background:#EEF2FF;color:#6366F1;cursor:pointer;font-size:16px"><i class="fas fa-location-dot"></i></button>'+
+      '</div>'+
+    '</div>'+
+
+    /* Rayon */
+    '<div style="margin-bottom:20px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Rayon de visibilité</label>'+
+      '<select id="mk-radius-sel" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;background:#F8FAFC;color:#0F172A">'+radOpts+'</select>'+
+    '</div>'+
+
+    /* Bouton publier */
+    '<button onclick="_mkPublishListing()" style="width:100%;padding:14px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer"><i class="fas fa-check" style="margin-right:6px"></i>Publier l\'annonce</button>'+
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){
+      card.style.transition = 'transform .35s cubic-bezier(.22,1,.36,1)';
+    });
+  });
+
+  /* Pré-remplir la ville si location connue */
+  if (_mkUserLocation) {
+    var ci = document.getElementById('mk-city-inp');
+    var co = document.getElementById('mk-country-inp');
+    if (ci) ci.value = _mkUserLocation.city || '';
+    if (co) co.value = _mkUserLocation.country || '';
+  } else {
+    _mkDetectLocation(true); /* silent */
+  }
+}
+
+function _mkSetType(type) {
+  _mkCurrentType = type;
+  var svcBtn  = document.getElementById('mk-type-svc');
+  var prodBtn = document.getElementById('mk-type-prod');
+  var catSel  = document.getElementById('mk-cat-sel');
+  var grad = 'background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none';
+  var flat = 'background:#F1F5F9;color:#64748B;border:none';
+  if (svcBtn)  svcBtn.style.cssText  = (type==='service' ? grad : flat) + ';flex:1;padding:10px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer';
+  if (prodBtn) prodBtn.style.cssText = (type==='product' ? grad : flat) + ';flex:1;padding:10px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer';
+  if (catSel) {
+    var cats = type === 'service' ? _MK_SVC_CATS : _MK_PROD_CATS;
+    catSel.innerHTML = Object.keys(cats).map(function(k){ return '<option value="'+k+'">'+cats[k]+'</option>'; }).join('');
+  }
+}
+
+function _mkPickImages(input) {
+  var files = Array.prototype.slice.call(input.files);
+  var remaining = 5 - _mkPickedImages.length;
+  files = files.slice(0, remaining);
+  var loaded = 0;
+  files.forEach(function(file) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      _mkPickedImages.push(e.target.result);
+      loaded++;
+      if (loaded === files.length) _mkRenderImgPreviews();
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function _mkRenderImgPreviews() {
+  var wrap = document.getElementById('mk-img-previews');
+  if (!wrap) return;
+  var html = _mkPickedImages.map(function(src, i) {
+    return '<div style="position:relative;width:64px;height:64px">' +
+      '<img src="'+src+'" style="width:64px;height:64px;object-fit:cover;border-radius:12px;display:block">'+
+      '<button onclick="_mkRemoveImg('+i+')" style="position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:#EF4444;border:none;color:#fff;font-size:9px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>'+
+    '</div>';
+  }).join('');
+  if (_mkPickedImages.length < 5) {
+    html += '<button onclick="document.getElementById(\'mk-img-inp\').click()" style="width:64px;height:64px;border:2px dashed #CBD5E1;border-radius:12px;background:#F8FAFC;color:#94A3B8;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-plus"></i></button>';
+  }
+  wrap.innerHTML = html;
+}
+
+function _mkRemoveImg(idx) {
+  _mkPickedImages.splice(idx, 1);
+  _mkRenderImgPreviews();
+}
+
+function _mkDetectLocation(silent) {
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(function(pos) {
+      var lat = pos.coords.latitude;
+      var lng = pos.coords.longitude;
+      fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat='+lat+'&lon='+lng+'&accept-language=fr')
+        .then(function(r){ return r.json(); })
+        .then(function(data) {
+          var city    = data.address.city || data.address.town || data.address.village || '';
+          var country = data.address.country || '';
+          _mkUserLocation = { city: city, country: country, lat: lat, lng: lng };
+          var ci = document.getElementById('mk-city-inp');
+          var co = document.getElementById('mk-country-inp');
+          if (ci) ci.value = city;
+          if (co) co.value = country;
+          var radii   = _MK_RADIUS_BY_COUNTRY[country] || _MK_RADIUS_BY_COUNTRY['default'];
+          var radSel  = document.getElementById('mk-radius-sel');
+          if (radSel) radSel.innerHTML = radii.map(function(r){ return '<option value="'+r+'">'+r+' km</option>'; }).join('');
+          if (!silent) showToast('Localisation détectée : '+city, 'ok');
+        }).catch(function(){
+          if (!silent) showToast('Entrez votre ville manuellement', 'err');
+        });
+    }, function() {
+      if (!silent) showToast('GPS indisponible — entrez votre ville', 'err');
+    });
+  } else {
+    if (!silent) showToast('GPS non supporté — entrez votre ville', 'err');
+  }
+}
+
+function _mkPublishListing() {
+  var title   = (document.getElementById('mk-title-inp')   ||{}).value && document.getElementById('mk-title-inp').value.trim();
+  var desc    = (document.getElementById('mk-desc-inp')    ||{}).value && document.getElementById('mk-desc-inp').value.trim();
+  var price   = parseFloat(document.getElementById('mk-price-inp') ? document.getElementById('mk-price-inp').value : 0) || 0;
+  var cat     = document.getElementById('mk-cat-sel')     ? document.getElementById('mk-cat-sel').value     : '';
+  var city    = document.getElementById('mk-city-inp')    ? document.getElementById('mk-city-inp').value.trim()    : '';
+  var country = document.getElementById('mk-country-inp') ? document.getElementById('mk-country-inp').value.trim() : '';
+  var radius  = parseInt(document.getElementById('mk-radius-sel') ? document.getElementById('mk-radius-sel').value : 50) || 50;
+  var paypal  = document.getElementById('mk-paypal-inp')  ? document.getElementById('mk-paypal-inp').value.trim()  : '';
+  var allowOffer = document.getElementById('mk-offer-chk') ? document.getElementById('mk-offer-chk').checked : false;
+
+  if (!title)   { showToast('Ajoutez un titre', 'err'); return; }
+  if (!price)   { showToast('Ajoutez un prix', 'err'); return; }
+  if (!city)    { showToast('Ajoutez votre ville', 'err'); return; }
+  if (!country) { showToast('Ajoutez votre pays', 'err'); return; }
+  if (!paypal)  { showToast('Ajoutez votre email PayPal', 'err'); return; }
+
+  var plan       = _mkGetUserPlanKey(_currentUser.email);
+  var limits     = _MK_PLAN_LIMITS[plan] || _MK_PLAN_LIMITS.free;
+  var daysExp    = limits.durationDays;
+  var expiresAt  = new Date(Date.now() + daysExp*24*3600*1000).toISOString();
+  var profile    = loadUserProfile(_currentUser.email) || {};
+
+  var listing = {
+    id:            'lst_' + Date.now(),
+    type:          _mkCurrentType,
+    category:      cat,
+    title:         title,
+    description:   desc,
+    price:         price,
+    currency:      'EUR',
+    allowOffer:    allowOffer,
+    images:        _mkPickedImages.slice(),
+    location:      { city: city, country: country,
+                     lat: _mkUserLocation ? _mkUserLocation.lat : null,
+                     lng: _mkUserLocation ? _mkUserLocation.lng : null },
+    radius:        radius,
+    sellerEmail:   _currentUser.email,
+    sellerNom:     _currentUser.nom || profile.nom || 'Membre',
+    sellerPaypal:  paypal,
+    sellerVerified: !!(profile.badgeType),
+    sellerPlan:    plan,
+    status:        'active',
+    createdAt:     new Date().toISOString(),
+    expiresAt:     expiresAt,
+    views:         0,
+    isPriority:    plan === 'business',
+    canAd:         limits.canAd
+  };
+
+  var listings = _mkGetListings();
+  listings.unshift(listing);
+  _mkSaveListings(listings);
+
+  var bg   = document.getElementById('mk-create-bg');
+  var card = document.getElementById('mk-create-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+
+  _mkPickedImages = [];
+  showToast('Annonce publiée ✓', 'ok');
+  renderMarketplaceUserServices();
+}
+
+/* ── Détail d'une annonce + PayPal ── */
+function _mkOpenDetail(listingId) {
+  var listings = _mkGetListings();
+  var listing  = listings.find(function(l){ return l.id === listingId; });
+  if (!listing) return;
+  _mkCurrentListing = listing;
+
+  listing.views = (listing.views || 0) + 1;
+  _mkSaveListings(listings);
+
+  var existing = document.getElementById('mk-detail-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('mk-detail-card');
+  if (existingCard) existingCard.remove();
+
+  var cats = listing.type === 'service' ? _MK_SVC_CATS : _MK_PROD_CATS;
+  var catLabel = cats[listing.category] || listing.category;
+  var isMine   = _currentUser && listing.sellerEmail === _currentUser.email;
+
+  var imgsHtml = '';
+  if (listing.images && listing.images.length) {
+    imgsHtml = '<div style="display:flex;gap:6px;overflow-x:auto;padding:0 20px 12px;scrollbar-width:none">' +
+      listing.images.map(function(src) {
+        return '<img src="'+src+'" style="width:200px;height:150px;object-fit:cover;border-radius:12px;flex-shrink:0">';
+      }).join('') + '</div>';
+  }
+
+  var expiresLabel = '';
+  if (listing.expiresAt) {
+    var daysLeft = Math.ceil((new Date(listing.expiresAt)-Date.now())/(1000*3600*24));
+    expiresLabel = daysLeft > 0 ? 'Expire dans '+daysLeft+' jour(s)' : 'Expirée';
+  }
+
+  var bg = document.createElement('div');
+  bg.id = 'mk-detail-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+  bg.onclick = function(e){ if(e.target===bg){ bg.remove(); card.remove(); } };
+
+  var card = document.createElement('div');
+  card.id = 'mk-detail-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 8px"></div>'+
+    imgsHtml +
+    '<div style="padding:0 20px 100px">'+
+
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'+
+      '<span style="font-size:11px;font-weight:700;background:#EEF2FF;color:#4F46E5;padding:3px 10px;border-radius:20px">'+escHtml(catLabel)+'</span>'+
+      (listing.type==='product' ? '<span style="font-size:11px;font-weight:700;background:#FEF3C7;color:#D97706;padding:3px 10px;border-radius:20px">📦 Produit</span>' : '')+
+      (listing.sellerVerified ? '<span style="font-size:11px;font-weight:700;background:#DCFCE7;color:#16A34A;padding:3px 10px;border-radius:20px">✅ Vérifié</span>' : '')+
+    '</div>'+
+
+    '<div style="font-size:18px;font-weight:800;color:#0F172A;line-height:1.3;margin-bottom:8px">'+escHtml(listing.title)+'</div>'+
+    '<div style="font-size:22px;font-weight:900;color:#6366F1;margin-bottom:12px">'+listing.price.toFixed(2)+' €'+
+      (listing.allowOffer ? ' <span style="font-size:12px;background:#EEF2FF;color:#6366F1;padding:2px 8px;border-radius:20px;font-weight:600">Offre possible</span>' : '')+
+    '</div>'+
+
+    (listing.description ? '<div style="font-size:13.5px;color:#374151;line-height:1.7;margin-bottom:14px;white-space:pre-wrap">'+escHtml(listing.description)+'</div>' : '')+
+
+    '<div style="display:flex;align-items:center;gap:10px;background:#F8FAFC;border-radius:12px;padding:10px 12px;margin-bottom:14px">'+
+      '<div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:700;flex-shrink:0">'+
+        listing.sellerNom.slice(0,2).toUpperCase()+
+      '</div>'+
+      '<div style="flex:1">'+
+        '<div style="font-size:13px;font-weight:700;color:#0F172A">'+escHtml(listing.sellerNom)+'</div>'+
+        '<div style="font-size:11px;color:#64748B">'+escHtml(listing.location.city||'')+', '+escHtml(listing.location.country||'')+' · '+escHtml(listing.sellerPlan||'free')+'</div>'+
+      '</div>'+
+      (listing.sellerVerified ? '<i class="fas fa-circle-check" style="color:#3B82F6;font-size:18px"></i>' : '')+
+    '</div>'+
+
+    '<div style="font-size:11px;color:#94A3B8;margin-bottom:16px">'+
+      '<i class="fas fa-eye" style="margin-right:4px"></i>'+listing.views+' vue(s) · '+
+      '<i class="fas fa-clock" style="margin:0 4px 0 8px"></i>'+expiresLabel+
+    '</div>'+
+
+    '<div id="mk-paypal-btn-wrap" style="margin-bottom:12px"></div>'+
+
+    '<div style="display:flex;flex-direction:column;gap:8px">'+
+      (listing.allowOffer && !isMine ?
+        '<button onclick="_mkSendOffer()" style="padding:13px;background:#EEF2FF;color:#4F46E5;border:1.5px solid #C7D2FE;border-radius:14px;font-size:13px;font-weight:700;cursor:pointer"><i class="fas fa-hand-holding-dollar" style="margin-right:6px"></i>Faire une offre</button>' : '')+
+      (!isMine ?
+        '<button onclick="_mkContactSeller(\''+listing.sellerEmail.replace(/'/g,"\\'")+'\',\''+listingId+'\')" style="padding:13px;background:#F0FDF4;color:#16A34A;border:1.5px solid #A7F3D0;border-radius:14px;font-size:13px;font-weight:700;cursor:pointer"><i class="fas fa-comment-dots" style="margin-right:6px"></i>Contacter le vendeur</button>' : '')+
+      (isMine && listing.status==='active' ?
+        '<button onclick="_mkMarkSold(\''+listingId+'\')" style="padding:12px;background:#FEF9C3;color:#CA8A04;border:none;border-radius:14px;font-size:13px;font-weight:700;cursor:pointer"><i class="fas fa-check-circle" style="margin-right:6px"></i>Marquer comme vendu</button>' : '')+
+      (isMine ?
+        '<button onclick="_mkDeleteListing(\''+listingId+'\')" style="padding:12px;background:#FEF2F2;color:#EF4444;border:none;border-radius:14px;font-size:13px;font-weight:700;cursor:pointer"><i class="fas fa-trash" style="margin-right:6px"></i>Supprimer l\'annonce</button>' : '')+
+    '</div>'+
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){
+      card.style.transition = 'transform .35s cubic-bezier(.22,1,.36,1)';
+    });
+  });
+
+  if (!isMine && listing.status === 'active') {
+    _mkLoadPayPal(listing);
+  }
+}
+
+function _mkLoadPayPal(listing) {
+  var wrap = document.getElementById('mk-paypal-btn-wrap');
+  if (!wrap) return;
+
+  var existing = document.getElementById('paypal-sdk');
+  if (!existing) {
+    var script = document.createElement('script');
+    script.id  = 'paypal-sdk';
+    script.src = 'https://www.paypal.com/sdk/js?client-id='+_GW_PAYPAL_CLIENT_ID+'&currency=EUR&intent=capture';
+    script.onload = function() { _mkRenderPayPalBtn(listing); };
+    script.onerror = function() { wrap.innerHTML = '<div style="font-size:12px;color:#EF4444;text-align:center">PayPal indisponible. Contactez le vendeur.</div>'; };
+    document.head.appendChild(script);
+  } else {
+    _mkRenderPayPalBtn(listing);
+  }
+}
+
+function _mkRenderPayPalBtn(listing) {
+  var wrap = document.getElementById('mk-paypal-btn-wrap');
+  if (!wrap || typeof paypal === 'undefined') return;
+  wrap.innerHTML = '<div id="paypal-button-container" style="margin-bottom:4px"></div>'+
+    '<div style="font-size:10.5px;color:#94A3B8;text-align:center"><i class="fas fa-lock" style="margin-right:3px"></i>Paiement sécurisé PayPal · 1% de commission Geniwork</div>';
+
+  var commission   = parseFloat((listing.price * _GW_COMMISSION_RATE).toFixed(2));
+  var sellerAmount = parseFloat((listing.price - commission).toFixed(2));
+
+  paypal.Buttons({
+    createOrder: function(data, actions) {
+      return actions.order.create({
+        purchase_units: [{
+          description: listing.title,
+          amount: { value: listing.price.toFixed(2), currency_code: 'EUR' },
+          payee: { email_address: listing.sellerPaypal }
+        }]
+      });
+    },
+    onApprove: function(data, actions) {
+      return actions.order.capture().then(function(details) {
+        var txns = _mkGetTxns();
+        txns.unshift({
+          id:            'txn_'+Date.now(),
+          listingId:     listing.id,
+          listingTitle:  listing.title,
+          amount:        listing.price,
+          commission:    commission,
+          sellerNet:     sellerAmount,
+          sellerEmail:   listing.sellerEmail,
+          buyerEmail:    _currentUser ? _currentUser.email : '',
+          paypalOrderId: details.id,
+          status:        'completed',
+          date:          new Date().toISOString()
+        });
+        _mkSaveTxns(txns);
+        pushNotif(listing.sellerEmail, {
+          id: genNotifId(), type:'system',
+          title: '💰 Vente réalisée !',
+          message: _currentUser.nom+' a acheté "'+listing.title+'" pour '+listing.price+'€.\nVous recevrez '+sellerAmount+'€ (après 1% de commission Geniwork).',
+          date: new Date().toISOString(), read: false
+        });
+        var bg   = document.getElementById('mk-detail-bg');
+        var card = document.getElementById('mk-detail-card');
+        if (bg)   bg.remove();
+        if (card) card.remove();
+        showToast('Paiement réussi ✓ Le vendeur a été notifié !', 'ok');
+      });
+    },
+    onError: function(err) {
+      showToast('Erreur PayPal. Réessayez ou contactez le vendeur.', 'err');
+    },
+    style: { layout:'vertical', color:'blue', shape:'pill', label:'pay', height:44 }
+  }).render('#paypal-button-container');
+}
+
+function _mkSendOffer() {
+  if (!_mkCurrentListing) return;
+  var listing = _mkCurrentListing;
+  var offerStr = prompt('Votre offre en € (prix affiché : '+listing.price+'€) :');
+  if (!offerStr) return;
+  var offer = parseFloat(offerStr);
+  if (isNaN(offer) || offer <= 0) { showToast('Montant invalide', 'err'); return; }
+  pushNotif(listing.sellerEmail, {
+    id: genNotifId(), type:'system',
+    title: '💬 Nouvelle offre reçue',
+    message: (_currentUser?_currentUser.nom:'Quelqu\'un')+' propose '+offer+'€ pour "'+listing.title+'" (prix : '+listing.price+'€).\n\nContactez-le pour conclure.',
+    date: new Date().toISOString(), read: false
+  });
+  showToast('Offre de '+offer+'€ envoyée !', 'ok');
+}
+
+function _mkContactSeller(email, listingId) {
+  if (!_currentUser) { showToast('Connectez-vous pour envoyer un message', 'err'); return; }
+  if (!email) return;
+
+  /* Fermer le panel détail */
+  var bg   = document.getElementById('mk-detail-bg');
+  var card = document.getElementById('mk-detail-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+
+  /* Récupérer les infos de l'annonce */
+  var listing = listingId ? _mkGetListings().find(function(l){ return l.id === listingId; }) : null;
+
+  /* Profil du vendeur */
+  var profile     = loadUserProfile(email) || {};
+  var sellerNom   = profile.nom || email;
+  var hasBadge    = !!(profile.badgeType);
+
+  /* Cherche ou crée la conversation */
+  var existing = DEMO_CONVERSATIONS.find(function(c) {
+    return !c.isGroup && c.email === email;
+  });
+
+  var conv;
+  if (existing) {
+    conv = existing;
+  } else {
+    conv = {
+      id:       _newConvId(),
+      name:     sellerNom,
+      email:    email,
+      role:     profile.domain || 'Membre Geniwork',
+      verified: hasBadge,
+      online:   false,
+      avatar:   { type: 'color', color: '#6366F1', initials: getInitials(sellerNom) },
+      at: Date.now(), time:     'À l\'instant',
+      lastMsg:  'Annonce marketplace',
+      unread:   0,
+      archived: false,
+      messages: []
+    };
+    DEMO_CONVERSATIONS.unshift(conv);
+    _saveDMConvList();
+  }
+
+  /* Injecter le message carte-annonce si une annonce est liée */
+  if (listing) {
+    var now = new Date();
+    var timeStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2,'0');
+    /* Éviter les doublons : ne pas re-envoyer si la même annonce est déjà la dernière carte */
+    var alreadySent = conv.messages.length && conv.messages[conv.messages.length-1].listingId === listingId;
+    if (!alreadySent) {
+      var cardMsg = {
+        id:        Date.now(),
+        from:      _currentUser.email,
+        time:      timeStr,
+        at:        Date.now(),
+        type:      'listing_card',
+        listingId: listing.id,
+        listingTitle: listing.title,
+        listingPrice: listing.price,
+        listingImg:   listing.images && listing.images.length ? listing.images[0] : null,
+        listingCat:   listing.category,
+        listingType:  listing.type,
+        text:         '📦 ' + listing.title + ' — ' + listing.price.toFixed(2) + ' €'
+      };
+      conv.messages.push(cardMsg);
+      conv.lastMsg = '📦 ' + listing.title;
+      conv.lastAt  = Date.now();
+      /* Sauvegarder la conversation + notifier le vendeur */
+      _saveDMConv(conv);
+      _writeDMInbox(email, _currentUser.email, _currentUser.nom || _currentUser.email,
+                    _currentUser.role || 'Membre Geniwork', conv.lastMsg);
+    }
+  }
+
+  /* Aller sur Messages et ouvrir le chat */
+  var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+  if (msgsBtn) navTo(msgsBtn, 'p-messages');
+  renderConversations();
+  setTimeout(function() { openChat(conv.id); }, 220);
+}
+
+function _mkMarkSold(listingId) {
+  if (!confirm('Marquer cette annonce comme vendue ?')) return;
+  var listings = _mkGetListings();
+  var l = listings.find(function(x){ return x.id === listingId; });
+  if (l) { l.status = 'sold'; _mkSaveListings(listings); }
+  var bg   = document.getElementById('mk-detail-bg');
+  var card = document.getElementById('mk-detail-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+  showToast('Annonce marquée comme vendue ✓', 'ok');
+  renderMarketplaceUserServices();
+}
+
+function _mkDeleteListing(listingId) {
+  if (!confirm('Supprimer cette annonce ?')) return;
+  _mkSaveListings(_mkGetListings().filter(function(l){ return l.id !== listingId; }));
+  var bg   = document.getElementById('mk-detail-bg');
+  var card = document.getElementById('mk-detail-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+  showToast('Annonce supprimée', 'ok');
+  renderMarketplaceUserServices();
+}
+
+/* ── Annonces sponsorisées dans le feed ── */
+function _mkInjectAdsInFeed() {
+  var feedList = document.getElementById('feed-list');
+  if (!feedList) return;
+
+  feedList.querySelectorAll('.mk-feed-ad').forEach(function(el){ el.remove(); });
+
+  var listings = _mkGetListings().filter(function(l){
+    return l.status==='active' && l.canAd;
+  });
+  listings.sort(function(a,b){ return (b.isPriority?1:0)-(a.isPriority?1:0); });
+
+  if (!listings.length) return;
+
+  var posts = feedList.querySelectorAll('.post-card');
+  var adIdx = 0;
+
+  posts.forEach(function(post, i) {
+    if ((i+1) % 5 === 0 && adIdx < listings.length) {
+      var ad = _mkBuildFeedAdCard(listings[adIdx % listings.length]);
+      adIdx++;
+      post.insertAdjacentElement('afterend', ad);
+    }
+  });
+}
+
+function _mkBuildFeedAdCard(listing) {
+  var cats = listing.type==='service' ? _MK_SVC_CATS : _MK_PROD_CATS;
+  var catLabel = cats[listing.category] || listing.category;
+  var imgHtml = listing.images && listing.images.length
+    ? '<img src="'+listing.images[0]+'" style="width:100%;height:180px;object-fit:cover;border-radius:0">'
+    : '<div style="width:100%;height:100px;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;color:#fff;font-size:28px">🏪</div>';
+
+  var wrap = document.createElement('div');
+  wrap.className = 'mk-feed-ad';
+  wrap.style.cssText = 'background:#fff;border-radius:16px;overflow:hidden;margin:12px 0;box-shadow:0 2px 12px rgba(0,0,0,.08);cursor:pointer;border:1.5px solid #E0E7FF;position:relative';
+  wrap.onclick = function(){ _mkOpenDetail(listing.id); };
+
+  var adBadge = listing.isPriority
+    ? '<span style="position:absolute;top:8px;left:8px;background:linear-gradient(135deg,#F59E0B,#D97706);color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;z-index:1">💼 SPONSORISÉ</span>'
+    : '<span style="position:absolute;top:8px;left:8px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;z-index:1">👑 SPONSORISÉ</span>';
+
+  var countdownEl = '<div id="mk-ad-cd-'+listing.id+'" style="position:absolute;top:8px;right:8px;width:28px;height:28px;border-radius:50%;background:rgba(0,0,0,.5);color:#fff;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;z-index:2">3</div>';
+
+  wrap.innerHTML =
+    '<div style="position:relative">'+adBadge+countdownEl+imgHtml+'</div>'+
+    '<div style="padding:10px 14px 14px">'+
+      '<div style="font-size:11px;color:#6366F1;font-weight:700;margin-bottom:2px">'+escHtml(catLabel)+'</div>'+
+      '<div style="font-size:14px;font-weight:800;color:#0F172A;margin-bottom:4px">'+escHtml(listing.title)+'</div>'+
+      '<div style="display:flex;align-items:center;justify-content:space-between">'+
+        '<span style="font-size:16px;font-weight:900;color:#6366F1">'+listing.price.toFixed(2)+' €</span>'+
+        '<span style="font-size:11px;color:#94A3B8"><i class="fas fa-location-dot" style="margin-right:3px"></i>'+escHtml(listing.location.city||'')+'</span>'+
+      '</div>'+
+      '<button onclick="event.stopPropagation();_mkOpenDetail(\''+listing.id+'\')" style="width:100%;margin-top:10px;padding:10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">Voir l\'annonce</button>'+
+    '</div>';
+
+  var secs = 3;
+  var timer = setInterval(function(){
+    secs--;
+    var cd = document.getElementById('mk-ad-cd-'+listing.id);
+    if (cd) cd.textContent = secs;
+    if (secs <= 0) {
+      clearInterval(timer);
+      var cd2 = document.getElementById('mk-ad-cd-'+listing.id);
+      if (cd2) cd2.remove();
+    }
+  }, 1000);
+
+  return wrap;
+}
+
+/* ── Rendu des annonces du système dans la section Services des membres ── */
+/* ── Ajouter une annonce marketplace au panier ── */
+function _mkAddListingToCart(listingId) {
+  if (!_currentUser) { showToast('Connectez-vous pour acheter', 'err'); return; }
+  var listing = _mkGetListings().find(function(l){ return l.id === listingId; });
+  if (!listing) return;
+  if (listing.sellerEmail === _currentUser.email) { showToast('Vous ne pouvez pas acheter votre propre annonce', 'err'); return; }
+
+  var cart = loadCart();
+  var existing = cart.find(function(i){ return i.listingId === listingId; });
+  if (existing) {
+    existing.qty = (existing.qty || 1) + 1;
+    showToast('Quantité mise à jour ✓', 'ok');
+  } else {
+    cart.push({
+      id:         Date.now(),
+      listingId:  listing.id,
+      svcId:      listing.id,
+      ownerEmail: listing.sellerEmail,
+      title:      listing.title,
+      price:      listing.price || 0,
+      itemType:   listing.type || 'service',
+      qty:        1,
+      photo:      (listing.images && listing.images[0]) || null
+    });
+    showToast('Ajouté au panier ✓', 'ok');
+  }
+  saveCart(cart);
+  _updateCartBadge();
+}
+
+function _mkRenderSystemListings() {
+  _mkCheckExpired();
+  var mkListings = _mkGetListings().filter(function(l){ return l.status==='active'; });
+
+  /* ── Section "Annonces des membres" ── */
+  var mkSection = document.getElementById('mk-annonces-section');
+  var mkList    = document.getElementById('mk-annonces-list');
+
+  /* Créer la section si elle n'existe pas encore */
+  if (!mkSection) {
+    var svcSection = document.getElementById('mk-user-services-section');
+    mkSection = document.createElement('div');
+    mkSection.id = 'mk-annonces-section';
+    mkList    = document.createElement('div');
+    mkList.id = 'mk-annonces-list';
+    mkList.className = 'mk-services-scroll';
+    mkSection.innerHTML =
+      '<div class="mk-section-head" style="padding:0 16px">'+
+        '<h3>Annonces des membres</h3>'+
+      '</div>';
+    mkSection.appendChild(mkList);
+    if (svcSection && svcSection.parentNode) {
+      svcSection.parentNode.insertBefore(mkSection, svcSection.nextSibling);
+    }
+  }
+
+  if (!mkListings.length) {
+    mkSection.style.display = 'none';
+    return;
+  }
+
+  mkSection.style.display = '';
+  mkList.innerHTML = ''; /* vider avant re-rendu complet */
+
+  /* Business en premier (priorité) puis le reste */
+  mkListings.sort(function(a, b) { return (b.isPriority ? 1 : 0) - (a.isPriority ? 1 : 0); });
+
+  mkListings.forEach(function(listing) {
+    var cats      = listing.type === 'service' ? _MK_SVC_CATS : _MK_PROD_CATS;
+    var catLabel  = cats[listing.category] || listing.category;
+    var isMine    = _currentUser && listing.sellerEmail === _currentUser.email;
+    var safeId    = listing.id.replace(/'/g, "\\'");
+
+    var card = document.createElement('div');
+    card.id        = 'mk-lst-'+listing.id;
+    card.className = 'mk-service-card mk-listing-card';
+    card.onclick   = function(){ _mkOpenDetail(listing.id); };
+
+    var imgStyle = (listing.images && listing.images.length)
+      ? 'background:url(\''+listing.images[0]+'\') center/cover no-repeat'
+      : 'background:linear-gradient(135deg,#6366F1,#8B5CF6)';
+
+    /* Bouton action : panier (acheteur) ou gérer (vendeur) */
+    var actionBtn = isMine
+      ? '<button onclick="event.stopPropagation();_mkCloseScreen(\'mk-sales-screen\');_mkOpenMySales()" '+
+          'style="position:absolute;bottom:8px;right:8px;z-index:3;padding:5px 9px;background:rgba(99,102,241,.9);color:#fff;border:none;border-radius:8px;font-size:10px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:4px">'+
+          '<i class="fas fa-cog"></i> Gérer'+
+        '</button>'
+      : '<button onclick="event.stopPropagation();_mkAddListingToCart(\''+safeId+'\')" '+
+          'style="position:absolute;bottom:8px;right:8px;z-index:3;width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(99,102,241,.4)">'+
+          '<i class="fas fa-cart-plus"></i>'+
+        '</button>';
+
+    card.innerHTML =
+      '<div class="mk-service-img" style="'+imgStyle+';position:relative">'+
+        '<span class="mk-service-badge">'+escHtml(catLabel)+'</span>'+
+        (listing.isPriority
+          ? '<span style="position:absolute;top:8px;right:8px;background:#F59E0B;color:#fff;font-size:9px;font-weight:800;padding:2px 6px;border-radius:10px;z-index:2">⭐ PRO</span>'
+          : '')+
+        actionBtn+
+      '</div>'+
+      '<div class="mk-service-body">'+
+        '<div class="mk-service-seller">'+
+          '<div class="mk-seller-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:700">'+
+            escHtml(listing.sellerNom.slice(0,2).toUpperCase())+
+          '</div>'+
+          '<span>'+escHtml(listing.sellerNom)+'</span>'+
+          (listing.sellerVerified ? '<i class="fas fa-circle-check mk-verified"></i>' : '')+
+          (isMine ? '<span style="font-size:10px;padding:2px 7px;background:#EEF2FF;color:#6366F1;border-radius:20px;font-weight:700;margin-left:4px">Ma annonce</span>' : '')+
+        '</div>'+
+        '<p class="mk-service-title">'+escHtml(listing.title)+'</p>'+
+        '<p class="mk-service-desc" style="color:#64748B;font-size:12px;margin:2px 0 4px">'+
+          escHtml((listing.description||'').slice(0,55))+(listing.description&&listing.description.length>55?'…':'')+
+        '</p>'+
+        '<div style="display:flex;align-items:center;justify-content:space-between">'+
+          '<p class="mk-service-price" style="margin:0">À partir de <strong>'+listing.price.toFixed(2)+'€</strong></p>'+
+          (isMine
+            ? ''
+            : '<span style="font-size:10px;color:#6366F1;font-weight:700;padding:3px 8px;background:#EEF2FF;border-radius:20px"><i class="fas fa-cart-plus" style="margin-right:3px"></i>Ajouter</span>')+
+        '</div>'+
+      '</div>';
+
+    mkList.appendChild(card);
+  });
+}
+
+/* ── Section commissions Marketplace dans l'admin ── */
+function _admBuildMkCommissions() {
+  var txns  = _mkGetTxns();
+  var total = txns.reduce(function(s,t){ return s + (t.commission||0); }, 0);
+  var count = txns.length;
+
+  var html = '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-store" style="color:#6366F1;margin-right:6px"></i>Commissions Marketplace (1%)</div>';
+
+  html += '<div class="adm-pay-overview">'+
+    '<div class="adm-pay-card total">'+
+      '<div class="adm-pay-card-icon"><i class="fas fa-percent"></i></div>'+
+      '<div class="adm-pay-card-val">'+total.toFixed(2).replace('.',',')+' €</div>'+
+      '<div class="adm-pay-card-lbl">Total commissions</div>'+
+    '</div>'+
+    '<div class="adm-pay-card month">'+
+      '<div class="adm-pay-card-icon"><i class="fas fa-receipt"></i></div>'+
+      '<div class="adm-pay-card-val">'+count+'</div>'+
+      '<div class="adm-pay-card-lbl">Transactions</div>'+
+    '</div>'+
+  '</div>';
+
+  if (txns.length) {
+    html += '<div class="adm-pay-table-wrap"><table class="adm-pay-table">'+
+      '<thead><tr><th>Acheteur</th><th>Vendeur</th><th>Annonce</th><th>Montant</th><th>Commission</th><th>Date</th></tr></thead><tbody>';
+    txns.forEach(function(t) {
+      var d  = new Date(t.date);
+      var dt = d.toLocaleDateString('fr-FR')+' '+d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
+      html += '<tr>'+
+        '<td>'+escHtml(t.buyerEmail||'—')+'</td>'+
+        '<td>'+escHtml(t.sellerEmail||'—')+'</td>'+
+        '<td>'+escHtml(t.listingTitle||'—')+'</td>'+
+        '<td><strong>'+( (t.amount||0).toFixed(2) )+'€</strong></td>'+
+        '<td style="color:#10B981;font-weight:700">'+( (t.commission||0).toFixed(2) )+'€</td>'+
+        '<td>'+dt+'</td>'+
+      '</tr>';
+    });
+    html += '</tbody></table></div>';
+  } else {
+    html += '<div class="adm-empty"><i class="fas fa-store"></i>Aucune transaction marketplace</div>';
+  }
+  return html;
+}
+
+/* ══════════════════════════════════════════
+   FIN MODULE MARKETPLACE
+══════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════
+   MODULE COLLABORATION — Chercher un collaborateur
+══════════════════════════════════════════════════════════════ */
+
+/* ── Données ── */
+function _collabGetAll() {
+  try { return JSON.parse(localStorage.getItem('gw_collab_requests') || '[]'); } catch(e) { return []; }
+}
+function _collabSaveAll(list) {
+  localStorage.setItem('gw_collab_requests', JSON.stringify(list));
+  _gwFbSet('collab_requests', list);
+}
+
+/* ── Domaines disponibles ── */
+var _COLLAB_DOMAINS = {
+  dev:     '💻 Développement',
+  design:  '🎨 Design',
+  mkt:     '📣 Marketing',
+  video:   '🎬 Vidéo / Photo',
+  redac:   '✍️ Rédaction',
+  conseil: '🧠 Conseil / Stratégie',
+  finance: '💰 Finance',
+  droit:   '⚖️ Juridique',
+  rh:      '👥 Ressources humaines',
+  autre:   '📦 Autre'
+};
+
+var _COLLAB_DURATIONS = {
+  court:  '⚡ Court terme (< 1 mois)',
+  moyen:  '📅 Moyen terme (1-6 mois)',
+  long:   '🚀 Long terme (> 6 mois)',
+  indeter:'🔄 Indéterminé'
+};
+
+/* ── Rendu de la liste dans la marketplace ── */
+function _collabRender() {
+  var wrap = document.getElementById('collab-list-wrap');
+  if (!wrap) return;
+
+  var all = _collabGetAll().filter(function(c) { return c.status === 'active'; });
+
+  if (!all.length) {
+    wrap.innerHTML =
+      '<div style="text-align:center;padding:20px 0;color:#94A3B8">' +
+        '<i class="fas fa-handshake" style="font-size:28px;display:block;margin-bottom:8px;color:#CBD5E1"></i>' +
+        '<div style="font-size:13px;font-weight:600;color:#64748B">Aucune offre de collaboration</div>' +
+        '<div style="font-size:12px;margin-top:4px">Soyez le premier à publier !</div>' +
+        '<button onclick="_collabOpenPost()" style="margin-top:12px;padding:10px 20px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">' +
+          '<i class="fas fa-plus" style="margin-right:6px"></i>Chercher un collaborateur' +
+        '</button>' +
+      '</div>';
+    return;
+  }
+
+  /* Trier : plus récents en premier */
+  all.sort(function(a, b) { return new Date(b.date) - new Date(a.date); });
+
+  wrap.innerHTML = '';
+  all.forEach(function(c) {
+    var card = document.createElement('div');
+    card.className = 'collab-card';
+    card.onclick   = function() { _collabOpenDetail(c.id); };
+
+    var domLabel  = _COLLAB_DOMAINS[c.domain]  || c.domain  || '📦 Autre';
+    var durLabel  = _COLLAB_DURATIONS[c.duration] || c.duration || '';
+    var ago       = _collabTimeAgo(c.date);
+    var isMine    = _currentUser && c.postedBy === _currentUser.email;
+    var hasApplied = _currentUser && (c.applicants || []).indexOf(_currentUser.email) !== -1;
+
+    var skillsHtml = (c.skills || []).slice(0, 3).map(function(s) {
+      return '<span class="collab-skill-tag">' + escHtml(s) + '</span>';
+    }).join('');
+
+    card.innerHTML =
+      '<div class="collab-card-head">' +
+        '<div class="collab-card-domain">' + domLabel + '</div>' +
+        '<div class="collab-card-meta">' +
+          (c.remote ? '<span class="collab-badge-remote"><i class="fas fa-wifi"></i> Remote</span>' : '') +
+          '<span class="collab-card-ago">' + ago + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="collab-card-title">' + escHtml(c.title) + '</div>' +
+      '<div class="collab-card-desc">' + escHtml((c.description || '').slice(0, 80)) + (c.description && c.description.length > 80 ? '…' : '') + '</div>' +
+      (skillsHtml ? '<div class="collab-skills-row">' + skillsHtml + '</div>' : '') +
+      '<div class="collab-card-footer">' +
+        '<div class="collab-card-poster">' +
+          '<div class="collab-poster-av">' + escHtml(c.postedByNom.slice(0,2).toUpperCase()) + '</div>' +
+          '<span>' + escHtml(c.postedByNom) + '</span>' +
+        '</div>' +
+        '<div class="collab-card-right">' +
+          (durLabel ? '<span class="collab-card-dur">' + durLabel + '</span>' : '') +
+          (isMine
+            ? '<span class="collab-badge-mine">Ma demande</span>'
+            : (hasApplied
+              ? '<span class="collab-badge-applied"><i class="fas fa-check"></i> Postulé</span>'
+              : '<span class="collab-badge-cta">Voir</span>')) +
+        '</div>' +
+      '</div>' +
+      '<div class="collab-card-applicants"><i class="fas fa-users" style="margin-right:4px;color:#94A3B8"></i>' + (c.applicants || []).length + ' candidat(s)</div>';
+
+    wrap.appendChild(card);
+  });
+}
+
+/* ── Ouvre le formulaire de publication ── */
+function _collabOpenPost() {
+  if (!_currentUser) { showToast('Connectez-vous pour publier', 'err'); return; }
+
+  var existing = document.getElementById('collab-post-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('collab-post-card');
+  if (existingCard) existingCard.remove();
+
+  var domOpts = Object.keys(_COLLAB_DOMAINS).map(function(k) {
+    return '<option value="' + k + '">' + _COLLAB_DOMAINS[k] + '</option>';
+  }).join('');
+
+  var durOpts = Object.keys(_COLLAB_DURATIONS).map(function(k) {
+    return '<option value="' + k + '">' + _COLLAB_DURATIONS[k] + '</option>';
+  }).join('');
+
+  var bg = document.createElement('div');
+  bg.id = 'collab-post-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+
+  var card = document.createElement('div');
+  card.id = 'collab-post-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  bg.onclick = function(e) { if (e.target === bg) { bg.remove(); card.remove(); } };
+
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
+    '<div style="padding:16px 20px 28px">' +
+
+    '<div style="font-size:17px;font-weight:800;color:#0F172A;margin-bottom:18px">' +
+      '<i class="fas fa-handshake" style="color:#6366F1;margin-right:8px"></i>Chercher un collaborateur' +
+    '</div>' +
+
+    /* Titre du projet */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Titre du projet *</label>' +
+      '<input id="cl-title" placeholder="Ex : Développer une app mobile…" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box;outline:none" onfocus="this.style.borderColor=\'#6366F1\'" onblur="this.style.borderColor=\'#E2E8F0\'">' +
+    '</div>' +
+
+    /* Description */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Description *</label>' +
+      '<textarea id="cl-desc" placeholder="Décrivez votre projet, ce que vous cherchez…" rows="3" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;resize:none;box-sizing:border-box;outline:none" onfocus="this.style.borderColor=\'#6366F1\'" onblur="this.style.borderColor=\'#E2E8F0\'"></textarea>' +
+    '</div>' +
+
+    /* Domaine */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Domaine recherché *</label>' +
+      '<select id="cl-domain" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;background:#F8FAFC;color:#0F172A;box-sizing:border-box">' + domOpts + '</select>' +
+    '</div>' +
+
+    /* Compétences */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Compétences requises <span style="font-weight:400;text-transform:none">(séparées par virgule)</span></label>' +
+      '<input id="cl-skills" placeholder="Ex : React, Figma, SEO…" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box;outline:none" onfocus="this.style.borderColor=\'#6366F1\'" onblur="this.style.borderColor=\'#E2E8F0\'">' +
+    '</div>' +
+
+    /* Durée + Remote */
+    '<div style="display:flex;gap:10px;margin-bottom:13px">' +
+      '<div style="flex:2">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Durée</label>' +
+        '<select id="cl-duration" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:12.5px;background:#F8FAFC;color:#0F172A;box-sizing:border-box">' + durOpts + '</select>' +
+      '</div>' +
+      '<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:2px">' +
+        '<label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;color:#374151;padding:10px 0">' +
+          '<input type="checkbox" id="cl-remote" checked style="accent-color:#6366F1;width:17px;height:17px"> Remote' +
+        '</label>' +
+      '</div>' +
+    '</div>' +
+
+    /* Budget */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Budget (€) <span style="font-weight:400;text-transform:none;font-size:10px">optionnel</span></label>' +
+      '<div style="display:flex;gap:8px;margin-top:5px">' +
+        '<input id="cl-budget" type="number" min="0" placeholder="0" style="flex:1;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box;outline:none" onfocus="this.style.borderColor=\'#6366F1\'" onblur="this.style.borderColor=\'#E2E8F0\'">' +
+        '<select id="cl-budget-type" style="flex:1.2;padding:11px 10px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:12.5px;background:#F8FAFC;box-sizing:border-box">' +
+          '<option value="fixed">Forfait</option>' +
+          '<option value="hourly">Par heure</option>' +
+          '<option value="volunteer">Bénévolat</option>' +
+        '</select>' +
+      '</div>' +
+    '</div>' +
+
+    /* Bouton publier */
+    '<button onclick="_collabSubmitPost()" style="width:100%;padding:14px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(99,102,241,.4)">' +
+      '<i class="fas fa-paper-plane" style="margin-right:8px"></i>Publier la demande' +
+    '</button>' +
+
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* ── Soumettre la demande de collaboration ── */
+function _collabSubmitPost() {
+  if (!_currentUser) return;
+
+  var title    = (document.getElementById('cl-title')    || {}).value || '';
+  var desc     = (document.getElementById('cl-desc')     || {}).value || '';
+  var domain   = (document.getElementById('cl-domain')   || {}).value || 'autre';
+  var skillsRaw= (document.getElementById('cl-skills')   || {}).value || '';
+  var duration = (document.getElementById('cl-duration') || {}).value || 'indeter';
+  var remote   = document.getElementById('cl-remote') ? document.getElementById('cl-remote').checked : true;
+  var budgetV  = parseFloat((document.getElementById('cl-budget') || {}).value) || 0;
+  var budgetT  = (document.getElementById('cl-budget-type') || {}).value || 'fixed';
+
+  if (!title.trim()) { showToast('Le titre est requis', 'err'); return; }
+  if (!desc.trim())  { showToast('La description est requise', 'err'); return; }
+
+  var skills = skillsRaw.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+  var profile = loadUserProfile(_currentUser.email) || {};
+  var nom     = profile.nom || _currentUser.nom || 'Membre';
+
+  var request = {
+    id:          'collab_' + Date.now(),
+    title:       title.trim(),
+    description: desc.trim(),
+    domain:      domain,
+    skills:      skills,
+    duration:    duration,
+    remote:      remote,
+    budget:      { amount: budgetV, type: budgetT },
+    postedBy:    _currentUser.email,
+    postedByNom: nom,
+    date:        new Date().toISOString(),
+    status:      'active',
+    applicants:  []
+  };
+
+  var all = _collabGetAll();
+  all.unshift(request);
+  _collabSaveAll(all);
+
+  /* Fermer le formulaire */
+  var bg   = document.getElementById('collab-post-bg');
+  var card = document.getElementById('collab-post-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+
+  showToast('Demande publiée ✓ Les membres peuvent maintenant postuler !', 'ok');
+  _collabRender();
+}
+
+/* ── Ouvre le détail d'une demande de collaboration ── */
+function _collabOpenDetail(id) {
+  var all = _collabGetAll();
+  var c   = all.find(function(x) { return x.id === id; });
+  if (!c) { showToast('Demande introuvable', 'err'); return; }
+
+  var existing = document.getElementById('collab-detail-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('collab-detail-card');
+  if (existingCard) existingCard.remove();
+
+  var isMine    = _currentUser && c.postedBy === _currentUser.email;
+  var hasApplied = _currentUser && (c.applicants || []).indexOf(_currentUser.email) !== -1;
+
+  var domLabel = _COLLAB_DOMAINS[c.domain]  || c.domain  || '📦 Autre';
+  var durLabel = _COLLAB_DURATIONS[c.duration] || '';
+  var budgetHtml = '';
+  if (c.budget && c.budget.amount > 0) {
+    var btypes = { fixed: 'Forfait', hourly: '/h', volunteer: 'Bénévolat' };
+    budgetHtml = '<div class="collab-detail-row"><i class="fas fa-euro-sign"></i> <strong>' + c.budget.amount + ' € ' + (btypes[c.budget.type] || '') + '</strong></div>';
+  }
+
+  var skillsHtml = (c.skills || []).map(function(s) {
+    return '<span class="collab-skill-tag">' + escHtml(s) + '</span>';
+  }).join('');
+
+  var bg = document.createElement('div');
+  bg.id = 'collab-detail-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+
+  var card = document.createElement('div');
+  card.id = 'collab-detail-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:88vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  bg.onclick = function(e) { if (e.target === bg) { bg.remove(); card.remove(); } };
+
+  /* Bouton action selon le rôle */
+  var actionHtml = '';
+  if (isMine) {
+    actionHtml =
+      '<button onclick="_collabClose(\'' + id + '\')" style="width:100%;padding:13px;background:#FEF2F2;color:#EF4444;border:2px solid #FECACA;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px">' +
+        '<i class="fas fa-times-circle" style="margin-right:6px"></i>Clôturer ma demande' +
+      '</button>';
+  } else if (hasApplied) {
+    actionHtml =
+      '<div style="text-align:center;padding:14px;background:#F0FDF4;border-radius:12px;margin-bottom:10px;font-weight:700;color:#16A34A;font-size:14px">' +
+        '<i class="fas fa-check-circle" style="margin-right:6px"></i>Vous avez déjà postulé' +
+      '</div>';
+  } else if (_currentUser) {
+    actionHtml =
+      '<button onclick="_collabApply(\'' + id + '\')" style="width:100%;padding:14px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(99,102,241,.4);margin-bottom:10px">' +
+        '<i class="fas fa-handshake" style="margin-right:8px"></i>Postuler pour collaborer' +
+      '</button>';
+  }
+
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
+    '<div style="padding:16px 20px 28px">' +
+
+    /* En-tête */
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">' +
+      '<span style="font-size:12px;font-weight:700;padding:5px 12px;border-radius:20px;background:#EEF2FF;color:#6366F1">' + domLabel + '</span>' +
+      '<button onclick="document.getElementById(\'collab-detail-bg\').remove();document.getElementById(\'collab-detail-card\').remove()" style="border:none;background:#F1F5F9;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:16px;color:#64748B">✕</button>' +
+    '</div>' +
+
+    '<h2 style="font-size:18px;font-weight:800;color:#0F172A;margin:0 0 10px">' + escHtml(c.title) + '</h2>' +
+
+    /* Meta */
+    '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">' +
+      (c.remote ? '<span style="font-size:11.5px;padding:4px 10px;background:#ECFDF5;color:#059669;border-radius:20px;font-weight:600"><i class="fas fa-wifi" style="margin-right:4px"></i>Remote</span>' : '') +
+      (durLabel ? '<span style="font-size:11.5px;padding:4px 10px;background:#FFF7ED;color:#EA580C;border-radius:20px;font-weight:600">' + durLabel + '</span>' : '') +
+    '</div>' +
+
+    /* Description */
+    '<div style="font-size:13.5px;color:#374151;line-height:1.6;margin-bottom:14px">' + escHtml(c.description) + '</div>' +
+
+    /* Compétences */
+    (skillsHtml ? '<div style="margin-bottom:14px"><div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Compétences recherchées</div><div style="display:flex;flex-wrap:wrap;gap:6px">' + skillsHtml + '</div></div>' : '') +
+
+    /* Budget */
+    budgetHtml +
+
+    /* Poster */
+    '<div style="display:flex;align-items:center;gap:10px;padding:12px;background:#F8FAFC;border-radius:12px;margin:14px 0">' +
+      '<div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px">' + escHtml(c.postedByNom.slice(0,2).toUpperCase()) + '</div>' +
+      '<div>' +
+        '<div style="font-size:13px;font-weight:700;color:#0F172A">' + escHtml(c.postedByNom) + '</div>' +
+        '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(c.date) + ' · ' + (c.applicants || []).length + ' candidat(s)</div>' +
+      '</div>' +
+    '</div>' +
+
+    /* Action */
+    actionHtml +
+
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* ── Postuler à une demande ── */
+function _collabApply(id) {
+  if (!_currentUser) { showToast('Connectez-vous pour postuler', 'err'); return; }
+
+  var all = _collabGetAll();
+  var c   = all.find(function(x) { return x.id === id; });
+  if (!c) return;
+
+  if ((c.applicants || []).indexOf(_currentUser.email) !== -1) {
+    showToast('Vous avez déjà postulé', 'err'); return;
+  }
+  if (c.postedBy === _currentUser.email) {
+    showToast('Vous ne pouvez pas postuler à votre propre demande', 'err'); return;
+  }
+
+  if (!c.applicants) c.applicants = [];
+  c.applicants.push(_currentUser.email);
+  _collabSaveAll(all);
+
+  /* Notifie le posteur */
+  var profile    = loadUserProfile(_currentUser.email) || {};
+  var applicantNom = profile.nom || _currentUser.nom || 'Un membre';
+
+  pushNotif(c.postedBy, {
+    id:      genNotifId(),
+    type:    'system',
+    title:   '🤝 Nouveau candidat !',
+    message: applicantNom + ' souhaite collaborer sur votre projet :\n"' + c.title + '".\nContactez-le dans les messages.',
+    date:    new Date().toISOString(),
+    read:    false
+  });
+
+  /* Créer/retrouver la conversation DM avec le posteur */
+  if (c.postedBy && c.postedBy !== _currentUser.email) {
+    var _posterProfile = loadUserProfile(c.postedBy) || {};
+    var _posterNom = _posterProfile.nom || c.postedByNom || c.postedBy;
+    var _existConv = DEMO_CONVERSATIONS.find(function(x) {
+      return !x.isGroup && x.email === c.postedBy;
+    });
+    if (!_existConv) {
+      _existConv = {
+        id:       _newConvId(),
+        name:     _posterNom,
+        email:    c.postedBy,
+        role:     _posterProfile.domain || 'Membre Geniwork',
+        verified: !!(_posterProfile.badgeType),
+        online:   false,
+        avatar:   { type: 'color', color: '#6366F1', initials: getInitials(_posterNom) },
+        at:       Date.now(),
+        time:     'À l\'instant',
+        lastMsg:  '',
+        unread:   0,
+        archived: false,
+        messages: []
+      };
+      DEMO_CONVERSATIONS.unshift(_existConv);
+    }
+    /* Message de candidature (partagé via DM storage) */
+    var _cTs = Date.now();
+    var _collabMsg = {
+      id:   _cTs,
+      from: _currentUser.email,
+      text: '🤝 Bonjour ' + _posterNom.split(' ')[0] + ', j\'ai postulé à votre demande de collaboration :\n\n"' + c.title + '"\n\nJe suis disponible pour en discuter !',
+      type: 'text',
+      time: _nowTime(),
+      at:   _cTs
+    };
+    _existConv.messages.push(_collabMsg);
+    _existConv.lastMsg = '🤝 Candidature : ' + c.title;
+    _existConv.lastAt  = _cTs;
+    _saveDMConv(_existConv);
+    _writeDMInbox(c.postedBy, _currentUser.email, _currentUser.nom || _currentUser.email,
+                  _currentUser.role || 'Membre Geniwork', _existConv.lastMsg);
+    _saveDMConvList();
+  }
+
+  /* Fermer et rafraîchir */
+  var bg   = document.getElementById('collab-detail-bg');
+  var card = document.getElementById('collab-detail-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+
+  showToast('Candidature envoyée ✓ Un message a été envoyé au posteur !', 'ok');
+  _collabRender();
+}
+
+/* ── Clôturer sa propre demande ── */
+function _collabClose(id) {
+  if (!_currentUser) return;
+  var all = _collabGetAll();
+  var c   = all.find(function(x) { return x.id === id; });
+  if (!c || c.postedBy !== _currentUser.email) return;
+
+  if (!confirm('Clôturer cette demande de collaboration ?')) return;
+  c.status = 'closed';
+  _collabSaveAll(all);
+
+  var bg   = document.getElementById('collab-detail-bg');
+  var card = document.getElementById('collab-detail-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+
+  showToast('Demande clôturée', 'ok');
+  _collabRender();
+}
+
+/* ── Utilitaire : temps relatif ── */
+function _collabTimeAgo(dateStr) {
+  var diff = Date.now() - new Date(dateStr).getTime();
+  var mins  = Math.floor(diff / 60000);
+  var hours = Math.floor(diff / 3600000);
+  var days  = Math.floor(diff / 86400000);
+  if (mins  < 1)   return 'À l\'instant';
+  if (mins  < 60)  return mins + ' min';
+  if (hours < 24)  return hours + 'h';
+  if (days  < 7)   return days + 'j';
+  return Math.floor(days / 7) + ' sem.';
+}
+
+/* ── Bouton "Actualiser" collaboration avec feedback visuel ── */
+function _collabRefresh(btn) {
+  if (btn) {
+    btn.textContent = '⟳ Chargement…';
+    btn.disabled = true;
+  }
+  /* Forcer sync Firebase si connecté */
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/collab_requests').once('value', function(snap) {
+      var val = snap.val();
+      if (val !== null) {
+        localStorage.setItem('gw_collab_requests', JSON.stringify(val));
+      }
+      _collabRender();
+      if (btn) { btn.textContent = 'Actualiser'; btn.disabled = false; }
+    });
+  } else {
+    _collabRender();
+    if (btn) { btn.textContent = 'Actualiser'; btn.disabled = false; }
+  }
+}
+
+/* ══════════════════════════════════════════
+   VOIR TOUTES LES ANNONCES — Écran complet
+══════════════════════════════════════════ */
+function _mkOpenAllListings() {
+  var existing = document.getElementById('mk-all-screen');
+  if (existing) existing.remove();
+
+  var screen = document.createElement('div');
+  screen.id  = 'mk-all-screen';
+  screen.style.cssText = 'position:fixed;left:50%;top:0;bottom:0;width:100%;max-width:430px;transform:translateX(-50%) translateX(100%);transition:transform .28s cubic-bezier(.4,0,.2,1);background:#F8FAFC;z-index:1400;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  document.body.appendChild(screen);
+  requestAnimationFrame(function(){ screen.style.transform = 'translateX(-50%) translateX(0)'; });
+
+  _mkRefreshAllListings();
+}
+
+function _mkRefreshAllListings() {
+  var screen = document.getElementById('mk-all-screen');
+  if (!screen) return;
+
+  _mkCheckExpired();
+  var listings  = _mkGetListings().filter(function(l){ return l.status === 'active'; });
+  var collabs   = _collabGetAll().filter(function(c){ return c.status === 'active'; });
+
+  /* Trier : business (priorité) d'abord, puis par date */
+  listings.sort(function(a, b) {
+    if (b.isPriority !== a.isPriority) return (b.isPriority ? 1 : 0) - (a.isPriority ? 1 : 0);
+    return new Date(b.createdAt) - new Date(a.createdAt);
+  });
+
+  var searchVal = '';
+  var filterVal = 'all';
+
+  function _buildHtml() {
+    var filtered = listings.filter(function(l) {
+      var matchSearch = !searchVal || (l.title+l.description+l.sellerNom).toLowerCase().indexOf(searchVal.toLowerCase()) !== -1;
+      var matchFilter = filterVal === 'all' || l.type === filterVal || l.category === filterVal;
+      return matchSearch && matchFilter;
+    });
+
+    var listHtml = '';
+    if (!filtered.length) {
+      listHtml = '<div style="text-align:center;padding:40px 20px;color:#94A3B8">' +
+        '<i class="fas fa-store" style="font-size:36px;display:block;margin-bottom:10px;color:#CBD5E1"></i>' +
+        '<div style="font-size:14px;font-weight:600;color:#64748B">Aucune annonce trouvée</div>' +
+      '</div>';
+    } else {
+      filtered.forEach(function(l) {
+        var cats     = l.type === 'service' ? _MK_SVC_CATS : _MK_PROD_CATS;
+        var catLabel = cats[l.category] || l.category;
+        var isMine   = _currentUser && l.sellerEmail === _currentUser.email;
+        var safeId   = l.id.replace(/'/g,"\\'");
+        var imgHtml  = (l.images && l.images.length)
+          ? '<div style="width:70px;height:70px;border-radius:12px;background:url(\''+l.images[0]+'\') center/cover no-repeat;flex-shrink:0"></div>'
+          : '<div style="width:70px;height:70px;border-radius:12px;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="fas fa-tag" style="color:#fff;font-size:22px"></i></div>';
+        var ago = _collabTimeAgo(l.createdAt || l.date || new Date().toISOString());
+
+        listHtml +=
+          '<div style="background:#fff;border-radius:14px;padding:13px;margin-bottom:10px;display:flex;gap:12px;box-shadow:0 1px 5px rgba(0,0,0,.06);cursor:pointer" onclick="_mkOpenDetail(\''+safeId+'\')">' +
+            imgHtml +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">' +
+                '<span style="font-size:10px;font-weight:700;padding:2px 7px;background:#EEF2FF;color:#6366F1;border-radius:20px">'+escHtml(catLabel)+'</span>' +
+                (l.isPriority ? '<span style="font-size:10px;font-weight:700;padding:2px 7px;background:#FEF3C7;color:#D97706;border-radius:20px">⭐ PRO</span>' : '') +
+                (isMine ? '<span style="font-size:10px;font-weight:700;padding:2px 7px;background:#F0FDF4;color:#16A34A;border-radius:20px">Ma annonce</span>' : '') +
+              '</div>' +
+              '<div style="font-size:14px;font-weight:800;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+escHtml(l.title)+'</div>' +
+              '<div style="font-size:11.5px;color:#64748B;margin-top:2px">'+escHtml(l.sellerNom)+' · '+ago+'</div>' +
+              '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">' +
+                '<div style="font-size:15px;font-weight:800;color:#0F172A">'+l.price.toFixed(2)+'€</div>' +
+                (isMine
+                  ? '<button onclick="event.stopPropagation();_mkOpenMySales()" style="padding:5px 10px;background:#EEF2FF;color:#6366F1;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-cog" style="margin-right:3px"></i>Gérer</button>'
+                  : '<button onclick="event.stopPropagation();_mkAddListingToCart(\''+safeId+'\')" style="padding:5px 10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-cart-plus" style="margin-right:3px"></i>Panier</button>') +
+              '</div>' +
+            '</div>' +
+          '</div>';
+      });
+    }
+
+    screen.innerHTML =
+      /* Header */
+      '<div style="position:sticky;top:0;background:#fff;z-index:10;border-bottom:1px solid #E2E8F0;box-shadow:0 1px 4px rgba(0,0,0,.05)">' +
+        '<div style="padding:14px 16px;display:flex;align-items:center;gap:10px">' +
+          '<button onclick="_mkCloseScreen(\'mk-all-screen\')" style="width:36px;height:36px;border:none;background:#F1F5F9;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;color:#374151;cursor:pointer;flex-shrink:0"><i class="fas fa-arrow-left"></i></button>' +
+          '<div style="flex:1;font-size:17px;font-weight:800;color:#0F172A">Toutes les annonces</div>' +
+          '<span style="font-size:12px;color:#94A3B8">'+filtered.length+' résultat(s)</span>' +
+        '</div>' +
+        /* Barre de recherche */
+        '<div style="padding:0 16px 12px;display:flex;gap:8px">' +
+          '<div style="flex:1;display:flex;align-items:center;background:#F1F5F9;border-radius:10px;padding:8px 12px;gap:8px">' +
+            '<i class="fas fa-magnifying-glass" style="color:#94A3B8;font-size:14px"></i>' +
+            '<input id="mk-all-search" placeholder="Rechercher…" value="'+escHtml(searchVal)+'" oninput="_mkAllSearch(this.value)" style="border:none;background:none;font-size:13px;flex:1;outline:none;color:#0F172A">' +
+          '</div>' +
+          /* Filtre type */
+          '<select id="mk-all-filter" onchange="_mkAllFilter(this.value)" style="padding:8px 10px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:12px;background:#fff;color:#374151">' +
+            '<option value="all"'+(filterVal==='all'?' selected':'')+'>Tous</option>' +
+            '<option value="service"'+(filterVal==='service'?' selected':'')+'>Services</option>' +
+            '<option value="product"'+(filterVal==='product'?' selected':'')+'>Produits</option>' +
+          '</select>' +
+        '</div>' +
+      '</div>' +
+      /* Liste */
+      '<div style="padding:12px 16px" id="mk-all-listings-wrap">' + listHtml + '</div>';
+  }
+
+  _buildHtml();
+
+  /* Fonctions de recherche et filtre accessibles globalement */
+  window._mkAllSearch = function(val) {
+    searchVal = val;
+    _buildHtml();
+  };
+  window._mkAllFilter = function(val) {
+    filterVal = val;
+    _buildHtml();
+  };
+}
+
+/* ── Ferme l'écran "Voir tout" ── */
+function _mkCloseAllScreen() {
+  _mkCloseScreen('mk-all-screen');
+}
+
+/* ══════════════════════════════════════════
+   FIN MODULE COLLABORATION
+══════════════════════════════════════════ */
