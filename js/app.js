@@ -202,7 +202,25 @@ function _gwFbSyncStart() {
   }
 
   /* ── Utilisateurs ── */
-  _listen('users', 'gw_users');
+  _listen('users', 'gw_users', function() {
+    /* Rafraîchit les avatars/photos de profil partout dans l'UI */
+    try { renderFeed(getAllPosts()); } catch(e){}
+    try {
+      if (_currentUser) {
+        var updated = getUsers().find(function(u){ return u.email === _currentUser.email; });
+        if (updated && updated.photo) {
+          /* Met à jour les avatars de l'utilisateur connecté */
+          document.querySelectorAll('.sb-avatar,.composer-avatar,.post-avatar').forEach(function(el){
+            if (el.tagName === 'IMG') el.src = updated.photo;
+          });
+        }
+      }
+    } catch(e){}
+  });
+
+  /* ── Posts utilisateurs (sync temps réel) ── */
+  _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
+  _gwFbDB.ref('gw/posts').on('child_changed', function(snap) { try { _gwMergePost(snap); } catch(e){} });
 
   /* ── Bans ── */
   _listen('bans', 'gw_bans', function() {
@@ -283,6 +301,37 @@ function _gwFbSyncStart() {
 
   /* ── Notifications de l'utilisateur connecté ── */
   if (_currentUser) _gwFbWatchUserNotifs(_currentUser.email);
+}
+
+/* ── Merge les posts d'un utilisateur reçus depuis Firebase ── */
+function _gwMergePost(snap) {
+  if (!snap) return;
+  var fbKey = snap.key;
+  var posts = snap.val();
+  if (!Array.isArray(posts) || !posts.length) return;
+  var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+  /* Ne pas écraser nos propres posts (déjà gérés localement) */
+  if (_currentUser && email === _currentUser.email) return;
+  /* Sauvegarder dans localStorage */
+  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e){}
+  /* Merger dans DEMO_POSTS */
+  var changed = false;
+  posts.forEach(function(p) {
+    if (!DEMO_POSTS.find(function(d){ return d.id === p.id; })) {
+      p.likers = loadPostLikers(p.id);
+      DEMO_POSTS.push(p);
+      changed = true;
+    }
+  });
+  if (changed) {
+    DEMO_POSTS.sort(function(a, b){ return b.id - a.id; });
+    /* Rafraîchit le feed si ouvert */
+    try {
+      if (document.getElementById('feed-list')) {
+        renderFeed(getAllPosts());
+      }
+    } catch(e){}
+  }
 }
 
 /* ── Merge un snapshot Firebase DM dans localStorage ── */
@@ -3537,6 +3586,11 @@ function loadPersistedUserPosts(email) {
 
 function savePersistedUserPosts(email, posts) {
   localStorage.setItem(_userPostsKey(email), JSON.stringify(posts));
+  /* ── Sync Firebase ── */
+  if (_gwFbReady && _gwFbDB && email) {
+    var _fbPostKey = _gwFbKey(email);
+    _gwFbDB.ref('gw/posts/' + _fbPostKey).set(posts).catch(function(){});
+  }
 }
 
 function persistNewPost(post) {
