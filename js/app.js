@@ -372,13 +372,37 @@ function _gwMergeDM(snap) {
     if (changed) {
       stored.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
       localStorage.setItem(lsKey, JSON.stringify({ messages: stored, lastMsg: data.lastMsg, lastAt: data.lastAt }));
-      /* Rafraîchit la conv si elle est ouverte */
       try {
+        /* Retrouver la conv en mémoire */
         var openConv = DEMO_CONVERSATIONS.find(function(c) {
           return !c.isGroup && _getDMKey(_currentUser.email, c.email) === lsKey;
         });
-        if (openConv && _chatConvId === openConv.id && document.getElementById('chat-messages')) {
-          _pollChatMessages();
+
+        /* Si la conv n'existe pas encore en mémoire → la créer depuis Firebase */
+        if (!openConv) {
+          try { _checkDMInbox(); } catch(e){}
+          openConv = DEMO_CONVERSATIONS.find(function(c) {
+            return !c.isGroup && _getDMKey(_currentUser.email, c.email) === lsKey;
+          });
+        }
+
+        if (openConv) {
+          /* Compter les vrais nouveaux messages (pas les nôtres) */
+          var newFromOther = stored.filter(function(m) {
+            return m.from && m.from !== _currentUser.email &&
+                   m.from !== 'me' && m.from !== 'system' &&
+                   !openConv.messages.some(function(x) { return String(x.id) === String(m.id); });
+          });
+          /* Mettre à jour les métadonnées en mémoire */
+          if (data.lastMsg) openConv.lastMsg = data.lastMsg;
+          if (data.lastAt)  openConv.lastAt  = data.lastAt;
+          if (_chatConvId !== openConv.id && newFromOther.length > 0) {
+            openConv.unread = (openConv.unread || 0) + newFromOther.length;
+          }
+          /* Rafraîchit si la conv est ouverte à l'écran */
+          if (_chatConvId === openConv.id && document.getElementById('chat-messages')) {
+            _pollChatMessages();
+          }
         }
         renderConversations();
       } catch(e){}
@@ -754,8 +778,12 @@ function _gwPreloadUserData(user, callback) {
     _gwFbDB.ref('gw/group_inboxes/' + fbKey).once('value'),
     _gwFbDB.ref('gw/group_msgs').once('value')
   ]).then(function(snaps) {
-    var inbox = snaps[0].val();
-    if (inbox) try { localStorage.setItem('gw_dm_inbox_' + user.email, JSON.stringify(inbox)); } catch(e){}
+    var inboxRaw = snaps[0].val();
+    if (inboxRaw) {
+      /* Firebase stocke sous forme d'objet {fromFbKey: entry} — convertir en tableau */
+      var inboxList = Array.isArray(inboxRaw) ? inboxRaw : Object.values(inboxRaw);
+      try { localStorage.setItem('gw_dm_inbox_' + user.email, JSON.stringify(inboxList)); } catch(e){}
+    }
     var notifs = snaps[1].val();
     if (notifs) try { localStorage.setItem('gw_notifs_' + user.email, JSON.stringify(notifs)); } catch(e){}
     var profile = snaps[2].val();
@@ -20866,30 +20894,29 @@ function _closeOfficialComposer() {
 /* X écrit dans l'inbox de Y pour que Y sache qu'il a un message */
 function _writeDMInbox(toEmail, fromEmail, fromName, fromRole, lastMsg) {
   if (!toEmail || !fromEmail) return;
-  var key = 'gw_dm_inbox_' + toEmail;
+  var entry = {
+    fromEmail: fromEmail,
+    fromName:  fromName,
+    fromRole:  fromRole || 'Membre Geniwork',
+    lastMsg:   lastMsg,
+    at:        Date.now()
+  };
+  /* ── Met à jour le localStorage local (utile sur le même appareil) ── */
   try {
+    var key   = 'gw_dm_inbox_' + toEmail;
     var inbox = JSON.parse(localStorage.getItem(key) || '[]');
-    var entry = inbox.find(function(e) { return e.fromEmail === fromEmail; });
-    if (entry) {
-      entry.lastMsg = lastMsg;
-      entry.at = Date.now();
-    } else {
-      inbox.push({
-        fromEmail: fromEmail,
-        fromName:  fromName,
-        fromRole:  fromRole || 'Membre Geniwork',
-        lastMsg:   lastMsg,
-        at:        Date.now()
-      });
-    }
+    var idx   = inbox.findIndex(function(e) { return e.fromEmail === fromEmail; });
+    if (idx !== -1) inbox[idx] = entry; else inbox.push(entry);
     localStorage.setItem(key, JSON.stringify(inbox));
-
-    /* ── Sync Firebase ── */
-    if (_gwFbReady && _gwFbDB) {
-      var _fbInboxKey = toEmail.replace(/\./g,'__d__').replace(/@/g,'__a__');
-      _gwFbDB.ref('gw/inboxes/' + _fbInboxKey).set(inbox).catch(function(){});
-    }
   } catch(e) {}
+  /* ── Sync Firebase : écrit UNIQUEMENT l'entrée de l'expéditeur
+        sous gw/inboxes/{toFbKey}/{fromFbKey}
+        → n'écrase pas les autres conversations de Y ── */
+  if (_gwFbReady && _gwFbDB) {
+    var _toFbKey   = _gwFbKey(toEmail);
+    var _fromFbKey = _gwFbKey(fromEmail);
+    _gwFbDB.ref('gw/inboxes/' + _toFbKey + '/' + _fromFbKey).set(entry).catch(function(){});
+  }
 }
 
 /* Y vérifie son inbox et crée les conversations manquantes */
