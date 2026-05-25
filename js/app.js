@@ -12008,7 +12008,7 @@ function handleChatAttach(input) {
   }
 
   if (isImage) {
-    /* Compression Canvas → JPEG ≤ 280 Ko base64 (~210 Ko réels) */
+    /* Compression Canvas → JPEG ≤ 280 Ko base64 → passe dans Firebase RTDB */
     var reader = new FileReader();
     reader.onload = function(e) {
       _compressImageForChat(e.target.result, 280000, function(compressed) {
@@ -12017,35 +12017,16 @@ function handleChatAttach(input) {
     };
     reader.readAsDataURL(file);
 
-  } else if (isVideo || file.size > 280000) {
-    /* Vidéos ou fichiers lourds → Firebase Storage */
-    if (!_gwFbStorage) {
-      showToast('Firebase Storage non disponible', 'err'); return;
-    }
-    /* Afficher un indicateur de chargement */
-    var box = document.getElementById('chat-messages');
-    if (box) {
-      var loadRow = document.createElement('div');
-      loadRow.className = 'chat-msg-row mine';
-      loadRow.setAttribute('data-msg-id', 'uploading_' + file.name);
-      loadRow.innerHTML = '<div class="chat-bubble out" style="opacity:.6;font-size:12px;padding:8px 14px">' +
-        '<i class="fas fa-spinner fa-spin" style="margin-right:6px"></i>Envoi en cours…</div>';
-      box.appendChild(loadRow);
-      _scrollChatToBottom();
-    }
-    _uploadChatMedia(file, Date.now(), null, function(err, url) {
-      if (err) {
-        var pl = document.getElementById('chat-messages') &&
-                 document.querySelector('[data-msg-id="uploading_' + file.name + '"]');
-        if (pl) pl.remove();
-        showToast('Échec de l\'envoi : ' + (err.message || err), 'err');
-        return;
-      }
-      _dispatchChatMedia(url, true);
-    });
+  } else if (isVideo) {
+    /* Vidéos : Firebase Storage requis (forfait Blaze payant) */
+    showToast('Les vidéos ne peuvent pas être partagées entre appareils (Storage non activé). Partagez via WhatsApp ou YouTube.', 'err');
+
+  } else if (file.size > 280000) {
+    /* Fichiers lourds (>280 Ko) : trop grand pour Firebase RTDB sans Storage */
+    showToast('Fichier trop volumineux pour être synchronisé entre appareils (max ~200 Ko). Les petits fichiers (PDF, docs) fonctionnent.', 'err');
 
   } else {
-    /* Petits fichiers (<280 Ko) → base64 direct */
+    /* Petits fichiers (<280 Ko) → base64 direct dans RTDB */
     var reader2 = new FileReader();
     reader2.onload = function(e) { _dispatchChatMedia(e.target.result, false); };
     reader2.readAsDataURL(file);
