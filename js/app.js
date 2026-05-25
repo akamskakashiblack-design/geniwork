@@ -240,6 +240,47 @@ function _gwFbSyncStart() {
     } catch(e){}
   });
 
+  /* ── Messages DM par message (child_added atomique — sans race condition) ── */
+  _gwFbDB.ref('gw/dm_msgs').on('child_added', function(convSnap) {
+    /* convSnap.key = dmFbKey ; convSnap.val() = {msgId: msg, ...} */
+    if (!_currentUser) return;
+    var dmFbKey = convSnap.key;
+    var myFbPart = _gwFbKey(_currentUser.email);
+    if (dmFbKey.indexOf(myFbPart) === -1) return;  /* pas ma conversation */
+    var lsKey = dmFbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+    if (!_gwSyncedMsgIds[lsKey]) _gwSyncedMsgIds[lsKey] = {};
+    var syncSet = _gwSyncedMsgIds[lsKey];
+    var msgsObj = convSnap.val() || {};
+    var newMsgs = [];
+    Object.keys(msgsObj).forEach(function(k) {
+      var m = msgsObj[k];
+      if (m && m.id && !syncSet[String(m.id)]) {
+        syncSet[String(m.id)] = true;
+        newMsgs.push(m);
+      }
+    });
+    if (!newMsgs.length) return;
+    newMsgs.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
+    try {
+      var _ls2 = null;
+      try { _ls2 = JSON.parse(localStorage.getItem(lsKey)); } catch(e){}
+      var _stored2 = (_ls2 && Array.isArray(_ls2.messages)) ? _ls2.messages : [];
+      var changed2 = false;
+      newMsgs.forEach(function(m) {
+        if (!_stored2.some(function(s) { return String(s.id) === String(m.id); })) {
+          _stored2.push(m); changed2 = true;
+        }
+      });
+      if (changed2) {
+        _stored2.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
+        var lastM = newMsgs[newMsgs.length - 1];
+        localStorage.setItem(lsKey, JSON.stringify({ messages: _stored2, lastMsg: lastM.text || '', lastAt: lastM.at || Date.now() }));
+        try { _checkDMInbox(); } catch(e2){}
+        renderConversations();
+      }
+    } catch(e){}
+  });
+
   /* ── Posts utilisateurs (sync temps réel) ── */
   _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
   _gwFbDB.ref('gw/posts').on('child_changed', function(snap) { try { _gwMergePost(snap); } catch(e){} });
@@ -890,7 +931,8 @@ function _gwPreloadUserData(user, callback) {
     _gwFbDB.ref('gw/group_inboxes/' + fbKey).once('value'),
     _gwFbDB.ref('gw/group_msgs').once('value'),
     _gwFbDB.ref('gw/following/' + fbKey).once('value'),
-    _gwFbDB.ref('gw/follow_counts').once('value')
+    _gwFbDB.ref('gw/follow_counts').once('value'),
+    _gwFbDB.ref('gw/dm_msgs').once('value')
   ]).then(function(snaps) {
     var inboxRaw = snaps[0].val();
     if (inboxRaw) {
@@ -983,6 +1025,32 @@ function _gwPreloadUserData(user, callback) {
         mergedGrp.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
         localStorage.setItem(grpLsKey, JSON.stringify({ messages: mergedGrp, lastMsg: grpData.lastMsg, lastAt: grpData.lastAt }));
       } catch(e){}
+    });
+
+    /* ── dm_msgs : charge tous les messages per-message reçus sur d'autres appareils ── */
+    var allDmMsgs = snaps[8] ? (snaps[8].val() || {}) : {};
+    Object.keys(allDmMsgs).forEach(function(dmFbKey) {
+      if (dmFbKey.indexOf(fbKey) === -1) return;  /* pas ma conversation */
+      var lsKey = dmFbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+      if (!_gwSyncedMsgIds[lsKey]) _gwSyncedMsgIds[lsKey] = {};
+      var syncSet2 = _gwSyncedMsgIds[lsKey];
+      var msgsObj2 = allDmMsgs[dmFbKey] || {};
+      var _ls3 = null;
+      try { _ls3 = JSON.parse(localStorage.getItem(lsKey)); } catch(e){}
+      var _stored3 = (_ls3 && Array.isArray(_ls3.messages)) ? _ls3.messages : [];
+      var changed3 = false;
+      Object.keys(msgsObj2).forEach(function(k) {
+        var m = msgsObj2[k];
+        if (!m || !m.id) return;
+        syncSet2[String(m.id)] = true;
+        if (!_stored3.some(function(s) { return String(s.id) === String(m.id); })) {
+          _stored3.push(m); changed3 = true;
+        }
+      });
+      if (changed3) {
+        _stored3.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
+        try { localStorage.setItem(lsKey, JSON.stringify({ messages: _stored3, lastMsg: _ls3 && _ls3.lastMsg || '', lastAt: _ls3 && _ls3.lastAt || Date.now() })); } catch(e){}
+      }
     });
 
     /* ── Following list (restaurée depuis Firebase au login) ── */
@@ -9793,6 +9861,7 @@ var DEMO_CONVERSATIONS = [
 var _msgTab          = 'all';
 var _chatConvId      = null;
 var _gwActiveDMRef   = null;   /* Firebase listener on the currently-open DM */
+var _gwSyncedMsgIds  = {};     /* {lsKey → {msgId → true}} évite de re-syncer le même message */
 var _groupConvsReady = false;
 
 /* ── Persistance des conversations DM dynamiques (conversations réelles entre utilisateurs) ──
@@ -10435,40 +10504,56 @@ function openChat(convId) {
   }, 320);
   _startChatPolling();
 
-  /* ── Direct Firebase listener on the open DM (fixes intermittent sync on mobile) ── */
+  /* ── Listener Firebase par message (child_added atomique — sans race condition) ── */
   if (_gwActiveDMRef) { _gwActiveDMRef.off(); _gwActiveDMRef = null; }
   if (!conv.isGroup && conv.email && _gwFbReady && _gwFbDB) {
-    var _openDmKey    = _getDMKey(_currentUser.email, conv.email);
-    var _openDmFbKey  = _openDmKey.replace(/\./g,'__d__').replace(/@/g,'__a__');
-    _gwActiveDMRef = _gwFbDB.ref('gw/dms/' + _openDmFbKey);
-    _gwActiveDMRef.on('value', function(snap) {
-      if (!snap || !snap.val()) return;
-      var data = snap.val();
-      if (!Array.isArray(data.messages)) return;
+    var _openDmKey   = _getDMKey(_currentUser.email, conv.email);
+    var _openDmFbKey = _openDmKey.replace(/\./g,'__d__').replace(/@/g,'__a__');
+    if (!_gwSyncedMsgIds[_openDmKey]) _gwSyncedMsgIds[_openDmKey] = {};
+    var _dmSyncSet = _gwSyncedMsgIds[_openDmKey];
+
+    /* Marquer les messages déjà en mémoire comme synced (pour ne pas les re-rendre) */
+    var _initConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+    if (_initConv) {
+      (_initConv.messages || []).forEach(function(m) {
+        if (m && m.id) _dmSyncSet[String(m.id)] = true;
+      });
+    }
+
+    _gwActiveDMRef = _gwFbDB.ref('gw/dm_msgs/' + _openDmFbKey);
+    _gwActiveDMRef.on('child_added', function(snap) {
+      var msg = snap.val();
+      if (!msg || !msg.id) return;
+      var msgIdStr = String(msg.id);
+      if (_dmSyncSet[msgIdStr]) return;      /* déjà en mémoire — ignorer */
+      _dmSyncSet[msgIdStr] = true;
       try {
-        var existing = null;
-        try { existing = JSON.parse(localStorage.getItem(_openDmKey)); } catch(e){}
-        var stored    = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
-        var storedMap = {};
-        stored.forEach(function(m) { storedMap[String(m.id)] = true; });
-        var changed = false;
-        data.messages.forEach(function(m) {
-          if (m && m.id && !storedMap[String(m.id)]) { stored.push(m); changed = true; }
-        });
-        if (changed) {
-          stored.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-          localStorage.setItem(_openDmKey, JSON.stringify({ messages: stored, lastMsg: data.lastMsg, lastAt: data.lastAt }));
-          var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
-          if (activeConv) {
-            activeConv.messages = stored;
-            if (data.lastMsg) activeConv.lastMsg = data.lastMsg;
-            if (data.lastAt)  activeConv.lastAt  = data.lastAt;
-            if (document.getElementById('chat-messages')) {
-              try { _pollChatMessages(); } catch(e){}
-            }
-            renderConversations();
-          }
+        var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+        if (!activeConv) return;
+        activeConv.messages.push(msg);
+        activeConv.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+        if (msg.text || msg.type) {
+          activeConv.lastMsg = msg.text || (msg.type === 'img' ? '📷 Photo' : '📎 Fichier');
+          activeConv.lastAt  = msg.at || Date.now();
+          if (_chatConvId !== activeConv.id) activeConv.unread = (activeConv.unread || 0) + 1;
         }
+        /* Mettre à jour localStorage */
+        var _ls = null;
+        try { _ls = JSON.parse(localStorage.getItem(_openDmKey)); } catch(e){}
+        var _lsMsgs = (_ls && Array.isArray(_ls.messages)) ? _ls.messages : [];
+        if (!_lsMsgs.some(function(m) { return String(m.id) === msgIdStr; })) {
+          _lsMsgs.push(msg);
+          _lsMsgs.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+          localStorage.setItem(_openDmKey, JSON.stringify({
+            messages: _lsMsgs,
+            lastMsg:  activeConv.lastMsg || '',
+            lastAt:   activeConv.lastAt  || Date.now()
+          }));
+        }
+        if (_chatConvId === activeConv.id && document.getElementById('chat-messages')) {
+          try { _pollChatMessages(); } catch(e){}
+        }
+        renderConversations();
       } catch(e){}
     });
   }
@@ -11630,10 +11715,22 @@ function _saveDMConv(conv) {
     };
     localStorage.setItem(key, JSON.stringify(dmData));
 
-    /* ── Sync Firebase ── */
+    /* ── Sync Firebase : écriture atomique PAR MESSAGE (pas de race condition) ── */
     if (_gwFbReady && _gwFbDB) {
       var _fbDmKey = key.replace(/\./g,'__d__').replace(/@/g,'__a__');
-      _gwFbDB.ref('gw/dms/' + _fbDmKey).set(dmData).catch(function(){});
+      if (!_gwSyncedMsgIds[key]) _gwSyncedMsgIds[key] = {};
+      var _syncedSet = _gwSyncedMsgIds[key];
+      /* Écrire seulement les nouveaux messages */
+      mergedForStorage.forEach(function(m) {
+        if (!m || !m.id || _syncedSet[String(m.id)]) return;
+        _gwFbDB.ref('gw/dm_msgs/' + _fbDmKey + '/' + m.id).set(m).catch(function(){});
+        _syncedSet[String(m.id)] = true;
+      });
+      /* Meta séparée (lastMsg / lastAt) */
+      _gwFbDB.ref('gw/dm_meta/' + _fbDmKey).set({
+        lastMsg: conv.lastMsg || '',
+        lastAt:  conv.lastAt  || Date.now()
+      }).catch(function(){});
     }
   } catch(e) {}
 }
