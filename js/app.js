@@ -624,9 +624,11 @@ function _googleLogin(gUser) {
       if (!_gwCheckBanOnLogin(existing.email)) return;
       _currentUser = { nom: existing.nom, email: existing.email, loginMethod: 'google' };
       _gwCreateSession(_currentUser);
-      goTo('screen-app');
-      initApp(_currentUser);
-      showToast('Bienvenue ' + existing.nom + ' !', 'ok');
+      _gwPreloadUserData(_currentUser, function() {
+        goTo('screen-app');
+        initApp(_currentUser);
+        showToast('Bienvenue ' + existing.nom + ' !', 'ok');
+      });
     }, 600);
   }
 
@@ -685,52 +687,116 @@ function _hideGoogleLoading() {
   if (ov) ov.classList.add('hidden');
 }
 
+/* ══════════════════════════════════════════
+   DÉMARRAGE APP — Firebase charge en premier
+══════════════════════════════════════════ */
+
+/* Précharge les données spécifiques à un utilisateur depuis Firebase */
+function _gwPreloadUserData(user, callback) {
+  if (!_gwFbReady || !_gwFbDB || !user || !user.email) {
+    callback(); return;
+  }
+  var fbKey = _gwFbKey(user.email);
+  Promise.all([
+    _gwFbDB.ref('gw/inboxes/' + fbKey).once('value'),
+    _gwFbDB.ref('gw/notifs/' + fbKey).once('value'),
+    _gwFbDB.ref('gw/profiles/' + fbKey).once('value')
+  ]).then(function(snaps) {
+    var inbox = snaps[0].val();
+    if (inbox) try { localStorage.setItem('gw_dm_inbox_' + user.email, JSON.stringify(inbox)); } catch(e){}
+    var notifs = snaps[1].val();
+    if (notifs) try { localStorage.setItem('gw_notifs_' + user.email, JSON.stringify(notifs)); } catch(e){}
+    var profile = snaps[2].val();
+    if (profile) {
+      var existing = loadUserProfile(user.email) || {};
+      var merged = Object.assign({}, profile, existing.photo ? { photo: existing.photo } : {});
+      try { localStorage.setItem('gw_profile_' + user.email, JSON.stringify(merged)); } catch(e){}
+    }
+    callback();
+  }).catch(function() { callback(); });
+}
+
+/* Lance l'app après que Firebase a chargé les données critiques */
+function _gwStartApp() {
+  var session = _gwLoadSession();
+  if (session) {
+    var storedUser = findUser(session.email);
+    if (storedUser && !_admIsBanned(session.email)) {
+      _currentUser = { nom: storedUser.nom, email: storedUser.email, loginMethod: storedUser.loginMethod || 'email' };
+      _gwCreateSession(_currentUser);
+      setTimeout(function() {
+        initApp(_currentUser);
+        scheduleNewPosts();
+        goTo('screen-app');
+      }, 0);
+    } else {
+      localStorage.removeItem('gw_session');
+    }
+  }
+}
+
+/* Précharge toutes les données Firebase dans localStorage, PUIS lance l'app */
+function _gwFbPreloadAndStart() {
+  if (!_gwFbReady || !_gwFbDB) {
+    _gwStartApp();
+    return;
+  }
+
+  Promise.all([
+    _gwFbDB.ref('gw/users').once('value'),
+    _gwFbDB.ref('gw/posts').once('value'),
+    _gwFbDB.ref('gw/bans').once('value'),
+    _gwFbDB.ref('gw/official_posts').once('value'),
+    _gwFbDB.ref('gw/mk_listings').once('value'),
+    _gwFbDB.ref('gw/collab_requests').once('value')
+  ]).then(function(snaps) {
+
+    /* ── Utilisateurs ── */
+    var users = snaps[0].val();
+    if (Array.isArray(users) && users.length) {
+      try { localStorage.setItem('gw_users', JSON.stringify(users)); } catch(e){}
+    }
+
+    /* ── Posts de tous les utilisateurs ── */
+    var allPosts = snaps[1].val() || {};
+    Object.keys(allPosts).forEach(function(fbKey) {
+      var posts = allPosts[fbKey];
+      if (!Array.isArray(posts)) return;
+      var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+      try { localStorage.setItem('gw_userposts_' + email, JSON.stringify(posts)); } catch(e){}
+    });
+
+    /* ── Bans ── */
+    var bans = snaps[2].val();
+    if (bans) try { localStorage.setItem('gw_bans', JSON.stringify(bans)); } catch(e){}
+
+    /* ── Publications officielles ── */
+    var offPosts = snaps[3].val();
+    if (offPosts) try { localStorage.setItem('gw_official_posts', JSON.stringify(offPosts)); } catch(e){}
+
+    /* ── Marketplace ── */
+    var mk = snaps[4].val();
+    if (mk) try { localStorage.setItem('gw_mk_listings', JSON.stringify(mk)); } catch(e){}
+
+    /* ── Collaborations ── */
+    var collab = snaps[5].val();
+    if (collab) try { localStorage.setItem('gw_collab_requests', JSON.stringify(collab)); } catch(e){}
+
+    _gwStartApp();
+  }).catch(function() {
+    /* En cas d'erreur réseau, démarre quand même avec le cache local */
+    _gwStartApp();
+  });
+}
+
 /* Lance l'initialisation GIS quand la page est prête */
 window.addEventListener('load', function() {
   /* ── IndexedDB vidéo ── */
   _gwInitVideoDB();
   /* ── Firebase : init sync temps réel ── */
   _gwInitFirebase();
-  /* ── Restauration de session sécurisée ── */
-  var session = _gwLoadSession();
-  if (session) {
-    function _restoreSession(users) {
-      var storedUser = users ? users.find(function(u){ return u.email === session.email; }) : findUser(session.email);
-      if (storedUser && !_admIsBanned(session.email)) {
-        /* Sync Firebase users dans localStorage si chargés depuis Firebase */
-        if (users) try { localStorage.setItem('gw_users', JSON.stringify(users)); } catch(e){}
-        _currentUser = { nom: storedUser.nom, email: storedUser.email, loginMethod: storedUser.loginMethod || 'email' };
-        _gwCreateSession(_currentUser);
-        setTimeout(function() {
-          initApp(_currentUser);
-          scheduleNewPosts();
-          goTo('screen-app');
-        }, 0);
-      } else {
-        localStorage.removeItem('gw_session');
-      }
-    }
-    /* D'abord localStorage — si vide, charge depuis Firebase avant de décider */
-    var localUser = findUser(session.email);
-    if (localUser) {
-      _restoreSession(null);
-    } else if (_gwFbReady && _gwFbDB) {
-      _gwFbDB.ref('gw/users').once('value').then(function(snap) {
-        _restoreSession(snap.val() || []);
-      }).catch(function() { localStorage.removeItem('gw_session'); });
-    } else {
-      /* Firebase pas encore prêt — réessaie dans 2s */
-      setTimeout(function() {
-        if (_gwFbReady && _gwFbDB) {
-          _gwFbDB.ref('gw/users').once('value').then(function(snap) {
-            _restoreSession(snap.val() || []);
-          }).catch(function() { localStorage.removeItem('gw_session'); });
-        } else {
-          localStorage.removeItem('gw_session');
-        }
-      }, 2000);
-    }
-  }
+  /* ── Précharge Firebase PUIS lance l'app ── */
+  _gwFbPreloadAndStart();
 
   /* GIS se charge de manière async — on attend qu'il soit dispo */
   var _gisTimer = setInterval(function() {
@@ -1213,9 +1279,11 @@ function doLogin() {
 
     showToast('Connexion réussie ✓', 'ok');
     setTimeout(function() {
-      initApp(_currentUser);
-      scheduleNewPosts();
-      goTo('screen-app');
+      _gwPreloadUserData(_currentUser, function() {
+        initApp(_currentUser);
+        scheduleNewPosts();
+        goTo('screen-app');
+      });
     }, 900);
   });
 }
