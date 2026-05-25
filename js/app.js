@@ -244,8 +244,8 @@ function _gwFbSyncStart() {
   _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
   _gwFbDB.ref('gw/posts').on('child_changed', function(snap) { try { _gwMergePost(snap); } catch(e){} });
 
-  /* ── Likes (temps réel entre appareils) ── */
-  _gwFbDB.ref('gw/likes').on('child_changed', function(snap) {
+  /* ── Likes (temps réel entre appareils) — child_added = 1er like, child_changed = likes suivants ── */
+  function _gwMergeLikes(snap) {
     try {
       var postId = snap.key;
       var likers = snap.val();
@@ -254,15 +254,52 @@ function _gwFbSyncStart() {
       var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
       if (post) {
         post.likers = likers;
+        /* Met à jour le compteur directement dans le DOM (plus rapide que re-render total) */
+        document.querySelectorAll('[id="lcount-' + postId + '"],[id^="lcount-' + postId + '"]').forEach(function(el) {
+          el.textContent = likers.length || '';
+        });
         if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e){} }
       }
     } catch(e){}
-  });
+  }
+  _gwFbDB.ref('gw/likes').on('child_added',   function(snap) { _gwMergeLikes(snap); });
+  _gwFbDB.ref('gw/likes').on('child_changed', function(snap) { _gwMergeLikes(snap); });
 
-  /* ── Commentaires (temps réel entre appareils) ── */
-  _gwFbDB.ref('gw/comments').on('child_changed', function(snap) {
+  /* ── Dislikes (temps réel) ── */
+  function _gwMergeDislikes(snap) {
     try {
       var postId = snap.key;
+      var list   = snap.val();
+      if (!Array.isArray(list)) return;
+      localStorage.setItem('gw_dislikers_' + postId, JSON.stringify(list));
+      if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e){} }
+    } catch(e){}
+  }
+  _gwFbDB.ref('gw/dislikes').on('child_added',   function(snap) { _gwMergeDislikes(snap); });
+  _gwFbDB.ref('gw/dislikes').on('child_changed', function(snap) { _gwMergeDislikes(snap); });
+
+  /* ── Reposts (compteur temps réel) ── */
+  function _gwMergeRcount(snap) {
+    try {
+      var postId = snap.key;
+      var count  = snap.val();
+      if (typeof count !== 'number') return;
+      var local = parseInt(localStorage.getItem('gw_rcount_' + postId) || '0', 10);
+      if (count > local) {
+        localStorage.setItem('gw_rcount_' + postId, count);
+        document.querySelectorAll('[id="rcount-' + postId + '"]').forEach(function(el) {
+          el.textContent = count > 0 ? count : '';
+        });
+      }
+    } catch(e){}
+  }
+  _gwFbDB.ref('gw/rcounts').on('child_added',   function(snap) { _gwMergeRcount(snap); });
+  _gwFbDB.ref('gw/rcounts').on('child_changed', function(snap) { _gwMergeRcount(snap); });
+
+  /* ── Commentaires (temps réel entre appareils) ── */
+  function _gwMergeComments(snap) {
+    try {
+      var postId   = snap.key;
       var comments = snap.val();
       if (!Array.isArray(comments)) return;
       localStorage.setItem('gw_comments_' + postId, JSON.stringify(comments));
@@ -271,8 +308,14 @@ function _gwFbSyncStart() {
       if (openDetail && openDetail.dataset && openDetail.dataset.postId === String(postId)) {
         try { openPostDetail(parseInt(postId, 10)); } catch(e){}
       }
+      /* Met à jour le compteur dans le feed */
+      document.querySelectorAll('[id="ccount-' + postId + '"]').forEach(function(el) {
+        el.textContent = comments.length || '';
+      });
     } catch(e){}
-  });
+  }
+  _gwFbDB.ref('gw/comments').on('child_added',   function(snap) { _gwMergeComments(snap); });
+  _gwFbDB.ref('gw/comments').on('child_changed', function(snap) { _gwMergeComments(snap); });
 
   /* ── Compteurs d'abonnés (temps réel) ── */
   _gwFbDB.ref('gw/follow_counts').on('child_changed', function(snap) {
@@ -4804,6 +4847,9 @@ function loadPostDislikers(postId) {
 }
 function savePostDislikers(postId, list) {
   localStorage.setItem('gw_dislikers_' + postId, JSON.stringify(list));
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/dislikes/' + postId).set(list).catch(function(){});
+  }
 }
 
 function dislikePost(postId) {
@@ -5897,6 +5943,10 @@ function _markReposted(postId) {
   localStorage.setItem('gw_reposted_' + _currentUser.email + '_' + postId, '1');
   var c = _getRepostCount(postId) + 1;
   localStorage.setItem('gw_rcount_' + postId, c);
+  /* Sync Firebase */
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/rcounts/' + postId).set(c).catch(function(){});
+  }
   /* Met à jour le badge dans le DOM */
   document.querySelectorAll('[id="rcount-' + postId + '"]').forEach(function(el) {
     el.textContent = c > 0 ? c : '';
