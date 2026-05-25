@@ -52,9 +52,10 @@ var _mkPickedImages   = [];
 var _mkCurrentType    = 'service';
 
 /* ── État Firebase ── */
-var _gwFbDB    = null;   /* Instance Realtime Database */
-var _gwFbAuth  = null;   /* Instance Firebase Auth */
-var _gwFbReady = false;  /* true quand Firebase est connecté */
+var _gwFbDB      = null;   /* Instance Realtime Database */
+var _gwFbAuth    = null;   /* Instance Firebase Auth */
+var _gwFbStorage = null;   /* Instance Firebase Storage (photos/vidéos) */
+var _gwFbReady   = false;  /* true quand Firebase est connecté */
 var _gwFbSkip  = false;  /* Pause les listeners pour éviter les boucles */
 
 /* ══════════════════════════════════════════
@@ -160,9 +161,15 @@ function _gwInitFirebase() {
     if (!firebase.apps || !firebase.apps.length) {
       firebase.initializeApp(_GW_FIREBASE_CONFIG);
     }
-    _gwFbDB    = firebase.database();
-    _gwFbAuth  = firebase.auth();
-    _gwFbReady = true;
+    _gwFbDB      = firebase.database();
+    _gwFbAuth    = firebase.auth();
+    _gwFbReady   = true;
+    /* Storage pour photos / vidéos */
+    if (typeof firebase.storage === 'function') {
+      _gwFbStorage = firebase.storage();
+      /* Auth anonyme pour que les règles Storage "auth != null" passent */
+      _gwFbAuth.signInAnonymously().catch(function(){});
+    }
     console.log('[GW Firebase] ✅ Initialisé — URL:', _GW_FIREBASE_CONFIG.databaseURL);
     /* Test de connexion */
     _gwFbDB.ref('.info/connected').on('value', function(snap) {
@@ -11447,11 +11454,14 @@ function _saveDMConv(conv) {
     /* 5. Mettre à jour la copie en mémoire */
     conv.messages = merged;
 
-    /* Pour le storage partagé : conserver les images < 300 Ko telles quelles.
-       Au-delà, supprimer le base64 mais marquer _photoStripped pour afficher un placeholder. */
+    /* Pour le storage partagé :
+       - data_url (lien Firebase Storage) → toujours gardé tel quel
+       - data base64 < 300 Ko → gardé
+       - data base64 ≥ 300 Ko → supprimé, marqué _photoStripped */
     var mergedForStorage = merged.map(function(m) {
-      if ((m.type === 'img' || m.type === 'file') && m.data) {
-        if (m.data.length < 300000) return m;          /* ≤ ~225 Ko en base64 → on garde */
+      if (m.data_url) return m;                            /* URL Storage → rien à faire */
+      if ((m.type === 'img' || m.type === 'file' || m.type === 'video') && m.data) {
+        if (m.data.length < 300000) return m;
         var stripped = { _photoStripped: true };
         for (var k in m) { if (k !== 'data') stripped[k] = m[k]; }
         return stripped;
@@ -11705,24 +11715,42 @@ function _buildBubbleHtml(m, isMine) {
   var quoteHtml = m.replyTo ? _buildReplyQuoteHtml(m.replyTo, isMine) : '';
 
   if (m.type === 'img') {
+    var imgSrc = m.data_url || m.data;
     var imgContent;
-    if (m.data) {
-      imgContent = '<img src="' + m.data + '" class="chat-img-attach" ' +
+    if (imgSrc) {
+      imgContent = '<img src="' + imgSrc + '" class="chat-img-attach" ' +
                    'onclick="_openImgFull(\'' + m.id + '\')" alt="photo"/>';
     } else {
-      /* Photo trop grande pour Firebase ou reçue sans data (stripped) */
       imgContent = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;' +
                    'padding:18px 22px;gap:6px;color:#64748B;font-size:12px">' +
                    '<i class="fas fa-image" style="font-size:28px;color:#CBD5E1"></i>' +
-                   '<span>' + (m._photoStripped ? '📷 Photo (trop grande pour sync)' : '📷 Photo non disponible') + '</span>' +
+                   '<span>📷 Photo non disponible</span>' +
                    '</div>';
     }
     return '<div class="bubble-reply-wrap">' +
       (isMine ? replyBtn : '') +
       '<div class="chat-bubble ' + cls + ' bubble-img">' +
-        quoteHtml +
-        imgContent +
-        timeHtml +
+        quoteHtml + imgContent + timeHtml +
+      '</div>' +
+      (!isMine ? replyBtn : '') +
+    '</div>';
+  }
+  if (m.type === 'video') {
+    var vidSrc = m.data_url || m.data;
+    var vidContent;
+    if (vidSrc) {
+      vidContent = '<video controls preload="metadata" ' +
+        'style="max-width:240px;max-height:200px;border-radius:8px;display:block" src="' + vidSrc + '"></video>';
+    } else {
+      vidContent = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+                   'padding:18px 22px;gap:6px;color:#64748B;font-size:12px">' +
+                   '<i class="fas fa-video" style="font-size:28px;color:#CBD5E1"></i>' +
+                   '<span>🎥 Vidéo non disponible</span></div>';
+    }
+    return '<div class="bubble-reply-wrap">' +
+      (isMine ? replyBtn : '') +
+      '<div class="chat-bubble ' + cls + ' bubble-img">' +
+        quoteHtml + vidContent + timeHtml +
       '</div>' +
       (!isMine ? replyBtn : '') +
     '</div>';
@@ -11803,7 +11831,7 @@ function _openImgFull(msgId) {
   var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
   if (!conv) return;
   var m = (conv.messages || []).find(function(x) { return String(x.id) === String(msgId); });
-  if (!m || !m.data) return;
+  if (!m || (!m.data && !m.data_url)) return;
 
   var overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;';
@@ -11820,7 +11848,7 @@ function _openImgFull(msgId) {
     '</button>';
 
   var img = document.createElement('img');
-  img.src = m.data;
+  img.src = m.data_url || m.data;
   img.style.cssText = 'max-width:95%;max-height:80vh;border-radius:10px;object-fit:contain;';
 
   overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
@@ -11839,7 +11867,22 @@ function _downloadChatFile(msgId) {
     });
     if (found) { m = found; break; }
   }
-  if (!m || !m.data) return;
+  if (!m || (!m.data && !m.data_url)) return;
+
+  /* Fichiers hébergés sur Firebase Storage → ouvrir directement l'URL */
+  if (m.data_url) {
+    try {
+      var a0 = document.createElement('a');
+      a0.href     = m.data_url;
+      a0.target   = '_blank';
+      a0.download = m.fileName || ('geniwork_' + m.id);
+      document.body.appendChild(a0);
+      a0.click();
+      document.body.removeChild(a0);
+      showToast('Téléchargement démarré ✓', 'ok');
+    } catch(e) { showToast('Impossible de télécharger ce fichier', 'err'); }
+    return;
+  }
 
   try {
     /* Convertit base64 en Blob */
@@ -11864,6 +11907,45 @@ function _downloadChatFile(msgId) {
   }
 }
 
+/* ── Compresse une image (dataUrl) via Canvas → JPEG ≤ maxBytes ── */
+function _compressImageForChat(dataUrl, maxBytes, cb) {
+  var img = new Image();
+  img.onload = function() {
+    var MAX_DIM = 1280;
+    var scale   = Math.min(1, MAX_DIM / img.width, MAX_DIM / img.height);
+    var w = Math.round(img.width  * scale);
+    var h = Math.round(img.height * scale);
+    var canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+    /* Tente qualité 0.82, puis 0.65, puis 0.45 jusqu'à passer sous maxBytes */
+    var qualities = [0.82, 0.65, 0.45, 0.30];
+    var result = dataUrl;
+    for (var qi = 0; qi < qualities.length; qi++) {
+      var attempt = canvas.toDataURL('image/jpeg', qualities[qi]);
+      result = attempt;
+      if (attempt.length <= maxBytes) break;
+    }
+    cb(result);
+  };
+  img.onerror = function() { cb(dataUrl); };
+  img.src = dataUrl;
+}
+
+/* ── Upload un fichier vers Firebase Storage → retourne la downloadURL ── */
+function _uploadChatMedia(file, msgId, onProgress, cb) {
+  if (!_gwFbStorage) { cb(new Error('Storage non disponible')); return; }
+  var ext  = (file.name || '').split('.').pop() || 'bin';
+  var path = 'gw_media/' + msgId + '_' + Date.now() + '.' + ext;
+  var ref  = _gwFbStorage.ref(path);
+  var task = ref.put(file);
+  task.on('state_changed',
+    function(snap) { onProgress && onProgress(Math.round(snap.bytesTransferred / snap.totalBytes * 100)); },
+    function(err)  { cb(err); },
+    function()     { ref.getDownloadURL().then(function(url) { cb(null, url); }).catch(cb); }
+  );
+}
+
 /* ── Pièce jointe ── */
 function handleChatAttach(input) {
   var file = input && input.files && input.files[0];
@@ -11875,25 +11957,28 @@ function handleChatAttach(input) {
   }
 
   var isImage = file.type.startsWith('image/');
-  var reader  = new FileReader();
+  var isVideo = file.type.startsWith('video/');
 
-  reader.onload = function(e) {
+  /* ── Fonction commune : construit + envoie le message ── */
+  function _dispatchChatMedia(dataOrUrl, isStorageUrl) {
     var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
     if (!conv) return;
-
+    var msgType = isImage ? 'img' : (isVideo ? 'video' : 'file');
     var msg = {
       id:       Date.now(),
       from:     _currentUser.email,
       text:     isImage ? '' : file.name,
-      type:     isImage ? 'img' : 'file',
-      data:     e.target.result,
+      type:     msgType,
       fileName: file.name,
       fileSize: _formatFileSize(file.size),
       time:     _nowTime(),
       at:       Date.now()
     };
+    if (isStorageUrl) { msg.data_url = dataOrUrl; }
+    else              { msg.data     = dataOrUrl; }
+
     conv.messages.push(msg);
-    conv.lastMsg = isImage ? '📷 Photo' : '📎 ' + file.name;
+    conv.lastMsg = isImage ? '📷 Photo' : (isVideo ? '🎥 Vidéo' : '📎 ' + file.name);
     conv.lastAt  = Date.now();
 
     var box = document.getElementById('chat-messages');
@@ -11902,6 +11987,9 @@ function handleChatAttach(input) {
       row.className = 'chat-msg-row mine';
       row.setAttribute('data-msg-id', msg.id);
       row.innerHTML = _buildBubbleHtml(msg, true);
+      /* Retire le placeholder de chargement si présent */
+      var placeholder = box.querySelector('[data-msg-id="uploading_' + file.name + '"]');
+      if (placeholder) placeholder.remove();
       box.appendChild(row);
       _scrollChatToBottom();
     }
@@ -11911,14 +11999,57 @@ function handleChatAttach(input) {
     } else {
       _saveDMConv(conv);
       if (conv.email) {
-        var _fLabel = isImage ? '📷 Photo' : '📎 ' + file.name;
+        var _fLabel = isImage ? '📷 Photo' : (isVideo ? '🎥 Vidéo' : '📎 ' + file.name);
         _writeDMInbox(conv.email, _currentUser.email, _currentUser.nom, _currentUser.role || 'Membre Geniwork', _fLabel);
         _saveDMConvList();
       }
     }
     renderConversations();
-  };
-  reader.readAsDataURL(file);
+  }
+
+  if (isImage) {
+    /* Compression Canvas → JPEG ≤ 280 Ko base64 (~210 Ko réels) */
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      _compressImageForChat(e.target.result, 280000, function(compressed) {
+        _dispatchChatMedia(compressed, false);
+      });
+    };
+    reader.readAsDataURL(file);
+
+  } else if (isVideo || file.size > 280000) {
+    /* Vidéos ou fichiers lourds → Firebase Storage */
+    if (!_gwFbStorage) {
+      showToast('Firebase Storage non disponible', 'err'); return;
+    }
+    /* Afficher un indicateur de chargement */
+    var box = document.getElementById('chat-messages');
+    if (box) {
+      var loadRow = document.createElement('div');
+      loadRow.className = 'chat-msg-row mine';
+      loadRow.setAttribute('data-msg-id', 'uploading_' + file.name);
+      loadRow.innerHTML = '<div class="chat-bubble out" style="opacity:.6;font-size:12px;padding:8px 14px">' +
+        '<i class="fas fa-spinner fa-spin" style="margin-right:6px"></i>Envoi en cours…</div>';
+      box.appendChild(loadRow);
+      _scrollChatToBottom();
+    }
+    _uploadChatMedia(file, Date.now(), null, function(err, url) {
+      if (err) {
+        var pl = document.getElementById('chat-messages') &&
+                 document.querySelector('[data-msg-id="uploading_' + file.name + '"]');
+        if (pl) pl.remove();
+        showToast('Échec de l\'envoi : ' + (err.message || err), 'err');
+        return;
+      }
+      _dispatchChatMedia(url, true);
+    });
+
+  } else {
+    /* Petits fichiers (<280 Ko) → base64 direct */
+    var reader2 = new FileReader();
+    reader2.onload = function(e) { _dispatchChatMedia(e.target.result, false); };
+    reader2.readAsDataURL(file);
+  }
 }
 
 function sendChatMessage() {
