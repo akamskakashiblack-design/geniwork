@@ -5046,7 +5046,7 @@ function saveCommentReact(cid, react) {
 /* Tous les commentaires d'un post = demo (fixes) + utilisateurs (localStorage) */
 function getAllComments(postId) {
   var post = getAllPosts().find(function(p) { return p.id === postId; });
-  var demo = post ? post.comments.map(function(c, i) {
+  var demo = (post && Array.isArray(post.comments)) ? post.comments.map(function(c, i) {
     return {
       id: 'demo_' + postId + '_' + i,
       postId: postId,
