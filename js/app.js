@@ -9632,6 +9632,7 @@ var DEMO_CONVERSATIONS = [
 
 var _msgTab          = 'all';
 var _chatConvId      = null;
+var _gwActiveDMRef   = null;   /* Firebase listener on the currently-open DM */
 var _groupConvsReady = false;
 
 /* ── Persistance des conversations DM dynamiques (conversations réelles entre utilisateurs) ──
@@ -10273,6 +10274,45 @@ function openChat(convId) {
     _scrollChatToBottom();
   }, 320);
   _startChatPolling();
+
+  /* ── Direct Firebase listener on the open DM (fixes intermittent sync on mobile) ── */
+  if (_gwActiveDMRef) { _gwActiveDMRef.off(); _gwActiveDMRef = null; }
+  if (!conv.isGroup && conv.email && _gwFbReady && _gwFbDB) {
+    var _openDmKey    = _getDMKey(_currentUser.email, conv.email);
+    var _openDmFbKey  = _openDmKey.replace(/\./g,'__d__').replace(/@/g,'__a__');
+    _gwActiveDMRef = _gwFbDB.ref('gw/dms/' + _openDmFbKey);
+    _gwActiveDMRef.on('value', function(snap) {
+      if (!snap || !snap.val()) return;
+      var data = snap.val();
+      if (!Array.isArray(data.messages)) return;
+      try {
+        var existing = null;
+        try { existing = JSON.parse(localStorage.getItem(_openDmKey)); } catch(e){}
+        var stored    = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
+        var storedMap = {};
+        stored.forEach(function(m) { storedMap[String(m.id)] = true; });
+        var changed = false;
+        data.messages.forEach(function(m) {
+          if (m && m.id && !storedMap[String(m.id)]) { stored.push(m); changed = true; }
+        });
+        if (changed) {
+          stored.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+          localStorage.setItem(_openDmKey, JSON.stringify({ messages: stored, lastMsg: data.lastMsg, lastAt: data.lastAt }));
+          var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+          if (activeConv) {
+            activeConv.messages = stored;
+            if (data.lastMsg) activeConv.lastMsg = data.lastMsg;
+            if (data.lastAt)  activeConv.lastAt  = data.lastAt;
+            if (document.getElementById('chat-messages')) {
+              try { _pollChatMessages(); } catch(e){}
+            }
+            renderConversations();
+          }
+        }
+      } catch(e){}
+    });
+  }
+
   /* Active le maintien pour supprimer */
   setTimeout(_initMsgLongPress, 350);
 }
@@ -10427,6 +10467,7 @@ function _doDeleteMsgForMe(msgId) {
 
 function closeChat() {
   _stopChatPolling();
+  if (_gwActiveDMRef) { _gwActiveDMRef.off(); _gwActiveDMRef = null; }
   closeChatProfilePanel();
   var screen = document.getElementById('chat-screen');
   screen.classList.remove('open');
@@ -11406,11 +11447,12 @@ function _saveDMConv(conv) {
     /* 5. Mettre à jour la copie en mémoire */
     conv.messages = merged;
 
-    /* Pour le storage partagé : ne pas persister le base64 des images/fichiers (trop lourd)
-       On garde uniquement les métadonnées — l'aperçu reste local à l'envoyeur */
+    /* Pour le storage partagé : conserver les images < 300 Ko telles quelles.
+       Au-delà, supprimer le base64 mais marquer _photoStripped pour afficher un placeholder. */
     var mergedForStorage = merged.map(function(m) {
       if ((m.type === 'img' || m.type === 'file') && m.data) {
-        var stripped = {};
+        if (m.data.length < 300000) return m;          /* ≤ ~225 Ko en base64 → on garde */
+        var stripped = { _photoStripped: true };
         for (var k in m) { if (k !== 'data') stripped[k] = m[k]; }
         return stripped;
       }
@@ -11663,12 +11705,23 @@ function _buildBubbleHtml(m, isMine) {
   var quoteHtml = m.replyTo ? _buildReplyQuoteHtml(m.replyTo, isMine) : '';
 
   if (m.type === 'img') {
+    var imgContent;
+    if (m.data) {
+      imgContent = '<img src="' + m.data + '" class="chat-img-attach" ' +
+                   'onclick="_openImgFull(\'' + m.id + '\')" alt="photo"/>';
+    } else {
+      /* Photo trop grande pour Firebase ou reçue sans data (stripped) */
+      imgContent = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+                   'padding:18px 22px;gap:6px;color:#64748B;font-size:12px">' +
+                   '<i class="fas fa-image" style="font-size:28px;color:#CBD5E1"></i>' +
+                   '<span>' + (m._photoStripped ? '📷 Photo (trop grande pour sync)' : '📷 Photo non disponible') + '</span>' +
+                   '</div>';
+    }
     return '<div class="bubble-reply-wrap">' +
       (isMine ? replyBtn : '') +
       '<div class="chat-bubble ' + cls + ' bubble-img">' +
         quoteHtml +
-        '<img src="' + m.data + '" class="chat-img-attach" ' +
-             'onclick="_openImgFull(\'' + m.id + '\')" alt="photo"/>' +
+        imgContent +
         timeHtml +
       '</div>' +
       (!isMine ? replyBtn : '') +
