@@ -7324,6 +7324,28 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 }
 .post-official-sub { font-size: 11px; color: #3B82F6; font-weight: 500; }
 .post-official-time { font-size: 10px; color: #9CA3AF; margin-left: auto; }
+
+/* Bouton Suivre directement sur la card officielle */
+.off-card-follow-btn {
+  flex-shrink: 0;
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1.5px solid #6366F1;
+  background: transparent;
+  color: #6366F1;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex; align-items: center; gap: 5px;
+  transition: background .15s, color .15s;
+  white-space: nowrap;
+}
+.off-card-follow-btn:hover { background: rgba(99,102,241,.12); }
+.off-card-follow-btn.following {
+  border-color: #334155;
+  color: #64748B;
+  background: transparent;
+}
 .post-official-text {
   font-size: 14px; color: #1E293B; line-height: 1.6;
   white-space: pre-wrap; word-break: break-word;

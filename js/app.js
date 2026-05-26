@@ -9806,6 +9806,31 @@ function _toggleFollowOfficial() {
   _updateFollowBtn();
   var cntEl = document.getElementById('upv-stat-followers');
   if (cntEl) cntEl.textContent = _getFCount(key);
+  /* Rafraîchit tous les boutons sur les cards du feed */
+  _refreshAllOfficialFollowBtns();
+}
+
+/* Met à jour tous les boutons Suivre sur les cards officielles du feed */
+function _refreshAllOfficialFollowBtns() {
+  var now = isFollowing(GW_OFFICIAL_KEY);
+  document.querySelectorAll('[id^="off-card-follow-"]').forEach(function(btn) {
+    btn.className = 'off-card-follow-btn' + (now ? ' following' : '');
+    btn.innerHTML = now ? '<i class="fas fa-check"></i> Abonné' : '<i class="fas fa-plus"></i> Suivre';
+  });
+  /* Bouton dans le profil ouvert */
+  var profBtn = document.getElementById('upv-action-follow-btn');
+  if (profBtn && _upvTarget && _upvTarget._isOfficial) {
+    profBtn.className = 'upv-action-follow' + (now ? ' following' : '');
+    var lbl = document.getElementById('upv-action-follow-label');
+    if (lbl) lbl.textContent = now ? 'Abonné' : 'Suivre';
+    var ico = profBtn.querySelector('i');
+    if (ico) ico.className = 'fas fa-' + (now ? 'check' : 'user-plus');
+  }
+}
+
+/* Appelé depuis le bouton sur la card (event.stopPropagation déjà fait) */
+function _offCardToggleFollow(btn) {
+  _toggleFollowOfficial();
 }
 
 /* Listener Firebase pour le compteur d'abonnés du compte officiel */
@@ -21718,16 +21743,21 @@ function _buildOfficialCard(p) {
   var comments   = Array.isArray(p.comments) ? p.comments : [];
   var cmtCount   = comments.length;
 
+  var isFollowingOff = isFollowing(GW_OFFICIAL_KEY);
   card.innerHTML =
     '<div class="post-official-header" onclick="openOfficialProfile()" style="cursor:pointer" title="Voir le profil Geniwork">' +
       avatarHtml +
-      '<div style="flex:1">' +
+      '<div style="flex:1;min-width:0">' +
         '<div class="post-official-name">Geniwork' +
           '<span class="post-official-badge"><i class="fas fa-circle-check"></i> Officiel</span>' +
         '</div>' +
-        '<div class="post-official-sub">Compte certifié · Publication officielle</div>' +
+        '<div class="post-official-sub">Compte certifié · ' + timeStr + '</div>' +
       '</div>' +
-      '<div class="post-official-time">' + timeStr + '</div>' +
+      /* Bouton Suivre / Abonné directement sur la card */
+      '<button class="off-card-follow-btn' + (isFollowingOff ? ' following' : '') + '" id="off-card-follow-' + p.id + '"' +
+        ' onclick="event.stopPropagation();_offCardToggleFollow(this)">' +
+        (isFollowingOff ? '<i class="fas fa-check"></i> Abonné' : '<i class="fas fa-plus"></i> Suivre') +
+      '</button>' +
     '</div>' +
     (p.text ? '<div class="post-official-text">' + escHtml(p.text) + '</div>' : '') +
     imgHtml +
