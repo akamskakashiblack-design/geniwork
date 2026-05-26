@@ -9872,36 +9872,84 @@ function switchUpvTab(btn, tab) {
 /* ── Publications officielles dans l'onglet Posts du profil Geniwork ── */
 function _renderOfficialProfilePosts(container) {
   if (!container) return;
+  container.innerHTML = '';
+
   var offPosts = _offGetPosts();
   if (!offPosts.length) {
-    container.innerHTML = '<div class="profil-empty-hint" style="text-align:center;padding:2rem 0">Aucune publication officielle pour l\'instant.</div>';
+    container.innerHTML =
+      '<div class="profil-posts-empty">' +
+        '<i class="fas fa-pen-to-square"></i>' +
+        '<p>Aucune publication pour l\'instant</p>' +
+        '<small>Les publications officielles apparaîtront ici</small>' +
+      '</div>';
     return;
   }
-  container.innerHTML = offPosts.map(function(p) {
-    var mediaHtml = '';
-    if (p.video) {
-      var vSrc = typeof p.video === 'string' ? p.video : (p.video.url || '');
-      mediaHtml = '<div style="position:relative;cursor:pointer;border-radius:12px;overflow:hidden;margin-bottom:.6rem" onclick="closeUserProfileView();setTimeout(function(){_openOfficialVideo(\'' + p.id + '\')},350)">' +
-        (vSrc
-          ? '<video src="' + escHtml(vSrc) + '" muted playsinline preload="metadata" style="width:100%;max-height:220px;object-fit:cover;display:block"></video>'
-          : '<div style="height:100px;background:#1E293B;display:flex;align-items:center;justify-content:center"><i class="fas fa-play" style="color:#6366F1;font-size:1.8rem"></i></div>') +
-        '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"><div style="background:rgba(0,0,0,.4);width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center"><i class="fas fa-play" style="color:#fff;font-size:1.1rem;margin-left:3px"></i></div></div>' +
-      '</div>';
-    } else if (p.images && p.images.length && p.images[0]) {
-      mediaHtml = '<img src="' + escHtml(p.images[0]) + '" alt="" style="width:100%;max-height:220px;object-fit:cover;border-radius:12px;display:block;margin-bottom:.6rem">';
+
+  /* Compteur — même style que renderProfilPosts */
+  var header = document.createElement('div');
+  header.className = 'profil-posts-count';
+  header.innerHTML = '<i class="fas fa-newspaper"></i> ' + offPosts.length +
+    ' publication' + (offPosts.length > 1 ? 's' : '');
+  container.appendChild(header);
+
+  offPosts.forEach(function(p) {
+    /* Normalise le post officiel au format attendu par buildPostCard.
+       On utilise un ID numérique pour éviter les onclick invalides (off_xxx non quoté).
+       L'ID original p.id est conservé pour les actions vidéo/officielle. */
+    var logo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
+    /* Extrait le timestamp numérique de l'ID (off_1234567890 → 1234567890) */
+    var numId = parseInt(String(p.id).replace('off_', ''), 10) || Date.now();
+
+    var normalized = {
+      id:         numId,
+      author:     'Geniwork',
+      ownerEmail: null,
+      role:       'Publication officielle',
+      time:       _offTimeAgo(p.publishedAt),
+      at:         p.publishedAt ? new Date(p.publishedAt).getTime() : Date.now(),
+      text:       p.text || '',
+      images:     p.images || [],
+      video:      p.video || null,
+      likers:     Array.isArray(p.likers)   ? p.likers   : [],
+      baseLikes:  p.baseLikes || 0,
+      comments:   Array.isArray(p.comments) ? p.comments : []
+    };
+
+    var card = buildPostCard(normalized);
+
+    /* ── Fixups après construction ── */
+
+    /* 1. Avatar : remplace les initiales par le logo officiel si disponible */
+    var avEl = card.querySelector('.user-av');
+    if (avEl && logo) {
+      avEl.innerHTML = '<img src="' + escHtml(logo) + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:50%">';
+      avEl.classList.add('av-photo');
     }
-    var likeCount = (p.baseLikes || 0) + (Array.isArray(p.likers) ? p.likers.length : 0);
-    var cmtCount  = Array.isArray(p.comments) ? p.comments.length : 0;
-    return '<div class="post-card" style="margin-bottom:12px">' +
-      (p.text ? '<div style="font-size:.9rem;line-height:1.55;margin-bottom:.6rem">' + escHtml(p.text) + '</div>' : '') +
-      mediaHtml +
-      '<div style="display:flex;gap:1.2rem;font-size:.8rem;color:#64748B;margin-top:.2rem">' +
-        '<span><i class="fas fa-heart" style="color:#EF4444"></i> ' + likeCount + '</span>' +
-        '<span><i class="fas fa-comment" style="color:#6366F1"></i> ' + cmtCount + '</span>' +
-        '<span style="margin-left:auto;font-size:.75rem">' + _offTimeAgo(p.publishedAt) + '</span>' +
-      '</div>' +
-    '</div>';
-  }).join('');
+
+    /* 2. Clic auteur → ouvre le profil officiel */
+    var authorArea = card.querySelector('.post-author-area');
+    if (authorArea) authorArea.onclick = function(e) { e.stopPropagation(); openOfficialProfile(); };
+
+    /* 3. Masque le bouton Suivre et le menu (post officiel = pas d'actions normales) */
+    var followBtn = card.querySelector('.post-follow-btn'); if (followBtn) followBtn.remove();
+    var menuBtn   = card.querySelector('.post-menu-btn');  if (menuBtn)  menuBtn.style.display = 'none';
+
+    /* 4. Rewire le clic vidéo → _openOfficialVideo avec l'ID original */
+    if (p.video) {
+      var pvw = card.querySelector('.post-video-wrap');
+      if (pvw) {
+        (function(origId) {
+          pvw.onclick = function(e) {
+            e.stopPropagation();
+            closeUserProfileView();
+            setTimeout(function() { _openOfficialVideo(origId); }, 320);
+          };
+        })(p.id);
+      }
+    }
+
+    container.appendChild(card);
+  });
 }
 
 /* ══════════════════════════════════════════
