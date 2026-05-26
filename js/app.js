@@ -491,26 +491,44 @@ function _gwFbSyncStart() {
         var lastM = newMsgs[newMsgs.length - 1];
         localStorage.setItem(lsKey, JSON.stringify({ messages: _stored2, lastMsg: lastM.text || '', lastAt: lastM.at || Date.now() }));
 
-        /* ── Push direct dans DEMO_CONVERSATIONS (évite le skip par _gwActiveDMRef) ── */
+        /* ── Push direct dans DEMO_CONVERSATIONS + rendu DOM immédiat ── */
         if (_currentUser) {
           var _memConv = DEMO_CONVERSATIONS.find(function(c) {
             return !c.isGroup && c.email && _getDMKey(_currentUser.email, c.email) === lsKey;
           });
           if (_memConv) {
+            var _chatBox = document.getElementById('chat-messages');
+            var _chatOpen = _chatConvId === _memConv.id && _chatBox;
+
             newMsgs.forEach(function(m) {
-              if (!_memConv.messages.some(function(x) { return String(x.id) === String(m.id); })) {
-                _memConv.messages.push(m);
+              /* Évite les doublons en mémoire */
+              if (_memConv.messages.some(function(x) { return String(x.id) === String(m.id); })) return;
+              _memConv.messages.push(m);
+
+              /* ── Rendu DOM direct — évite le bug _pollChatMessages qui
+                 ne re-rend pas les messages déjà en mémoire ── */
+              if (_chatOpen && m.from !== _currentUser.email) {
+                if (!_chatBox.querySelector('[data-msg-id="' + m.id + '"]')) {
+                  var _row = document.createElement('div');
+                  _row.className = 'chat-msg-row theirs';
+                  _row.setAttribute('data-msg-id', m.id);
+                  _row.innerHTML = _buildBubbleHtml(m, false);
+                  _chatBox.appendChild(_row);
+                }
               }
             });
+
             _memConv.messages.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
             _memConv.lastMsg = lastM.text || (lastM.type === 'img' ? '📷 Photo' : (lastM.type === 'video' ? '🎥 Vidéo' : '📎 Fichier'));
             _memConv.lastAt  = lastM.at || Date.now();
-            if (_chatConvId !== _memConv.id) {
-              _memConv.unread = (_memConv.unread || 0) + newMsgs.length;
-            }
-            /* Si la conv est ouverte → re-render le chat immédiatement */
-            if (_chatConvId === _memConv.id && document.getElementById('chat-messages')) {
-              try { _pollChatMessages(); } catch(e3){}
+
+            /* Scroll si chat ouvert, sinon compteur non-lu */
+            if (_chatOpen) {
+              try { _scrollChatToBottom(); } catch(e4){}
+            } else {
+              _memConv.unread = (_memConv.unread || 0) + newMsgs.filter(function(m) {
+                return m.from !== _currentUser.email;
+              }).length;
             }
           }
         }
@@ -967,20 +985,48 @@ function _gwMergeGroupMsg(snap) {
       var _lastGrpText = _lastGrpMsg.text || (data.lastMsg || '');
       try { localStorage.setItem(lsKey, JSON.stringify({ messages: stored, lastMsg: _lastGrpText, lastAt: data.lastAt || Date.now() })); } catch(e){}
 
-      /* ── Met à jour le conv en mémoire ── */
+      /* ── Met à jour le conv en mémoire + rendu DOM direct ── */
+      var _grpChatBox  = document.getElementById('chat-messages');
+      var _grpChatOpen = _chatConvId === conv.id && _grpChatBox;
+
       newMsgsGrp.forEach(function(m) {
-        if (!conv.messages.some(function(x){ return String(x.id) === String(m.id); })) {
-          conv.messages.push(m);
+        if (conv.messages.some(function(x){ return String(x.id) === String(m.id); })) return;
+        conv.messages.push(m);
+
+        /* Rendu direct — évite le bug _pollGroupMessages / convMap déjà rempli */
+        if (_grpChatOpen && m.from !== _currentUser.email) {
+          if (!_grpChatBox.querySelector('[data-msg-id="' + m.id + '"]')) {
+            var _grpRow = document.createElement('div');
+            if (m.from === 'system') {
+              _grpRow.className = 'chat-sys-msg';
+              _grpRow.textContent = m.text || '';
+            } else {
+              var _sProfile = loadUserProfile(m.from) || {};
+              var _sName    = _sProfile.nom || m.from || '';
+              var _sAv = _sProfile.photo
+                ? '<img src="' + _sProfile.photo + '" class="chat-group-av" alt="">'
+                : '<div class="chat-group-av chat-group-av-init">' + escHtml(_sName.charAt(0).toUpperCase()) + '</div>';
+              var _sHdr = '<div class="chat-group-sender-row">' + _sAv +
+                '<span class="chat-group-sender-name">' + escHtml(_sName) + '</span></div>';
+              _grpRow.className = 'chat-msg-row theirs';
+              _grpRow.setAttribute('data-msg-id', m.id);
+              _grpRow.innerHTML = _sHdr + _buildBubbleHtml(m, false);
+            }
+            _grpChatBox.appendChild(_grpRow);
+          }
         }
       });
+
       conv.messages.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
       conv.lastMsg = _lastGrpText;
       conv.lastAt  = data.lastAt || Date.now();
-      if (_chatConvId !== conv.id) conv.unread = (conv.unread || 0) + newMsgsGrp.length;
 
-      /* Rafraîchit si ce groupe est ouvert */
-      if (_chatConvId === conv.id && document.getElementById('chat-messages')) {
-        try { _pollGroupMessages(); } catch(e){}
+      if (_grpChatOpen) {
+        try { _scrollChatToBottom(); } catch(e4){}
+      } else {
+        conv.unread = (conv.unread || 0) + newMsgsGrp.filter(function(m) {
+          return m.from !== _currentUser.email;
+        }).length;
       }
       renderConversations();
     }
