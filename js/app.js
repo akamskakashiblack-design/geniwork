@@ -1399,7 +1399,8 @@ function _gwPreloadUserData(user, callback) {
     _gwFbDB.ref('gw/privacy/' + fbKey).once('value'),         /* 12 */
     _gwFbDB.ref('gw/collab_invites/' + fbKey).once('value'),  /* 13 */
     _gwFbDB.ref('gw/reviews/' + fbKey).once('value'),         /* 14 */
-    _gwFbDB.ref('gw/milestones/' + fbKey).once('value')       /* 15 */
+    _gwFbDB.ref('gw/milestones/' + fbKey).once('value'),      /* 15 */
+    _gwFbDB.ref('gw/viewed_vids/' + fbKey).once('value')      /* 16 */
   ]).then(function(snaps) {
     var inboxRaw = snaps[0].val();
     if (inboxRaw) {
@@ -1555,6 +1556,12 @@ function _gwPreloadUserData(user, callback) {
     Object.keys(milestonesFb).forEach(function(k) {
       if (milestonesFb[k]) localStorage.setItem('gw_mile_' + k, '1');
     });
+
+    /* ── Vidéos déjà vues (pour ne pas recompter) ── */
+    var viewedFb = snaps[16] ? snaps[16].val() : null;
+    if (viewedFb && typeof viewedFb === 'object') {
+      try { localStorage.setItem('gw_viewed_vids_' + user.email, JSON.stringify(viewedFb)); } catch(e){}
+    }
 
     callback();
   }).catch(function() { callback(); });
@@ -5695,16 +5702,63 @@ function deletePost(postId) {
 function _getVideoViews(postId) {
   return parseInt(localStorage.getItem('gw_vid_views_' + postId) || '0', 10);
 }
+
+/* Retourne true si l'utilisateur courant a DÉJÀ vu cette vidéo */
+function _hasViewedVideo(postId) {
+  if (!_currentUser) return false;
+  try {
+    var viewed = JSON.parse(localStorage.getItem('gw_viewed_vids_' + _currentUser.email) || '{}');
+    return !!viewed[String(postId)];
+  } catch(e) { return false; }
+}
+
+/* Marque la vidéo comme vue pour l'utilisateur courant */
+function _markVideoViewed(postId) {
+  if (!_currentUser) return;
+  try {
+    var key    = 'gw_viewed_vids_' + _currentUser.email;
+    var viewed = JSON.parse(localStorage.getItem(key) || '{}');
+    viewed[String(postId)] = true;
+    localStorage.setItem(key, JSON.stringify(viewed));
+    /* Sync Firebase — nœud par vidéo pour éviter d'écraser les autres */
+    if (_gwFbReady && _gwFbDB) {
+      _gwFbDB.ref('gw/viewed_vids/' + _gwFbKey(_currentUser.email) + '/' + postId)
+        .set(true).catch(function(){});
+    }
+  } catch(e) {}
+}
+
 function _incrementVideoViews(postId) {
-  var v = _getVideoViews(postId) + 1;
-  localStorage.setItem('gw_vid_views_' + postId, v);
+  /* Une seule vue par compte — ignore si déjà compté */
+  if (_hasViewedVideo(postId)) return _getVideoViews(postId);
+
+  _markVideoViewed(postId);
+
+  /* Incrément atomique côté Firebase (transaction) pour éviter les doublons entre appareils */
   if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/vid_views/' + postId).set(v).catch(function(){});
+    _gwFbDB.ref('gw/vid_views/' + postId).transaction(function(current) {
+      return (current || 0) + 1;
+    }).then(function(result) {
+      if (result.committed) {
+        var newCount = result.snapshot.val();
+        localStorage.setItem('gw_vid_views_' + postId, newCount);
+        var badge = document.getElementById('vid-views-' + postId);
+        if (badge) badge.textContent = _fmtViews(newCount);
+      }
+    }).catch(function() {
+      /* Fallback local si Firebase indisponible */
+      var v = _getVideoViews(postId) + 1;
+      localStorage.setItem('gw_vid_views_' + postId, v);
+      var badge = document.getElementById('vid-views-' + postId);
+      if (badge) badge.textContent = _fmtViews(v);
+    });
+  } else {
+    var v = _getVideoViews(postId) + 1;
+    localStorage.setItem('gw_vid_views_' + postId, v);
+    var badge = document.getElementById('vid-views-' + postId);
+    if (badge) badge.textContent = _fmtViews(v);
   }
-  /* Met à jour le badge dans le DOM si visible */
-  var badge = document.getElementById('vid-views-' + postId);
-  if (badge) badge.textContent = _fmtViews(v);
-  return v;
+  return _getVideoViews(postId);
 }
 function _fmtViews(n) {
   if (n >= 1000000) return (n / 1000000).toFixed(1).replace('.0', '') + 'M';

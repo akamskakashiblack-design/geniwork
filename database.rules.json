@@ -1,31 +1,16 @@
 {
   "rules": {
-
     "gw": {
-
-      /* ═══════════════════════════════════════════════════════════════
-         UTILISATEURS & PROFILS
-         Lecture publique (affichage des comptes, recherche d'utilisateurs)
-         Écriture protégée : il faut être authentifié (même anonymement)
-      ═══════════════════════════════════════════════════════════════ */
       "users": {
         ".read":  true,
         ".write": "auth != null"
       },
-
       "profiles": {
         ".read":  true,
         "$userFbKey": {
           ".write": "auth != null"
         }
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         MESSAGES DIRECTS (DM)
-         Chemin : gw/dm_msgs/{dmFbKey}/{msgId}
-         dmFbKey = _gwFbKey(emailA) + '__' + _gwFbKey(emailB)  (trié)
-         Seuls les utilisateurs authentifiés peuvent lire/écrire leurs DMs
-      ═══════════════════════════════════════════════════════════════ */
       "dm_msgs": {
         "$dmFbKey": {
           ".read":  "auth != null",
@@ -35,237 +20,164 @@
           }
         }
       },
-
-      /* Métadonnées DM (lastMsg, lastAt) */
       "dm_meta": {
         "$dmFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* Inbox DM : entrées de conversation reçues
-         Chemin : gw/inboxes/{toFbKey}/{fromFbKey} */
       "inboxes": {
         "$toFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         MESSAGES DE GROUPE
-         Chemin : gw/group_msgs/{grpFbKey}
-         grpFbKey = _gwFbKey( gw_grp_{projId}___{ownerEmail} )
-         Lecture/écriture : tout utilisateur authentifié (membre du groupe)
-      ═══════════════════════════════════════════════════════════════ */
       "group_msgs": {
         "$grpFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* Inbox de groupe : invitations et groupes rejoints
-         Chemin : gw/group_inboxes/{userFbKey} */
       "group_inboxes": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         PUBLICATIONS
-         Lecture publique, écriture protégée
-      ═══════════════════════════════════════════════════════════════ */
       "posts": {
         ".read":  true,
         "$userFbKey": {
           ".write": "auth != null"
         }
       },
-
-      /* Images des posts — nœud séparé pour éviter la limite 4 Mo de Firebase */
       "post_imgs": {
         ".read":  true,
         "$postId": {
           ".write": "auth != null"
         }
       },
-
       "post_videos": {
         ".read":  true,
         "$postId": {
           ".write": "auth != null"
         }
       },
-
       "official_posts": {
         ".read":  true,
         ".write": "auth != null"
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         RÉACTIONS : Likes / Dislikes / Commentaires / Reposts
-      ═══════════════════════════════════════════════════════════════ */
       "likes": {
         ".read":  true,
         "$postId": {
           ".write": "auth != null"
         }
       },
-
       "dislikes": {
         ".read":  true,
         "$postId": {
           ".write": "auth != null"
         }
       },
-
       "comments": {
         ".read":  true,
         "$postId": {
           ".write": "auth != null"
         }
       },
-
       "rcounts": {
         ".read":  true,
         "$postId": {
           ".write": "auth != null"
         }
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         SOCIAL : Abonnements & compteurs d'abonnés
-      ═══════════════════════════════════════════════════════════════ */
       "following": {
         ".read":  true,
         "$userFbKey": {
           ".write": "auth != null"
         }
       },
-
       "follow_counts": {
         ".read":  true,
         "$profileFbKey": {
           ".write": "auth != null"
         }
       },
-
-      /* Index inversé : qui suit qui
-         Chemin : gw/followers/{profileFbKey}/{followerFbKey} */
       "followers": {
         "$profileFbKey": {
           ".read":  true,
           ".write": "auth != null"
         }
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         NOTIFICATIONS (privées par utilisateur)
-      ═══════════════════════════════════════════════════════════════ */
       "notifs": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         MARKETPLACE & COLLABORATIONS
-      ═══════════════════════════════════════════════════════════════ */
       "mk_listings": {
         ".read":  true,
         ".write": "auth != null"
       },
-
+      "mk_txns": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
       "collab_requests": {
         ".read":  true,
         ".write": "auth != null"
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         BANS & SIGNALEMENTS (admin uniquement en production)
-      ═══════════════════════════════════════════════════════════════ */
       "bans": {
         ".read":  "auth != null",
         ".write": "auth != null"
       },
-
       "reports": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         PROFILS UTILISATEURS — données personnelles synchronisées
-      ═══════════════════════════════════════════════════════════════ */
-
-      /* Projets : gw/projects/{userFbKey} → tableau de projets */
       "projects": {
         ".read":  true,
         "$userFbKey": {
           ".write": "auth != null"
         }
       },
-
-      /* Services/produits : gw/services/{userFbKey} → tableau de services */
       "services": {
         ".read":  true,
         "$userFbKey": {
           ".write": "auth != null"
         }
       },
-
-      /* Avis reçus : gw/reviews/{profileFbKey} → tableau d'avis */
       "reviews": {
         ".read":  true,
         "$profileFbKey": {
           ".write": "auth != null"
         }
       },
-
-      /* Utilisateurs bloqués (privé) : gw/blocked/{userFbKey} */
       "blocked": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* Confidentialité (privé) : gw/privacy/{userFbKey} */
       "privacy": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* Invitations de collaboration (privé) : gw/collab_invites/{userFbKey} */
       "collab_invites": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         MÉTRIQUES & JALONS
-      ═══════════════════════════════════════════════════════════════ */
-
-      /* Milestones par utilisateur : gw/milestones/{userFbKey}/{key} */
       "milestones": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* Vues vidéo : gw/vid_views/{postId} → nombre */
       "vid_views": {
         ".read":  true,
         "$postId": {
@@ -273,31 +185,26 @@
         }
       },
 
-      /* Réactions commentaires : gw/creact/{cid} → {likes:[], dislikes:[]} */
+      "viewed_vids": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
       "creact": {
         ".read":  true,
         "$cid": {
           ".write": "auth != null"
         }
       },
-
-      /* ═══════════════════════════════════════════════════════════════
-         ADMINISTRATION
-      ═══════════════════════════════════════════════════════════════ */
-
-      /* Éditeurs officiels */
       "publishers": {
         ".read":  "auth != null",
         ".write": "auth != null"
       },
-
-      /* Tâches admin */
       "admin_tasks": {
         ".read":  "auth != null",
         ".write": "auth != null"
       },
-
-      /* Demandes de badge */
       "badge_requests": {
         ".read":  "auth != null",
         ".write": "auth != null"
