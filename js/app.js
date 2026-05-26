@@ -960,22 +960,17 @@ function _gwPreloadUserData(user, callback) {
           /* Firebase a une photo → c'est la plus récente (sync multi-appareils) */
           merged = Object.assign({}, existing, profile);
         } else if (existing.photo) {
-          /* Firebase n'a pas de photo mais locale si → on fusionne ET on renvoie vers Firebase */
+          /* Firebase n'a pas de photo mais locale oui → fusion + re-push compressé */
           merged = Object.assign({}, profile, { photo: existing.photo });
-          /* Ré-upload silencieux pour que les autres appareils voient la photo */
-          try {
-            if (_gwFbReady && _gwFbDB) {
-              _gwFbDB.ref('gw/profiles/' + fbKey).set(merged).catch(function(){});
-            }
-          } catch(e){}
+          try { _pushProfileToFirebase(user.email, merged); } catch(e){}
         } else {
           merged = Object.assign({}, existing, profile);
         }
       } else {
         /* Pas de profil Firebase du tout → crée-le depuis le local */
         merged = Object.assign({}, existing);
-        if (merged && Object.keys(merged).length && _gwFbReady && _gwFbDB) {
-          try { _gwFbDB.ref('gw/profiles/' + fbKey).set(merged).catch(function(){}); } catch(e){}
+        if (merged && Object.keys(merged).length) {
+          try { _pushProfileToFirebase(user.email, merged); } catch(e){}
         }
       }
       if (merged && Object.keys(merged).length) {
@@ -1140,8 +1135,13 @@ function _gwFbPreloadAndStart() {
         var existing = null;
         try { existing = JSON.parse(localStorage.getItem('gw_profile_' + email)); } catch(e2){}
         /* Garde la photo locale si Firebase n'en a pas */
-        var merged = Object.assign({}, profile, (existing && existing.photo && !profile.photo) ? { photo: existing.photo } : {});
+        var _hasLocalPhotoOnly = !!(existing && existing.photo && !profile.photo);
+        var merged = Object.assign({}, profile, _hasLocalPhotoOnly ? { photo: existing.photo } : {});
         localStorage.setItem('gw_profile_' + email, JSON.stringify(merged));
+        /* Re-push vers Firebase si la photo est locale mais absente de Firebase */
+        if (_hasLocalPhotoOnly) {
+          try { _pushProfileToFirebase(email, merged); } catch(e2){}
+        }
       } catch(e){}
     });
 
@@ -7886,6 +7886,26 @@ function closeProfileModal() { /* compat — no-op */ }
 function loadUserProfile(email) {
   return JSON.parse(localStorage.getItem('gw_profile_' + email) || 'null');
 }
+
+/* ── Pousse le profil vers Firebase avec compression photo automatique ──────
+   La photo est toujours incluse : si elle est > 150 Ko, elle est compressée
+   de façon asynchrone avant l'écriture. Plus jamais de photo supprimée.     */
+function _pushProfileToFirebase(email, data) {
+  if (!_gwFbReady || !_gwFbDB) return;
+  var ref  = _gwFbDB.ref('gw/profiles/' + _gwFbKey(email));
+  var copy = Object.assign({}, data);
+  /* Pas de photo ou photo déjà petite → écriture directe */
+  if (!copy.photo || copy.photo.length <= 150000) {
+    ref.set(copy).catch(function(){});
+    return;
+  }
+  /* Photo trop grande → compression asynchrone (max 150 Ko) puis écriture */
+  _compressImageForChat(copy.photo, 150000, function(compressed) {
+    copy.photo = compressed;
+    ref.set(copy).catch(function(){});
+  });
+}
+
 function saveUserProfile(email, data) {
   var ts = Date.now();
   var saved = false;
@@ -7905,14 +7925,9 @@ function saveUserProfile(email, data) {
   /* Signal global — écrit une seule fois après la sauvegarde réussie */
   if (saved) {
     try { localStorage.setItem('gw_profile_changed', JSON.stringify({ email: email, at: ts })); } catch(e3) {}
-    /* ── Sync Firebase profil ── */
-    if (_gwFbReady && _gwFbDB && !_gwFbSkip) {
-      var _profileForFb = Object.assign({}, data);
-      /* Ne pas stocker les images base64 trop lourdes en Firebase — stocker l'URL si disponible */
-      if (_profileForFb.photo && _profileForFb.photo.length > 500000) {
-        delete _profileForFb.photo; /* Trop lourd pour Firebase Realtime DB (>500 Ko) */
-      }
-      _gwFbDB.ref('gw/profiles/' + _gwFbKey(email)).set(_profileForFb).catch(function(){});
+    /* ── Sync Firebase profil (avec compression photo automatique) ── */
+    if (!_gwFbSkip) {
+      _pushProfileToFirebase(email, data);
     }
   }
 }
