@@ -9441,6 +9441,95 @@ function saveReviews(profileKey, reviews)   { localStorage.setItem('gw_reviews_'
 function openUserProfileView(userInfo) {
   if (!userInfo || !userInfo.nom) return;
 
+  /* ── Compte officiel Geniwork ── */
+  if (userInfo._isOfficial) {
+    userInfo = { nom: 'Geniwork', email: null, role: 'Compte officiel certifié', _isOfficial: true };
+    _upvTarget = userInfo;
+    _upvRating = 0;
+
+    var _t2 = function(id, txt) { var e = document.getElementById(id); if (e) e.textContent = txt; };
+    var logo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
+    var offPosts = _offGetPosts();
+    var offFollowers = _getFCount(GW_OFFICIAL_KEY);
+
+    _t2('upv-title', 'Geniwork');
+    _t2('upv-name',  'Geniwork');
+    /* Badge vérifié */
+    var bdEl = document.getElementById('upv-badge-display');
+    if (bdEl) bdEl.innerHTML = '<span style="font-size:.8rem;color:#3B82F6;margin-left:4px"><i class="fas fa-circle-check"></i> Officiel</span>';
+
+    /* Photo */
+    var photoImg = document.getElementById('upv-photo-img');
+    var photoIni = document.getElementById('upv-initials');
+    if (photoImg && photoIni) {
+      if (logo) {
+        photoImg.src = logo; photoImg.style.display = 'block';
+        photoIni.style.display = 'none';
+      } else {
+        photoImg.style.display = 'none';
+        photoIni.style.display = '';
+        photoIni.textContent = 'G';
+      }
+    }
+
+    _t2('upv-domain',   'Compte officiel certifié');
+    _t2('upv-location', 'Partout 🌍');
+    _t2('upv-stat-projects',  offPosts.length);
+    _t2('upv-stat-rating',    '★ Officiel');
+    _t2('upv-stat-followers', offFollowers);
+    _t2('upv-stat-following', '—');
+
+    /* Bio */
+    var bioEl = document.getElementById('upv-bio');
+    if (bioEl) { bioEl.textContent = 'Compte officiel de la plateforme Geniwork. Découvrez les dernières actualités, annonces et publications officielles.'; bioEl.classList.remove('empty-bio'); }
+    _t2('upv-since', 'Compte vérifié');
+
+    /* Masquer téléphone, email, stats cliquables inutiles */
+    var phRow = document.getElementById('upv-phone-row'); if (phRow) phRow.style.display = 'none';
+    var emRow = document.getElementById('upv-email-row'); if (emRow) emRow.style.display = 'none';
+    var skillsWrap = document.getElementById('upv-skills');
+    if (skillsWrap) skillsWrap.innerHTML = '<p class="profil-empty-hint">Compte certifié Geniwork ✔</p>';
+
+    /* Barre d'action : masquer Message, adapter Suivre */
+    var msgBtn = document.getElementById('upv-msg-btn'); if (msgBtn) msgBtn.style.display = 'none';
+    var followBtnTop = document.getElementById('upv-follow-btn'); if (followBtnTop) followBtnTop.style.display = 'none';
+    var actionBar = document.getElementById('upv-action-bar');
+    if (actionBar) {
+      actionBar.style.display = '';
+      /* Remplace les boutons d'action par un seul bouton Suivre */
+      var isFollowingOff = isFollowing(GW_OFFICIAL_KEY);
+      actionBar.innerHTML =
+        '<button class="upv-action-follow ' + (isFollowingOff ? 'following' : '') + '" id="upv-action-follow-btn" onclick="_toggleFollowOfficial()" style="width:100%">' +
+          '<i class="fas fa-' + (isFollowingOff ? 'check' : 'user-plus') + '"></i> ' +
+          '<span id="upv-action-follow-label">' + (isFollowingOff ? 'Abonné' : 'Suivre') + '</span>' +
+        '</button>';
+    }
+
+    /* Cacher les onglets inutiles, garder À propos + Publications */
+    document.querySelectorAll('#user-profile-view .profil-tab').forEach(function(b) {
+      var tab = b.getAttribute('onclick') || '';
+      var isAbout = tab.indexOf("'about'") !== -1;
+      var isPosts = tab.indexOf("'posts'") !== -1;
+      b.style.display = (isAbout || isPosts) ? '' : 'none';
+      b.classList.toggle('active', isAbout);
+    });
+    var abt = document.getElementById('upvtab-about'); if (abt) abt.classList.remove('hidden');
+    ['reviews','services','projects','posts'].forEach(function(t) {
+      var el = document.getElementById('upvtab-' + t); if (el) el.classList.add('hidden');
+    });
+
+    /* Masquer le rate-card */
+    var rc = document.getElementById('upv-rate-card'); if (rc) rc.style.display = 'none';
+
+    /* Affiche le panel */
+    var ov = document.getElementById('user-profile-view');
+    ov.classList.remove('hidden');
+    void ov.offsetWidth;
+    ov.classList.add('open');
+    ov.querySelector('.upv-content').scrollTop = 0;
+    return;
+  }
+
   /* ── Résolution email : si absent, cherche parmi les inscrits ── */
   var resolvedEmail = userInfo.email || null;
   if (!resolvedEmail && userInfo.nom) {
@@ -9460,6 +9549,21 @@ function openUserProfileView(userInfo) {
 
   _upvTarget = userInfo;
   _upvRating = 0;
+
+  /* Réaffiche tous les onglets (au cas où le profil officiel les aurait masqués) */
+  document.querySelectorAll('#user-profile-view .profil-tab').forEach(function(b) { b.style.display = ''; });
+  /* Réaffiche le bouton Message */
+  var _msgBtn = document.getElementById('upv-msg-btn'); if (_msgBtn) _msgBtn.style.display = '';
+  var _followBtnTop = document.getElementById('upv-follow-btn'); if (_followBtnTop) _followBtnTop.style.display = '';
+  /* Restaure la barre d'action originale si elle a été modifiée pour le profil officiel */
+  var _actionBar = document.getElementById('upv-action-bar');
+  if (_actionBar && !_actionBar.querySelector('.upv-action-msg')) {
+    _actionBar.innerHTML =
+      '<button class="upv-action-msg" onclick="openChatWithUser()"><i class="fas fa-paper-plane"></i> Message</button>' +
+      '<button class="upv-action-follow" id="upv-action-follow-btn" onclick="toggleFollowUser()"><i class="fas fa-user-plus"></i> <span id="upv-action-follow-label">Suivre</span></button>';
+  }
+  /* Réaffiche le rate-card */
+  var _rc = document.getElementById('upv-rate-card'); if (_rc) _rc.style.display = '';
 
   /* Enregistre dans l'historique (uniquement si ce n'est pas son propre profil) */
   if (_currentUser && userInfo.email && userInfo.email !== _currentUser.email) {
@@ -9660,134 +9764,30 @@ function closeUserProfileView() {
 
 /* ════════════════════════════════════════════════════════════════════
    PROFIL OFFICIEL GENIWORK
-   Panneau dédié affiché quand on clique sur l'avatar/nom d'un post officiel
+   Réutilise le même panneau user-profile-view avec _isOfficial:true
    ════════════════════════════════════════════════════════════════════ */
 
 function openOfficialProfile() {
-  var existing = document.getElementById('off-profile-panel');
-  if (existing) existing.remove();
-
-  var logo      = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
-  var offPosts  = _offGetPosts();
-  var followers = _getFCount(GW_OFFICIAL_KEY);
-  var following = isFollowing(GW_OFFICIAL_KEY);
-
-  var avatarHtml = logo
-    ? '<img src="' + escHtml(logo) + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:50%">'
-    : '<i class="fas fa-star" style="font-size:2rem;color:#6366F1"></i>';
-
-  /* Construit les cards des posts officiels */
-  var postsHtml = '';
-  if (!offPosts.length) {
-    postsHtml = '<div style="text-align:center;color:#94A3B8;padding:2rem 0;font-size:.9rem">Aucune publication pour l\'instant.</div>';
-  } else {
-    postsHtml = offPosts.map(function(p) {
-      var mediaHtml = '';
-      if (p.video) {
-        var vSrc = typeof p.video === 'string' ? p.video : (p.video.url || '');
-        mediaHtml = '<div class="offp-post-media" onclick="closeOfficialProfile();_openOfficialVideo(\'' + p.id + '\')" style="cursor:pointer">' +
-          (vSrc ? '<video src="' + escHtml(vSrc) + '" muted playsinline preload="metadata" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;display:block"></video>' : '<div style="height:120px;background:#1E293B;border-radius:10px;display:flex;align-items:center;justify-content:center"><i class="fas fa-play" style="color:#6366F1;font-size:2rem"></i></div>') +
-        '</div>';
-      } else if (p.images && p.images.length && p.images[0]) {
-        mediaHtml = '<img src="' + escHtml(p.images[0]) + '" alt="" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;display:block;margin-bottom:.5rem">';
-      }
-      var likeCount = (p.baseLikes || 0) + (Array.isArray(p.likers) ? p.likers.length : 0);
-      var cmtCount  = Array.isArray(p.comments) ? p.comments.length : 0;
-      return '<div class="offp-post-card">' +
-        (p.text ? '<div style="font-size:.9rem;color:#CBD5E1;margin-bottom:.5rem;line-height:1.5">' + escHtml(p.text) + '</div>' : '') +
-        mediaHtml +
-        '<div style="display:flex;gap:1rem;font-size:.8rem;color:#64748B;margin-top:.4rem">' +
-          '<span><i class="fas fa-heart" style="color:#EF4444"></i> ' + likeCount + '</span>' +
-          '<span><i class="fas fa-comment" style="color:#6366F1"></i> ' + cmtCount + '</span>' +
-          '<span style="margin-left:auto">' + _offTimeAgo(p.publishedAt) + '</span>' +
-        '</div>' +
-      '</div>';
-    }).join('');
-  }
-
-  var panel = document.createElement('div');
-  panel.id = 'off-profile-panel';
-  panel.className = 'off-profile-overlay';
-  panel.innerHTML =
-    /* Header topbar */
-    '<div class="off-profile-topbar">' +
-      '<button class="off-profile-back" onclick="closeOfficialProfile()"><i class="fas fa-arrow-left"></i></button>' +
-      '<span class="off-profile-topbar-title">Profil officiel</span>' +
-      '<div style="width:40px"></div>' +
-    '</div>' +
-    /* Corps scrollable */
-    '<div class="off-profile-body">' +
-      /* Avatar + identité */
-      '<div class="off-profile-hero">' +
-        '<div class="off-profile-avatar">' + avatarHtml + '</div>' +
-        '<div class="off-profile-identity">' +
-          '<h2 class="off-profile-name">Geniwork' +
-            '<span class="off-profile-verified"><i class="fas fa-circle-check"></i></span>' +
-          '</h2>' +
-          '<p class="off-profile-role">Compte officiel certifié</p>' +
-        '</div>' +
-      '</div>' +
-
-      /* Stats */
-      '<div class="off-profile-stats">' +
-        '<div class="off-profile-stat">' +
-          '<strong id="off-profile-followers">' + followers + '</strong>' +
-          '<span>Abonnés</span>' +
-        '</div>' +
-        '<div class="off-profile-stat">' +
-          '<strong>' + offPosts.length + '</strong>' +
-          '<span>Publications</span>' +
-        '</div>' +
-      '</div>' +
-
-      /* Bouton Suivre */
-      '<div class="off-profile-follow-wrap">' +
-        '<button class="off-profile-follow-btn ' + (following ? 'following' : '') + '" id="off-profile-follow-btn" onclick="_toggleFollowOfficial(this)">' +
-          '<i class="fas fa-' + (following ? 'check' : 'user-plus') + '"></i>' +
-          ' <span id="off-profile-follow-label">' + (following ? 'Abonné' : 'Suivre') + '</span>' +
-        '</button>' +
-      '</div>' +
-
-      /* Séparateur publications */
-      '<div class="off-profile-section-title"><i class="fas fa-newspaper"></i> Publications</div>' +
-
-      /* Liste des posts */
-      '<div id="off-profile-posts-list">' + postsHtml + '</div>' +
-    '</div>';
-
-  (document.querySelector('.phone-frame') || document.body).appendChild(panel);
-  /* Double rAF pour déclencher la transition CSS après insertion dans le DOM */
-  requestAnimationFrame(function() {
-    requestAnimationFrame(function() { panel.classList.add('open'); });
-  });
+  openUserProfileView({ nom: 'Geniwork', email: null, role: 'Compte officiel certifié', _isOfficial: true });
 }
 
-function closeOfficialProfile() {
-  var panel = document.getElementById('off-profile-panel');
-  if (!panel) return;
-  panel.classList.remove('open');
-  setTimeout(function() { if (panel.parentNode) panel.parentNode.removeChild(panel); }, 300);
-}
+function closeOfficialProfile() { closeUserProfileView(); }
 
-function _toggleFollowOfficial(btn) {
+/* Follow/unfollow du compte officiel — appelé via toggleFollowUser() */
+function _toggleFollowOfficial() {
   if (!_currentUser) { showToast('Connectez-vous pour suivre Geniwork', 'err'); return; }
   var key      = GW_OFFICIAL_KEY;
   var list     = getFollowing();
   var _myFbKey = _gwFbKey(_currentUser.email);
 
   if (isFollowing(key)) {
-    /* Désabonner */
     saveFollowing(list.filter(function(f) { return f.key !== key; }));
     _decrFCount(key);
     if (_gwFbReady && _gwFbDB) {
       _gwFbDB.ref('gw/followers/' + key + '/' + _myFbKey).remove().catch(function(){});
     }
-    if (btn) { btn.classList.remove('following'); btn.innerHTML = '<i class="fas fa-user-plus"></i> <span>Suivre</span>'; }
-    var follEl = document.getElementById('off-profile-followers');
-    if (follEl) follEl.textContent = _getFCount(key);
     showToast('Désabonné de Geniwork', '');
   } else {
-    /* Suivre */
     list.push({ key: key, nom: 'Geniwork', isOfficial: true });
     saveFollowing(list);
     _incrFCount(key);
@@ -9798,14 +9798,14 @@ function _toggleFollowOfficial(btn) {
         role:  (function() { var p = loadUserProfile(_currentUser.email); return (p && p.role) || 'Membre Geniwork'; })()
       }).catch(function(){});
     }
-    if (btn) { btn.classList.add('following'); btn.innerHTML = '<i class="fas fa-check"></i> <span id="off-profile-follow-label">Abonné</span>'; }
-    var follEl2 = document.getElementById('off-profile-followers');
-    if (follEl2) follEl2.textContent = _getFCount(key);
-    /* Met à jour le compteur "Abonnements" sur la page profil perso */
     var pfEl = document.getElementById('pstat-following');
     if (pfEl) pfEl.textContent = getFollowing().length;
     showToast('Vous suivez maintenant Geniwork 👍', 'ok');
   }
+  /* Rafraîchit les boutons Suivre dans le profil ouvert */
+  _updateFollowBtn();
+  var cntEl = document.getElementById('upv-stat-followers');
+  if (cntEl) cntEl.textContent = _getFCount(key);
 }
 
 /* Listener Firebase pour le compteur d'abonnés du compte officiel */
@@ -9830,7 +9830,11 @@ function switchUpvTab(btn, tab) {
     if (el) el.classList.toggle('hidden', t !== tab);
   });
   if (tab === 'posts' && _upvTarget) {
-    renderProfilPosts(_upvTarget.email || null, _upvTarget.nom, document.getElementById('upvtab-posts'));
+    if (_upvTarget._isOfficial) {
+      _renderOfficialProfilePosts(document.getElementById('upvtab-posts'));
+    } else {
+      renderProfilPosts(_upvTarget.email || null, _upvTarget.nom, document.getElementById('upvtab-posts'));
+    }
   }
   if (tab === 'projects' && _upvTarget) {
     renderUpvProjects(_upvTarget.email || null);
@@ -9838,6 +9842,41 @@ function switchUpvTab(btn, tab) {
   if (tab === 'services' && _upvTarget) {
     renderUpvServices(_upvTarget.email || null);
   }
+}
+
+/* ── Publications officielles dans l'onglet Posts du profil Geniwork ── */
+function _renderOfficialProfilePosts(container) {
+  if (!container) return;
+  var offPosts = _offGetPosts();
+  if (!offPosts.length) {
+    container.innerHTML = '<div class="profil-empty-hint" style="text-align:center;padding:2rem 0">Aucune publication officielle pour l\'instant.</div>';
+    return;
+  }
+  container.innerHTML = offPosts.map(function(p) {
+    var mediaHtml = '';
+    if (p.video) {
+      var vSrc = typeof p.video === 'string' ? p.video : (p.video.url || '');
+      mediaHtml = '<div style="position:relative;cursor:pointer;border-radius:12px;overflow:hidden;margin-bottom:.6rem" onclick="closeUserProfileView();setTimeout(function(){_openOfficialVideo(\'' + p.id + '\')},350)">' +
+        (vSrc
+          ? '<video src="' + escHtml(vSrc) + '" muted playsinline preload="metadata" style="width:100%;max-height:220px;object-fit:cover;display:block"></video>'
+          : '<div style="height:100px;background:#1E293B;display:flex;align-items:center;justify-content:center"><i class="fas fa-play" style="color:#6366F1;font-size:1.8rem"></i></div>') +
+        '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"><div style="background:rgba(0,0,0,.4);width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center"><i class="fas fa-play" style="color:#fff;font-size:1.1rem;margin-left:3px"></i></div></div>' +
+      '</div>';
+    } else if (p.images && p.images.length && p.images[0]) {
+      mediaHtml = '<img src="' + escHtml(p.images[0]) + '" alt="" style="width:100%;max-height:220px;object-fit:cover;border-radius:12px;display:block;margin-bottom:.6rem">';
+    }
+    var likeCount = (p.baseLikes || 0) + (Array.isArray(p.likers) ? p.likers.length : 0);
+    var cmtCount  = Array.isArray(p.comments) ? p.comments.length : 0;
+    return '<div class="post-card" style="margin-bottom:12px">' +
+      (p.text ? '<div style="font-size:.9rem;line-height:1.55;margin-bottom:.6rem">' + escHtml(p.text) + '</div>' : '') +
+      mediaHtml +
+      '<div style="display:flex;gap:1.2rem;font-size:.8rem;color:#64748B;margin-top:.2rem">' +
+        '<span><i class="fas fa-heart" style="color:#EF4444"></i> ' + likeCount + '</span>' +
+        '<span><i class="fas fa-comment" style="color:#6366F1"></i> ' + cmtCount + '</span>' +
+        '<span style="margin-left:auto;font-size:.75rem">' + _offTimeAgo(p.publishedAt) + '</span>' +
+      '</div>' +
+    '</div>';
+  }).join('');
 }
 
 /* ══════════════════════════════════════════
