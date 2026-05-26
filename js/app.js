@@ -570,11 +570,17 @@ function _gwFbSyncStart() {
       var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
       if (post) {
         post.likers = likers;
-        /* Met à jour le compteur directement dans le DOM (plus rapide que re-render total) */
-        document.querySelectorAll('[id="lcount-' + postId + '"],[id^="lcount-' + postId + '"]').forEach(function(el) {
-          el.textContent = likers.length || '';
+        var myEmail = _currentUser ? _currentUser.email : '';
+        var liked   = likers.indexOf(myEmail) !== -1;
+        var total   = post.baseLikes + likers.length;
+        /* Mise à jour DOM ciblée — SANS re-render pour éviter le scroll jump */
+        document.querySelectorAll('[id="like-btn-' + postId + '"]').forEach(function(btn) {
+          btn.className = 'act-btn' + (liked ? ' liked' : '');
+          var ico = btn.querySelector('i'); if (ico) ico.className = liked ? 'fas fa-heart' : 'far fa-heart';
         });
-        if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e){} }
+        document.querySelectorAll('[id="like-count-' + postId + '"],[id="lcount-' + postId + '"]').forEach(function(el) {
+          el.textContent = total > 0 ? total : '';
+        });
       }
     } catch(e){}
   }
@@ -588,7 +594,14 @@ function _gwFbSyncStart() {
       var list   = snap.val();
       if (!Array.isArray(list)) return;
       localStorage.setItem('gw_dislikers_' + postId, JSON.stringify(list));
-      if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e){} }
+      var myEmail  = _currentUser ? _currentUser.email : '';
+      var disliked = list.indexOf(myEmail) !== -1;
+      /* Mise à jour DOM ciblée — SANS re-render pour éviter le scroll jump */
+      document.querySelectorAll('[id="dislike-btn-' + postId + '"]').forEach(function(btn) {
+        btn.className = 'act-btn' + (disliked ? ' disliked' : '');
+        var ico = btn.querySelector('i'); if (ico) ico.className = disliked ? 'fas fa-thumbs-down' : 'far fa-thumbs-down';
+        var cnt = btn.querySelector('span'); if (cnt) { cnt.textContent = list.length > 0 ? list.length : ''; cnt.style.display = list.length > 0 ? '' : 'none'; }
+      });
     } catch(e){}
   }
   _gwFbDB.ref('gw/dislikes').on('child_added',   function(snap) { _gwMergeDislikes(snap); });
