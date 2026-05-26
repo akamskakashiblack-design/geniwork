@@ -9712,6 +9712,25 @@ function openUserProfileView(userInfo) {
   var profile    = resolvedEmail ? loadUserProfile(resolvedEmail) : null;
   var reviews    = loadReviews(profileKey);
 
+  /* ── Fetch avis depuis Firebase pour les profils visités ── */
+  var _isSelfProfile = _currentUser && resolvedEmail && resolvedEmail === _currentUser.email;
+  if (!_isSelfProfile && resolvedEmail && _gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/reviews/' + _gwFbKey(resolvedEmail)).once('value').then(function(snap) {
+      var fbReviews = snap.val();
+      if (fbReviews && Array.isArray(fbReviews) && fbReviews.length) {
+        try { localStorage.setItem('gw_reviews_' + resolvedEmail, JSON.stringify(fbReviews)); } catch(e){}
+        /* Met à jour l'affichage si le profil est toujours ouvert */
+        if (_upvTarget && _upvTarget.email === resolvedEmail) {
+          var avg2 = (fbReviews.reduce(function(s, r) { return s + r.rating; }, 0) / fbReviews.length).toFixed(1);
+          var rEl2 = document.getElementById('upv-stat-rating');
+          if (rEl2) rEl2.textContent = avg2 + ' ★';
+          _renderReviewsList(resolvedEmail, fbReviews);
+          _updateReviewsBadge(fbReviews);
+        }
+      }
+    }).catch(function(){});
+  }
+
   /* Helpers locaux */
   var _t = function(id, txt) { var e = document.getElementById(id); if (e) e.textContent = txt; };
 
@@ -10107,32 +10126,63 @@ function renderProfilPosts(email, nom, container) {
   if (!container) return;
   container.innerHTML = '';
 
-  var posts = getPostsByAuthor(email, nom);
+  function _doRenderPosts(posts) {
+    container.innerHTML = '';
+    if (!posts.length) {
+      container.innerHTML =
+        '<div class="profil-posts-empty">' +
+          '<i class="fas fa-pen-to-square"></i>' +
+          '<p>Aucune publication pour l\'instant</p>' +
+          '<small>Les publications apparaîtront ici</small>' +
+        '</div>';
+      return;
+    }
+    /* Compteur */
+    var header = document.createElement('div');
+    header.className = 'profil-posts-count';
+    header.innerHTML = '<i class="fas fa-newspaper"></i> ' + posts.length +
+      ' publication' + (posts.length > 1 ? 's' : '');
+    container.appendChild(header);
 
-  if (!posts.length) {
-    container.innerHTML =
-      '<div class="profil-posts-empty">' +
-        '<i class="fas fa-pen-to-square"></i>' +
-        '<p>Aucune publication pour l\'instant</p>' +
-        '<small>Les publications apparaîtront ici</small>' +
-      '</div>';
-    return;
+    posts.forEach(function(post) {
+      var card = buildPostCard(post);
+      var followBtn = card.querySelector('.post-follow-btn');
+      if (followBtn) followBtn.remove();
+      container.appendChild(card);
+    });
   }
 
-  /* Compteur */
-  var header = document.createElement('div');
-  header.className = 'profil-posts-count';
-  header.innerHTML = '<i class="fas fa-newspaper"></i> ' + posts.length +
-    ' publication' + (posts.length > 1 ? 's' : '');
-  container.appendChild(header);
+  var posts = getPostsByAuthor(email, nom);
 
-  posts.forEach(function(post) {
-    var card = buildPostCard(post);
-    /* Supprime le bouton Suivre dans le contexte profil (déjà sur ce profil) */
-    var followBtn = card.querySelector('.post-follow-btn');
-    if (followBtn) followBtn.remove();
-    container.appendChild(card);
-  });
+  /* Si pas de posts locaux et que c'est un autre utilisateur → fetch Firebase */
+  var isSelf = _currentUser && email && email === _currentUser.email;
+  if (!posts.length && !isSelf && email && _gwFbReady && _gwFbDB) {
+    container.innerHTML =
+      '<div class="profil-posts-empty">' +
+        '<i class="fas fa-spinner fa-spin" style="font-size:22px;color:#6366F1"></i>' +
+        '<p style="margin-top:8px;color:#64748B">Chargement…</p>' +
+      '</div>';
+    _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).once('value').then(function(snap) {
+      var fbPosts = snap.val();
+      if (fbPosts && Array.isArray(fbPosts) && fbPosts.length) {
+        /* Intègre dans DEMO_POSTS pour le reste de la session */
+        fbPosts.forEach(function(p) {
+          if (!p || !p.id) return;
+          if (!p.images) p.images = [];
+          if (!DEMO_POSTS.find(function(d) { return d.id === p.id; })) {
+            p.likers = loadPostLikers(p.id);
+            DEMO_POSTS.push(p);
+          }
+        });
+        try { localStorage.setItem('gw_userposts_' + email, JSON.stringify(fbPosts)); } catch(e){}
+        _doRenderPosts(fbPosts.sort(function(a, b) { return b.id - a.id; }));
+      } else {
+        _doRenderPosts([]);
+      }
+    }).catch(function() { _doRenderPosts([]); });
+  } else {
+    _doRenderPosts(posts);
+  }
 }
 
 /* ══════════════════════════════════════════
@@ -14296,19 +14346,38 @@ function renderUpvProjects(email) {
       '<i class="fas fa-folder-open"></i><p>Projets non disponibles</p></div></div>';
     return;
   }
-  var list = loadProjects(email);
-  /* Met à jour le compteur dans les stats UPV */
-  var countEl = document.getElementById('upv-stat-projects');
-  if (countEl) countEl.textContent = list.length;
 
-  if (!list.length) {
-    container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
-      '<i class="fas fa-folder-open"></i><p>Aucun projet publié</p></div></div>';
-    return;
+  function _doRenderProjects(list) {
+    var countEl = document.getElementById('upv-stat-projects');
+    if (countEl) countEl.textContent = list.length;
+    if (!list.length) {
+      container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
+        '<i class="fas fa-folder-open"></i><p>Aucun projet publié</p></div></div>';
+      return;
+    }
+    container.innerHTML = '<div class="profil-card">' +
+      list.map(function(p) { return _buildProjCard(p, false); }).join('') +
+    '</div>';
   }
-  container.innerHTML = '<div class="profil-card">' +
-    list.map(function(p) { return _buildProjCard(p, false); }).join('') +
-  '</div>';
+
+  /* Profil d'un autre utilisateur → fetch Firebase en priorité */
+  var isSelf = _currentUser && _currentUser.email === email;
+  if (!isSelf && _gwFbReady && _gwFbDB) {
+    container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
+      '<i class="fas fa-spinner fa-spin" style="font-size:22px;color:#6366F1"></i>' +
+      '<p style="margin-top:8px;color:#64748B">Chargement…</p></div></div>';
+    _gwFbDB.ref('gw/projects/' + _gwFbKey(email)).once('value').then(function(snap) {
+      var fbList = snap.val();
+      if (fbList && Array.isArray(fbList) && fbList.length) {
+        try { localStorage.setItem('gw_projects_' + email, JSON.stringify(fbList)); } catch(e){}
+        _doRenderProjects(fbList);
+      } else {
+        _doRenderProjects(loadProjects(email));
+      }
+    }).catch(function() { _doRenderProjects(loadProjects(email)); });
+  } else {
+    _doRenderProjects(loadProjects(email));
+  }
 }
 
 /* ── Rendu onglet Services (profil visité) ── */
@@ -14320,48 +14389,70 @@ function renderUpvServices(email) {
       '<i class="fas fa-concierge-bell"></i><p>Services non disponibles</p></div></div>';
     return;
   }
-  /* Tous les services du profil — les produits ne s'affichent pas ici */
-  var list = loadUserServices(email).filter(function(s) {
-    return !s.itemType || s.itemType === 'service';
-  });
-  if (!list.length) {
-    container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
-      '<i class="fas fa-concierge-bell" style="font-size:28px;color:#6366F1;margin-bottom:8px"></i>' +
-      '<p style="font-weight:700;color:#1E293B;margin:0 0 4px">Aucun service proposé</p>' +
-      '<small style="color:#64748B">Cet utilisateur n\'a pas encore<br>ajouté de services à son profil</small></div></div>';
-    return;
+
+  function _doRenderServices(rawList) {
+    /* Tous les services du profil — les produits ne s'affichent pas ici */
+    var list = (rawList || []).filter(function(s) {
+      return !s.itemType || s.itemType === 'service';
+    });
+    if (!list.length) {
+      container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
+        '<i class="fas fa-concierge-bell" style="font-size:28px;color:#6366F1;margin-bottom:8px"></i>' +
+        '<p style="font-weight:700;color:#1E293B;margin:0 0 4px">Aucun service proposé</p>' +
+        '<small style="color:#64748B">Cet utilisateur n\'a pas encore<br>ajouté de services à son profil</small></div></div>';
+      return;
+    }
+    container.innerHTML = list.map(function(svc) {
+      var catLabel = (_SVC_CATS && _SVC_CATS[svc.category]) || svc.category;
+      var priceStr = _formatSvcPrice(svc);
+      var photos   = svc.photos || [];
+      var ssHtml   = photos.length ? _buildSvcSlideshow(photos, 'upvss-' + svc.id) : '';
+      var descHtml = svc.description
+        ? '<p class="profil-svc-desc">' + escHtml(svc.description) + '</p>'
+        : '';
+      return '<div class="profil-card upv-svc-card">' +
+        (ssHtml ? '<div class="profil-svc-media">' + ssHtml + '</div>' : '') +
+        '<div class="profil-svc-body">' +
+          '<div class="profil-svc-top" style="margin-bottom:6px">' +
+            '<div class="profil-svc-cat-badge">' + escHtml(catLabel) + '</div>' +
+            '<span class="profil-svc-price">' + escHtml(priceStr) + '</span>' +
+          '</div>' +
+          '<p class="profil-svc-title">' + escHtml(svc.title) + '</p>' +
+          descHtml +
+          '<div class="upv-svc-actions">' +
+            '<button class="upv-svc-save-btn' + (isSvcSaved(svc.id, email) ? ' saved' : '') + '" ' +
+              'onclick="event.stopPropagation();toggleSavedSvc(' + svc.id + ',\'' + email.replace(/'/g,"\\'") + '\',this)" ' +
+              'title="Sauvegarder">' +
+              '<i class="' + (isSvcSaved(svc.id, email) ? 'fas' : 'far') + ' fa-heart"></i>' +
+            '</button>' +
+            '<button class="upv-svc-contact-btn" ' +
+              'onclick="_contactAboutService(' + svc.id + ',\'' + email.replace(/'/g, "\\'") + '\')">' +
+              '<i class="fas fa-paper-plane"></i> Contacter' +
+            '</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
   }
-  container.innerHTML = list.map(function(svc) {
-    var catLabel = (_SVC_CATS && _SVC_CATS[svc.category]) || svc.category;
-    var priceStr = _formatSvcPrice(svc);
-    var photos   = svc.photos || [];
-    var ssHtml   = photos.length ? _buildSvcSlideshow(photos, 'upvss-' + svc.id) : '';
-    var descHtml = svc.description
-      ? '<p class="profil-svc-desc">' + escHtml(svc.description) + '</p>'
-      : '';
-    return '<div class="profil-card upv-svc-card">' +
-      (ssHtml ? '<div class="profil-svc-media">' + ssHtml + '</div>' : '') +
-      '<div class="profil-svc-body">' +
-        '<div class="profil-svc-top" style="margin-bottom:6px">' +
-          '<div class="profil-svc-cat-badge">' + escHtml(catLabel) + '</div>' +
-          '<span class="profil-svc-price">' + escHtml(priceStr) + '</span>' +
-        '</div>' +
-        '<p class="profil-svc-title">' + escHtml(svc.title) + '</p>' +
-        descHtml +
-        '<div class="upv-svc-actions">' +
-          '<button class="upv-svc-save-btn' + (isSvcSaved(svc.id, email) ? ' saved' : '') + '" ' +
-            'onclick="event.stopPropagation();toggleSavedSvc(' + svc.id + ',\'' + email.replace(/'/g,"\\'") + '\',this)" ' +
-            'title="Sauvegarder">' +
-            '<i class="' + (isSvcSaved(svc.id, email) ? 'fas' : 'far') + ' fa-heart"></i>' +
-          '</button>' +
-          '<button class="upv-svc-contact-btn" ' +
-            'onclick="_contactAboutService(' + svc.id + ',\'' + email.replace(/'/g, "\\'") + '\')">' +
-            '<i class="fas fa-paper-plane"></i> Contacter' +
-          '</button>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
-  }).join('');
+
+  /* Profil d'un autre utilisateur → fetch Firebase en priorité */
+  var isSelf = _currentUser && _currentUser.email === email;
+  if (!isSelf && _gwFbReady && _gwFbDB) {
+    container.innerHTML = '<div class="profil-card"><div class="profil-coming-soon-sm">' +
+      '<i class="fas fa-spinner fa-spin" style="font-size:22px;color:#6366F1"></i>' +
+      '<p style="margin-top:8px;color:#64748B">Chargement…</p></div></div>';
+    _gwFbDB.ref('gw/services/' + _gwFbKey(email)).once('value').then(function(snap) {
+      var fbList = snap.val();
+      if (fbList && Array.isArray(fbList) && fbList.length) {
+        try { localStorage.setItem('gw_services_' + email, JSON.stringify(fbList)); } catch(e){}
+        _doRenderServices(fbList);
+      } else {
+        _doRenderServices(loadUserServices(email));
+      }
+    }).catch(function() { _doRenderServices(loadUserServices(email)); });
+  } else {
+    _doRenderServices(loadUserServices(email));
+  }
 }
 
 /* ── Contacter un utilisateur à propos d'un service ── */
