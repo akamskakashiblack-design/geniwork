@@ -226,6 +226,160 @@ function _uploadToStorage(storagePath, dataUrl, onOk, onFail) {
   }
 }
 
+/* Upload d'un Blob (vidéo, etc.) vers Firebase Storage → URL publique permanente
+   onProgress(pct 0-100) est optionnel */
+function _uploadBlobToStorage(storagePath, blob, onOk, onFail, onProgress) {
+  if (!_gwFbStorage) { if (onFail) onFail('no-storage'); return; }
+  try {
+    var ref  = _gwFbStorage.ref(storagePath);
+    var task = ref.put(blob);
+    task.on('state_changed',
+      function(snap) {
+        if (onProgress && snap.totalBytes > 0) {
+          onProgress(Math.round(snap.bytesTransferred / snap.totalBytes * 100));
+        }
+      },
+      function(e) {
+        console.error('[GW Storage] ❌', storagePath, e.message || e);
+        if (onFail) onFail(e);
+      },
+      function() {
+        ref.getDownloadURL()
+          .then(function(url) { if (onOk) onOk(url); })
+          .catch(function(e) { if (onFail) onFail(e); });
+      }
+    );
+  } catch(e) {
+    console.error('[GW Storage] ❌ Erreur upload blob :', e);
+    if (onFail) onFail(e);
+  }
+}
+
+/* ── Ré-upload rétroactif des vidéos sans URL Storage ──────────────────────────
+   Appelé après login : scanne les posts de l'utilisateur courant qui ont un
+   blob vidéo en IndexedDB mais pas encore d'URL Firebase Storage.
+   Utile pour les vidéos publiées avant l'activation du Storage ou après un
+   échec réseau lors de la publication.
+──────────────────────────────────────────────────────────────────────────── */
+function _gwUploadPendingVideos() {
+  if (!_gwFbStorage || !_gwFbDB || !_gwFbReady || !_currentUser) return;
+  var myEmail = _currentUser.email;
+  var postsToFix = DEMO_POSTS.filter(function(p) {
+    return p.ownerEmail === myEmail &&
+           p.video &&
+           typeof p.video === 'object' &&
+           p.video.idbId &&
+           !p.video.url;
+  });
+  if (!postsToFix.length) return;
+  console.log('[GW Storage] 🔄 Ré-upload de', postsToFix.length, 'vidéo(s) en attente…');
+  postsToFix.forEach(function(post) {
+    (function(p) {
+      _gwLoadVideoBlob(p.video.idbId, function(blob) {
+        if (!blob) return;  /* pas en IDB sur cet appareil */
+        var ext = (blob.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
+        _uploadBlobToStorage('videos/' + p.id + ext, blob,
+          function(url) {
+            console.log('[GW Storage] ✅ Vidéo ré-uploadée :', p.id, url);
+            p.video.url = url;
+            /* 1. Nœud dédié pour livraison immédiate aux autres appareils */
+            _gwFbDB.ref('gw/post_videos/' + p.id).set({
+              url: url,
+              dur: p.video.duration || 0
+            }).catch(function(){});
+            /* 2. Met à jour le tableau de posts dans Firebase */
+            var savedPosts = loadPersistedUserPosts(myEmail);
+            var idx = savedPosts.findIndex(function(sp) { return String(sp.id) === String(p.id); });
+            if (idx !== -1) {
+              savedPosts[idx].video.url = url;
+              savePersistedUserPosts(myEmail, savedPosts);
+            }
+            /* 3. Met à jour le <video> déjà rendu dans le feed */
+            var vEl = document.getElementById('fv-' + p.id);
+            if (vEl && !vEl.src) vEl.src = url;
+          },
+          function() {}  /* échec silencieux — réessayera au prochain démarrage */
+        );
+      });
+    })(post);
+  });
+}
+
+/* ── Ré-upload rétroactif des vidéos officielles sans URL Storage ────────────
+   Appelé après login : scanne les posts officiels dont le blob est en IDB
+   mais qui n'ont pas encore d'URL Firebase Storage (publiés avant la MAJ).
+────────────────────────────────────────────────────────────────────────────── */
+function _gwUploadPendingOfficialVideos() {
+  if (!_gwFbStorage || !_gwFbDB || !_gwFbReady) return;
+  /* Seul l'admin / éditeur officiel qui a le blob en IDB peut ré-uploader */
+  var offList  = _offGetPosts();
+  var toFix    = offList.filter(function(p) {
+    return p.video && typeof p.video === 'object' && p.video.idbId && !p.video.url;
+  });
+  if (!toFix.length) return;
+  console.log('[GW Storage] 🔄 Ré-upload de', toFix.length, 'vidéo(s) officielle(s) en attente…');
+  toFix.forEach(function(post) {
+    (function(p) {
+      _gwLoadVideoBlob(p.video.idbId, function(blob) {
+        if (!blob) return;  /* blob absent sur cet appareil — ignoré */
+        var ext = (blob.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
+        _uploadBlobToStorage('videos/' + p.id + ext, blob,
+          function(url) {
+            console.log('[GW Storage] ✅ Vidéo officielle ré-uploadée :', p.id, url);
+            p.video.url = url;
+            _gwFbDB.ref('gw/post_videos/' + p.id).set({ url: url, dur: p.video.duration || 0 }).catch(function(){});
+            /* Met à jour localStorage */
+            var all = _offGetPosts();
+            var idx = all.findIndex(function(x) { return String(x.id) === String(p.id); });
+            if (idx !== -1) { all[idx].video.url = url; _offSavePosts(all); }
+            /* Met à jour le <video> si déjà rendu */
+            var vEl = document.getElementById('off-fv-' + p.id);
+            if (vEl && !vEl.src) vEl.src = url;
+          },
+          function() {}
+        );
+      });
+    })(post);
+  });
+}
+
+/* Barre de progression vidéo — affichée dans le feed pendant l'upload */
+function _showVideoProgress(pct) {
+  var bar = document.getElementById('gw-vid-upload-bar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'gw-vid-upload-bar';
+    bar.style.cssText = [
+      'position:fixed;bottom:72px;left:50%;transform:translateX(-50%)',
+      'width:88%;max-width:420px;background:#fff;border-radius:14px',
+      'box-shadow:0 4px 20px rgba(0,0,0,.18);padding:12px 16px;z-index:9999',
+      'display:flex;align-items:center;gap:10px'
+    ].join(';');
+    bar.innerHTML =
+      '<i class="fas fa-cloud-upload-alt" style="color:#6366F1;font-size:18px"></i>' +
+      '<div style="flex:1">' +
+        '<div style="font-size:12px;font-weight:700;color:#0F172A;margin-bottom:4px">Envoi de la vidéo…</div>' +
+        '<div style="background:#E2E8F0;border-radius:99px;height:6px;overflow:hidden">' +
+          '<div id="gw-vid-upload-fill" style="height:100%;background:linear-gradient(90deg,#6366F1,#8B5CF6);border-radius:99px;transition:width .3s;width:0%"></div>' +
+        '</div>' +
+      '</div>' +
+      '<span id="gw-vid-upload-pct" style="font-size:12px;font-weight:700;color:#6366F1;min-width:34px;text-align:right">0%</span>';
+    document.body.appendChild(bar);
+  }
+  var fill = document.getElementById('gw-vid-upload-fill');
+  var pctEl = document.getElementById('gw-vid-upload-pct');
+  if (fill)  fill.style.width  = pct + '%';
+  if (pctEl) pctEl.textContent = pct + '%';
+}
+function _hideVideoProgress() {
+  var bar = document.getElementById('gw-vid-upload-bar');
+  if (bar) {
+    bar.style.opacity = '0';
+    bar.style.transition = 'opacity .4s';
+    setTimeout(function() { if (bar.parentNode) bar.parentNode.removeChild(bar); }, 450);
+  }
+}
+
 /* Upload plusieurs images en parallèle, retourne tableau d'URLs */
 function _uploadImages(basePath, images, callback) {
   if (!images || !images.length) { callback([]); return; }
@@ -336,6 +490,31 @@ function _gwFbSyncStart() {
         _stored2.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
         var lastM = newMsgs[newMsgs.length - 1];
         localStorage.setItem(lsKey, JSON.stringify({ messages: _stored2, lastMsg: lastM.text || '', lastAt: lastM.at || Date.now() }));
+
+        /* ── Push direct dans DEMO_CONVERSATIONS (évite le skip par _gwActiveDMRef) ── */
+        if (_currentUser) {
+          var _memConv = DEMO_CONVERSATIONS.find(function(c) {
+            return !c.isGroup && c.email && _getDMKey(_currentUser.email, c.email) === lsKey;
+          });
+          if (_memConv) {
+            newMsgs.forEach(function(m) {
+              if (!_memConv.messages.some(function(x) { return String(x.id) === String(m.id); })) {
+                _memConv.messages.push(m);
+              }
+            });
+            _memConv.messages.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
+            _memConv.lastMsg = lastM.text || (lastM.type === 'img' ? '📷 Photo' : (lastM.type === 'video' ? '🎥 Vidéo' : '📎 Fichier'));
+            _memConv.lastAt  = lastM.at || Date.now();
+            if (_chatConvId !== _memConv.id) {
+              _memConv.unread = (_memConv.unread || 0) + newMsgs.length;
+            }
+            /* Si la conv est ouverte → re-render le chat immédiatement */
+            if (_chatConvId === _memConv.id && document.getElementById('chat-messages')) {
+              try { _pollChatMessages(); } catch(e3){}
+            }
+          }
+        }
+
         try { _checkDMInbox(); } catch(e2){}
         renderConversations();
       }
@@ -347,6 +526,39 @@ function _gwFbSyncStart() {
   /* ── Posts utilisateurs (sync temps réel) ── */
   _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
   _gwFbDB.ref('gw/posts').on('child_changed', function(snap) { try { _gwMergePost(snap); } catch(e){} });
+
+  /* ── URLs vidéos des posts (canal séparé pour livraison fiable) ── */
+  _gwFbDB.ref('gw/post_videos').on('child_added', function(snap) {
+    try {
+      var pid  = snap.key;
+      var data = snap.val();
+      if (!data || !data.url) return;
+      /* Posts utilisateurs (IDs numériques) */
+      var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(pid); });
+      if (post && post.video && !post.video.url) {
+        post.video.url = data.url;
+        var vEl = document.getElementById('fv-' + pid);
+        if (vEl && !vEl.src)  vEl.src = data.url;
+        var wrap = document.getElementById('pvw-' + pid);
+        if (wrap) {
+          (function(u, d) {
+            wrap.onclick = function() { _openVideoFromPost(String(pid), d); };
+          })(data.url, data.dur || 0);
+        }
+      }
+      /* Posts officiels (IDs commençant par 'off_') */
+      if (String(pid).indexOf('off_') === 0) {
+        var offList = _offGetPosts();
+        var offPost = offList.find(function(x) { return String(x.id) === String(pid); });
+        if (offPost && offPost.video && typeof offPost.video === 'object' && !offPost.video.url) {
+          offPost.video.url = data.url;
+          try { localStorage.setItem('gw_official_posts', JSON.stringify(offList)); } catch(e2){}
+          var offVEl = document.getElementById('off-fv-' + pid);
+          if (offVEl && !offVEl.src) offVEl.src = data.url;
+        }
+      }
+    } catch(e){}
+  });
 
   /* ── Likes (temps réel entre appareils) — child_added = 1er like, child_changed = likes suivants ── */
   function _gwMergeLikes(snap) {
@@ -555,6 +767,12 @@ function _gwMergePost(snap) {
       p.likers = loadPostLikers(p.id);
       DEMO_POSTS.push(p);
       changed = true;
+    } else if (p.video && p.video.url && existing.video && !existing.video.url) {
+      /* Met à jour l'URL vidéo si Firebase en a une mais pas la version locale */
+      existing.video.url = p.video.url;
+      var _vEl = document.getElementById('fv-' + p.id);
+      if (_vEl && !_vEl.src) _vEl.src = p.video.url;
+      changed = true;
     }
   });
   if (changed) {
@@ -635,7 +853,7 @@ function _gwMergeGroupMsg(snap) {
   if (!_currentUser || !snap) return;
   var fbKey = snap.key;
   var data  = snap.val();
-  if (!data || !Array.isArray(data.messages)) return;
+  if (!data) return;
   var lsKey = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
   /* S'assurer que les conversations de groupe sont chargées avant la recherche */
   if (!_groupConvsReady) { try { _loadGroupConvs(); } catch(e){} }
@@ -645,18 +863,39 @@ function _gwMergeGroupMsg(snap) {
   });
   if (!conv) return;
   try {
+    /* Normalise : Firebase stocke les messages comme objet {id:msg} ou tableau */
+    var rawMsgs = data.messages;
+    var incomingMsgs = Array.isArray(rawMsgs) ? rawMsgs
+      : (rawMsgs && typeof rawMsgs === 'object') ? Object.values(rawMsgs) : [];
+    if (!incomingMsgs.length) return;
+
     var existing = null;
     try { existing = JSON.parse(localStorage.getItem(lsKey)); } catch(e){}
     var stored = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
     var storedMap = {};
     stored.forEach(function(m) { storedMap[String(m.id)] = true; });
-    var changed = false;
-    data.messages.forEach(function(m) {
-      if (m && m.id && !storedMap[String(m.id)]) { stored.push(m); changed = true; }
+    var newMsgsGrp = [];
+    incomingMsgs.forEach(function(m) {
+      if (m && m.id && !storedMap[String(m.id)]) { stored.push(m); newMsgsGrp.push(m); }
     });
+    var changed = newMsgsGrp.length > 0;
     if (changed) {
       stored.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-      try { localStorage.setItem(lsKey, JSON.stringify({ messages: stored, lastMsg: data.lastMsg, lastAt: data.lastAt })); } catch(e){}
+      var _lastGrpMsg = newMsgsGrp[newMsgsGrp.length - 1];
+      var _lastGrpText = _lastGrpMsg.text || (data.lastMsg || '');
+      try { localStorage.setItem(lsKey, JSON.stringify({ messages: stored, lastMsg: _lastGrpText, lastAt: data.lastAt || Date.now() })); } catch(e){}
+
+      /* ── Met à jour le conv en mémoire ── */
+      newMsgsGrp.forEach(function(m) {
+        if (!conv.messages.some(function(x){ return String(x.id) === String(m.id); })) {
+          conv.messages.push(m);
+        }
+      });
+      conv.messages.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
+      conv.lastMsg = _lastGrpText;
+      conv.lastAt  = data.lastAt || Date.now();
+      if (_chatConvId !== conv.id) conv.unread = (conv.unread || 0) + newMsgsGrp.length;
+
       /* Rafraîchit si ce groupe est ouvert */
       if (_chatConvId === conv.id && document.getElementById('chat-messages')) {
         try { _pollGroupMessages(); } catch(e){}
@@ -2282,6 +2521,12 @@ function initApp(user) {
     /* Premier poll immédiat pour synchro des messages */
     try { _globalMsgPoll(); } catch(e) {}
   }, 800);
+
+  /* Ré-upload rétroactif des vidéos sans URL Storage (posts anciens ou upload interrompu) */
+  setTimeout(function() {
+    try { _gwUploadPendingVideos(); } catch(e) {}
+    try { _gwUploadPendingOfficialVideos(); } catch(e2) {}
+  }, 6000);
 }
 
 function getInitials(nom) {
@@ -4640,7 +4885,9 @@ function buildPostCard(post) {
   if (post.video && (post.video.idbId || post.video.url)) {
     var vDur  = escHtml(formatDuration(post.video.duration || 0));
     var vidId = 'fv-' + post.id;
-    var vSrc  = post.video.url ? escHtml(post.video.url) : '';
+    /* Préfère l'URL Storage (permanente) si disponible, sinon blob URL locale */
+    var vSrc  = (post.video.url && !post.video.url.startsWith('blob:')) ? escHtml(post.video.url)
+              : (post.video.url ? escHtml(post.video.url) : '');
 
     var vViews = _getVideoViews(post.id);
     videoHtml =
@@ -5371,15 +5618,45 @@ function _openOfficialVideo(postId) {
   /* URL déjà en mémoire ? */
   var url = typeof post.video === 'string' ? post.video : (post.video.url || '');
   if (url) { openVideoPlayer(url, dur); return; }
-  /* Sinon charge depuis IndexedDB */
+
+  /* Fallback Firebase : récupère l'URL Storage depuis gw/post_videos/{postId} */
+  function _tryStorageFallback() {
+    if (_gwFbReady && _gwFbDB) {
+      showToast('Chargement vidéo…', '');
+      _gwFbDB.ref('gw/post_videos/' + postId).once('value').then(function(snap) {
+        var d = snap.val();
+        if (d && d.url) {
+          /* Cache l'URL en mémoire et dans localStorage */
+          if (typeof post.video === 'object') post.video.url = d.url;
+          var all = _offGetPosts();
+          var p2 = all.find(function(x) { return String(x.id) === String(postId); });
+          if (p2 && p2.video && typeof p2.video === 'object') {
+            p2.video.url = d.url;
+            try { localStorage.setItem('gw_official_posts', JSON.stringify(all)); } catch(e2){}
+          }
+          openVideoPlayer(d.url, dur);
+        } else {
+          showToast('Vidéo introuvable', 'err');
+        }
+      }).catch(function() {
+        showToast('Vidéo introuvable', 'err');
+      });
+    } else {
+      showToast('Vidéo introuvable', 'err');
+    }
+  }
+
+  /* Sinon charge depuis IndexedDB (appareil d'origine) puis Storage */
   var idbId = typeof post.video === 'object' ? post.video.idbId : null;
   if (idbId) {
     _gwLoadVideoBlob(idbId, function(blob) {
-      if (!blob) { showToast('Vidéo introuvable', 'err'); return; }
+      if (!blob) { _tryStorageFallback(); return; }
       var bUrl = URL.createObjectURL(blob);
       post.video.url = bUrl;
       openVideoPlayer(bUrl, dur);
     });
+  } else {
+    _tryStorageFallback();
   }
 }
 
@@ -5389,20 +5666,51 @@ function _openVideoFromPost(postId, duration) {
   /* Comptage de la vue + milestone */
   var _newViews = _incrementVideoViews(postId);
   _checkViewMilestone(postId, post.ownerEmail || null, _newViews);
-  /* Si on a déjà l'URL en mémoire → ouvre directement */
+
+  /* ── Ordre de priorité : URL mémoire → IDB locale → Firebase RTDB ── */
+  function _tryFirebaseFallback() {
+    if (_gwFbReady && _gwFbDB) {
+      showToast('Chargement vidéo…', '');
+      _gwFbDB.ref('gw/post_videos/' + postId).once('value').then(function(snap) {
+        var d = snap.val();
+        if (d && d.url) {
+          post.video.url = d.url;
+          /* Met à jour le <video> dans le feed si visible */
+          var vEl = document.getElementById('fv-' + postId);
+          if (vEl) vEl.src = d.url;
+          openVideoPlayer(d.url, duration);
+        } else {
+          showToast('Vidéo non disponible sur cet appareil', 'err');
+        }
+      }).catch(function() {
+        showToast('Vidéo non disponible sur cet appareil', 'err');
+      });
+    } else {
+      showToast('Vidéo non disponible sur cet appareil', 'err');
+    }
+  }
+
+  /* 1. URL Storage déjà en mémoire */
   if (post.video.url) {
     openVideoPlayer(post.video.url, duration);
     return;
   }
-  /* Sinon charge depuis IndexedDB */
+  /* 2. Blob en IndexedDB (appareil d'origine) */
   if (post.video.idbId) {
     _gwLoadVideoBlob(post.video.idbId, function(blob) {
-      if (!blob) { showToast('Vidéo introuvable', 'err'); return; }
-      var bUrl = URL.createObjectURL(blob);
-      post.video.url = bUrl;
-      openVideoPlayer(bUrl, duration);
+      if (blob) {
+        var bUrl = URL.createObjectURL(blob);
+        post.video.url = bUrl;
+        openVideoPlayer(bUrl, duration);
+      } else {
+        /* 3. Fallback : chercher l'URL dans Firebase */
+        _tryFirebaseFallback();
+      }
     });
+    return;
   }
+  /* Pas d'idbId non plus → Firebase direct */
+  _tryFirebaseFallback();
 }
 
 /* ── Signaler un post ── */
@@ -7540,25 +7848,72 @@ function publierPost() {
   if (_currentUser) _incDailyCount('posts', _currentUser.email);
   renderFeed(DEMO_POSTS);
 
-  /* ── Upload images vers Firebase Storage puis sauvegarde définitive ── */
-  function _finalizePost(finalImages) {
+  /* ── Upload médias vers Firebase Storage puis sauvegarde définitive ── */
+  function _finalizePost(finalImages, finalVideoUrl) {
     newPost.images = finalImages;
     var postToStore = JSON.parse(JSON.stringify(newPost));
-    if (postToStore.video) { delete postToStore.video.url; }
-    if (postToStore.doc)   { delete postToStore.doc.url; }
+    if (postToStore.video) {
+      if (finalVideoUrl) {
+        /* URL Storage permanente : on la conserve pour la sync inter-appareils */
+        postToStore.video.url = finalVideoUrl;
+        if (newPost.video) newPost.video.url = finalVideoUrl;
+      } else {
+        /* Pas d'URL Storage : on retire le blobUrl (non sérialisable) */
+        delete postToStore.video.url;
+      }
+    }
+    if (postToStore.doc) { delete postToStore.doc.url; }
     persistNewPost(postToStore);
-    /* Re-render pour remplacer base64 par URLs Storage dans le DOM */
+    /* Re-render pour remplacer base64/blob par URLs Storage dans le DOM */
     var dp = DEMO_POSTS.find(function(p) { return p.id === newPost.id; });
-    if (dp) dp.images = finalImages;
+    if (dp) {
+      dp.images = finalImages;
+      if (finalVideoUrl && dp.video) dp.video.url = finalVideoUrl;
+    }
     renderFeed(DEMO_POSTS);
   }
 
-  if (_gwFbStorage && _imagesSnapshot.length > 0) {
-    _uploadImages('post_imgs/' + postId, _imagesSnapshot, function(urls) {
-      _finalizePost(urls);
-    });
+  if (_gwFbStorage && (_imagesSnapshot.length > 0 || videoBlob)) {
+    /* Compte combien d'uploads sont en cours (images + vidéo) */
+    var _pendingUploads  = (_imagesSnapshot.length > 0 ? 1 : 0) + (videoBlob ? 1 : 0);
+    var _uploadedImages  = _imagesSnapshot;
+    var _uploadedVideoUrl = null;
+
+    function _onUploadDone() {
+      if (--_pendingUploads <= 0) {
+        _finalizePost(_uploadedImages, _uploadedVideoUrl);
+      }
+    }
+
+    if (_imagesSnapshot.length > 0) {
+      _uploadImages('post_imgs/' + postId, _imagesSnapshot, function(urls) {
+        _uploadedImages = urls;
+        _onUploadDone();
+      });
+    }
+    if (videoBlob) {
+      var _vExt = (videoBlob.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
+      _showVideoProgress(0);
+      _uploadBlobToStorage('videos/' + postId + _vExt, videoBlob,
+        function(url) {
+          _uploadedVideoUrl = url;
+          _hideVideoProgress();
+          showToast('Vidéo synchronisée ✓', 'ok');
+          /* Écriture séparée pour livraison fiable aux autres appareils */
+          if (_gwFbReady && _gwFbDB) {
+            _gwFbDB.ref('gw/post_videos/' + postId).set({
+              url: url,
+              dur: newPost.video ? (newPost.video.duration || 0) : 0
+            }).catch(function(){});
+          }
+          _onUploadDone();
+        },
+        function() { _hideVideoProgress(); _onUploadDone(); },
+        function(pct) { _showVideoProgress(pct); }
+      );
+    }
   } else {
-    _finalizePost(_imagesSnapshot);
+    _finalizePost(_imagesSnapshot, null);
   }
 
   /* Réinitialise */
@@ -9972,10 +10327,16 @@ function _saveGroupMsg(conv, msg) {
       lastAt:   msg.at || Date.now()
     };
     localStorage.setItem(key, JSON.stringify(grpData));
-    /* ── Sync Firebase groupe ── */
+    /* ── Sync Firebase groupe : écriture ATOMIQUE par message (pas de race condition) ── */
     if (_gwFbReady && _gwFbDB) {
       var _fbGrpKey = key.replace(/\./g,'__d__').replace(/@/g,'__a__');
-      _gwFbDB.ref('gw/group_msgs/' + _fbGrpKey).set(grpData).catch(function(){});
+      var _grpRef   = _gwFbDB.ref('gw/group_msgs/' + _fbGrpKey);
+      /* Écrit seulement le nouveau message + meta → n'écrase pas les messages des autres */
+      var _grpUpdates = {};
+      _grpUpdates['messages/' + msg.id] = msg;
+      _grpUpdates['lastMsg'] = grpData.lastMsg;
+      _grpUpdates['lastAt']  = grpData.lastAt;
+      _grpRef.update(_grpUpdates).catch(function(){});
     }
   } catch(e) {}
 }
@@ -12237,12 +12598,13 @@ function handleChatAttach(input) {
   if (!file || !_chatConvId || !_currentUser) return;
   input.value = '';
 
-  if (file.size > 8 * 1024 * 1024) {
-    showToast('Fichier trop volumineux (max 8 Mo)', 'err'); return;
-  }
-
   var isImage = file.type.startsWith('image/');
   var isVideo = file.type.startsWith('video/');
+
+  var _maxBytes = isVideo ? 200 * 1024 * 1024 : 8 * 1024 * 1024;
+  if (file.size > _maxBytes) {
+    showToast('Fichier trop volumineux (max ' + (isVideo ? '200 Mo' : '8 Mo') + ')', 'err'); return;
+  }
 
   /* ── Fonction commune : construit + envoie le message ── */
   function _dispatchChatMedia(dataOrUrl, isStorageUrl) {
@@ -12303,8 +12665,20 @@ function handleChatAttach(input) {
     reader.readAsDataURL(file);
 
   } else if (isVideo) {
-    /* Vidéos : Firebase Storage requis (forfait Blaze payant) */
-    showToast('Les vidéos ne peuvent pas être partagées entre appareils (Storage non activé). Partagez via WhatsApp ou YouTube.', 'err');
+    /* Vidéos → Firebase Storage (Blaze) */
+    if (!_gwFbStorage) {
+      showToast('Storage non disponible — reconnectez-vous', 'err');
+      return;
+    }
+    showToast('Upload vidéo en cours…', '');
+    var _vMsgId = Date.now();
+    var _vExt2  = (file.name || '').split('.').pop() || 'mp4';
+    _uploadBlobToStorage(
+      'chat_videos/' + _vMsgId + '_' + _gwFbKey(_currentUser.email) + '.' + _vExt2,
+      file,
+      function(url) { showToast('Vidéo envoyée ✓', 'ok'); _dispatchChatMedia(url, true); },
+      function()    { showToast('Erreur upload vidéo', 'err'); }
+    );
 
   } else if (file.size > 280000) {
     /* Fichiers lourds (>280 Ko) : trop grand pour Firebase RTDB sans Storage */
@@ -12322,7 +12696,9 @@ function sendChatMessage() {
   _closeEmojiPicker();
   var inp  = document.getElementById('chat-input');
   var text = inp ? inp.value.trim() : '';
-  if (!text || !_chatConvId || !_currentUser) return;
+  if (!text) return;
+  if (!_currentUser) { showToast('Reconnectez-vous pour envoyer des messages', 'err'); return; }
+  if (!_chatConvId)  { showToast('Conversation introuvable — réouvrez la discussion', 'err'); return; }
 
   /* ── Vérification limite messages/jour ── */
   var _mLim = _getCurrentPlanLimits();
@@ -20559,13 +20935,45 @@ function _admPublishOfficial() {
     _admRender();
   }
 
-  /* ── Vidéo : sauvegarde dans IndexedDB pour persistance ── */
+  /* ── Vidéo : upload vers Firebase Storage puis publie ── */
   if (hasVid && _admOffVidFile) {
-    var videoIdbId = 'vid_off_' + Date.now();
-    /* Sauvegarde le Blob dans IndexedDB en arrière-plan */
-    _gwSaveVideoBlob(videoIdbId, _admOffVidFile, function() {});
-    /* Publie immédiatement avec l'idbId (pas de blob URL → valide après redémarrage) */
-    _offPublishPost(text, imgData, _adminUser ? _adminUser.nom : 'Geniwork', { idbId: videoIdbId });
+    var videoIdbId  = 'vid_off_' + Date.now();
+    var _offPostId  = 'off_' + Date.now();
+    var _offVidFile = _admOffVidFile;
+    var _offText    = text;
+    var _offImg     = imgData;
+    var _offNom     = _adminUser ? _adminUser.nom : 'Geniwork';
+    /* Sauvegarde le Blob dans IndexedDB (fallback appareil d'origine) */
+    _gwSaveVideoBlob(videoIdbId, _offVidFile, function() {});
+    if (_gwFbStorage) {
+      /* Upload vers Storage avec barre de progression */
+      var _vExt = (_offVidFile.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
+      _showVideoProgress(0);
+      _uploadBlobToStorage('videos/' + _offPostId + _vExt, _offVidFile,
+        function(url) {
+          _hideVideoProgress();
+          /* Publie avec l'URL Storage permanente */
+          _offPublishPost(_offText, _offImg, _offNom,
+            { idbId: videoIdbId, url: url }, _offPostId);
+          /* Nœud dédié pour livraison immédiate aux autres appareils */
+          if (_gwFbReady && _gwFbDB) {
+            _gwFbDB.ref('gw/post_videos/' + _offPostId).set({ url: url, dur: 0 }).catch(function(){});
+          }
+          _resetAdmForm();
+        },
+        function() {
+          /* Échec upload Storage → publie quand même (lecture IDB sur cet appareil) */
+          _hideVideoProgress();
+          _offPublishPost(_offText, _offImg, _offNom,
+            { idbId: videoIdbId }, _offPostId);
+          _resetAdmForm();
+        },
+        function(pct) { _showVideoProgress(pct); }
+      );
+      return; /* attend la fin de l'upload */
+    }
+    /* Pas de Storage disponible → publie avec IDB uniquement */
+    _offPublishPost(text, imgData, _offNom, { idbId: videoIdbId }, _offPostId);
   } else {
     _offPublishPost(text, imgData, _adminUser ? _adminUser.nom : 'Geniwork', null);
   }
@@ -20640,10 +21048,10 @@ function _admOffRemoveVideo() {
 }
 
 /* ── Publie un post officiel (partagé entre admin panel + user composer) ── */
-function _offPublishPost(text, imgData, publisherNom, videoData) {
+function _offPublishPost(text, imgData, publisherNom, videoData, presetId) {
   var posts = _offGetPosts();
   var newPost = {
-    id:             'off_' + Date.now(),
+    id:             presetId || ('off_' + Date.now()),
     isOfficial:     true,
     text:           text,
     images:         imgData ? [imgData] : [],
@@ -21431,8 +21839,32 @@ function _checkDMInbox() {
         DEMO_CONVERSATIONS.unshift(newConv);
         changed = true;
       } else {
-        /* Conversation existe déjà → mettre à jour le nom/role si profil enrichi */
+        /* Conversation existe déjà → mettre à jour nom/email + recharger les messages depuis localStorage */
         if (!existing.email) existing.email = entry.fromEmail;
+        /* Merge les messages du storage partagé dans la conv en mémoire */
+        var _existKey  = _getDMKey(_currentUser.email, entry.fromEmail);
+        var _existData = null;
+        try { _existData = JSON.parse(localStorage.getItem(_existKey)); } catch(e2){}
+        if (_existData && Array.isArray(_existData.messages)) {
+          var _existMap = {};
+          existing.messages.forEach(function(m) { _existMap[String(m.id)] = true; });
+          var _addedCount = 0;
+          _existData.messages.forEach(function(m) {
+            if (m && m.id && !_existMap[String(m.id)]) {
+              existing.messages.push(m);
+              _existMap[String(m.id)] = true;
+              _addedCount++;
+            }
+          });
+          if (_addedCount > 0) {
+            existing.messages.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
+            var _newLast = existing.messages[existing.messages.length - 1];
+            existing.lastMsg = (_newLast && _newLast.text) || _existData.lastMsg || existing.lastMsg;
+            existing.lastAt  = _existData.lastAt || existing.lastAt;
+            if (_chatConvId !== existing.id) existing.unread = (existing.unread || 0) + _addedCount;
+            changed = true;
+          }
+        }
       }
     });
     if (changed) {

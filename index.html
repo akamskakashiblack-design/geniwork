@@ -2927,14 +2927,18 @@
       <div class="chat-input-wrap">
         <input type="text" id="chat-input" class="chat-input"
                placeholder="Écrire un message..."
-               onkeydown="if(event.key==='Enter')sendChatMessage()"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();sendChatMessage();}"
+               onkeyup="if(event.key==='Enter'){event.preventDefault();}"
                onfocus="_closeEmojiPicker()"
-               autocomplete="off"/>
+               autocomplete="off"
+               inputmode="text"/>
       </div>
       <button class="chat-emoji-btn" id="chat-emoji-btn" onclick="toggleEmojiPicker(event)">
         <i class="far fa-face-smile"></i>
       </button>
-      <button class="chat-send-btn" onclick="sendChatMessage()" id="chat-send-btn">
+      <button class="chat-send-btn" id="chat-send-btn"
+              onclick="sendChatMessage()"
+              ontouchend="event.preventDefault();sendChatMessage()">
         <i class="fas fa-paper-plane"></i>
       </button>
     </div>

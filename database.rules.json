@@ -94,6 +94,13 @@
         }
       },
 
+      "post_videos": {
+        ".read":  true,
+        "$postId": {
+          ".write": "auth != null"
+        }
+      },
+
       "official_posts": {
         ".read":  true,
         ".write": "auth != null"
