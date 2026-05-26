@@ -532,7 +532,12 @@ function _gwFbSyncStart() {
   /* child_changed: messages suivants dans une conversation existante                  */
   function _onDmMsgsSnap(convSnap) {
     /* convSnap.key = dmFbKey ; convSnap.val() = {msgId: msg, ...} */
-    if (!_currentUser) return;
+    /* Si l'utilisateur n'est pas encore connecté, on retraite dans 1 s
+       (les child_added tirent avant le login lors de la restauration de session) */
+    if (!_currentUser) {
+      setTimeout(function() { try { _onDmMsgsSnap(convSnap); } catch(e){} }, 1000);
+      return;
+    }
     var dmFbKey = convSnap.key;
     var myFbPart = _gwFbKey(_currentUser.email);
     if (dmFbKey.indexOf(myFbPart) === -1) return;  /* pas ma conversation */
@@ -1658,11 +1663,13 @@ function _gwStartApp() {
     if (storedUser && !_admIsBanned(session.email)) {
       _currentUser = { nom: storedUser.nom, email: storedUser.email, loginMethod: storedUser.loginMethod || 'email' };
       _gwCreateSession(_currentUser);
-      setTimeout(function() {
+      /* Précharge les DMs, inbox et données utilisateur depuis Firebase (même chemin que doLogin)
+         avant d'initialiser l'app — garantit que les messages reçus hors connexion sont visibles */
+      _gwPreloadUserData(_currentUser, function() {
         initApp(_currentUser);
         scheduleNewPosts();
         goTo('screen-app');
-      }, 0);
+      });
     } else {
       localStorage.removeItem('gw_session');
     }
