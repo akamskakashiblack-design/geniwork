@@ -677,10 +677,31 @@ function _gwFbSyncStart() {
   _listen('sadmin', 'gw_sadmin');
 
   /* ── Publications officielles ── */
-  _listen('official_posts', 'gw_official_posts', function() {
+  _listen('official_posts', 'gw_official_posts', function(freshList) {
     if (document.getElementById('feed-list')) {
       try { _injectOfficialPosts(); } catch(e){}
     }
+    /* Pour chaque post vidéo sans URL → query gw/post_videos/{id} en parallèle */
+    if (!Array.isArray(freshList) || !_gwFbDB) return;
+    freshList.forEach(function(p) {
+      if (!p || !p.id || !p.video || typeof p.video !== 'object') return;
+      if (p.video.url) return; /* URL déjà présente → rien à faire */
+      /* Query directe pour récupérer l'URL Storage */
+      _gwFbDB.ref('gw/post_videos/' + p.id).once('value').then(function(snap) {
+        var d = snap.val();
+        if (!d || !d.url) return;
+        /* Mettre à jour localStorage */
+        var all = _offGetPosts();
+        var idx = all.findIndex(function(x) { return String(x.id) === String(p.id); });
+        if (idx !== -1 && all[idx].video && !all[idx].video.url) {
+          all[idx].video.url = d.url;
+          try { localStorage.setItem('gw_official_posts', JSON.stringify(all)); } catch(e2){}
+          /* Mettre à jour le <video> si déjà rendu */
+          var vEl = document.getElementById('off-fv-' + p.id);
+          if (vEl && !vEl.src) vEl.src = d.url;
+        }
+      }).catch(function(){});
+    });
   });
 
   /* ── Logo officiel ── */
@@ -20776,7 +20797,26 @@ function _admResolveAppeal(id, action) {
 
 /* ── Helpers ── */
 function _offGetPosts()        { try { return JSON.parse(localStorage.getItem('gw_official_posts') || '[]'); } catch(e){ return []; } }
-function _offSavePosts(list)   { localStorage.setItem('gw_official_posts', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('official_posts', list); }
+function _offSavePosts(list) {
+  localStorage.setItem('gw_official_posts', JSON.stringify(list));
+  if (!_gwFbSkip && _gwFbDB && _gwFbReady) {
+    /* Strip les images base64 trop lourdes avant d'écrire dans Firebase
+       (évite le dépassement de la limite 4 Mo qui ferait échouer le write) */
+    var fbList = list.slice(0, 30).map(function(p) {
+      var copy = Object.assign({}, p);
+      if (copy.images) {
+        copy.images = copy.images.map(function(img) {
+          return (!img || (typeof img === 'string' && img.startsWith('data:') && img.length > 120000))
+            ? '' : img;
+        }).filter(Boolean);
+      }
+      return copy;
+    });
+    _gwFbDB.ref('gw/official_posts').set(fbList).catch(function(e) {
+      console.error('[GW Firebase] ❌ official_posts →', e.message || e);
+    });
+  }
+}
 function _offGetPublishers()   { try { return JSON.parse(localStorage.getItem('gw_publishers') || '[]'); } catch(e){ return []; } }
 function _offSavePublishers(l) { localStorage.setItem('gw_publishers', JSON.stringify(l)); }
 
