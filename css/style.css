@@ -7374,29 +7374,19 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
    PROFIL OFFICIEL GENIWORK
    ════════════════════════════════════════════════ */
 .off-profile-overlay {
-  position: fixed; inset: 0;
-  left: 50%; transform: translateX(-50%);
+  position: fixed;
+  top: 0; bottom: 0;
+  left: 50%;
   width: 100%; max-width: 430px;
-  background: rgba(0,0,0,.5);
-  z-index: 900;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .25s;
-}
-.off-profile-overlay.open {
-  opacity: 1;
-  pointer-events: auto;
-}
-.off-profile-sheet {
-  position: absolute; inset: 0;
   background: #0F172A;
+  z-index: 900;
   display: flex; flex-direction: column;
   transform: translateX(100%);
   transition: transform .3s cubic-bezier(.4,0,.2,1);
   overflow: hidden;
 }
-.off-profile-overlay.open .off-profile-sheet {
-  transform: translateX(0);
+.off-profile-overlay.open {
+  transform: translateX(-50%);
 }
 .off-profile-topbar {
   display: flex; align-items: center; justify-content: space-between;

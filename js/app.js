@@ -9709,57 +9709,57 @@ function openOfficialProfile() {
   panel.id = 'off-profile-panel';
   panel.className = 'off-profile-overlay';
   panel.innerHTML =
-    '<div class="off-profile-sheet">' +
-      /* Header topbar */
-      '<div class="off-profile-topbar">' +
-        '<button class="off-profile-back" onclick="closeOfficialProfile()"><i class="fas fa-arrow-left"></i></button>' +
-        '<span class="off-profile-topbar-title">Profil officiel</span>' +
-        '<div style="width:40px"></div>' +
+    /* Header topbar */
+    '<div class="off-profile-topbar">' +
+      '<button class="off-profile-back" onclick="closeOfficialProfile()"><i class="fas fa-arrow-left"></i></button>' +
+      '<span class="off-profile-topbar-title">Profil officiel</span>' +
+      '<div style="width:40px"></div>' +
+    '</div>' +
+    /* Corps scrollable */
+    '<div class="off-profile-body">' +
+      /* Avatar + identité */
+      '<div class="off-profile-hero">' +
+        '<div class="off-profile-avatar">' + avatarHtml + '</div>' +
+        '<div class="off-profile-identity">' +
+          '<h2 class="off-profile-name">Geniwork' +
+            '<span class="off-profile-verified"><i class="fas fa-circle-check"></i></span>' +
+          '</h2>' +
+          '<p class="off-profile-role">Compte officiel certifié</p>' +
+        '</div>' +
       '</div>' +
-      /* Corps */
-      '<div class="off-profile-body">' +
-        /* Avatar + identité */
-        '<div class="off-profile-hero">' +
-          '<div class="off-profile-avatar">' + avatarHtml + '</div>' +
-          '<div class="off-profile-identity">' +
-            '<h2 class="off-profile-name">Geniwork' +
-              '<span class="off-profile-verified"><i class="fas fa-circle-check"></i></span>' +
-            '</h2>' +
-            '<p class="off-profile-role">Compte officiel certifié</p>' +
-          '</div>' +
+
+      /* Stats */
+      '<div class="off-profile-stats">' +
+        '<div class="off-profile-stat">' +
+          '<strong id="off-profile-followers">' + followers + '</strong>' +
+          '<span>Abonnés</span>' +
         '</div>' +
-
-        /* Stats */
-        '<div class="off-profile-stats">' +
-          '<div class="off-profile-stat">' +
-            '<strong id="off-profile-followers">' + followers + '</strong>' +
-            '<span>Abonnés</span>' +
-          '</div>' +
-          '<div class="off-profile-stat">' +
-            '<strong>' + offPosts.length + '</strong>' +
-            '<span>Publications</span>' +
-          '</div>' +
+        '<div class="off-profile-stat">' +
+          '<strong>' + offPosts.length + '</strong>' +
+          '<span>Publications</span>' +
         '</div>' +
-
-        /* Bouton Suivre */
-        '<div class="off-profile-follow-wrap">' +
-          '<button class="off-profile-follow-btn ' + (following ? 'following' : '') + '" id="off-profile-follow-btn" onclick="_toggleFollowOfficial(this)">' +
-            '<i class="fas fa-' + (following ? 'check' : 'user-plus') + '"></i>' +
-            ' <span id="off-profile-follow-label">' + (following ? 'Abonné' : 'Suivre') + '</span>' +
-          '</button>' +
-        '</div>' +
-
-        /* Séparateur publications */
-        '<div class="off-profile-section-title"><i class="fas fa-newspaper"></i> Publications</div>' +
-
-        /* Liste des posts */
-        '<div id="off-profile-posts-list">' + postsHtml + '</div>' +
       '</div>' +
+
+      /* Bouton Suivre */
+      '<div class="off-profile-follow-wrap">' +
+        '<button class="off-profile-follow-btn ' + (following ? 'following' : '') + '" id="off-profile-follow-btn" onclick="_toggleFollowOfficial(this)">' +
+          '<i class="fas fa-' + (following ? 'check' : 'user-plus') + '"></i>' +
+          ' <span id="off-profile-follow-label">' + (following ? 'Abonné' : 'Suivre') + '</span>' +
+        '</button>' +
+      '</div>' +
+
+      /* Séparateur publications */
+      '<div class="off-profile-section-title"><i class="fas fa-newspaper"></i> Publications</div>' +
+
+      /* Liste des posts */
+      '<div id="off-profile-posts-list">' + postsHtml + '</div>' +
     '</div>';
 
   (document.querySelector('.phone-frame') || document.body).appendChild(panel);
-  /* Animation d'entrée */
-  requestAnimationFrame(function() { panel.classList.add('open'); });
+  /* Double rAF pour déclencher la transition CSS après insertion dans le DOM */
+  requestAnimationFrame(function() {
+    requestAnimationFrame(function() { panel.classList.add('open'); });
+  });
 }
 
 function closeOfficialProfile() {
@@ -15946,6 +15946,12 @@ function renderSrchResults(query) {
   var matchedUsers = [];
   var seenNames    = {};
 
+  /* ── Compte officiel Geniwork (toujours en tête si la requête correspond) ── */
+  if ('geniwork'.indexOf(q) !== -1 || 'officiel'.indexOf(q) !== -1 || q.indexOf('geni') !== -1) {
+    seenNames['geniwork'] = true;
+    matchedUsers.push({ nom: 'Geniwork', email: null, role: 'Compte officiel certifié', _isOfficial: true });
+  }
+
   /* Utilisateurs inscrits — toujours le nom actuel du profil */
   getUsers().forEach(function(u) {
     var currentNom  = getDisplayName(u.email, u.nom);
@@ -15976,6 +15982,12 @@ function renderSrchResults(query) {
            currentNom.toLowerCase().indexOf(q)                   !== -1  ||
            (p.role       && p.role.toLowerCase().indexOf(q)      !== -1);
   });
+  /* ── Publications officielles aussi cherchées ── */
+  var matchedOfficialPosts = _offGetPosts().filter(function(p) {
+    return (p.text && p.text.toLowerCase().indexOf(q) !== -1) ||
+           'geniwork'.indexOf(q) !== -1;
+  }).map(function(p) { return Object.assign({}, p, { _isOfficialPost: true }); });
+  matchedPosts = matchedOfficialPosts.concat(matchedPosts);
 
   var html     = '';
   var hasAny   = false;
@@ -15986,6 +15998,23 @@ function renderSrchResults(query) {
       html += '<div class="srch-section-title">Utilisateurs</div>';
     }
     matchedUsers.slice(0, 6).forEach(function(u) {
+      /* Compte officiel → ouvre openOfficialProfile */
+      if (u._isOfficial) {
+        var officialLogo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
+        var offAvHtml = officialLogo
+          ? '<div class="avatar sm srch-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);padding:0;overflow:hidden"><img src="' + escHtml(officialLogo) + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%"></div>'
+          : '<div class="avatar sm srch-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6)"><i class="fas fa-star" style="font-size:.9rem"></i></div>';
+        html +=
+          '<div class="srch-user-item" onclick="closeSearch();openOfficialProfile()">' +
+            offAvHtml +
+            '<div class="srch-user-info">' +
+              '<strong>' + _srchHighlight('Geniwork', query) + ' <span style="font-size:.7rem;color:#3B82F6;margin-left:4px"><i class="fas fa-circle-check"></i> Officiel</span></strong>' +
+              '<small>Compte officiel certifié</small>' +
+            '</div>' +
+            '<i class="fas fa-chevron-right srch-chevron"></i>' +
+          '</div>';
+        return;
+      }
       var emailArg = u.email ? '\'' + u.email + '\'' : 'null';
       html +=
         '<div class="srch-user-item" onclick="srchOpenProfile(' +
@@ -16014,6 +16043,26 @@ function renderSrchResults(query) {
         mediaIco = '<i class="fas fa-image srch-media-icon"></i>';
       } else if (p.video) {
         mediaIco = '<i class="fas fa-play srch-media-icon"></i>';
+      }
+      /* Post officiel */
+      if (p._isOfficialPost) {
+        var offLogo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
+        var offAvHtml2 = offLogo
+          ? '<div class="avatar sm srch-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);padding:0;overflow:hidden"><img src="' + escHtml(offLogo) + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%"></div>'
+          : '<div class="avatar sm srch-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6)"><i class="fas fa-star" style="font-size:.9rem"></i></div>';
+        html +=
+          '<div class="srch-post-item" onclick="closeSearch();openOfficialProfile()">' +
+            '<div class="srch-post-header">' +
+              offAvHtml2 +
+              '<div class="srch-post-meta">' +
+                '<strong>Geniwork <span style="font-size:.7rem;color:#3B82F6"><i class="fas fa-circle-check"></i></span></strong>' +
+                '<small>Publication officielle</small>' +
+              '</div>' +
+              mediaIco +
+            '</div>' +
+            (preview ? '<p class="srch-post-preview">' + _srchHighlight(escHtml(preview), query) + '</p>' : '') +
+          '</div>';
+        return;
       }
       var postDisplayNom  = getDisplayName(p.ownerEmail, p.author);
       var postDisplayRole = getDisplayRole(p.ownerEmail, p.role);
