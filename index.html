@@ -227,8 +227,8 @@
           <div class="verify-icon"><i class="fas fa-envelope-open-text"></i></div>
           <h1>Vérifiez votre e-mail</h1>
           <p>Nous avons envoyé un code à 4 chiffres à<br/><strong id="verify-email-display">—</strong></p>
-          <!-- En mode démo : affiche le code simulé -->
-          <div class="demo-code-box">
+          <!-- Code envoyé par e-mail (invisible) -->
+          <div class="demo-code-box" id="demo-code-box-wrap" style="display:none">
             <i class="fas fa-info-circle"></i>
             Code de démo : <strong id="demo-code-display">—</strong>
           </div>
@@ -305,7 +305,8 @@
           <div class="verify-icon orange"><i class="fas fa-shield-halved"></i></div>
           <h1>Code de vérification</h1>
           <p>Un code a été envoyé à<br/><strong id="reset-email-display">—</strong></p>
-          <div class="demo-code-box">
+          <!-- Code envoyé par e-mail (invisible) -->
+          <div class="demo-code-box" id="demo-reset-code-box-wrap" style="display:none">
             <i class="fas fa-info-circle"></i>
             Code de démo : <strong id="demo-reset-code">—</strong>
           </div>

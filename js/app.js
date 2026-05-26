@@ -2007,6 +2007,28 @@ function generateCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
 
+/* ── Envoie un code par e-mail via /api/send-code ── */
+function _gwMailCode(email, code, type, onDone) {
+  fetch('/api/send-code', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ email: email, code: code, type: type })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.ok) {
+      showToast('Code envoyé à ' + email + ' 📧', 'ok');
+    } else {
+      showToast('Erreur envoi email : ' + (data.error || 'inconnu'), 'err');
+    }
+    if (onDone) onDone(!!data.ok);
+  })
+  .catch(function() {
+    showToast('Impossible d\'envoyer l\'email. Vérifiez la connexion.', 'err');
+    if (onDone) onDone(false);
+  });
+}
+
 /* Codes temporaires en mémoire */
 var _verifyCode = '';       // code inscription
 var _verifyEmail = '';      // email en attente de vérification
@@ -2053,9 +2075,10 @@ function doRegister() {
     _verifyEmail = email;
     _verifyData  = { nom: nom, email: email, password: pwd, verified: false };
     document.getElementById('verify-email-display').textContent = email;
-    document.getElementById('demo-code-display').textContent    = _verifyCode;
     clearCodeInputs(['c1','c2','c3','c4']);
     goTo('screen-verify');
+    /* Envoie le code par email (le code n'est plus affiché à l'écran) */
+    _gwMailCode(email, _verifyCode, 'register');
   }
 
   if (_gwFbReady && _gwFbDB) {
@@ -2143,9 +2166,8 @@ function doVerify() {
 function resendCode() {
   if (!_verifyEmail) return;
   _verifyCode = generateCode();
-  document.getElementById('demo-code-display').textContent = _verifyCode;
   clearCodeInputs(['c1','c2','c3','c4']);
-  showToast('Nouveau code envoyé ✓', 'ok');
+  _gwMailCode(_verifyEmail, _verifyCode, 'register');
 }
 
 /* ══════════════════════════════════════════
@@ -2323,12 +2345,11 @@ function doForgot() {
   _resetEmail = email;
 
   document.getElementById('reset-email-display').textContent = email;
-  document.getElementById('demo-reset-code').textContent     = _resetCode;
   clearCodeInputs(['r1','r2','r3','r4']);
 
   goTo('screen-reset-verify');
-  showToast('Code envoyé à ' + email, 'ok');
-  /* Code affiché à l'écran (démo) — production : envoi par email côté serveur */
+  /* Envoie le code par e-mail */
+  _gwMailCode(email, _resetCode, 'reset');
 }
 
 /* ══════════════════════════════════════════
@@ -2356,9 +2377,8 @@ function doResetVerify() {
 function resendResetCode() {
   if (!_resetEmail) return;
   _resetCode = generateCode();
-  document.getElementById('demo-reset-code').textContent = _resetCode;
   clearCodeInputs(['r1','r2','r3','r4']);
-  showToast('Nouveau code envoyé ✓', 'ok');
+  _gwMailCode(_resetEmail, _resetCode, 'reset');
 }
 
 /* ══════════════════════════════════════════
