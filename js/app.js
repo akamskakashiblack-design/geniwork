@@ -625,6 +625,35 @@ function _gwFbSyncStart() {
   _gwFbDB.ref('gw/rcounts').on('child_added',   function(snap) { _gwMergeRcount(snap); });
   _gwFbDB.ref('gw/rcounts').on('child_changed', function(snap) { _gwMergeRcount(snap); });
 
+  /* ── Vues vidéo (compteur temps réel) ── */
+  function _gwMergeVidViews(snap) {
+    try {
+      var postId = snap.key;
+      var count  = snap.val();
+      if (typeof count !== 'number') return;
+      var cur = parseInt(localStorage.getItem('gw_vid_views_' + postId) || '0', 10);
+      if (count > cur) {
+        localStorage.setItem('gw_vid_views_' + postId, count);
+        var badge = document.getElementById('vid-views-' + postId);
+        if (badge) badge.textContent = _fmtViews(count);
+      }
+    } catch(e){}
+  }
+  _gwFbDB.ref('gw/vid_views').on('child_added',   function(snap) { _gwMergeVidViews(snap); });
+  _gwFbDB.ref('gw/vid_views').on('child_changed', function(snap) { _gwMergeVidViews(snap); });
+
+  /* ── Réactions commentaires (temps réel) ── */
+  function _gwMergeCreact(snap) {
+    try {
+      var cid   = snap.key;
+      var react = snap.val();
+      if (!react) return;
+      localStorage.setItem('gw_creact_' + cid, JSON.stringify(react));
+    } catch(e){}
+  }
+  _gwFbDB.ref('gw/creact').on('child_added',   function(snap) { _gwMergeCreact(snap); });
+  _gwFbDB.ref('gw/creact').on('child_changed', function(snap) { _gwMergeCreact(snap); });
+
   /* ── Commentaires (temps réel entre appareils) ── */
   function _gwMergeComments(snap) {
     try {
@@ -770,6 +799,30 @@ function _gwFbSyncStart() {
   _listen('collab_requests', 'gw_collab_requests', function() {
     if (document.getElementById('collab-list-wrap')) { try { _collabRender(); } catch(e){} }
   });
+
+  /* ── Éditeurs officiels ── */
+  _listen('publishers', 'gw_publishers');
+
+  /* ── Tâches admin ── */
+  _listen('admin_tasks', 'gw_admin_tasks', function() {
+    if (_adminUser) { try { _admRender(); } catch(e){} }
+  });
+
+  /* ── Demandes de badge ── */
+  _listen('badge_requests', 'gw_badge_requests', function() {
+    if (_adminUser) { try { _admRender(); } catch(e){} }
+  });
+
+  /* ── Milestones de l'utilisateur connecté ── */
+  if (_currentUser) {
+    _gwFbDB.ref('gw/milestones/' + _gwFbKey(_currentUser.email)).on('value', function(snap) {
+      if (_gwFbSkip) return;
+      var data = snap.val() || {};
+      Object.keys(data).forEach(function(k) {
+        if (data[k]) localStorage.setItem('gw_mile_' + k, '1');
+      });
+    });
+  }
 
   /* ── Notifications de l'utilisateur connecté ── */
   if (_currentUser) _gwFbWatchUserNotifs(_currentUser.email);
@@ -1285,15 +1338,22 @@ function _gwPreloadUserData(user, callback) {
   }
   var fbKey = _gwFbKey(user.email);
   Promise.all([
-    _gwFbDB.ref('gw/inboxes/' + fbKey).once('value'),
-    _gwFbDB.ref('gw/notifs/' + fbKey).once('value'),
-    _gwFbDB.ref('gw/profiles/' + fbKey).once('value'),
-    _gwFbDB.ref('gw/dms').once('value'),
-    _gwFbDB.ref('gw/group_inboxes/' + fbKey).once('value'),
-    _gwFbDB.ref('gw/group_msgs').once('value'),
-    _gwFbDB.ref('gw/following/' + fbKey).once('value'),
-    _gwFbDB.ref('gw/follow_counts').once('value'),
-    _gwFbDB.ref('gw/dm_msgs').once('value')
+    _gwFbDB.ref('gw/inboxes/' + fbKey).once('value'),         /* 0 */
+    _gwFbDB.ref('gw/notifs/' + fbKey).once('value'),          /* 1 */
+    _gwFbDB.ref('gw/profiles/' + fbKey).once('value'),        /* 2 */
+    _gwFbDB.ref('gw/dms').once('value'),                      /* 3 */
+    _gwFbDB.ref('gw/group_inboxes/' + fbKey).once('value'),   /* 4 */
+    _gwFbDB.ref('gw/group_msgs').once('value'),               /* 5 */
+    _gwFbDB.ref('gw/following/' + fbKey).once('value'),       /* 6 */
+    _gwFbDB.ref('gw/follow_counts').once('value'),            /* 7 */
+    _gwFbDB.ref('gw/dm_msgs').once('value'),                  /* 8 */
+    _gwFbDB.ref('gw/projects/' + fbKey).once('value'),        /* 9 */
+    _gwFbDB.ref('gw/services/' + fbKey).once('value'),        /* 10 */
+    _gwFbDB.ref('gw/blocked/' + fbKey).once('value'),         /* 11 */
+    _gwFbDB.ref('gw/privacy/' + fbKey).once('value'),         /* 12 */
+    _gwFbDB.ref('gw/collab_invites/' + fbKey).once('value'),  /* 13 */
+    _gwFbDB.ref('gw/reviews/' + fbKey).once('value'),         /* 14 */
+    _gwFbDB.ref('gw/milestones/' + fbKey).once('value')       /* 15 */
   ]).then(function(snaps) {
     var inboxRaw = snaps[0].val();
     if (inboxRaw) {
@@ -1407,6 +1467,48 @@ function _gwPreloadUserData(user, callback) {
         }
       });
     }
+
+    /* ── Projets ── */
+    var projectsFb = snaps[9] ? snaps[9].val() : null;
+    if (projectsFb && Array.isArray(projectsFb)) {
+      try { localStorage.setItem('gw_projects_' + user.email, JSON.stringify(projectsFb)); } catch(e){}
+    }
+
+    /* ── Services ── */
+    var servicesFb = snaps[10] ? snaps[10].val() : null;
+    if (servicesFb && Array.isArray(servicesFb)) {
+      try { localStorage.setItem('gw_services_' + user.email, JSON.stringify(servicesFb)); } catch(e){}
+    }
+
+    /* ── Utilisateurs bloqués ── */
+    var blockedFb = snaps[11] ? snaps[11].val() : null;
+    if (blockedFb && Array.isArray(blockedFb)) {
+      try { localStorage.setItem('gw_blocked_' + user.email, JSON.stringify(blockedFb)); } catch(e){}
+    }
+
+    /* ── Paramètres de confidentialité ── */
+    var privacyFb = snaps[12] ? snaps[12].val() : null;
+    if (privacyFb && typeof privacyFb === 'object') {
+      try { localStorage.setItem('gw_privacy_' + user.email, JSON.stringify(privacyFb)); } catch(e){}
+    }
+
+    /* ── Invitations de collaboration ── */
+    var collabInvFb = snaps[13] ? snaps[13].val() : null;
+    if (collabInvFb && Array.isArray(collabInvFb)) {
+      try { localStorage.setItem('gw_collab_invites_' + user.email, JSON.stringify(collabInvFb)); } catch(e){}
+    }
+
+    /* ── Avis reçus sur le profil ── */
+    var reviewsFb = snaps[14] ? snaps[14].val() : null;
+    if (reviewsFb && Array.isArray(reviewsFb)) {
+      try { localStorage.setItem('gw_reviews_' + user.email, JSON.stringify(reviewsFb)); } catch(e){}
+    }
+
+    /* ── Milestones (badges de jalons déjà déclenchés) ── */
+    var milestonesFb = snaps[15] ? (snaps[15].val() || {}) : {};
+    Object.keys(milestonesFb).forEach(function(k) {
+      if (milestonesFb[k]) localStorage.setItem('gw_mile_' + k, '1');
+    });
 
     callback();
   }).catch(function() { callback(); });
@@ -3970,6 +4072,9 @@ function _privLoad() {
 function _privSave(data) {
   if (!_currentUser) return;
   try { localStorage.setItem('gw_privacy_' + _currentUser.email, JSON.stringify(data)); } catch(e) {}
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/privacy/' + _gwFbKey(_currentUser.email)).set(data).catch(function(){});
+  }
 }
 
 function openPrivacySettings() {
@@ -5547,6 +5652,9 @@ function _getVideoViews(postId) {
 function _incrementVideoViews(postId) {
   var v = _getVideoViews(postId) + 1;
   localStorage.setItem('gw_vid_views_' + postId, v);
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/vid_views/' + postId).set(v).catch(function(){});
+  }
   /* Met à jour le badge dans le DOM si visible */
   var badge = document.getElementById('vid-views-' + postId);
   if (badge) badge.textContent = _fmtViews(v);
@@ -5567,7 +5675,12 @@ var _MILE_COMMENTS = [10, 50, 100, 500, 1000, 5000];
 var _MILE_FOLLOWS  = [100, 500, 1000, 2000, 3000, 5000, 10000, 50000, 100000];
 
 function _mileDone(key)  { return localStorage.getItem('gw_mile_' + key) === '1'; }
-function _mileMark(key)  { localStorage.setItem('gw_mile_' + key, '1'); }
+function _mileMark(key)  {
+  localStorage.setItem('gw_mile_' + key, '1');
+  if (_gwFbReady && _gwFbDB && _currentUser) {
+    _gwFbDB.ref('gw/milestones/' + _gwFbKey(_currentUser.email) + '/' + key).set(true).catch(function(){});
+  }
+}
 function _mileLabel(n) {
   if (n >= 1000000) return (n / 1000000) + 'M';
   if (n >= 1000)    return (n / 1000) + 'K';
@@ -5853,6 +5966,9 @@ function blockUser(postId) {
     blocked.push(blockedEmail || blockedName);
   }
   localStorage.setItem(key, JSON.stringify(blocked));
+  if (_gwFbReady && _gwFbDB && _currentUser) {
+    _gwFbDB.ref('gw/blocked/' + _gwFbKey(_currentUser.email)).set(blocked).catch(function(){});
+  }
 
   /* Retire toutes les publications de cet utilisateur du feed */
   document.querySelectorAll('.post-card').forEach(function(card) {
@@ -5894,6 +6010,9 @@ function getCommentReact(cid) {
 }
 function saveCommentReact(cid, react) {
   localStorage.setItem('gw_creact_' + cid, JSON.stringify(react));
+  if (_gwFbReady && _gwFbDB && cid) {
+    _gwFbDB.ref('gw/creact/' + cid).set(react).catch(function(){});
+  }
 }
 
 /* Tous les commentaires d'un post = demo (fixes) + utilisateurs (localStorage) */
@@ -9448,7 +9567,12 @@ function _getSeedNum(key, min, max) {
 
 /* ── Storage avis ── */
 function loadReviews(profileKey)            { return JSON.parse(localStorage.getItem('gw_reviews_' + profileKey) || '[]'); }
-function saveReviews(profileKey, reviews)   { localStorage.setItem('gw_reviews_' + profileKey, JSON.stringify(reviews)); }
+function saveReviews(profileKey, reviews) {
+  localStorage.setItem('gw_reviews_' + profileKey, JSON.stringify(reviews));
+  if (_gwFbReady && _gwFbDB && profileKey) {
+    _gwFbDB.ref('gw/reviews/' + _gwFbKey(profileKey)).set(reviews).catch(function(){});
+  }
+}
 
 /* ── Ouvrir la vue ── */
 function openUserProfileView(userInfo) {
@@ -12254,6 +12378,9 @@ function _doBlockUser() {
       var blocked = JSON.parse(localStorage.getItem('gw_blocked_' + _currentUser.email) || '[]');
       if (conv.email && !blocked.includes(conv.email)) blocked.push(conv.email);
       localStorage.setItem('gw_blocked_' + _currentUser.email, JSON.stringify(blocked));
+      if (_gwFbReady && _gwFbDB) {
+        _gwFbDB.ref('gw/blocked/' + _gwFbKey(_currentUser.email)).set(blocked).catch(function(){});
+      }
     } catch(e) {}
   }
   showToast('Utilisateur bloqué 🚫', 'ok');
@@ -13370,6 +13497,9 @@ function loadProjects(email) {
 }
 function saveProjects(email, arr) {
   localStorage.setItem('gw_projects_' + email, JSON.stringify(arr));
+  if (_gwFbReady && _gwFbDB && email) {
+    _gwFbDB.ref('gw/projects/' + _gwFbKey(email)).set(arr).catch(function(){});
+  }
 }
 
 /* ── Variables du formulaire ── */
@@ -13819,6 +13949,9 @@ function _getCollabInvites(email) {
 }
 function _saveCollabInvites(email, arr) {
   localStorage.setItem('gw_collab_invites_' + email, JSON.stringify(arr));
+  if (_gwFbReady && _gwFbDB && email) {
+    _gwFbDB.ref('gw/collab_invites/' + _gwFbKey(email)).set(arr).catch(function(){});
+  }
 }
 
 /* ── Ouvrir le panneau d'invitation ── */
@@ -14370,6 +14503,9 @@ function loadUserServices(email) {
 }
 function saveUserServices(email, list) {
   localStorage.setItem('gw_services_' + email, JSON.stringify(list));
+  if (_gwFbReady && _gwFbDB && email) {
+    _gwFbDB.ref('gw/services/' + _gwFbKey(email)).set(list).catch(function(){});
+  }
 }
 
 /* ── Ouvrir le formulaire d'ajout ── */
@@ -17728,9 +17864,19 @@ function _admSaveAdmins(list)     { localStorage.setItem('gw_admins', JSON.strin
 function _admGetBans()            { try { return JSON.parse(localStorage.getItem('gw_bans') || '[]'); } catch(e){ return []; } }
 function _admSaveBans(list)       { localStorage.setItem('gw_bans', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('bans', list); }
 function _admGetBadgeReqs()       { try { return JSON.parse(localStorage.getItem('gw_badge_requests') || '[]'); } catch(e){ return []; } }
-function _admSaveBadgeReqs(list)  { localStorage.setItem('gw_badge_requests', JSON.stringify(list)); }
+function _admSaveBadgeReqs(list) {
+  localStorage.setItem('gw_badge_requests', JSON.stringify(list));
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/badge_requests').set(list).catch(function(){});
+  }
+}
 function _admGetTasks()           { try { return JSON.parse(localStorage.getItem('gw_admin_tasks') || '[]'); } catch(e){ return []; } }
-function _admSaveTasks(list)      { localStorage.setItem('gw_admin_tasks', JSON.stringify(list)); }
+function _admSaveTasks(list) {
+  localStorage.setItem('gw_admin_tasks', JSON.stringify(list));
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/admin_tasks').set(list).catch(function(){});
+  }
+}
 function _admGetLog()             { try { return JSON.parse(localStorage.getItem('gw_admin_log') || '[]'); } catch(e){ return []; } }
 function _admLog(action, target) {
   var log = _admGetLog();
@@ -21204,7 +21350,12 @@ function _offSavePosts(list) {
   }
 }
 function _offGetPublishers()   { try { return JSON.parse(localStorage.getItem('gw_publishers') || '[]'); } catch(e){ return []; } }
-function _offSavePublishers(l) { localStorage.setItem('gw_publishers', JSON.stringify(l)); }
+function _offSavePublishers(l) {
+  localStorage.setItem('gw_publishers', JSON.stringify(l));
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/publishers').set(l).catch(function(){});
+  }
+}
 
 /* Vérifie si un email est éditeur autorisé */
 function _offIsPublisher(email) {

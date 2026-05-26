@@ -199,6 +199,108 @@
           ".read":  "auth != null",
           ".write": "auth != null"
         }
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         PROFILS UTILISATEURS — données personnelles synchronisées
+      ═══════════════════════════════════════════════════════════════ */
+
+      /* Projets : gw/projects/{userFbKey} → tableau de projets */
+      "projects": {
+        ".read":  true,
+        "$userFbKey": {
+          ".write": "auth != null"
+        }
+      },
+
+      /* Services/produits : gw/services/{userFbKey} → tableau de services */
+      "services": {
+        ".read":  true,
+        "$userFbKey": {
+          ".write": "auth != null"
+        }
+      },
+
+      /* Avis reçus : gw/reviews/{profileFbKey} → tableau d'avis */
+      "reviews": {
+        ".read":  true,
+        "$profileFbKey": {
+          ".write": "auth != null"
+        }
+      },
+
+      /* Utilisateurs bloqués (privé) : gw/blocked/{userFbKey} */
+      "blocked": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+
+      /* Confidentialité (privé) : gw/privacy/{userFbKey} */
+      "privacy": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+
+      /* Invitations de collaboration (privé) : gw/collab_invites/{userFbKey} */
+      "collab_invites": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         MÉTRIQUES & JALONS
+      ═══════════════════════════════════════════════════════════════ */
+
+      /* Milestones par utilisateur : gw/milestones/{userFbKey}/{key} */
+      "milestones": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+
+      /* Vues vidéo : gw/vid_views/{postId} → nombre */
+      "vid_views": {
+        ".read":  true,
+        "$postId": {
+          ".write": "auth != null"
+        }
+      },
+
+      /* Réactions commentaires : gw/creact/{cid} → {likes:[], dislikes:[]} */
+      "creact": {
+        ".read":  true,
+        "$cid": {
+          ".write": "auth != null"
+        }
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         ADMINISTRATION
+      ═══════════════════════════════════════════════════════════════ */
+
+      /* Éditeurs officiels */
+      "publishers": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+
+      /* Tâches admin */
+      "admin_tasks": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+
+      /* Demandes de badge */
+      "badge_requests": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
       }
     }
   }
