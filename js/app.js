@@ -1507,6 +1507,15 @@ function _gwPreloadUserData(user, callback) {
         }
       }
       if (merged && Object.keys(merged).length) {
+        /* Dernier recours : si aucune source n'a de photo, tente la sauvegarde dédiée */
+        if (!merged.photo) {
+          var _photoBackup = localStorage.getItem('gw_photo_' + user.email);
+          if (_photoBackup) {
+            merged.photo = _photoBackup;
+            /* Re-pousse vers Firebase pour resynchroniser */
+            try { _pushProfileToFirebase(user.email, merged); } catch(e){}
+          }
+        }
         try { localStorage.setItem('gw_profile_' + user.email, JSON.stringify(merged)); } catch(e){}
       }
     }
@@ -1719,7 +1728,8 @@ function _gwFbPreloadAndStart() {
         try { existing = JSON.parse(localStorage.getItem('gw_profile_' + email)); } catch(e2){}
         /* Garde la photo locale si Firebase n'en a pas */
         var _hasLocalPhotoOnly = !!(existing && existing.photo && !profile.photo);
-        var merged = Object.assign({}, profile, _hasLocalPhotoOnly ? { photo: existing.photo } : {});
+        /* Fusionne existing + Firebase (existing en base, Firebase par-dessus) pour ne perdre aucune donnée locale */
+        var merged = Object.assign({}, existing || {}, profile, _hasLocalPhotoOnly ? { photo: existing.photo } : {});
         localStorage.setItem('gw_profile_' + email, JSON.stringify(merged));
         /* Re-push vers Firebase si la photo est locale mais absente de Firebase */
         if (_hasLocalPhotoOnly) {
@@ -8721,7 +8731,13 @@ function closeProfileModal() { /* compat — no-op */ }
 
 /* ── Storage ── */
 function loadUserProfile(email) {
-  return JSON.parse(localStorage.getItem('gw_profile_' + email) || 'null');
+  var profile = JSON.parse(localStorage.getItem('gw_profile_' + email) || 'null');
+  /* Restauration automatique depuis la sauvegarde dédiée si la photo manque */
+  if (profile && !profile.photo) {
+    var _backupPhoto = localStorage.getItem('gw_photo_' + email);
+    if (_backupPhoto) { profile.photo = _backupPhoto; }
+  }
+  return profile;
 }
 
 /* ── Pousse le profil vers Firebase avec compression photo automatique ──────
@@ -8758,6 +8774,10 @@ function saveUserProfile(email, data) {
       } catch(e2) {}
     }
     showToast('Espace de stockage insuffisant — essayez une photo plus petite.', 'err');
+  }
+  /* Sauvegarde dédiée de la photo — survit aux QuotaExceededError sur le profil complet */
+  if (data && data.photo) {
+    try { localStorage.setItem('gw_photo_' + email, data.photo); } catch(e4) {}
   }
   /* Signal global — écrit une seule fois après la sauvegarde réussie */
   if (saved) {
