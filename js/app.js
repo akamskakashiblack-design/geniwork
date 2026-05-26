@@ -1011,6 +1011,9 @@ var GW_GOOGLE_CLIENT_ID = '180664489098-gljui5ih2883jv3f6744c6t65ce650kh.apps.go
 /* ── Email par défaut suggéré pour le compte super admin ── */
 var GW_SUPER_ADMIN_EMAIL = 'admin@geniwork.app';
 
+/* ── Clé unique du compte officiel Geniwork (pas un vrai email) ── */
+var GW_OFFICIAL_KEY = 'geniwork__officiel';
+
 /* Initialise GIS dès que la bibliothèque est prête */
 function _initGoogleSignIn() {
   if (typeof google === 'undefined' || !google.accounts) return;
@@ -2390,6 +2393,8 @@ function initApp(user) {
   _gwFbWatchUserNotifs(user.email);
   /* ── Firebase : écoute l'index abonnés en temps réel ── */
   _gwFbWatchFollowers(user.email);
+  /* ── Firebase : écoute le compteur d'abonnés du compte officiel ── */
+  _gwWatchOfficialFollowers();
 
   /* ── Firebase : sync DMs, inbox et profils en temps réel ── */
   if (_gwFbReady && _gwFbDB && user.email) {
@@ -9651,6 +9656,169 @@ function closeUserProfileView() {
   ov.classList.remove('open');
   setTimeout(function() { ov.classList.add('hidden'); }, 320);
   _upvTarget = null;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   PROFIL OFFICIEL GENIWORK
+   Panneau dédié affiché quand on clique sur l'avatar/nom d'un post officiel
+   ════════════════════════════════════════════════════════════════════ */
+
+function openOfficialProfile() {
+  var existing = document.getElementById('off-profile-panel');
+  if (existing) existing.remove();
+
+  var logo      = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
+  var offPosts  = _offGetPosts();
+  var followers = _getFCount(GW_OFFICIAL_KEY);
+  var following = isFollowing(GW_OFFICIAL_KEY);
+
+  var avatarHtml = logo
+    ? '<img src="' + escHtml(logo) + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:50%">'
+    : '<i class="fas fa-star" style="font-size:2rem;color:#6366F1"></i>';
+
+  /* Construit les cards des posts officiels */
+  var postsHtml = '';
+  if (!offPosts.length) {
+    postsHtml = '<div style="text-align:center;color:#94A3B8;padding:2rem 0;font-size:.9rem">Aucune publication pour l\'instant.</div>';
+  } else {
+    postsHtml = offPosts.map(function(p) {
+      var mediaHtml = '';
+      if (p.video) {
+        var vSrc = typeof p.video === 'string' ? p.video : (p.video.url || '');
+        mediaHtml = '<div class="offp-post-media" onclick="closeOfficialProfile();_openOfficialVideo(\'' + p.id + '\')" style="cursor:pointer">' +
+          (vSrc ? '<video src="' + escHtml(vSrc) + '" muted playsinline preload="metadata" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;display:block"></video>' : '<div style="height:120px;background:#1E293B;border-radius:10px;display:flex;align-items:center;justify-content:center"><i class="fas fa-play" style="color:#6366F1;font-size:2rem"></i></div>') +
+        '</div>';
+      } else if (p.images && p.images.length && p.images[0]) {
+        mediaHtml = '<img src="' + escHtml(p.images[0]) + '" alt="" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;display:block;margin-bottom:.5rem">';
+      }
+      var likeCount = (p.baseLikes || 0) + (Array.isArray(p.likers) ? p.likers.length : 0);
+      var cmtCount  = Array.isArray(p.comments) ? p.comments.length : 0;
+      return '<div class="offp-post-card">' +
+        (p.text ? '<div style="font-size:.9rem;color:#CBD5E1;margin-bottom:.5rem;line-height:1.5">' + escHtml(p.text) + '</div>' : '') +
+        mediaHtml +
+        '<div style="display:flex;gap:1rem;font-size:.8rem;color:#64748B;margin-top:.4rem">' +
+          '<span><i class="fas fa-heart" style="color:#EF4444"></i> ' + likeCount + '</span>' +
+          '<span><i class="fas fa-comment" style="color:#6366F1"></i> ' + cmtCount + '</span>' +
+          '<span style="margin-left:auto">' + _offTimeAgo(p.publishedAt) + '</span>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  var panel = document.createElement('div');
+  panel.id = 'off-profile-panel';
+  panel.className = 'off-profile-overlay';
+  panel.innerHTML =
+    '<div class="off-profile-sheet">' +
+      /* Header topbar */
+      '<div class="off-profile-topbar">' +
+        '<button class="off-profile-back" onclick="closeOfficialProfile()"><i class="fas fa-arrow-left"></i></button>' +
+        '<span class="off-profile-topbar-title">Profil officiel</span>' +
+        '<div style="width:40px"></div>' +
+      '</div>' +
+      /* Corps */
+      '<div class="off-profile-body">' +
+        /* Avatar + identité */
+        '<div class="off-profile-hero">' +
+          '<div class="off-profile-avatar">' + avatarHtml + '</div>' +
+          '<div class="off-profile-identity">' +
+            '<h2 class="off-profile-name">Geniwork' +
+              '<span class="off-profile-verified"><i class="fas fa-circle-check"></i></span>' +
+            '</h2>' +
+            '<p class="off-profile-role">Compte officiel certifié</p>' +
+          '</div>' +
+        '</div>' +
+
+        /* Stats */
+        '<div class="off-profile-stats">' +
+          '<div class="off-profile-stat">' +
+            '<strong id="off-profile-followers">' + followers + '</strong>' +
+            '<span>Abonnés</span>' +
+          '</div>' +
+          '<div class="off-profile-stat">' +
+            '<strong>' + offPosts.length + '</strong>' +
+            '<span>Publications</span>' +
+          '</div>' +
+        '</div>' +
+
+        /* Bouton Suivre */
+        '<div class="off-profile-follow-wrap">' +
+          '<button class="off-profile-follow-btn ' + (following ? 'following' : '') + '" id="off-profile-follow-btn" onclick="_toggleFollowOfficial(this)">' +
+            '<i class="fas fa-' + (following ? 'check' : 'user-plus') + '"></i>' +
+            ' <span id="off-profile-follow-label">' + (following ? 'Abonné' : 'Suivre') + '</span>' +
+          '</button>' +
+        '</div>' +
+
+        /* Séparateur publications */
+        '<div class="off-profile-section-title"><i class="fas fa-newspaper"></i> Publications</div>' +
+
+        /* Liste des posts */
+        '<div id="off-profile-posts-list">' + postsHtml + '</div>' +
+      '</div>' +
+    '</div>';
+
+  (document.querySelector('.phone-frame') || document.body).appendChild(panel);
+  /* Animation d'entrée */
+  requestAnimationFrame(function() { panel.classList.add('open'); });
+}
+
+function closeOfficialProfile() {
+  var panel = document.getElementById('off-profile-panel');
+  if (!panel) return;
+  panel.classList.remove('open');
+  setTimeout(function() { if (panel.parentNode) panel.parentNode.removeChild(panel); }, 300);
+}
+
+function _toggleFollowOfficial(btn) {
+  if (!_currentUser) { showToast('Connectez-vous pour suivre Geniwork', 'err'); return; }
+  var key      = GW_OFFICIAL_KEY;
+  var list     = getFollowing();
+  var _myFbKey = _gwFbKey(_currentUser.email);
+
+  if (isFollowing(key)) {
+    /* Désabonner */
+    saveFollowing(list.filter(function(f) { return f.key !== key; }));
+    _decrFCount(key);
+    if (_gwFbReady && _gwFbDB) {
+      _gwFbDB.ref('gw/followers/' + key + '/' + _myFbKey).remove().catch(function(){});
+    }
+    if (btn) { btn.classList.remove('following'); btn.innerHTML = '<i class="fas fa-user-plus"></i> <span>Suivre</span>'; }
+    var follEl = document.getElementById('off-profile-followers');
+    if (follEl) follEl.textContent = _getFCount(key);
+    showToast('Désabonné de Geniwork', '');
+  } else {
+    /* Suivre */
+    list.push({ key: key, nom: 'Geniwork', isOfficial: true });
+    saveFollowing(list);
+    _incrFCount(key);
+    if (_gwFbReady && _gwFbDB) {
+      _gwFbDB.ref('gw/followers/' + key + '/' + _myFbKey).set({
+        nom:   _currentUser.nom,
+        email: _currentUser.email,
+        role:  (function() { var p = loadUserProfile(_currentUser.email); return (p && p.role) || 'Membre Geniwork'; })()
+      }).catch(function(){});
+    }
+    if (btn) { btn.classList.add('following'); btn.innerHTML = '<i class="fas fa-check"></i> <span id="off-profile-follow-label">Abonné</span>'; }
+    var follEl2 = document.getElementById('off-profile-followers');
+    if (follEl2) follEl2.textContent = _getFCount(key);
+    /* Met à jour le compteur "Abonnements" sur la page profil perso */
+    var pfEl = document.getElementById('pstat-following');
+    if (pfEl) pfEl.textContent = getFollowing().length;
+    showToast('Vous suivez maintenant Geniwork 👍', 'ok');
+  }
+}
+
+/* Listener Firebase pour le compteur d'abonnés du compte officiel */
+function _gwWatchOfficialFollowers() {
+  if (!_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/follow_counts/' + GW_OFFICIAL_KEY).on('value', function(snap) {
+    var count = snap.val();
+    if (typeof count === 'number') {
+      localStorage.setItem('gw_fc_' + GW_OFFICIAL_KEY, count);
+      var el = document.getElementById('off-profile-followers');
+      if (el) el.textContent = count;
+    }
+  });
 }
 
 /* ── Switcher de tabs (vue visiteur) ── */
@@ -21463,7 +21631,7 @@ function _buildOfficialCard(p) {
   var cmtCount   = comments.length;
 
   card.innerHTML =
-    '<div class="post-official-header">' +
+    '<div class="post-official-header" onclick="openOfficialProfile()" style="cursor:pointer" title="Voir le profil Geniwork">' +
       avatarHtml +
       '<div style="flex:1">' +
         '<div class="post-official-name">Geniwork' +
