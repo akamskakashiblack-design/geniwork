@@ -154,6 +154,15 @@
         }
       },
 
+      /* Index inversé : qui suit qui
+         Chemin : gw/followers/{profileFbKey}/{followerFbKey} */
+      "followers": {
+        "$profileFbKey": {
+          ".read":  true,
+          ".write": "auth != null"
+        }
+      },
+
       /* ═══════════════════════════════════════════════════════════════
          NOTIFICATIONS (privées par utilisateur)
       ═══════════════════════════════════════════════════════════════ */

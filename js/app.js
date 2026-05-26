@@ -634,13 +634,15 @@ function _gwFbSyncStart() {
   _gwFbDB.ref('gw/comments').on('child_changed', function(snap) { _gwMergeComments(snap); });
 
   /* ── Compteurs d'abonnés (temps réel) ── */
-  _gwFbDB.ref('gw/follow_counts').on('child_changed', function(snap) {
+  function _onFollowCountSnap(snap) {
     try {
-      var key = snap.key;
-      var count = snap.val();
+      /* snap.key est encodé (ex: user__a__domain__d__com) → décoder vers email */
+      var fbKey  = snap.key;
+      var key    = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+      var count  = snap.val();
       if (typeof count !== 'number') return;
       localStorage.setItem('gw_fc_' + key, count);
-      /* Rafraîchit le compteur si le profil est ouvert */
+      /* Rafraîchit le compteur sur la vue profil visiteur ouverte */
       var countEl = document.getElementById('upv-stat-followers');
       if (countEl && _upvTarget && getProfileKey(_upvTarget) === key) {
         countEl.textContent = _getTotalFollowers(key, false);
@@ -654,16 +656,9 @@ function _gwFbSyncStart() {
         }
       }
     } catch(e){}
-  });
-
-  /* ── Following (restaure la liste d'abonnements au login) ── */
-  _gwFbDB.ref('gw/follow_counts').on('child_added', function(snap) {
-    try {
-      var key = snap.key;
-      var count = snap.val();
-      if (typeof count === 'number') localStorage.setItem('gw_fc_' + key, count);
-    } catch(e){}
-  });
+  }
+  _gwFbDB.ref('gw/follow_counts').on('child_changed', _onFollowCountSnap);
+  _gwFbDB.ref('gw/follow_counts').on('child_added',   _onFollowCountSnap);
 
   /* ── Bans ── */
   _listen('bans', 'gw_bans', function() {
@@ -916,6 +911,27 @@ function _gwFbWatchUserNotifs(email) {
     localStorage.setItem('gw_notifs_' + email, JSON.stringify(data));
     _gwFbSkip = false;
     try { renderNotifs(); updateNotifBadge(); } catch(e){}
+  });
+}
+
+/* ── Active le listener abonnés (index inversé gw/followers/{myFbKey}) ── */
+function _gwFbWatchFollowers(email) {
+  if (!_gwFbReady || !_gwFbDB || !email) return;
+  _gwFbDB.ref('gw/followers/' + _gwFbKey(email)).on('value', function(snap) {
+    try {
+      var data = snap.val();
+      /* Convertit l'objet {fbKey: {nom,email,role}} en tableau */
+      var followers = data
+        ? Object.values(data).filter(function(f) { return f && f.email; })
+        : [];
+      localStorage.setItem('gw_followers_' + email, JSON.stringify(followers));
+      /* Met à jour pstat-followers si le profil perso est affiché */
+      var myKey  = getProfileKey({ nom: _currentUser ? _currentUser.nom : '', email: email });
+      var follEl = document.getElementById('pstat-followers');
+      if (follEl && _currentUser && _currentUser.email === email) {
+        follEl.textContent = _getTotalFollowers(myKey, false);
+      }
+    } catch(e){}
   });
 }
 
@@ -1345,10 +1361,12 @@ function _gwPreloadUserData(user, callback) {
     /* ── Compteurs d'abonnés de tous les utilisateurs ── */
     var fcAll = snaps[7] ? snaps[7].val() : null;
     if (fcAll && typeof fcAll === 'object') {
-      Object.keys(fcAll).forEach(function(key) {
-        var count = fcAll[key];
+      Object.keys(fcAll).forEach(function(fbKey) {
+        var count = fcAll[fbKey];
         if (typeof count === 'number') {
-          localStorage.setItem('gw_fc_' + key, count);
+          /* Décoder la clé Firebase (encodée) vers email brut pour localStorage */
+          var lsKey = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+          localStorage.setItem('gw_fc_' + lsKey, count);
         }
       });
     }
@@ -2349,6 +2367,8 @@ function initApp(user) {
 
   /* ── Firebase : écoute les notifs en temps réel pour cet utilisateur ── */
   _gwFbWatchUserNotifs(user.email);
+  /* ── Firebase : écoute l'index abonnés en temps réel ── */
+  _gwFbWatchFollowers(user.email);
 
   /* ── Firebase : sync DMs, inbox et profils en temps réel ── */
   if (_gwFbReady && _gwFbDB && user.email) {
@@ -9354,7 +9374,8 @@ function _getFCount(key)  { return parseInt(localStorage.getItem('gw_fc_' + key)
 function _setFCount(key, val) {
   localStorage.setItem('gw_fc_' + key, val);
   if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/follow_counts/' + key).set(val).catch(function(){});
+    /* Utilise la clé encodée (. et @ interdits dans les chemins Firebase) */
+    _gwFbDB.ref('gw/follow_counts/' + _gwFbKey(key)).set(val).catch(function(){});
   }
 }
 function _incrFCount(key) { _setFCount(key, _getFCount(key) + 1); }
@@ -9681,10 +9702,18 @@ function _doFollowToggle(userInfo) {
   var key  = getProfileKey(userInfo);
   var list = getFollowing();
 
+  /* Clé Firebase de l'abonné (moi) et du suivi (cible) */
+  var _myFbKey      = _gwFbKey(_currentUser.email);
+  var _targetFbKey  = userInfo.email ? _gwFbKey(userInfo.email) : null;
+
   if (isFollowing(key)) {
     /* ── Se désabonner ── */
     saveFollowing(list.filter(function(f) { return f.key !== key; }));
     _decrFCount(key);
+    /* Retire de l'index inversé gw/followers/{cible}/{moi} */
+    if (_gwFbReady && _gwFbDB && _targetFbKey) {
+      _gwFbDB.ref('gw/followers/' + _targetFbKey + '/' + _myFbKey).remove().catch(function(){});
+    }
     showToast('Désabonné de ' + escHtml(userInfo.nom), '');
   } else {
     /* ── S'abonner ── */
@@ -9696,6 +9725,14 @@ function _doFollowToggle(userInfo) {
     });
     saveFollowing(list);
     _incrFCount(key);
+    /* Écrit dans l'index inversé gw/followers/{cible}/{moi} */
+    if (_gwFbReady && _gwFbDB && _targetFbKey) {
+      _gwFbDB.ref('gw/followers/' + _targetFbKey + '/' + _myFbKey).set({
+        nom:   _currentUser.nom,
+        email: _currentUser.email,
+        role:  (function() { var p = loadUserProfile(_currentUser.email); return (p && p.role) || 'Membre Geniwork'; })()
+      }).catch(function(){});
+    }
 
     /* ── Milestone abonnés ── */
     if (userInfo.email) {
@@ -9815,20 +9852,11 @@ function _updateFollowBtn() {
 ══════════════════════════════════════════ */
 function openSelfFollowersList() {
   if (!_currentUser) return;
-  var profileKey = getProfileKey({ nom: _currentUser.nom, email: _currentUser.email });
-  var isDemo     = false;
 
+  /* Lit depuis gw_followers_{email} — alimenté par le listener Firebase temps réel */
   var realFollowers = [];
   try {
-    var users = JSON.parse(localStorage.getItem('gw_users') || '[]');
-    users.forEach(function(u) {
-      if (u.email === _currentUser.email) return;
-      var list = JSON.parse(localStorage.getItem('gw_following_' + u.email) || '[]');
-      if (list.some(function(f) { return f.key === profileKey; })) {
-        var p = loadUserProfile(u.email);
-        realFollowers.push({ nom: (p && p.nom) || u.nom || u.email, email: u.email, role: (p && p.role) || 'Membre Geniwork' });
-      }
-    });
+    realFollowers = JSON.parse(localStorage.getItem('gw_followers_' + _currentUser.email) || '[]');
   } catch(e) {}
 
   var total = realFollowers.length;
@@ -9994,25 +10022,8 @@ function unfollowFromList(profileKey) {
    STATS CLIQUABLES — VUE PROFIL VISITEUR
 ══════════════════════════════════════════ */
 
-/* Abonnés du profil visité */
-function upvOpenFollowersList() {
-  if (!_upvTarget) return;
-  var profileKey = getProfileKey(_upvTarget);
-  var isDemo     = !_upvTarget.email;
-
-  /* Utilisateurs réels qui suivent cette cible */
-  var realFollowers = [];
-  try {
-    var users = JSON.parse(localStorage.getItem('gw_users') || '[]');
-    users.forEach(function(u) {
-      var list = JSON.parse(localStorage.getItem('gw_following_' + u.email) || '[]');
-      if (list.some(function(f) { return f.key === profileKey; })) {
-        var p = loadUserProfile(u.email);
-        realFollowers.push({ nom: (p && p.nom) || u.nom || u.email, email: u.email, role: (p && p.role) || 'Membre Geniwork' });
-      }
-    });
-  } catch(e) {}
-
+/* ── Construit et affiche la sheet abonnés (réutilisé par upvOpenFollowersList) ── */
+function _showFollowersList(realFollowers, profileKey, isDemo) {
   var seedCount = _getSeedFollowers(profileKey, isDemo);
   var total     = realFollowers.length + seedCount;
 
@@ -10060,60 +10071,97 @@ function upvOpenFollowersList() {
   document.body.appendChild(card);
 }
 
+/* Abonnés du profil visité — query Firebase pour données cross-appareils */
+function upvOpenFollowersList() {
+  if (!_upvTarget) return;
+  var profileKey = getProfileKey(_upvTarget);
+  var isDemo     = !_upvTarget.email;
+
+  if (_upvTarget.email && _gwFbReady && _gwFbDB) {
+    /* Requête Firebase : index inversé gw/followers/{profileFbKey} */
+    _gwFbDB.ref('gw/followers/' + _gwFbKey(_upvTarget.email)).once('value').then(function(snap) {
+      var data = snap.val();
+      var realFollowers = data
+        ? Object.values(data).filter(function(f) { return f && f.email; })
+        : [];
+      _showFollowersList(realFollowers, profileKey, isDemo);
+    }).catch(function() {
+      _showFollowersList([], profileKey, isDemo);
+    });
+  } else {
+    _showFollowersList([], profileKey, isDemo);
+  }
+}
+
 /* Abonnements du profil visité */
 function upvOpenFollowingList() {
   if (!_upvTarget) return;
   var email = _upvTarget.email;
 
-  var list = email ? JSON.parse(localStorage.getItem('gw_following_' + email) || '[]') : [];
-  var seedCount = list.length === 0 ? _getSeedNum('fllw_' + getProfileKey(_upvTarget), 5, 120) : 0;
-  var total = list.length + seedCount;
+  function _renderFollowingSheet(list) {
+    var seedCount = list.length === 0 ? _getSeedNum('fllw_' + getProfileKey(_upvTarget), 5, 120) : 0;
+    var total = list.length + seedCount;
 
-  _closeGenericSheet('upv-following-list');
-  var bg = document.createElement('div');
-  bg.className = 'cam-sheet-bg'; bg.id = 'upv-following-list-bg';
-  bg.onclick = function() { _closeGenericSheet('upv-following-list'); };
+    _closeGenericSheet('upv-following-list');
+    var bg = document.createElement('div');
+    bg.className = 'cam-sheet-bg'; bg.id = 'upv-following-list-bg';
+    bg.onclick = function() { _closeGenericSheet('upv-following-list'); };
 
-  var card = document.createElement('div');
-  card.className = 'cam-sheet-card following-list-card'; card.id = 'upv-following-list-card';
+    var card = document.createElement('div');
+    card.className = 'cam-sheet-card following-list-card'; card.id = 'upv-following-list-card';
 
-  var listHtml = list.map(function(f) {
-    var currentNom  = getDisplayName(f.email, f.nom);
-    var currentRole = getDisplayRole(f.email, f.role || 'Membre Geniwork');
-    var nomSafe  = currentNom.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    var roleSafe = currentRole.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    var emailArg = f.email ? "'" + f.email + "'" : 'null';
-    return '<div class="following-item">' +
-      '<div class="following-item-left" ' +
-           'onclick="_closeGenericSheet(\'upv-following-list\');' +
-                    'openUserProfileView({nom:\'' + nomSafe + '\',' +
-                                          'email:' + emailArg + ',' +
-                                          'role:\'' + roleSafe + '\'})">' +
-        getAvatarHtml(f.email || null, currentNom, 'sm') +
-        '<div class="following-item-info">' +
-          '<strong>' + escHtml(currentNom) + '</strong>' +
-          '<small>' + escHtml(currentRole) + '</small>' +
+    var listHtml = list.map(function(f) {
+      var currentNom  = getDisplayName(f.email, f.nom);
+      var currentRole = getDisplayRole(f.email, f.role || 'Membre Geniwork');
+      var nomSafe  = currentNom.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      var roleSafe = currentRole.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      var emailArg = f.email ? "'" + f.email + "'" : 'null';
+      return '<div class="following-item">' +
+        '<div class="following-item-left" ' +
+             'onclick="_closeGenericSheet(\'upv-following-list\');' +
+                      'openUserProfileView({nom:\'' + nomSafe + '\',' +
+                                            'email:' + emailArg + ',' +
+                                            'role:\'' + roleSafe + '\'})">' +
+          getAvatarHtml(f.email || null, currentNom, 'sm') +
+          '<div class="following-item-info">' +
+            '<strong>' + escHtml(currentNom) + '</strong>' +
+            '<small>' + escHtml(currentRole) + '</small>' +
+          '</div>' +
         '</div>' +
-      '</div>' +
-    '</div>';
-  }).join('');
+      '</div>';
+    }).join('');
 
-  if (seedCount > 0) {
-    listHtml += '<p class="upv-stat-seed-hint">+ ' + seedCount + ' abonnement' + (seedCount > 1 ? 's' : '') + '</p>';
+    if (seedCount > 0) {
+      listHtml += '<p class="upv-stat-seed-hint">+ ' + seedCount + ' abonnement' + (seedCount > 1 ? 's' : '') + '</p>';
+    }
+
+    card.innerHTML =
+      '<div class="cam-sheet-handle"></div>' +
+      '<p class="cam-sheet-title">Abonnements (' + total + ')</p>' +
+      (total === 0
+        ? '<div class="following-empty"><i class="fas fa-user-group"></i><p>Aucun abonnement</p></div>'
+        : '<div class="following-list-scroll">' + listHtml + '</div>') +
+      '<div style="padding:14px 16px 20px">' +
+        '<button class="btn-outline full" onclick="_closeGenericSheet(\'upv-following-list\')">Fermer</button>' +
+      '</div>';
+
+    document.body.appendChild(bg);
+    document.body.appendChild(card);
   }
 
-  card.innerHTML =
-    '<div class="cam-sheet-handle"></div>' +
-    '<p class="cam-sheet-title">Abonnements (' + total + ')</p>' +
-    (total === 0
-      ? '<div class="following-empty"><i class="fas fa-user-group"></i><p>Aucun abonnement</p></div>'
-      : '<div class="following-list-scroll">' + listHtml + '</div>') +
-    '<div style="padding:14px 16px 20px">' +
-      '<button class="btn-outline full" onclick="_closeGenericSheet(\'upv-following-list\')">Fermer</button>' +
-    '</div>';
-
-  document.body.appendChild(bg);
-  document.body.appendChild(card);
+  /* Essaie localStorage d'abord; si vide et Firebase dispo → query directe */
+  var localList = email ? JSON.parse(localStorage.getItem('gw_following_' + email) || '[]') : [];
+  if (localList.length > 0 || !email || !_gwFbReady || !_gwFbDB) {
+    _renderFollowingSheet(localList);
+  } else {
+    _gwFbDB.ref('gw/following/' + _gwFbKey(email)).once('value').then(function(snap) {
+      var val = snap.val();
+      var list = Array.isArray(val) ? val : [];
+      /* Sauvegarde en localStorage pour les prochains accès */
+      if (list.length) try { localStorage.setItem('gw_following_' + email, JSON.stringify(list)); } catch(e2){}
+      _renderFollowingSheet(list);
+    }).catch(function() { _renderFollowingSheet([]); });
+  }
 }
 
 /* Projets du profil visité → navigue vers l'onglet Projets */
