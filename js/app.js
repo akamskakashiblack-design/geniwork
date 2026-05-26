@@ -161,14 +161,17 @@ function _gwInitFirebase() {
     if (!firebase.apps || !firebase.apps.length) {
       firebase.initializeApp(_GW_FIREBASE_CONFIG);
     }
-    _gwFbDB      = firebase.database();
-    _gwFbAuth    = firebase.auth();
-    _gwFbReady   = true;
-    /* Storage pour photos / vidéos */
+    _gwFbDB    = firebase.database();
+    _gwFbAuth  = firebase.auth();
+    _gwFbReady = true;
+    /* Auth anonyme — obligatoire pour que les règles Firebase "auth != null"
+       (database.rules.json) autorisent lectures/écritures messaging et profils */
+    _gwFbAuth.signInAnonymously().catch(function(e) {
+      console.warn('[GW Firebase] Auth anonyme échouée :', e.code || e);
+    });
+    /* Storage pour photos / vidéos (Blaze uniquement) */
     if (typeof firebase.storage === 'function') {
       _gwFbStorage = firebase.storage();
-      /* Auth anonyme pour que les règles Storage "auth != null" passent */
-      _gwFbAuth.signInAnonymously().catch(function(){});
     }
     console.log('[GW Firebase] ✅ Initialisé — URL:', _GW_FIREBASE_CONFIG.databaseURL);
     /* Test de connexion */

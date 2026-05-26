@@ -1,0 +1,181 @@
+{
+  "rules": {
+
+    "gw": {
+
+      /* ═══════════════════════════════════════════════════════════════
+         UTILISATEURS & PROFILS
+         Lecture publique (affichage des comptes, recherche d'utilisateurs)
+         Écriture protégée : il faut être authentifié (même anonymement)
+      ═══════════════════════════════════════════════════════════════ */
+      "users": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
+
+      "profiles": {
+        ".read":  true,
+        "$userFbKey": {
+          ".write": "auth != null"
+        }
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         MESSAGES DIRECTS (DM)
+         Chemin : gw/dm_msgs/{dmFbKey}/{msgId}
+         dmFbKey = _gwFbKey(emailA) + '__' + _gwFbKey(emailB)  (trié)
+         Seuls les utilisateurs authentifiés peuvent lire/écrire leurs DMs
+      ═══════════════════════════════════════════════════════════════ */
+      "dm_msgs": {
+        "$dmFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null",
+          "$msgId": {
+            ".validate": "newData.hasChildren(['id','from','to','at','text']) || newData.hasChildren(['id','from','to','at','type'])"
+          }
+        }
+      },
+
+      /* Métadonnées DM (lastMsg, lastAt) */
+      "dm_meta": {
+        "$dmFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+
+      /* Inbox DM : entrées de conversation reçues
+         Chemin : gw/inboxes/{toFbKey}/{fromFbKey} */
+      "inboxes": {
+        "$toFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         MESSAGES DE GROUPE
+         Chemin : gw/group_msgs/{grpFbKey}
+         grpFbKey = _gwFbKey( gw_grp_{projId}___{ownerEmail} )
+         Lecture/écriture : tout utilisateur authentifié (membre du groupe)
+      ═══════════════════════════════════════════════════════════════ */
+      "group_msgs": {
+        "$grpFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+
+      /* Inbox de groupe : invitations et groupes rejoints
+         Chemin : gw/group_inboxes/{userFbKey} */
+      "group_inboxes": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         PUBLICATIONS
+         Lecture publique, écriture protégée
+      ═══════════════════════════════════════════════════════════════ */
+      "posts": {
+        ".read":  true,
+        "$userFbKey": {
+          ".write": "auth != null"
+        }
+      },
+
+      "official_posts": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         RÉACTIONS : Likes / Dislikes / Commentaires / Reposts
+      ═══════════════════════════════════════════════════════════════ */
+      "likes": {
+        ".read":  true,
+        "$postId": {
+          ".write": "auth != null"
+        }
+      },
+
+      "dislikes": {
+        ".read":  true,
+        "$postId": {
+          ".write": "auth != null"
+        }
+      },
+
+      "comments": {
+        ".read":  true,
+        "$postId": {
+          ".write": "auth != null"
+        }
+      },
+
+      "rcounts": {
+        ".read":  true,
+        "$postId": {
+          ".write": "auth != null"
+        }
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         SOCIAL : Abonnements & compteurs d'abonnés
+      ═══════════════════════════════════════════════════════════════ */
+      "following": {
+        ".read":  true,
+        "$userFbKey": {
+          ".write": "auth != null"
+        }
+      },
+
+      "follow_counts": {
+        ".read":  true,
+        "$profileFbKey": {
+          ".write": "auth != null"
+        }
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         NOTIFICATIONS (privées par utilisateur)
+      ═══════════════════════════════════════════════════════════════ */
+      "notifs": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         MARKETPLACE & COLLABORATIONS
+      ═══════════════════════════════════════════════════════════════ */
+      "mk_listings": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
+
+      "collab_requests": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
+
+      /* ═══════════════════════════════════════════════════════════════
+         BANS & SIGNALEMENTS (admin uniquement en production)
+      ═══════════════════════════════════════════════════════════════ */
+      "bans": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+
+      "reports": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    }
+  }
+}
