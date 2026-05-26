@@ -208,6 +208,12 @@
       "badge_requests": {
         ".read":  "auth != null",
         ".write": "auth != null"
+      },
+      "fcm_tokens": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
       }
     }
   }

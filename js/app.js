@@ -419,6 +419,80 @@ function _gwFbSet(path, data) {
     .catch(function(e){ console.error('[GW Firebase] ❌ Write ERREUR →', path, e.message); });
 }
 
+/* ══════════════════════════════════════════
+   PUSH NOTIFICATIONS — FCM Web
+   Demande la permission, récupère le token FCM
+   et l'enregistre dans Firebase pour la livraison.
+══════════════════════════════════════════ */
+
+/* VAPID key (Web Push) — à récupérer dans Firebase Console
+   Project Settings → Cloud Messaging → Web Push certificates */
+var _GW_VAPID_KEY = 'YOUR_VAPID_KEY_HERE';
+
+var _gwFcmToken = null;
+
+function _gwInitNotifications() {
+  if (!_gwFbReady || !_gwFbDB || !_currentUser) return;
+  if (!('Notification' in window))               return; /* Navigateur non compatible */
+  if (!firebase.messaging)                        return; /* SDK messaging non chargé */
+
+  /* Enregistre le service worker Firebase Messaging */
+  if (!('serviceWorker' in navigator)) return;
+
+  navigator.serviceWorker.register('/firebase-messaging-sw.js').then(function(reg) {
+    var messaging = firebase.messaging();
+
+    /* Lie le service worker au messaging */
+    messaging.useServiceWorker && messaging.useServiceWorker(reg);
+
+    /* Demande la permission si pas encore accordée */
+    Notification.requestPermission().then(function(perm) {
+      if (perm !== 'granted') return;
+
+      /* Récupère le token FCM */
+      messaging.getToken({ vapidKey: _GW_VAPID_KEY, serviceWorkerRegistration: reg })
+        .then(function(token) {
+          if (!token) return;
+          _gwFcmToken = token;
+          /* Sauvegarde dans Firebase pour que les autres utilisateurs puissent nous notifier */
+          _gwFbDB.ref('gw/fcm_tokens/' + _gwFbKey(_currentUser.email)).set(token).catch(function(){});
+        })
+        .catch(function(e) { console.warn('[GW Push] getToken échoué :', e.message); });
+
+      /* Notification quand l'app est au premier plan */
+      messaging.onMessage(function(payload) {
+        var t = (payload.notification && payload.notification.title) || (payload.data && payload.data.title) || 'Geniwork';
+        var b = (payload.notification && payload.notification.body)  || (payload.data && payload.data.body)  || '';
+        if (Notification.permission === 'granted') {
+          reg.showNotification(t, {
+            body:    b,
+            icon:    '/img/icon-192.png',
+            badge:   '/img/icon-96.png',
+            vibrate: [200, 100, 200],
+            tag:     (payload.data && payload.data.tag) || 'geniwork'
+          });
+        }
+      });
+    });
+  }).catch(function(e) { console.warn('[GW Push] SW register échoué :', e.message); });
+}
+
+/* Envoie une notification push à un utilisateur cible */
+function _gwSendPushNotif(toEmail, title, body, tag) {
+  if (!toEmail || !_gwFbReady || !_gwFbDB) return;
+  /* Récupère le token FCM du destinataire depuis Firebase */
+  _gwFbDB.ref('gw/fcm_tokens/' + _gwFbKey(toEmail)).once('value').then(function(snap) {
+    var token = snap.val();
+    if (!token || typeof token !== 'string') return;
+    /* Appelle la Vercel function qui relaie vers l'API FCM */
+    fetch('/api/notify', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ token: token, title: title, body: body, tag: tag || 'geniwork' })
+    }).catch(function(){});
+  }).catch(function(){});
+}
+
 /* ── Listeners temps réel Firebase → localStorage → UI ── */
 function _gwFbSyncStart() {
   if (!_gwFbDB) return;
@@ -2741,6 +2815,11 @@ function initApp(user) {
     try { _gwUploadPendingVideos(); } catch(e) {}
     try { _gwUploadPendingOfficialVideos(); } catch(e2) {}
   }, 6000);
+
+  /* Initialise les notifications push (service worker + permission + token FCM) */
+  setTimeout(function() {
+    try { _gwInitNotifications(); } catch(e) {}
+  }, 2000);
 }
 
 function getInitials(nom) {
@@ -8302,6 +8381,12 @@ function pushNotif(targetEmail, notif) {
   if (_currentUser && targetEmail === _currentUser.email) {
     updateNotifBadge();
   }
+  /* Push notification vers le destinataire s'il est sur un autre appareil */
+  if (_currentUser && targetEmail !== _currentUser.email) {
+    var _pTitle = notif.title || notif.label || 'Geniwork';
+    var _pBody  = notif.body  || notif.text  || notif.msg || '';
+    _gwSendPushNotif(targetEmail, _pTitle, _pBody, 'notif-' + _gwFbKey(targetEmail));
+  }
 }
 
 /* Génère des notifs de bienvenue à la première connexion */
@@ -13315,6 +13400,8 @@ function handleChatAttach(input) {
         var _fLabel = isImage ? '📷 Photo' : (isVideo ? '🎥 Vidéo' : '📎 ' + file.name);
         _writeDMInbox(conv.email, _currentUser.email, _currentUser.nom, _currentUser.role || 'Membre Geniwork', _fLabel);
         _saveDMConvList();
+        /* Push notification fichier/photo/vidéo */
+        _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', _fLabel, 'msg-' + _gwFbKey(conv.email));
       }
     }
     renderConversations();
@@ -13415,6 +13502,8 @@ function sendChatMessage() {
     if (conv.email) {
       _writeDMInbox(conv.email, _currentUser.email, _currentUser.nom, _currentUser.role || 'Membre Geniwork', text);
       _saveDMConvList(); /* ← Sauvegarde la liste pour survivre au refresh */
+      /* Push notification vers le destinataire */
+      _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', text, 'msg-' + _gwFbKey(conv.email));
     }
   }
 
