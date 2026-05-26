@@ -9458,18 +9458,19 @@ function openUserProfileView(userInfo) {
     var bdEl = document.getElementById('upv-badge-display');
     if (bdEl) bdEl.innerHTML = '<span style="font-size:.8rem;color:#3B82F6;margin-left:4px"><i class="fas fa-circle-check"></i> Officiel</span>';
 
-    /* Photo */
+    /* Photo — affiche "G" en attendant, puis met le logo dès qu'il est chargé */
     var photoImg = document.getElementById('upv-photo-img');
     var photoIni = document.getElementById('upv-initials');
-    if (photoImg && photoIni) {
-      if (logo) {
-        photoImg.src = logo; photoImg.style.display = 'block';
-        photoIni.style.display = 'none';
-      } else {
-        photoImg.style.display = 'none';
-        photoIni.style.display = '';
-        photoIni.textContent = 'G';
-      }
+    var _applyLogo = function(src) {
+      var img2 = document.getElementById('upv-photo-img');
+      var ini2 = document.getElementById('upv-initials');
+      if (!img2 || !ini2) return;
+      if (src) { img2.src = src; img2.style.display = 'block'; ini2.style.display = 'none'; }
+      else     { img2.style.display = 'none'; ini2.style.display = ''; ini2.textContent = 'G'; }
+    };
+    _applyLogo(logo);
+    if (!logo) {
+      _ensureOfficialLogo(function(fetchedLogo) { _applyLogo(fetchedLogo); });
     }
 
     _t2('upv-domain',   'Compte officiel certifié');
@@ -9919,11 +9920,21 @@ function _renderOfficialProfilePosts(container) {
 
     /* ── Fixups après construction ── */
 
-    /* 1. Avatar : remplace les initiales par le logo officiel si disponible */
+    /* 1. Avatar : logo officiel immédiat si en cache, sinon fetch async */
     var avEl = card.querySelector('.user-av');
-    if (avEl && logo) {
-      avEl.innerHTML = '<img src="' + escHtml(logo) + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:50%">';
-      avEl.classList.add('av-photo');
+    if (avEl) {
+      var _setAvLogo = function(src, el) {
+        if (!src || !el) return;
+        el.innerHTML = '<img src="' + escHtml(src) + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:50%">';
+        el.classList.add('av-photo');
+      };
+      if (logo) {
+        _setAvLogo(logo, avEl);
+      } else {
+        (function(el) {
+          _ensureOfficialLogo(function(src) { _setAvLogo(src, el); });
+        })(avEl);
+      }
     }
 
     /* 2. Clic auteur → ouvre le profil officiel */
@@ -16113,9 +16124,10 @@ function renderSrchResults(query) {
       /* Compte officiel → ouvre openOfficialProfile */
       if (u._isOfficial) {
         var officialLogo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
+        /* L'avatar a un id fixe pour que _ensureOfficialLogo puisse le mettre à jour */
         var offAvHtml = officialLogo
-          ? '<div class="avatar sm srch-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);padding:0;overflow:hidden"><img src="' + escHtml(officialLogo) + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%"></div>'
-          : '<div class="avatar sm srch-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6)"><i class="fas fa-star" style="font-size:.9rem"></i></div>';
+          ? '<div class="avatar sm srch-av" id="srch-off-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);padding:0;overflow:hidden"><img src="' + escHtml(officialLogo) + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%"></div>'
+          : '<div class="avatar sm srch-av" id="srch-off-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center"><i class="fas fa-star" style="font-size:.9rem;color:#fff"></i></div>';
         html +=
           '<div class="srch-user-item" onclick="closeSearch();openOfficialProfile()">' +
             offAvHtml +
@@ -16205,6 +16217,17 @@ function renderSrchResults(query) {
   }
 
   box.innerHTML = html;
+
+  /* Met à jour async l'avatar Geniwork dans les résultats si logo pas en cache */
+  if (!_admGetOfficialLogo()) {
+    _ensureOfficialLogo(function(src) {
+      if (!src) return;
+      var avEl = document.getElementById('srch-off-av');
+      if (!avEl) return;
+      avEl.style.padding = '0'; avEl.style.overflow = 'hidden';
+      avEl.innerHTML = '<img src="' + escHtml(src) + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%">';
+    });
+  }
 }
 
 /* Surligne le mot cherché dans le texte (sans casser le HTML existant) */
@@ -18134,6 +18157,27 @@ function _admGetOfficialLogo()      { return localStorage.getItem('gw_official_l
 function _admSaveOfficialLogo(data) {
   if (data) { localStorage.setItem('gw_official_logo', data); _gwFbSet('settings_logo', data); }
   else      { localStorage.removeItem('gw_official_logo');    _gwFbSet('settings_logo', null); }
+}
+
+/**
+ * Retourne le logo officiel via callback.
+ * 1. localStorage en cache → immédiat
+ * 2. Sinon fetch Firebase gw/settings_logo → stocke en localStorage → callback
+ * cb(logoDataUrl|null)
+ */
+function _ensureOfficialLogo(cb) {
+  var cached = _admGetOfficialLogo();
+  if (cached) { cb(cached); return; }
+  if (!_gwFbDB) { cb(null); return; }
+  _gwFbDB.ref('gw/settings_logo').once('value').then(function(snap) {
+    var val = snap.val();
+    if (val && typeof val === 'string') {
+      localStorage.setItem('gw_official_logo', val);
+      cb(val);
+    } else {
+      cb(null);
+    }
+  }).catch(function() { cb(null); });
 }
 
 /* Appelé depuis l'onglet Publications */
@@ -21782,11 +21826,13 @@ function _buildOfficialCard(p) {
   var liked     = likers.indexOf(userEmail) !== -1;
   var likeCount = (p.baseLikes || 0) + likers.length;
 
-  /* Logo officiel Geniwork (photo ou icône étoile) */
+  /* Logo officiel Geniwork — utilise le cache localStorage, sinon icône étoile
+     puis mise à jour async via _ensureOfficialLogo si absent */
   var officialLogo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
+  var offAvId = 'off-av-' + p.id;
   var avatarHtml = officialLogo
-    ? '<div class="post-official-avatar" style="padding:0;overflow:hidden"><img src="' + officialLogo + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:14px"></div>'
-    : '<div class="post-official-avatar"><i class="fas fa-star"></i></div>';
+    ? '<div class="post-official-avatar" id="' + offAvId + '" style="padding:0;overflow:hidden"><img src="' + escHtml(officialLogo) + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:14px"></div>'
+    : '<div class="post-official-avatar" id="' + offAvId + '"><i class="fas fa-star"></i></div>';
 
   var comments   = Array.isArray(p.comments) ? p.comments : [];
   var cmtCount   = comments.length;
@@ -21860,6 +21906,19 @@ function _buildOfficialCard(p) {
         '</button>' +
       '</div>' +
     '</div>';
+
+  /* Mise à jour async du logo si non disponible en localStorage */
+  if (!officialLogo) {
+    (function(avId) {
+      _ensureOfficialLogo(function(src) {
+        if (!src) return;
+        var avEl = document.getElementById(avId);
+        if (!avEl) return;
+        avEl.style.padding = '0'; avEl.style.overflow = 'hidden';
+        avEl.innerHTML = '<img src="' + escHtml(src) + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:14px">';
+      });
+    })(offAvId);
+  }
 
   return card;
 }
