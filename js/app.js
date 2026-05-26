@@ -485,16 +485,45 @@ function _gwMergePost(snap) {
   var posts = snap.val();
   if (!Array.isArray(posts) || !posts.length) return;
   var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
-  /* Sauvegarder dans localStorage */
-  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e){}
+
+  /* Merge localStorage : préserver les images locales que Firebase n'a pas */
+  try {
+    var localPosts = JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
+    var localMap = {};
+    localPosts.forEach(function(p) { if (p && p.id) localMap[p.id] = p; });
+    var toStore = posts.map(function(p) {
+      var local = localMap[p.id];
+      if (local && local.images && local.images.length && (!p.images || !p.images.length)) {
+        return Object.assign({}, p, { images: local.images });
+      }
+      return p;
+    });
+    localStorage.setItem(_userPostsKey(email), JSON.stringify(toStore));
+  } catch(e){}
+
   /* Merger dans DEMO_POSTS */
   var changed = false;
   posts.forEach(function(p) {
     var existing = DEMO_POSTS.find(function(d){ return d.id === p.id; });
     if (!existing) {
+      if (!p.images) p.images = [];
       p.likers = loadPostLikers(p.id);
       DEMO_POSTS.push(p);
       changed = true;
+      /* Si les images sont dans gw/post_imgs → les charger en arrière-plan */
+      if (p._imageCount > 0 && _gwFbReady && _gwFbDB) {
+        (function(post) {
+          _gwFbDB.ref('gw/post_imgs/' + post.id).once('value').then(function(imgSnap) {
+            var imgs = imgSnap.val();
+            if (!Array.isArray(imgs) || !imgs.length) return;
+            var p2 = DEMO_POSTS.find(function(d) { return d.id === post.id; });
+            if (p2) {
+              p2.images = imgs;
+              if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e){} }
+            }
+          }).catch(function(){});
+        })(p);
+      }
     }
   });
   if (changed) {
@@ -1100,13 +1129,27 @@ function _gwFbPreloadAndStart() {
       try { localStorage.setItem('gw_users', JSON.stringify(users)); } catch(e){}
     }
 
-    /* ── Posts de tous les utilisateurs ── */
+    /* ── Posts de tous les utilisateurs (merge : préserve les images locales) ── */
     var allPosts = snaps[1].val() || {};
     Object.keys(allPosts).forEach(function(fbKey) {
-      var posts = allPosts[fbKey];
-      if (!Array.isArray(posts)) return;
-      var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
-      try { localStorage.setItem('gw_userposts_' + email, JSON.stringify(posts)); } catch(e){}
+      var fbPosts = allPosts[fbKey];
+      if (!Array.isArray(fbPosts)) return;
+      var email2 = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+      try {
+        var lsKey2   = 'gw_userposts_' + email2;
+        var local2   = JSON.parse(localStorage.getItem(lsKey2) || '[]');
+        var localMap2 = {};
+        local2.forEach(function(p) { if (p && p.id) localMap2[p.id] = p; });
+        /* Restaure les images locales sur les posts que Firebase a en version allégée */
+        var merged2 = fbPosts.map(function(p) {
+          var lp = localMap2[p.id];
+          if (lp && lp.images && lp.images.length && (!p.images || !p.images.length)) {
+            return Object.assign({}, p, { images: lp.images });
+          }
+          return p;
+        });
+        localStorage.setItem(lsKey2, JSON.stringify(merged2));
+      } catch(e){}
     });
 
     /* ── Bans ── */
@@ -2116,18 +2159,44 @@ function initApp(user) {
     _gwFbDB.ref('gw/group_msgs').on('child_added',   function(snap) { try { _gwMergeGroupMsg(snap); } catch(e){} });
     _gwFbDB.ref('gw/group_msgs').on('child_changed', function(snap) { try { _gwMergeGroupMsg(snap); } catch(e){} });
 
-    /* Charge les posts depuis Firebase au login (correction BUG 3 & 7) */
+    /* Charge les posts depuis Firebase au login — merge + restaure les images locales */
     _gwFbDB.ref('gw/posts').once('value').then(function(snap) {
       var allPosts = snap.val() || {};
-      Object.keys(allPosts).forEach(function(fbKey) {
-        var posts = allPosts[fbKey];
-        if (!Array.isArray(posts)) return;
-        var email2 = fbKey.replace(/__d__/g,'.').replace(/__a__/g,'@');
-        try { localStorage.setItem(_userPostsKey(email2), JSON.stringify(posts)); } catch(e){}
-        posts.forEach(function(p) {
+      Object.keys(allPosts).forEach(function(fbKey3) {
+        var fbps = allPosts[fbKey3];
+        if (!Array.isArray(fbps)) return;
+        var email3 = fbKey3.replace(/__d__/g,'.').replace(/__a__/g,'@');
+        /* Merge localStorage : préserver images locales */
+        try {
+          var lk3     = _userPostsKey(email3);
+          var local3  = JSON.parse(localStorage.getItem(lk3) || '[]');
+          var lmap3   = {};
+          local3.forEach(function(p) { if (p && p.id) lmap3[p.id] = p; });
+          var merged3 = fbps.map(function(p) {
+            var lp3 = lmap3[p.id];
+            if (lp3 && lp3.images && lp3.images.length && (!p.images || !p.images.length)) {
+              return Object.assign({}, p, { images: lp3.images });
+            }
+            return p;
+          });
+          localStorage.setItem(lk3, JSON.stringify(merged3));
+        } catch(e3){}
+        /* Ajouter à DEMO_POSTS avec récupération d'images séparées si besoin */
+        fbps.forEach(function(p) {
+          if (!p.images) p.images = [];
           if (!DEMO_POSTS.find(function(d){ return d.id === p.id; })) {
             p.likers = loadPostLikers(p.id);
             DEMO_POSTS.push(p);
+            if (p._imageCount > 0 && _gwFbReady && _gwFbDB) {
+              (function(post3) {
+                _gwFbDB.ref('gw/post_imgs/' + post3.id).once('value').then(function(is) {
+                  var imgs3 = is.val();
+                  if (!Array.isArray(imgs3) || !imgs3.length) return;
+                  var dp3 = DEMO_POSTS.find(function(d) { return d.id === post3.id; });
+                  if (dp3) dp3.images = imgs3;
+                }).catch(function(){});
+              })(p);
+            }
           }
         });
       });
@@ -4143,16 +4212,31 @@ function loadPersistedUserPosts(email) {
 
 function savePersistedUserPosts(email, posts) {
   localStorage.setItem(_userPostsKey(email), JSON.stringify(posts));
-  /* ── Sync Firebase ── */
   if (_gwFbReady && _gwFbDB && email) {
-    var _fbPostKey = _gwFbKey(email);
-    console.log('[GW Firebase] 📝 Sauvegarde posts →', email, '(', posts.length, 'posts)');
-    _gwFbDB.ref('gw/posts/' + _fbPostKey).set(posts)
-      .then(function(){ console.log('[GW Firebase] ✅ Posts sauvegardés Firebase →', email); })
-      .catch(function(e){ console.error('[GW Firebase] ❌ Erreur posts →', e.message); });
-  } else {
-    console.warn('[GW Firebase] ⚠️ Posts sauvegardés LOCAL SEULEMENT (Firebase non prêt)');
+    _pushPostsToFirebase(email, posts);
   }
+}
+
+/* ── Envoie les posts vers Firebase en séparant les images (évite la limite 4 Mo) ──
+   • gw/posts/{userFbKey}      → tableau de posts SANS images (texte + métadonnées)
+   • gw/post_imgs/{postId}     → images base64 du post (nœud séparé, toujours < 1,2 Mo)
+   Cette séparation garantit que le tableau de posts est toujours accepté par Firebase
+   même si l'utilisateur a des dizaines de publications avec images.                   */
+function _pushPostsToFirebase(email, posts) {
+  var fbKey = _gwFbKey(email);
+  var fbPosts = posts.slice(0, 50).map(function(p) {
+    var copy = Object.assign({}, p);
+    if (copy.images && copy.images.length > 0) {
+      /* Images stockées dans un nœud dédié pour ne pas alourdir le tableau */
+      _gwFbDB.ref('gw/post_imgs/' + copy.id).set(copy.images).catch(function(){});
+      copy._imageCount = copy.images.length;
+      delete copy.images;
+    }
+    return copy;
+  });
+  _gwFbDB.ref('gw/posts/' + fbKey).set(fbPosts).catch(function(e) {
+    console.error('[GW Firebase] ❌ Posts →', e.message);
+  });
 }
 
 function persistNewPost(post) {
@@ -4524,6 +4608,20 @@ function _feedAppendBatch(immediate) {
   }, immediate ? 0 : 120);
 }
 
+/* ── Temps relatif dynamique (mis à jour à chaque rendu) ─────────────────── */
+function _timeAgo(ts) {
+  if (!ts) return '';
+  var diff = Date.now() - Number(ts);
+  if (diff < 60000)       return "À l'instant";
+  if (diff < 3600000)     return Math.floor(diff / 60000) + ' min';
+  if (diff < 86400000)    return Math.floor(diff / 3600000) + 'h';
+  if (diff < 604800000)   return Math.floor(diff / 86400000) + 'j';
+  if (diff < 2592000000)  return Math.floor(diff / 604800000) + ' sem.';
+  if (diff < 31536000000) return Math.floor(diff / 2592000000) + ' mois';
+  var yrs = Math.floor(diff / 31536000000);
+  return yrs + ' an' + (yrs > 1 ? 's' : '');
+}
+
 function buildPostCard(post) {
   var card = document.createElement('div');
 
@@ -4733,7 +4831,7 @@ function buildPostCard(post) {
           '<div class="post-name">' + escHtml(getDisplayName(post.ownerEmail, post.author)) +
             getBadgeHtml(post.ownerEmail) +
           '</div>' +
-          '<div class="post-time">' + escHtml(getDisplayRole(post.ownerEmail, post.role)) + ' · ' + escHtml(post.time) + '</div>' +
+          '<div class="post-time">' + escHtml(getDisplayRole(post.ownerEmail, post.role)) + ' · ' + _timeAgo(post.at || post.id) + '</div>' +
         '</div>' +
       '</div>' +
       followBtn +

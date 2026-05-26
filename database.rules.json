@@ -86,6 +86,14 @@
         }
       },
 
+      /* Images des posts — nœud séparé pour éviter la limite 4 Mo de Firebase */
+      "post_imgs": {
+        ".read":  true,
+        "$postId": {
+          ".write": "auth != null"
+        }
+      },
+
       "official_posts": {
         ".read":  true,
         ".write": "auth != null"
