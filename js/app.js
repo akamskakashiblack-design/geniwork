@@ -11519,13 +11519,17 @@ function openChat(convId) {
       try {
         var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
         if (!activeConv) return;
-        activeConv.messages.push(msg);
+
+        /* Évite les doublons en mémoire */
+        if (!activeConv.messages.some(function(m) { return String(m.id) === msgIdStr; })) {
+          activeConv.messages.push(msg);
+        }
         activeConv.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
         if (msg.text || msg.type) {
-          activeConv.lastMsg = msg.text || (msg.type === 'img' ? '📷 Photo' : '📎 Fichier');
+          activeConv.lastMsg = msg.text || (msg.type === 'img' ? '📷 Photo' : (msg.type === 'video' ? '🎥 Vidéo' : '📎 Fichier'));
           activeConv.lastAt  = msg.at || Date.now();
-          if (_chatConvId !== activeConv.id) activeConv.unread = (activeConv.unread || 0) + 1;
         }
+
         /* Mettre à jour localStorage */
         var _ls = null;
         try { _ls = JSON.parse(localStorage.getItem(_openDmKey)); } catch(e){}
@@ -11539,9 +11543,21 @@ function openChat(convId) {
             lastAt:   activeConv.lastAt  || Date.now()
           }));
         }
-        if (_chatConvId === activeConv.id && document.getElementById('chat-messages')) {
-          try { _pollChatMessages(); } catch(e){}
+
+        /* ── Rendu DOM direct — n'appelle PAS _pollChatMessages()
+           car le message est déjà en mémoire et _pollChatMessages retournerait immédiatement ── */
+        if (msg.from !== (_currentUser ? _currentUser.email : '')) {
+          var _box = document.getElementById('chat-messages');
+          if (_box && !_box.querySelector('[data-msg-id="' + msgIdStr + '"]')) {
+            var _row = document.createElement('div');
+            _row.className = 'chat-msg-row theirs';
+            _row.setAttribute('data-msg-id', msgIdStr);
+            _row.innerHTML = _buildBubbleHtml(msg, false);
+            _box.appendChild(_row);
+            try { _scrollChatToBottom(); } catch(e){}
+          }
         }
+
         renderConversations();
       } catch(e){}
     });
