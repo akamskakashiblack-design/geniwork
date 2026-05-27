@@ -1261,15 +1261,10 @@ function _googleLogin(gUser) {
 /* Importe la photo Google → profil Geniwork (canvas resize) */
 function _importGooglePhoto(email, nom, photoUrl) {
   var profile = loadUserProfile(email) || getDefaultProfile({ nom: nom, email: email });
-  /* Ne remplace que si aucune photo personnalisée n'existe déjà.
-     - Sans flag Google  → photo perso uploadée → ne jamais écraser
-     - URL Firebase Storage → photo perso uploadée → ne jamais écraser
-     - base64 sans _googlePhoto → photo perso → ne jamais écraser */
-  if (profile.photo) {
-    if (!profile._googlePhoto) return;                                  /* photo perso flagguée */
-    if (profile.photo.indexOf('firebasestorage') !== -1) return;        /* URL Storage = perso */
-    /* photo Google (base64 _googlePhoto=true) → peut être remplacée (photo Google changée) */
-  }
+  /* Règle absolue : si une photo existe déjà (quelle qu'elle soit),
+     on ne la remplace JAMAIS automatiquement.
+     L'utilisateur peut toujours changer sa photo manuellement dans le profil. */
+  if (profile.photo) return;
   var img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload = function() {
@@ -1348,8 +1343,17 @@ function _gwPreloadUserData(user, callback) {
       var merged;
       if (profile) {
         if (profile.photo) {
-          /* Firebase a une photo → c'est la plus récente (sync multi-appareils) */
-          merged = Object.assign({}, existing, profile);
+          /* Firebase a une photo.
+             Règle : si Firebase a une photo Google (_googlePhoto=true) ET
+             que le local a une photo différente (custom, _googlePhoto=false)
+             → préférer la photo locale + resync Firebase */
+          var _fbHasGooglePhoto = profile._googlePhoto && !existing._googlePhoto && existing.photo;
+          if (_fbHasGooglePhoto) {
+            merged = Object.assign({}, profile, { photo: existing.photo, _googlePhoto: false });
+            try { _pushProfileToFirebase(user.email, merged); } catch(e){}
+          } else {
+            merged = Object.assign({}, existing, profile);
+          }
         } else if (existing.photo) {
           /* Firebase n'a pas de photo mais locale oui → fusion + re-push compressé */
           merged = Object.assign({}, profile, { photo: existing.photo });
