@@ -2681,6 +2681,12 @@ function initApp(user) {
   if (_gwFbReady && _gwFbDB && user.email) {
     var _myFbKey = _gwFbKey(user.email);
 
+    /* ── Re-enregistre les listeners gw/dm_msgs (supprimés au logout) ── */
+    _gwFbDB.ref('gw/dm_msgs').off('child_added');
+    _gwFbDB.ref('gw/dm_msgs').off('child_changed');
+    _gwFbDB.ref('gw/dm_msgs').on('child_added',   function(snap) { try { _onDmMsgsSnap(snap); } catch(e){} });
+    _gwFbDB.ref('gw/dm_msgs').on('child_changed', function(snap) { try { _onDmMsgsSnap(snap); } catch(e){} });
+
     /* Inbox */
     var _inboxRef = _gwFbDB.ref('gw/inboxes/' + _myFbKey);
     _gwFbDB._prevInboxRef = _inboxRef;
