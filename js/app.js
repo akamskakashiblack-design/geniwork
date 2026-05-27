@@ -540,6 +540,7 @@ function _gwFbSyncStart() {
     }
     var dmFbKey = convSnap.key;
     var myFbPart = _gwFbKey(_currentUser.email);
+    console.log('[GW DM] 📨 snap reçu — clé:', dmFbKey, '| mon fragment:', myFbPart, '| correspond:', dmFbKey.indexOf(myFbPart) !== -1);
     if (dmFbKey.indexOf(myFbPart) === -1) return;  /* pas ma conversation */
     var lsKey = dmFbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
     if (!_gwSyncedMsgIds[lsKey]) _gwSyncedMsgIds[lsKey] = {};
@@ -553,6 +554,7 @@ function _gwFbSyncStart() {
         newMsgs.push(m);
       }
     });
+    console.log('[GW DM] 📩 nouveaux messages à traiter:', newMsgs.length, '| clé conv:', lsKey);
     if (!newMsgs.length) return;
     newMsgs.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
     try {
