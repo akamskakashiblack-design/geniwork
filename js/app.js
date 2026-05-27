@@ -12624,9 +12624,10 @@ function _dmClose() {
   }
 }
 
-/* ── Ouvre une conversation :
-      1. Charge tous les messages existants (once value)
-      2. Démarre un listener child_added pour les nouveaux ── */
+/* ── Ouvre une conversation Firebase-first :
+      1. Charge tous les messages depuis Firebase (once value), fusionne avec la mémoire locale
+      2. Démarre child_added sur la même ref pour les messages en temps réel
+         _seenIds est le seul garde-fou contre les doublons ── */
 function _dmOpen(conv) {
   _dmClose();
   if (!conv || conv.isGroup || !conv.email || !_currentUser || !_gwFbDB) return;
@@ -12635,55 +12636,69 @@ function _dmOpen(conv) {
   _dmRef    = _gwFbDB.ref('gw/dm_msgs/' + fbKey);
   _dmRefKey = fbKey;
 
-  /* Affiche un indicateur de chargement */
-  var _box = document.getElementById('chat-messages');
-  if (_box && !_box.children.length) {
-    _box.innerHTML = '<div class="chat-loading-msgs"><i class="fas fa-circle-notch fa-spin"></i></div>';
-  }
-
-  /* 1. Charge tous les messages existants en une seule requête Firebase */
+  /* Snapshot Firebase initial */
   _dmRef.once('value', function(snap) {
-    var msgs = [];
+    /* Annulé si l'utilisateur a changé de conversation ou s'est déconnecté */
+    if (_dmRefKey !== fbKey) return;
+    var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+    if (!activeConv) return;
+
+    /* Messages depuis Firebase */
+    var fbMsgs = [];
     if (snap && snap.val()) {
       Object.keys(snap.val()).forEach(function(k) {
         var m = snap.val()[k];
-        if (m && m.id && m.from) msgs.push(m);
+        if (m && m.id && m.from) fbMsgs.push(m);
       });
     }
-    msgs.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
 
-    /* Met à jour la conversation en mémoire */
-    var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
-    if (!activeConv) return;
-    activeConv.messages = msgs;
+    /* FUSION : conserver les messages locaux (envoyés mais pas encore confirmés Firebase)
+       Cela évite que le message texte de l'expéditeur disparaisse pendant le chargement */
+    var fbIds = {};
+    fbMsgs.forEach(function(m) { fbIds[String(m.id)] = true; });
+    var localPending = (activeConv.messages || []).filter(function(m) {
+      return m && m.id && !fbIds[String(m.id)];
+    });
+    var merged = fbMsgs.concat(localPending);
+    merged.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+
+    activeConv.messages = merged;
     activeConv.unread   = 0;
     _renderChatMessages(activeConv);
     setTimeout(_scrollChatToBottom, 60);
 
-    /* 2. Écoute uniquement les messages FUTURS (at > dernier message chargé) */
+    /* Index des messages déjà traités (évite les doublons dans child_added) */
     var _seenIds = {};
-    msgs.forEach(function(m) { _seenIds[String(m.id)] = true; });
-    var _startAt = msgs.length ? ((msgs[msgs.length - 1].at || 0) + 1) : 1;
+    merged.forEach(function(m) { _seenIds[String(m.id)] = true; });
 
-    _dmRef.orderByChild('at').startAt(_startAt).on('child_added', function(snap2) {
+    /* Listener temps réel : child_added sur la référence complète
+       (pas de filtre startAt — _seenIds gère la déduplication) */
+    _dmRef.on('child_added', function(snap2) {
+      if (_dmRefKey !== fbKey) return;
       var msg = snap2.val();
       if (!msg || !msg.id) return;
       var idStr = String(msg.id);
+
+      /* Déjà vu (messages initiaux ou envoyés localement) → ignorer */
       if (_seenIds[idStr]) return;
       _seenIds[idStr] = true;
 
       var conv2 = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
       if (!conv2) return;
-      if (conv2.messages.some(function(m) { return String(m.id) === idStr; })) return;
 
-      conv2.messages.push(msg);
-      conv2.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-      var _label = msg.text
+      /* Déjà en mémoire (envoyé par sendChatMessage avant la confirmation Firebase) → pas de doublon DOM */
+      var alreadyInMem = conv2.messages.some(function(m) { return String(m.id) === idStr; });
+      if (!alreadyInMem) {
+        conv2.messages.push(msg);
+        conv2.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+      }
+
+      var lbl = msg.text
         || (msg.type === 'img' ? '📷 Photo' : msg.type === 'video' ? '🎥 Vidéo' : '📎 ' + (msg.fileName || 'Fichier'));
-      conv2.lastMsg = _label;
+      conv2.lastMsg = lbl;
       conv2.lastAt  = msg.at || Date.now();
 
-      /* Append la bulle sans re-rendre tout le chat */
+      /* Rendu DOM : ajoute la bulle si elle n'est pas déjà à l'écran */
       var box2 = document.getElementById('chat-messages');
       if (box2 && !box2.querySelector('[data-msg-id="' + idStr + '"]')) {
         var isMine = _currentUser && msg.from === _currentUser.email;
@@ -12697,13 +12712,7 @@ function _dmOpen(conv) {
       renderConversations();
     });
   }, function(err) {
-    /* Erreur Firebase (ex: pas connecté) */
     console.error('[DM] Erreur chargement messages:', err && err.code);
-    var activeConv2 = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
-    if (activeConv2) {
-      activeConv2.messages = [];
-      _renderChatMessages(activeConv2);
-    }
   });
 }
 
