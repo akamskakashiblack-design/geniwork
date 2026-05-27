@@ -11704,20 +11704,28 @@ function openChat(convId) {
     }
 
     _gwActiveDMRef = _gwFbDB.ref('gw/dm_msgs/' + _openDmFbKey);
+    /* _activeDmSeenIds : dédup LOCAL à cette session d'écoute.
+       On NE PLUS utilise _dmSyncSet comme gate — il peut être marqué "true" par
+       _onDmMsgsSnap AVANT que le message soit réellement en mémoire, ce qui
+       ferait ignorer le message ici alors qu'il n'est toujours pas affiché. */
+    var _activeDmSeenIds = {};
     _gwActiveDMRef.on('child_added', function(snap) {
       var msg = snap.val();
       if (!msg || !msg.id) return;
       var msgIdStr = String(msg.id);
-      if (_dmSyncSet[msgIdStr]) return;      /* déjà en mémoire — ignorer */
+      /* Évite de traiter deux fois le même snap Firebase */
+      if (_activeDmSeenIds[msgIdStr]) return;
+      _activeDmSeenIds[msgIdStr] = true;
+      /* Notifie _onDmMsgsSnap que ce message est pris en charge */
       _dmSyncSet[msgIdStr] = true;
       try {
         var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
         if (!activeConv) return;
 
-        /* Évite les doublons en mémoire */
-        if (!activeConv.messages.some(function(m) { return String(m.id) === msgIdStr; })) {
-          activeConv.messages.push(msg);
-        }
+        /* Source de vérité : le message est-il déjà en mémoire ? */
+        if (activeConv.messages.some(function(m) { return String(m.id) === msgIdStr; })) return;
+
+        activeConv.messages.push(msg);
         activeConv.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
         if (msg.text || msg.type) {
           activeConv.lastMsg = msg.text || (msg.type === 'img' ? '📷 Photo' : (msg.type === 'video' ? '🎥 Vidéo' : '📎 Fichier'));
