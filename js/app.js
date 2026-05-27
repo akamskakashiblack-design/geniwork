@@ -1261,8 +1261,15 @@ function _googleLogin(gUser) {
 /* Importe la photo Google → profil Geniwork (canvas resize) */
 function _importGooglePhoto(email, nom, photoUrl) {
   var profile = loadUserProfile(email) || getDefaultProfile({ nom: nom, email: email });
-  /* Ne remplace que si aucune photo personnalisée n'existe déjà */
-  if (profile.photo && !profile._googlePhoto) return;
+  /* Ne remplace que si aucune photo personnalisée n'existe déjà.
+     - Sans flag Google  → photo perso uploadée → ne jamais écraser
+     - URL Firebase Storage → photo perso uploadée → ne jamais écraser
+     - base64 sans _googlePhoto → photo perso → ne jamais écraser */
+  if (profile.photo) {
+    if (!profile._googlePhoto) return;                                  /* photo perso flagguée */
+    if (profile.photo.indexOf('firebasestorage') !== -1) return;        /* URL Storage = perso */
+    /* photo Google (base64 _googlePhoto=true) → peut être remplacée (photo Google changée) */
+  }
   var img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload = function() {
@@ -1366,6 +1373,12 @@ function _gwPreloadUserData(user, callback) {
             /* Re-pousse vers Firebase pour resynchroniser */
             try { _pushProfileToFirebase(user.email, merged); } catch(e){}
           }
+        }
+        /* Rétrocompat : si photo Firebase Storage mais flag Google encore actif → le reset */
+        if (merged.photo && merged._googlePhoto &&
+            merged.photo.indexOf('firebasestorage') !== -1) {
+          merged._googlePhoto = false;
+          try { _pushProfileToFirebase(user.email, merged); } catch(e){}
         }
         try { localStorage.setItem('gw_profile_' + user.email, JSON.stringify(merged)); } catch(e){}
       }
@@ -8969,6 +8982,7 @@ function _cropApply() {
 
   function _applyPhoto(src) {
     profile.photo = src;
+    profile._googlePhoto = false;  /* photo perso → jamais écrasée par _importGooglePhoto */
     saveUserProfile(_currentUser.email, profile);
     _onProfileSaved();
     showToast('Photo de profil mise à jour ✓', 'ok');
