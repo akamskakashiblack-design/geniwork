@@ -12917,7 +12917,11 @@ function _saveDMConv(conv) {
       /* Écrire seulement les nouveaux messages */
       mergedForStorage.forEach(function(m) {
         if (!m || !m.id || _syncedSet[String(m.id)]) return;
-        _gwFbDB.ref('gw/dm_msgs/' + _fbDmKey + '/' + m.id).set(m).catch(function(){});
+        _gwFbDB.ref('gw/dm_msgs/' + _fbDmKey + '/' + m.id).set(m).catch(function(err) {
+          console.error('[GW DM] ❌ Écriture Firebase refusée :', err && err.code, err && err.message);
+          /* Retire de syncedSet pour réessayer au prochain envoi */
+          delete _syncedSet[String(m.id)];
+        });
         _syncedSet[String(m.id)] = true;
       });
       /* Meta séparée (lastMsg / lastAt) */
@@ -13412,6 +13416,7 @@ function handleChatAttach(input) {
     var msg = {
       id:       Date.now(),
       from:     _currentUser.email,
+      to:       conv.email,
       text:     isImage ? '' : file.name,
       type:     msgType,
       fileName: file.name,
@@ -13526,6 +13531,7 @@ function sendChatMessage() {
   var newMsg = {
     id:      Date.now(),
     from:    _currentUser.email,
+    to:      conv.email,
     text:    text,
     type:    'text',
     time:    _nowTime(),

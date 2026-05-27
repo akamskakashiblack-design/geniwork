@@ -16,7 +16,7 @@
           ".read":  "auth != null",
           ".write": "auth != null",
           "$msgId": {
-            ".validate": "newData.hasChildren(['id','from','to','at','text']) || newData.hasChildren(['id','from','to','at','type'])"
+            ".validate": "newData.hasChildren(['id','from','at']) && (newData.hasChild('text') || newData.hasChild('type'))"
           }
         }
       },
