@@ -527,100 +527,8 @@ function _gwFbSyncStart() {
     } catch(e){}
   });
 
-  /* ── Messages DM par message (child_added + child_changed — sans race condition) ── */
-  /* child_added  : nouvelle conversation (1er message)                               */
-  /* child_changed: messages suivants dans une conversation existante                  */
-  function _onDmMsgsSnap(convSnap) {
-    /* convSnap.key = dmFbKey ; convSnap.val() = {msgId: msg, ...} */
-    /* Si l'utilisateur n'est pas encore connecté, on retraite dans 1 s
-       (les child_added tirent avant le login lors de la restauration de session) */
-    if (!_currentUser) {
-      setTimeout(function() { try { _onDmMsgsSnap(convSnap); } catch(e){} }, 1000);
-      return;
-    }
-    var dmFbKey = convSnap.key;
-    var myFbPart = _gwFbKey(_currentUser.email);
-    console.log('[GW DM] 📨 snap reçu — clé:', dmFbKey, '| mon fragment:', myFbPart, '| correspond:', dmFbKey.indexOf(myFbPart) !== -1);
-    if (dmFbKey.indexOf(myFbPart) === -1) return;  /* pas ma conversation */
-    var lsKey = dmFbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
-    if (!_gwSyncedMsgIds[lsKey]) _gwSyncedMsgIds[lsKey] = {};
-    var syncSet = _gwSyncedMsgIds[lsKey];
-    var msgsObj = convSnap.val() || {};
-    var newMsgs = [];
-    Object.keys(msgsObj).forEach(function(k) {
-      var m = msgsObj[k];
-      if (m && m.id && !syncSet[String(m.id)]) {
-        syncSet[String(m.id)] = true;
-        newMsgs.push(m);
-      }
-    });
-    console.log('[GW DM] 📩 nouveaux messages à traiter:', newMsgs.length, '| clé conv:', lsKey);
-    if (!newMsgs.length) return;
-    newMsgs.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
-    try {
-      var _ls2 = null;
-      try { _ls2 = JSON.parse(localStorage.getItem(lsKey)); } catch(e){}
-      var _stored2 = (_ls2 && Array.isArray(_ls2.messages)) ? _ls2.messages : [];
-      var changed2 = false;
-      newMsgs.forEach(function(m) {
-        if (!_stored2.some(function(s) { return String(s.id) === String(m.id); })) {
-          _stored2.push(m); changed2 = true;
-        }
-      });
-      if (changed2) {
-        _stored2.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
-        var lastM = newMsgs[newMsgs.length - 1];
-        localStorage.setItem(lsKey, JSON.stringify({ messages: _stored2, lastMsg: lastM.text || '', lastAt: lastM.at || Date.now() }));
-
-        /* ── Push direct dans DEMO_CONVERSATIONS + rendu DOM immédiat ── */
-        if (_currentUser) {
-          var _memConv = DEMO_CONVERSATIONS.find(function(c) {
-            return !c.isGroup && c.email && _getDMKey(_currentUser.email, c.email) === lsKey;
-          });
-          if (_memConv) {
-            var _chatBox = document.getElementById('chat-messages');
-            var _chatOpen = _chatConvId === _memConv.id && _chatBox;
-
-            newMsgs.forEach(function(m) {
-              /* Évite les doublons en mémoire */
-              if (_memConv.messages.some(function(x) { return String(x.id) === String(m.id); })) return;
-              _memConv.messages.push(m);
-
-              /* ── Rendu DOM direct — évite le bug _pollChatMessages qui
-                 ne re-rend pas les messages déjà en mémoire ── */
-              if (_chatOpen && m.from !== _currentUser.email) {
-                if (!_chatBox.querySelector('[data-msg-id="' + m.id + '"]')) {
-                  var _row = document.createElement('div');
-                  _row.className = 'chat-msg-row theirs';
-                  _row.setAttribute('data-msg-id', m.id);
-                  _row.innerHTML = _buildBubbleHtml(m, false);
-                  _chatBox.appendChild(_row);
-                }
-              }
-            });
-
-            _memConv.messages.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
-            _memConv.lastMsg = lastM.text || (lastM.type === 'img' ? '📷 Photo' : (lastM.type === 'video' ? '🎥 Vidéo' : '📎 Fichier'));
-            _memConv.lastAt  = lastM.at || Date.now();
-
-            /* Scroll si chat ouvert, sinon compteur non-lu */
-            if (_chatOpen) {
-              try { _scrollChatToBottom(); } catch(e4){}
-            } else {
-              _memConv.unread = (_memConv.unread || 0) + newMsgs.filter(function(m) {
-                return m.from !== _currentUser.email;
-              }).length;
-            }
-          }
-        }
-
-        try { _checkDMInbox(); } catch(e2){}
-        renderConversations();
-      }
-    } catch(e){}
-  }
-  _gwFbDB.ref('gw/dm_msgs').on('child_added',   function(snap) { try { _onDmMsgsSnap(snap); } catch(e){} });
-  _gwFbDB.ref('gw/dm_msgs').on('child_changed', function(snap) { try { _onDmMsgsSnap(snap); } catch(e){} });
+  /* ── DM : les messages sont chargés directement depuis Firebase à l'ouverture
+     de chaque conversation (_dmOpen). Pas de listener global gw/dm_msgs. ── */
 
   /* ── Posts utilisateurs (sync temps réel) ── */
   _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
@@ -964,70 +872,6 @@ function _gwMergePost(snap) {
   }
 }
 
-/* ── Merge un snapshot Firebase DM dans localStorage ── */
-function _gwMergeDM(snap) {
-  if (!_currentUser || !snap) return;
-  var dmKey = snap.key;
-  var data  = snap.val();
-  if (!data || !Array.isArray(data.messages)) return;
-  /* Ignorer les DMs qui ne concernent pas l'utilisateur connecté */
-  var myFbPart = _gwFbKey(_currentUser.email);
-  if (dmKey.indexOf(myFbPart) === -1) return;
-  /* Reconstituer la clé localStorage */
-  var lsKey = dmKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
-  try {
-    var existing = null;
-    try { existing = JSON.parse(localStorage.getItem(lsKey)); } catch(e){}
-    var stored = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
-    var storedMap = {};
-    stored.forEach(function(m) { storedMap[String(m.id)] = true; });
-    var changed = false;
-    data.messages.forEach(function(m) {
-      if (m && m.id && !storedMap[String(m.id)]) {
-        stored.push(m);
-        changed = true;
-      }
-    });
-    if (changed) {
-      stored.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-      localStorage.setItem(lsKey, JSON.stringify({ messages: stored, lastMsg: data.lastMsg, lastAt: data.lastAt }));
-      try {
-        /* Retrouver la conv en mémoire */
-        var openConv = DEMO_CONVERSATIONS.find(function(c) {
-          return !c.isGroup && _getDMKey(_currentUser.email, c.email) === lsKey;
-        });
-
-        /* Si la conv n'existe pas encore en mémoire → la créer depuis Firebase */
-        if (!openConv) {
-          try { _checkDMInbox(); } catch(e){}
-          openConv = DEMO_CONVERSATIONS.find(function(c) {
-            return !c.isGroup && _getDMKey(_currentUser.email, c.email) === lsKey;
-          });
-        }
-
-        if (openConv) {
-          /* Compter les vrais nouveaux messages (pas les nôtres) */
-          var newFromOther = stored.filter(function(m) {
-            return m.from && m.from !== _currentUser.email &&
-                   m.from !== 'me' && m.from !== 'system' &&
-                   !openConv.messages.some(function(x) { return String(x.id) === String(m.id); });
-          });
-          /* Mettre à jour les métadonnées en mémoire */
-          if (data.lastMsg) openConv.lastMsg = data.lastMsg;
-          if (data.lastAt)  openConv.lastAt  = data.lastAt;
-          if (_chatConvId !== openConv.id && newFromOther.length > 0) {
-            openConv.unread = (openConv.unread || 0) + newFromOther.length;
-          }
-          /* Rafraîchit si la conv est ouverte à l'écran */
-          if (_chatConvId === openConv.id && document.getElementById('chat-messages')) {
-            _pollChatMessages();
-          }
-        }
-        renderConversations();
-      } catch(e){}
-    }
-  } catch(e){}
-}
 
 /* ── Merge messages d'un groupe depuis Firebase ── */
 function _gwMergeGroupMsg(snap) {
@@ -1560,31 +1404,7 @@ function _gwPreloadUserData(user, callback) {
       } catch(e){}
     });
 
-    /* ── dm_msgs : charge tous les messages per-message reçus sur d'autres appareils ── */
-    var allDmMsgs = snaps[8] ? (snaps[8].val() || {}) : {};
-    Object.keys(allDmMsgs).forEach(function(dmFbKey) {
-      if (dmFbKey.indexOf(fbKey) === -1) return;  /* pas ma conversation */
-      var lsKey = dmFbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
-      if (!_gwSyncedMsgIds[lsKey]) _gwSyncedMsgIds[lsKey] = {};
-      var syncSet2 = _gwSyncedMsgIds[lsKey];
-      var msgsObj2 = allDmMsgs[dmFbKey] || {};
-      var _ls3 = null;
-      try { _ls3 = JSON.parse(localStorage.getItem(lsKey)); } catch(e){}
-      var _stored3 = (_ls3 && Array.isArray(_ls3.messages)) ? _ls3.messages : [];
-      var changed3 = false;
-      Object.keys(msgsObj2).forEach(function(k) {
-        var m = msgsObj2[k];
-        if (!m || !m.id) return;
-        syncSet2[String(m.id)] = true;
-        if (!_stored3.some(function(s) { return String(s.id) === String(m.id); })) {
-          _stored3.push(m); changed3 = true;
-        }
-      });
-      if (changed3) {
-        _stored3.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
-        try { localStorage.setItem(lsKey, JSON.stringify({ messages: _stored3, lastMsg: _ls3 && _ls3.lastMsg || '', lastAt: _ls3 && _ls3.lastAt || Date.now() })); } catch(e){}
-      }
-    });
+    /* dm_msgs : les messages sont chargés depuis Firebase à l'ouverture de chaque conv (_dmOpen) */
 
     /* ── Following list (restaurée depuis Firebase au login) ── */
     var followingFb = snaps[6] ? snaps[6].val() : null;
@@ -2680,12 +2500,6 @@ function initApp(user) {
   /* ── Firebase : sync DMs, inbox et profils en temps réel ── */
   if (_gwFbReady && _gwFbDB && user.email) {
     var _myFbKey = _gwFbKey(user.email);
-
-    /* ── Re-enregistre les listeners gw/dm_msgs (supprimés au logout) ── */
-    _gwFbDB.ref('gw/dm_msgs').off('child_added');
-    _gwFbDB.ref('gw/dm_msgs').off('child_changed');
-    _gwFbDB.ref('gw/dm_msgs').on('child_added',   function(snap) { try { _onDmMsgsSnap(snap); } catch(e){} });
-    _gwFbDB.ref('gw/dm_msgs').on('child_changed', function(snap) { try { _onDmMsgsSnap(snap); } catch(e){} });
 
     /* Inbox */
     var _inboxRef = _gwFbDB.ref('gw/inboxes/' + _myFbKey);
@@ -11036,9 +10850,9 @@ function _newConvId() {
 var DEMO_CONVERSATIONS = [];
 
 var _msgTab          = 'all';
-var _chatConvId      = null;
-var _gwActiveDMRef   = null;   /* Firebase listener on the currently-open DM */
-var _gwSyncedMsgIds  = {};     /* {lsKey → {msgId → true}} évite de re-syncer le même message */
+var _chatConvId = null;
+var _dmRef      = null;   /* Firebase ref de la conversation DM ouverte */
+var _dmRefKey   = null;   /* Firebase key de la conversation DM ouverte */
 var _groupConvsReady = false;
 
 /* ── Persistance des conversations DM dynamiques (conversations réelles entre utilisateurs) ──
@@ -11663,15 +11477,16 @@ function openChat(convId) {
     if (statusEl) statusEl.textContent = conv.online ? 'En ligne' : 'Hors ligne';
   }
 
-  /* Charge les messages depuis le storage partagé */
+  /* Groupes : charge depuis le storage partagé + rendu synchrone */
   if (conv.isGroup) {
-    _loadGroupMsgs(conv);   /* Storage partagé entre tous les membres */
+    _loadGroupMsgs(conv);
+    _renderChatMessages(conv);
   } else {
-    _loadDMConv(conv);      /* Storage partagé entre les deux utilisateurs */
+    /* DM : rendu immédiat avec les messages en mémoire (vide si 1ère ouverture),
+       puis _dmOpen charge tout depuis Firebase et re-rend */
+    _renderChatMessages(conv);
+    _dmOpen(conv);
   }
-
-  /* Rend les messages */
-  _renderChatMessages(conv);
 
   /* Slide in */
   var screen = document.getElementById('chat-screen');
@@ -11679,91 +11494,13 @@ function openChat(convId) {
   void screen.offsetWidth;
   screen.classList.add('open');
 
-  /* Focus input + démarrage du polling */
+  /* Focus input + démarrage du polling (groupes seulement) */
   setTimeout(function() {
     var inp = document.getElementById('chat-input');
     if (inp) inp.focus();
     _scrollChatToBottom();
   }, 320);
   _startChatPolling();
-
-  /* ── Listener Firebase par message (child_added atomique — sans race condition) ── */
-  if (_gwActiveDMRef) { _gwActiveDMRef.off(); _gwActiveDMRef = null; }
-  if (!conv.isGroup && conv.email && _gwFbReady && _gwFbDB) {
-    var _openDmKey   = _getDMKey(_currentUser.email, conv.email);
-    var _openDmFbKey = _openDmKey.replace(/\./g,'__d__').replace(/@/g,'__a__');
-    if (!_gwSyncedMsgIds[_openDmKey]) _gwSyncedMsgIds[_openDmKey] = {};
-    var _dmSyncSet = _gwSyncedMsgIds[_openDmKey];
-
-    /* Marquer les messages déjà en mémoire comme synced (pour ne pas les re-rendre) */
-    var _initConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
-    if (_initConv) {
-      (_initConv.messages || []).forEach(function(m) {
-        if (m && m.id) _dmSyncSet[String(m.id)] = true;
-      });
-    }
-
-    _gwActiveDMRef = _gwFbDB.ref('gw/dm_msgs/' + _openDmFbKey);
-    /* _activeDmSeenIds : dédup LOCAL à cette session d'écoute.
-       On NE PLUS utilise _dmSyncSet comme gate — il peut être marqué "true" par
-       _onDmMsgsSnap AVANT que le message soit réellement en mémoire, ce qui
-       ferait ignorer le message ici alors qu'il n'est toujours pas affiché. */
-    var _activeDmSeenIds = {};
-    _gwActiveDMRef.on('child_added', function(snap) {
-      var msg = snap.val();
-      if (!msg || !msg.id) return;
-      var msgIdStr = String(msg.id);
-      /* Évite de traiter deux fois le même snap Firebase */
-      if (_activeDmSeenIds[msgIdStr]) return;
-      _activeDmSeenIds[msgIdStr] = true;
-      /* Notifie _onDmMsgsSnap que ce message est pris en charge */
-      _dmSyncSet[msgIdStr] = true;
-      try {
-        var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
-        if (!activeConv) return;
-
-        /* Source de vérité : le message est-il déjà en mémoire ? */
-        if (activeConv.messages.some(function(m) { return String(m.id) === msgIdStr; })) return;
-
-        activeConv.messages.push(msg);
-        activeConv.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-        if (msg.text || msg.type) {
-          activeConv.lastMsg = msg.text || (msg.type === 'img' ? '📷 Photo' : (msg.type === 'video' ? '🎥 Vidéo' : '📎 Fichier'));
-          activeConv.lastAt  = msg.at || Date.now();
-        }
-
-        /* Mettre à jour localStorage */
-        var _ls = null;
-        try { _ls = JSON.parse(localStorage.getItem(_openDmKey)); } catch(e){}
-        var _lsMsgs = (_ls && Array.isArray(_ls.messages)) ? _ls.messages : [];
-        if (!_lsMsgs.some(function(m) { return String(m.id) === msgIdStr; })) {
-          _lsMsgs.push(msg);
-          _lsMsgs.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-          localStorage.setItem(_openDmKey, JSON.stringify({
-            messages: _lsMsgs,
-            lastMsg:  activeConv.lastMsg || '',
-            lastAt:   activeConv.lastAt  || Date.now()
-          }));
-        }
-
-        /* ── Rendu DOM direct — n'appelle PAS _pollChatMessages()
-           car le message est déjà en mémoire et _pollChatMessages retournerait immédiatement ── */
-        if (msg.from !== (_currentUser ? _currentUser.email : '')) {
-          var _box = document.getElementById('chat-messages');
-          if (_box && !_box.querySelector('[data-msg-id="' + msgIdStr + '"]')) {
-            var _row = document.createElement('div');
-            _row.className = 'chat-msg-row theirs';
-            _row.setAttribute('data-msg-id', msgIdStr);
-            _row.innerHTML = _buildBubbleHtml(msg, false);
-            _box.appendChild(_row);
-            try { _scrollChatToBottom(); } catch(e){}
-          }
-        }
-
-        renderConversations();
-      } catch(e){}
-    });
-  }
 
   /* Active le maintien pour supprimer */
   setTimeout(_initMsgLongPress, 350);
@@ -11919,7 +11656,7 @@ function _doDeleteMsgForMe(msgId) {
 
 function closeChat() {
   _stopChatPolling();
-  if (_gwActiveDMRef) { _gwActiveDMRef.off(); _gwActiveDMRef = null; }
+  _dmClose();
   closeChatProfilePanel();
   var screen = document.getElementById('chat-screen');
   screen.classList.remove('open');
@@ -12825,24 +12562,18 @@ function _markDeletedForMe(msgId) {
   } catch(e) {}
 }
 
-/* ── Met à jour un message existant dans le stockage partagé DM ── */
+/* ── Met à jour un message DM en mémoire + dans Firebase ── */
 function _updateDMMsg(conv, msgId, updates) {
   if (!conv || conv.isGroup || !conv.email || !_currentUser) return;
-  try {
-    var key  = _getDMKey(_currentUser.email, conv.email);
-    var data = JSON.parse(localStorage.getItem(key) || '{}');
-    var msgs = (data && Array.isArray(data.messages)) ? data.messages : [];
-    var hit  = false;
-    msgs = msgs.map(function(m) {
-      if (String(m.id) === String(msgId)) { hit = true; return Object.assign({}, m, updates); }
-      return m;
-    });
-    if (hit) { data.messages = msgs; localStorage.setItem(key, JSON.stringify(data)); }
-  } catch(e) {}
   /* Mise à jour en mémoire */
   conv.messages = conv.messages.map(function(m) {
     return String(m.id) === String(msgId) ? Object.assign({}, m, updates) : m;
   });
+  /* Mise à jour Firebase */
+  if (_gwFbDB) {
+    var _fbKey = _dmFbKey(_currentUser.email, conv.email);
+    _gwFbDB.ref('gw/dm_msgs/' + _fbKey + '/' + msgId).update(updates).catch(function(){});
+  }
 }
 
 /* ── Met à jour un message existant dans le stockage partagé Groupe ── */
@@ -12864,136 +12595,161 @@ function _updateGroupMsg(conv, msgId, updates) {
   });
 }
 
-/* ── Sauvegarde DM : merge par ID pour ne jamais écraser les messages de l'autre ── */
-function _saveDMConv(conv) {
-  if (!conv || conv.isGroup || !conv.email || !_currentUser) return;
-  var key = _getDMKey(_currentUser.email, conv.email);
-  try {
-    /* 1. Lire ce qui est déjà en storage */
-    var existing = null;
-    try { existing = JSON.parse(localStorage.getItem(key)); } catch(e) {}
-    var storedMsgs = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
+/* ══════════════════════════════════════════════════════════════════
+   MOTEUR DM — Firebase-first (réécrit intégralement)
 
-    /* 2. Index des IDs déjà stockés */
-    var storedMap = {};
-    storedMsgs.forEach(function(m) { storedMap[String(m.id)] = true; });
+   Source de vérité unique : Firebase Realtime Database
+     gw/dm_msgs/{dmFbKey}/{msgId}   = objet message
+     gw/inboxes/{toFbKey}/{fromKey} = entrée inbox du destinataire
 
-    /* 3. Filtrer : ne conserver que les vrais messages (pas les démos) */
-    function _isRealMsg(m) {
-      return m && m.from && m.from !== 'them' && m.from !== 'me' &&
-             m.from !== 'system' && String(m.from).indexOf('@') !== -1;
-    }
-    /* Nettoyer aussi les messages déjà stockés (au cas où ils auraient été contaminés) */
-    var cleanStored = storedMsgs.filter(_isRealMsg);
-    var cleanStoredMap = {};
-    cleanStored.forEach(function(m) { cleanStoredMap[String(m.id)] = true; });
+   Flux :
+     Envoyer  → _dmWriteMsg()   → Firebase
+     Ouvrir   → _dmOpen()       → once('value') + child_added listener
+     Fermer   → _dmClose()      → off() du listener
+     Recevoir → inbox Firebase  → _checkDMInbox() → conversation dans la liste
+══════════════════════════════════════════════════════════════════ */
 
-    var merged = cleanStored.slice();
-    conv.messages.filter(_isRealMsg).forEach(function(m) {
-      if (!cleanStoredMap[String(m.id)]) {
-        merged.push(m);
-        cleanStoredMap[String(m.id)] = true;
-      }
-    });
-
-    /* 4. Trier par timestamp */
-    merged.sort(function(a, b) { return (Number(a.id) || 0) - (Number(b.id) || 0); });
-
-    /* 5. Mettre à jour la copie en mémoire */
-    conv.messages = merged;
-
-    /* Pour le storage partagé :
-       - data_url (lien Firebase Storage) → toujours gardé tel quel
-       - data base64 < 300 Ko → gardé
-       - data base64 ≥ 300 Ko → supprimé, marqué _photoStripped */
-    var mergedForStorage = merged.map(function(m) {
-      if (m.data_url) return m;                            /* URL Storage → rien à faire */
-      if ((m.type === 'img' || m.type === 'file' || m.type === 'video') && m.data) {
-        if (m.data.length < 300000) return m;
-        var stripped = { _photoStripped: true };
-        for (var k in m) { if (k !== 'data') stripped[k] = m[k]; }
-        return stripped;
-      }
-      return m;
-    });
-
-    var dmData = {
-      messages: mergedForStorage,
-      lastMsg:  conv.lastMsg,
-      lastAt:   conv.lastAt || Date.now(),
-      time:     conv.time
-    };
-    localStorage.setItem(key, JSON.stringify(dmData));
-
-    /* ── Sync Firebase : écriture atomique PAR MESSAGE (pas de race condition) ── */
-    if (_gwFbReady && _gwFbDB) {
-      var _fbDmKey = key.replace(/\./g,'__d__').replace(/@/g,'__a__');
-      if (!_gwSyncedMsgIds[key]) _gwSyncedMsgIds[key] = {};
-      var _syncedSet = _gwSyncedMsgIds[key];
-      /* Écrire seulement les nouveaux messages */
-      mergedForStorage.forEach(function(m) {
-        if (!m || !m.id || _syncedSet[String(m.id)]) return;
-        _gwFbDB.ref('gw/dm_msgs/' + _fbDmKey + '/' + m.id).set(m).catch(function(err) {
-          console.error('[GW DM] ❌ Écriture Firebase refusée :', err && err.code, err && err.message);
-          /* Retire de syncedSet pour réessayer au prochain envoi */
-          delete _syncedSet[String(m.id)];
-        });
-        _syncedSet[String(m.id)] = true;
-      });
-      /* Meta séparée (lastMsg / lastAt) */
-      _gwFbDB.ref('gw/dm_meta/' + _fbDmKey).set({
-        lastMsg: conv.lastMsg || '',
-        lastAt:  conv.lastAt  || Date.now()
-      }).catch(function(){});
-    }
-  } catch(e) {}
+/* Calcule la clé Firebase d'une conversation DM (emails triés + encodage) */
+function _dmFbKey(emailA, emailB) {
+  return ('gw_dm_' + [emailA, emailB].sort().join('__'))
+    .replace(/\./g, '__d__').replace(/@/g, '__a__');
 }
 
-/* ── Chargement DM : merge avec les messages déjà en mémoire ── */
-function _loadDMConv(conv) {
-  if (!conv || conv.isGroup || !conv.email || !_currentUser) return;
-  var key = _getDMKey(_currentUser.email, conv.email);
-  try {
-    var data = JSON.parse(localStorage.getItem(key));
-    if (data && Array.isArray(data.messages)) {
-      /* Filtrer les messages demo de la mémoire et du storage */
-      function _isRealMsgL(m) {
-        return m && m.from && m.from !== 'them' && m.from !== 'me' &&
-               m.from !== 'system' && String(m.from).indexOf('@') !== -1;
-      }
-      var merged = conv.messages.filter(_isRealMsgL);
-      var convMap2 = {};
-      merged.forEach(function(m) { convMap2[String(m.id)] = true; });
-
-      data.messages.filter(_isRealMsgL).forEach(function(m) {
-        if (!convMap2[String(m.id)]) {
-          merged.push(m);
-          convMap2[String(m.id)] = true;
-        }
-      });
-
-      merged.sort(function(a, b) { return (Number(a.id) || 0) - (Number(b.id) || 0); });
-      conv.messages = merged;
-      if (data.lastMsg) conv.lastMsg = data.lastMsg;
-      if (data.lastAt)  conv.lastAt  = data.lastAt;
-    }
-  } catch(e) {}
+/* ── Ferme le listener Firebase de la conversation active ── */
+function _dmClose() {
+  if (_dmRef) {
+    try { _dmRef.off(); } catch(e) {}
+    _dmRef    = null;
+    _dmRefKey = null;
+  }
 }
 
-/* ── Polling — détecte les nouveaux messages du destinataire ── */
+/* ── Ouvre une conversation :
+      1. Charge tous les messages existants (once value)
+      2. Démarre un listener child_added pour les nouveaux ── */
+function _dmOpen(conv) {
+  _dmClose();
+  if (!conv || conv.isGroup || !conv.email || !_currentUser || !_gwFbDB) return;
+
+  var fbKey = _dmFbKey(_currentUser.email, conv.email);
+  _dmRef    = _gwFbDB.ref('gw/dm_msgs/' + fbKey);
+  _dmRefKey = fbKey;
+
+  /* Affiche un indicateur de chargement */
+  var _box = document.getElementById('chat-messages');
+  if (_box && !_box.children.length) {
+    _box.innerHTML = '<div class="chat-loading-msgs"><i class="fas fa-circle-notch fa-spin"></i></div>';
+  }
+
+  /* 1. Charge tous les messages existants en une seule requête Firebase */
+  _dmRef.once('value', function(snap) {
+    var msgs = [];
+    if (snap && snap.val()) {
+      Object.keys(snap.val()).forEach(function(k) {
+        var m = snap.val()[k];
+        if (m && m.id && m.from) msgs.push(m);
+      });
+    }
+    msgs.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+
+    /* Met à jour la conversation en mémoire */
+    var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+    if (!activeConv) return;
+    activeConv.messages = msgs;
+    activeConv.unread   = 0;
+    _renderChatMessages(activeConv);
+    setTimeout(_scrollChatToBottom, 60);
+
+    /* 2. Écoute uniquement les messages FUTURS (at > dernier message chargé) */
+    var _seenIds = {};
+    msgs.forEach(function(m) { _seenIds[String(m.id)] = true; });
+    var _startAt = msgs.length ? ((msgs[msgs.length - 1].at || 0) + 1) : 1;
+
+    _dmRef.orderByChild('at').startAt(_startAt).on('child_added', function(snap2) {
+      var msg = snap2.val();
+      if (!msg || !msg.id) return;
+      var idStr = String(msg.id);
+      if (_seenIds[idStr]) return;
+      _seenIds[idStr] = true;
+
+      var conv2 = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+      if (!conv2) return;
+      if (conv2.messages.some(function(m) { return String(m.id) === idStr; })) return;
+
+      conv2.messages.push(msg);
+      conv2.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
+      var _label = msg.text
+        || (msg.type === 'img' ? '📷 Photo' : msg.type === 'video' ? '🎥 Vidéo' : '📎 ' + (msg.fileName || 'Fichier'));
+      conv2.lastMsg = _label;
+      conv2.lastAt  = msg.at || Date.now();
+
+      /* Append la bulle sans re-rendre tout le chat */
+      var box2 = document.getElementById('chat-messages');
+      if (box2 && !box2.querySelector('[data-msg-id="' + idStr + '"]')) {
+        var isMine = _currentUser && msg.from === _currentUser.email;
+        var row = document.createElement('div');
+        row.className = 'chat-msg-row ' + (isMine ? 'mine' : 'theirs');
+        row.setAttribute('data-msg-id', idStr);
+        row.innerHTML = _buildBubbleHtml(msg, isMine);
+        box2.appendChild(row);
+        _scrollChatToBottom();
+      }
+      renderConversations();
+    });
+  }, function(err) {
+    /* Erreur Firebase (ex: pas connecté) */
+    console.error('[DM] Erreur chargement messages:', err && err.code);
+    var activeConv2 = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+    if (activeConv2) {
+      activeConv2.messages = [];
+      _renderChatMessages(activeConv2);
+    }
+  });
+}
+
+/* ── Écrit un message dans Firebase + met à jour l'inbox du destinataire ── */
+function _dmWriteMsg(conv, msg) {
+  if (!_gwFbDB || !msg || !conv || !conv.email || !_currentUser) return Promise.resolve();
+
+  var fbKey   = _dmFbKey(_currentUser.email, conv.email);
+  var toFbKey = _gwFbKey(conv.email);
+  var myFbKey = _gwFbKey(_currentUser.email);
+  var label   = msg.text
+    || (msg.type === 'img'   ? '📷 Photo'
+      : msg.type === 'video' ? '🎥 Vidéo'
+      : '📎 ' + (msg.fileName || 'Fichier'));
+
+  return _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + msg.id).set(msg)
+    .then(function() {
+      return _gwFbDB.ref('gw/inboxes/' + toFbKey + '/' + myFbKey).set({
+        fromEmail: _currentUser.email,
+        fromName:  _currentUser.nom  || _currentUser.email,
+        fromRole:  _currentUser.role || 'Membre Geniwork',
+        lastMsg:   label,
+        at:        msg.at || Date.now()
+      });
+    })
+    .catch(function(err) {
+      console.error('[DM] ❌ Erreur envoi:', err && err.code, err && err.message);
+      showToast('Erreur d\'envoi — vérifiez votre connexion', 'err');
+    });
+}
+
+/* _saveDMConv : remplacé par _dmWriteMsg. Stub pour compatibilité résiduelle. */
+function _saveDMConv(conv) { /* no-op */ }
+
+/* ── Polling — groupes uniquement (DM géré par Firebase listener) ── */
 var _chatPollInterval = null;
 
 function _startChatPolling() {
   _stopChatPolling();
   _chatPollInterval = setInterval(function() {
-    /* Poll DM ou groupe selon le type de conv ouverte */
     var _openConv = _chatConvId
       ? DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; })
       : null;
+    /* Pour les DM, c'est _dmOpen/_dmRef qui gère — pas besoin de poll */
     if (_openConv && _openConv.isGroup) {
       _pollGroupMessages();
-    } else {
-      _pollChatMessages();
     }
   }, 3000);
 }
@@ -13002,72 +12758,9 @@ function _stopChatPolling() {
   if (_chatPollInterval) { clearInterval(_chatPollInterval); _chatPollInterval = null; }
 }
 
-function _pollChatMessages() {
-  if (!_chatConvId || !_currentUser) return;
-  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
-  if (!conv || conv.isGroup || !conv.email) return;
+/* _pollChatMessages : supprimé — remplacé par Firebase listener _dmRef */
+function _pollChatMessages() { /* no-op */ }
 
-  var key = _getDMKey(_currentUser.email, conv.email);
-  try {
-    var data = JSON.parse(localStorage.getItem(key));
-    if (!data || !Array.isArray(data.messages)) return;
-    /* Garder uniquement les vrais messages (exclure les messages démo) */
-    var stored = data.messages.filter(function(m) {
-      return m && m.from && m.from !== 'them' && m.from !== 'me' &&
-             m.from !== 'system' && String(m.from).indexOf('@') !== -1;
-    });
-
-    /* Comparer par ID — évite le bug de décompte par index */
-    var convMap = {};
-    conv.messages.forEach(function(m) { convMap[String(m.id)] = true; });
-
-    var newOnes = stored.filter(function(m) { return !convMap[String(m.id)]; });
-
-    /* ── Détecte les suppressions "pour tous" sur messages déjà en mémoire ── */
-    var box = document.getElementById('chat-messages');
-    stored.forEach(function(sm) {
-      if (!sm.deletedForAll) return;
-      var ex = conv.messages.find(function(m) { return String(m.id) === String(sm.id); });
-      if (ex && !ex.deletedForAll) {
-        ex.deletedForAll = true;
-        if (box) {
-          var domRow = box.querySelector('[data-msg-id="' + sm.id + '"]');
-          if (domRow) domRow.innerHTML = _buildBubbleHtml(ex, domRow.classList.contains('mine'));
-        }
-      }
-    });
-
-    if (newOnes.length === 0) return;
-
-    /* Merge en mémoire */
-    newOnes.forEach(function(m) { conv.messages.push(m); convMap[String(m.id)] = true; });
-    conv.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-
-    if (!box) return;
-
-    /* Ajouter uniquement les messages reçus (pas les nôtres déjà affichés) */
-    var toAdd = newOnes.filter(function(m) { return m.from !== _currentUser.email && m.from !== 'me'; });
-    var addedRecv = 0;
-    toAdd.forEach(function(m) {
-      if (!_isDeletedForMe(m.id)) {
-        var row = document.createElement('div');
-        row.className = 'chat-msg-row theirs';
-        row.setAttribute('data-msg-id', m.id);
-        row.innerHTML = _buildBubbleHtml(m, false);
-        box.appendChild(row);
-        addedRecv++;
-      }
-    });
-
-    if (addedRecv > 0) {
-      var _lastNew = newOnes[newOnes.length - 1];
-      conv.lastMsg = _lastNew.text || conv.lastMsg;
-      conv.lastAt  = _lastNew.at   || Date.now();
-      _scrollChatToBottom();
-      renderConversations();
-    }
-  } catch(e) {}
-}
 
 /* ══════════════════════════════════════════
    RÉPONDRE À UN MESSAGE (reply / citation)
@@ -13463,12 +13156,11 @@ function handleChatAttach(input) {
       _saveGroupMsg(conv, msg);
       _saveGroupConvs();
     } else {
-      _saveDMConv(conv);
+      /* DM : écriture directe dans Firebase */
+      _dmWriteMsg(conv, msg);
+      _saveDMConvList();
       if (conv.email) {
         var _fLabel = isImage ? '📷 Photo' : (isVideo ? '🎥 Vidéo' : '📎 ' + file.name);
-        _writeDMInbox(conv.email, _currentUser.email, _currentUser.nom, _currentUser.role || 'Membre Geniwork', _fLabel);
-        _saveDMConvList();
-        /* Push notification fichier/photo/vidéo */
         _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', _fLabel, 'msg-' + _gwFbKey(conv.email));
       }
     }
@@ -13561,17 +13253,14 @@ function sendChatMessage() {
 
   /* Persistance */
   if (conv.isGroup) {
-    /* Écrit dans le storage PARTAGÉ du groupe (tous les membres lisent la même clé) */
     _saveGroupMsg(conv, newMsg);
-    /* Métadonnées locales (liste des convs) */
     _saveGroupConvs();
   } else {
-    _saveDMConv(conv);
-    /* ← Notifie l'inbox du destinataire pour qu'il crée la conv s'il ne l'a pas encore */
+    /* DM : écriture directe dans Firebase */
+    _dmWriteMsg(conv, newMsg);
+    _saveDMConvList();
+    /* Push notification vers le destinataire */
     if (conv.email) {
-      _writeDMInbox(conv.email, _currentUser.email, _currentUser.nom, _currentUser.role || 'Membre Geniwork', text);
-      _saveDMConvList(); /* ← Sauvegarde la liste pour survivre au refresh */
-      /* Push notification vers le destinataire */
       _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', text, 'msg-' + _gwFbKey(conv.email));
     }
   }
@@ -16779,16 +16468,13 @@ function doLogout() {
       _gwFbDB.ref('gw/profiles').off('child_changed');
       _gwFbDB.ref('gw/group_msgs').off('child_added');
       _gwFbDB.ref('gw/group_msgs').off('child_changed');
-      _gwFbDB.ref('gw/dm_msgs').off('child_added');
-      _gwFbDB.ref('gw/dm_msgs').off('child_changed');
       if (_currentUser) {
         _gwFbDB.ref('gw/notifs/' + _gwFbKey(_currentUser.email)).off();
       }
     }
   } catch(e){}
-  /* Nettoyer le listener DM actif + mémoire des IDs synced */
-  if (_gwActiveDMRef) { try { _gwActiveDMRef.off(); } catch(e){} _gwActiveDMRef = null; }
-  _gwSyncedMsgIds = {};
+  /* Ferme le listener Firebase de la conversation DM active */
+  _dmClose();
   /* Vider les conversations en mémoire — seront rechargées au prochain login */
   DEMO_CONVERSATIONS.length = 0;
   _currentUser = null;
@@ -22792,7 +22478,8 @@ function _writeDMInbox(toEmail, fromEmail, fromName, fromRole, lastMsg) {
   }
 }
 
-/* Y vérifie son inbox et crée les conversations manquantes */
+/* Y vérifie son inbox Firebase et crée/met à jour les conversations
+   Les messages ne sont PAS chargés ici — ils le sont dans _dmOpen() */
 function _checkDMInbox() {
   if (!_currentUser) return;
   var key = 'gw_dm_inbox_' + _currentUser.email;
@@ -22802,35 +22489,17 @@ function _checkDMInbox() {
     var changed = false;
     inbox.forEach(function(entry) {
       if (!entry.fromEmail) return;
-      /* Conversation déjà dans la liste ? */
+
       var existing = DEMO_CONVERSATIONS.find(function(c) {
-        return c.email === entry.fromEmail;
+        return !c.isGroup && c.email === entry.fromEmail;
       });
+
       if (!existing) {
-        /* Crée la conversation automatiquement */
+        /* Nouvelle conversation — messages chargés depuis Firebase à l'ouverture */
         var nom = entry.fromName || entry.fromEmail;
         var _profile2 = loadUserProfile(entry.fromEmail) || {};
-        var hasBadge = _profile2.badgeType === 'verified' || _profile2.badgeType === 'premium';
-
-        /* Pré-charge les messages depuis le storage partagé pour compter les unread */
-        var _dmKey2  = _getDMKey(_currentUser.email, entry.fromEmail);
-        var _dmData2 = null;
-        try { _dmData2 = JSON.parse(localStorage.getItem(_dmKey2)); } catch(e2) {}
-        var _dmMsgs2 = (_dmData2 && Array.isArray(_dmData2.messages))
-          ? _dmData2.messages.filter(function(m) {
-              return m && m.from && m.from !== 'them' && m.from !== 'me' &&
-                     m.from !== 'system' && String(m.from).indexOf('@') !== -1;
-            })
-          : [];
-        /* Unread = tous les messages du DM qui viennent de l'expéditeur */
-        var _initUnread = _dmMsgs2.filter(function(m) {
-          return m.from === entry.fromEmail;
-        }).length;
-        var _lastStoredMsg = _dmMsgs2.length
-          ? (_dmMsgs2[_dmMsgs2.length - 1].text || entry.lastMsg || '...')
-          : (entry.lastMsg || '...');
-
-        var newConv = {
+        var hasBadge  = _profile2.badgeType === 'verified' || _profile2.badgeType === 'premium';
+        DEMO_CONVERSATIONS.unshift({
           id:       _newConvId(),
           name:     nom,
           email:    entry.fromEmail,
@@ -22840,45 +22509,27 @@ function _checkDMInbox() {
           avatar:   { type: 'color', color: '#6366F1', initials: getInitials(nom) },
           at:       entry.at,
           time:     'À l\'instant',
-          lastMsg:  _lastStoredMsg,
+          lastMsg:  entry.lastMsg || '...',
           lastAt:   entry.at,
-          unread:   _initUnread,
+          unread:   1,
           archived: false,
-          messages: _dmMsgs2
-        };
-        DEMO_CONVERSATIONS.unshift(newConv);
+          messages: []
+        });
         changed = true;
       } else {
-        /* Conversation existe déjà → mettre à jour nom/email + recharger les messages depuis localStorage */
+        /* Conversation existante — mettre à jour lastMsg + badge non-lu */
         if (!existing.email) existing.email = entry.fromEmail;
-        /* Merge les messages du storage partagé dans la conv en mémoire */
-        var _existKey  = _getDMKey(_currentUser.email, entry.fromEmail);
-        var _existData = null;
-        try { _existData = JSON.parse(localStorage.getItem(_existKey)); } catch(e2){}
-        if (_existData && Array.isArray(_existData.messages)) {
-          var _existMap = {};
-          existing.messages.forEach(function(m) { _existMap[String(m.id)] = true; });
-          var _addedCount = 0;
-          _existData.messages.forEach(function(m) {
-            if (m && m.id && !_existMap[String(m.id)]) {
-              existing.messages.push(m);
-              _existMap[String(m.id)] = true;
-              _addedCount++;
-            }
-          });
-          if (_addedCount > 0) {
-            existing.messages.sort(function(a,b){ return (Number(a.id)||0)-(Number(b.id)||0); });
-            var _newLast = existing.messages[existing.messages.length - 1];
-            existing.lastMsg = (_newLast && _newLast.text) || _existData.lastMsg || existing.lastMsg;
-            existing.lastAt  = _existData.lastAt || existing.lastAt;
-            if (_chatConvId !== existing.id) existing.unread = (existing.unread || 0) + _addedCount;
-            changed = true;
-          }
+        var isOpen = _chatConvId === existing.id;
+        if (!isOpen && entry.at && (!existing.lastAt || entry.at > existing.lastAt)) {
+          existing.lastMsg = entry.lastMsg || existing.lastMsg;
+          existing.lastAt  = entry.at;
+          existing.unread  = (existing.unread || 0) + 1;
+          changed = true;
         }
       }
     });
     if (changed) {
-      _saveDMConvList(); /* Persiste les nouvelles convs pour les retrouver après refresh */
+      _saveDMConvList();
       renderConversations();
     }
   } catch(e) {}
@@ -22902,47 +22553,8 @@ function _globalMsgPoll() {
   /* Vérifie si les groupes ont des non-lus */
   DEMO_CONVERSATIONS.forEach(function(c) { if (c.isGroup && (c.unread || 0) > 0) hadGroupNew = true; });
 
+  /* Les DM sont gérés par Firebase (_dmOpen/_checkDMInbox) — pas de poll localStorage */
   var hasNew = hadGroupNew;
-  DEMO_CONVERSATIONS.forEach(function(conv) {
-    if (conv.isGroup || !conv.email) return;
-    /* Si ce chat est ouvert → _pollChatMessages s'en charge */
-    if (conv.id === _chatConvId) return;
-    var key = _getDMKey(_currentUser.email, conv.email);
-    try {
-      var data = JSON.parse(localStorage.getItem(key));
-      if (!data || !Array.isArray(data.messages)) return;
-      /* Filtrer les messages démo avant tout traitement */
-      var stored = data.messages.filter(function(m) {
-        return m && m.from && m.from !== 'them' && m.from !== 'me' &&
-               m.from !== 'system' && String(m.from).indexOf('@') !== -1;
-      });
-
-      /* Comparaison par ID pour éviter le bug d'écrasement */
-      var convMap = {};
-      conv.messages.forEach(function(m) { convMap[String(m.id)] = true; });
-
-      var newOnes = stored.filter(function(m) {
-        return !convMap[String(m.id)] &&
-               m.from !== _currentUser.email &&
-               m.from !== 'me';
-      });
-
-      /* Merger tous les vrais messages du storage (y compris les nôtres) */
-      var allNew = stored.filter(function(m) { return !convMap[String(m.id)]; });
-      if (allNew.length > 0) {
-        allNew.forEach(function(m) { conv.messages.push(m); });
-        conv.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-      }
-
-      if (newOnes.length > 0) {
-        var last = newOnes[newOnes.length - 1];
-        conv.unread  = (conv.unread || 0) + newOnes.length;
-        conv.lastMsg = last.text || conv.lastMsg;
-        conv.lastAt  = last.at   || Date.now();
-        hasNew = true;
-      }
-    } catch(e) {}
-  });
 
   /* Trier les convs par lastAt décroissant pour que la plus récente remonte */
   if (hasNew) {
