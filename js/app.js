@@ -5357,8 +5357,11 @@ function expandPost(postId) {
 function likePost(postId) {
   if (!_currentUser) { showToast('Connectez-vous pour liker', 'err'); return; }
 
-  var post = getAllPosts().find(function(p) { return p.id === postId; });
+  var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
   if (!post) return;
+
+  /* Ensure likers is in sync with localStorage */
+  if (!Array.isArray(post.likers)) post.likers = loadPostLikers(post.id);
 
   var email = _currentUser.email;
   var idx   = post.likers.indexOf(email);
@@ -6003,12 +6006,15 @@ function _vpPopulateDetail(post) {
   var statsEl = document.getElementById('vpd-stats');
   if (statsEl) statsEl.textContent = _fmtViews(_getVideoViews(post.id)) + ' vues · ' + _timeAgo(post.at || post.id);
 
-  /* Like / dislike counts */
-  var lCnt = document.getElementById('vpd-like-cnt');
-  var dCnt = document.getElementById('vpd-dislike-cnt');
-  if (lCnt) lCnt.textContent = _fmtViews((post.baseLikes || 0) + (post.likers ? post.likers.length : 0));
+  /* Like / dislike counts — always read fresh from localStorage */
+  post.likers = loadPostLikers(post.id);
+  var lCnt     = document.getElementById('vpd-like-cnt');
+  var dCnt     = document.getElementById('vpd-dislike-cnt');
+  var sCnt     = document.getElementById('vpd-share-cnt');
   var dislikers = loadPostDislikers(post.id);
-  if (dCnt) dCnt.textContent = _fmtViews(dislikers.length);
+  if (lCnt) lCnt.textContent = _fmtViews((post.baseLikes || 0) + post.likers.length);
+  if (dCnt) dCnt.textContent = _fmtViews(dislikers.length) || '0';
+  if (sCnt) sCnt.textContent = _fmtViews(_getShareCount(post.id));
 
   /* Like / dislike / save active state */
   var email = _currentUser ? _currentUser.email : '';
@@ -6085,7 +6091,7 @@ function _vpPopulateDetail(post) {
   if (_vpCommentsTimer) { clearInterval(_vpCommentsTimer); _vpCommentsTimer = null; }
   var commWrap = document.getElementById('vpd-comments-wrap');
   if (commWrap) {
-    var cList  = (post.comments || []).slice().reverse();
+    var cList  = getAllComments(post.id).slice().reverse();
     var cCount = cList.length;
     var previewHtml = cCount > 0
       ? '<div id="vpd-comment-preview" class="vpd-comment-preview">' + _vpBuildCommentHtml(cList[0]) + '</div>'
@@ -6165,10 +6171,12 @@ function _vpPopulateDetail(post) {
 function _vpRefreshLikeDislike() {
   var post  = _vpCurrentPost;
   var email = _currentUser ? _currentUser.email : '';
-  var liked    = email && post.likers && post.likers.indexOf(email) !== -1;
+  /* Always read fresh state */
+  post.likers = loadPostLikers(post.id);
+  var liked    = email && post.likers.indexOf(email) !== -1;
   var dislikers = loadPostDislikers(post.id);
   var disliked  = email && dislikers.indexOf(email) !== -1;
-  var likeTotal = (post.baseLikes || 0) + (post.likers ? post.likers.length : 0);
+  var likeTotal = (post.baseLikes || 0) + post.likers.length;
 
   var lb   = document.getElementById('vpd-like-btn');
   var db   = document.getElementById('vpd-dislike-btn');
@@ -6940,9 +6948,18 @@ function _renderFavServices() {
 /* ══════════════════════════════════════════
    PARTAGE
 ══════════════════════════════════════════ */
+function _getShareCount(postId) {
+  return parseInt(localStorage.getItem('gw_shares_' + postId) || '0', 10);
+}
+function _incShareCount(postId) {
+  var n = _getShareCount(postId) + 1;
+  localStorage.setItem('gw_shares_' + postId, n);
+  return n;
+}
+
 function sharePost(postId) {
-  var post = getAllPosts().find(function(p) { return p.id === postId; });
-  var text = post ? post.author + ' sur Geniwork : ' + post.text.slice(0,80) + '…' : 'Geniwork';
+  var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+  var text = post ? (post.author || '') + ' sur Geniwork : ' + (post.text || '').slice(0,80) + '…' : 'Geniwork';
 
   if (navigator.share) {
     navigator.share({ title: 'Geniwork', text: text, url: 'https://geniwork.com' })
@@ -6962,7 +6979,12 @@ function sharePost(postId) {
 }
 
 function notifyShare(post) {
-  if (!post || !post.ownerEmail || !_currentUser) return;
+  if (!post) return;
+  /* Increment share counter and update the video player button if visible */
+  var newCount = _incShareCount(post.id);
+  var sCnt = document.getElementById('vpd-share-cnt');
+  if (sCnt) sCnt.textContent = _fmtViews(newCount);
+  if (!post.ownerEmail || !_currentUser) return;
   if (post.ownerEmail === _currentUser.email) return;
   pushNotif(post.ownerEmail, {
     id:          genNotifId(),
