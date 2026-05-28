@@ -1,30 +1,22 @@
 {
   "rules": {
     "gw": {
-
-      /* ── Utilisateurs ── */
       "users": {
         ".read":  true,
         ".write": "auth != null"
       },
-
-      /* ── Profils ── */
       "profiles": {
         ".read":  true,
         "$userFbKey": {
           ".write": "auth != null"
         }
       },
-
-      /* ── DM : liste des conversations (métadonnées) ── */
       "dms": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ── DM : messages ── */
       "dm_msgs": {
         "$dmFbKey": {
           ".read":  "auth != null",
@@ -34,40 +26,30 @@
           }
         }
       },
-
-      /* ── DM : métadonnées de conversation ── */
       "dm_meta": {
         "$dmFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ── Boîte de réception DM ── */
       "inboxes": {
         "$toFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ── Groupes : messages ── */
       "group_msgs": {
         "$grpFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ── Groupes : boîte de réception ── */
       "group_inboxes": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ── Publications (feed) ── */
       "posts": {
         ".read":  true,
         "$userFbKey": {
@@ -90,8 +72,6 @@
         ".read":  true,
         ".write": "auth != null"
       },
-
-      /* ── Interactions ── */
       "likes": {
         ".read":  true,
         "$postId": {
@@ -122,8 +102,6 @@
           ".write": "auth != null"
         }
       },
-
-      /* ── Vues vidéo ── */
       "vid_views": {
         ".read":  true,
         "$postId": {
@@ -136,8 +114,6 @@
           ".write": "auth != null"
         }
       },
-
-      /* ── Abonnements (follow) ── */
       "following": {
         ".read":  true,
         "$userFbKey": {
@@ -156,8 +132,6 @@
           ".write": "auth != null"
         }
       },
-
-      /* ── Notifications ── */
       "notifs": {
         "$userFbKey": {
           ".read":  "auth != null",
@@ -170,8 +144,6 @@
           ".write": "auth != null"
         }
       },
-
-      /* ── Marketplace ── */
       "mk_listings": {
         ".read":  true,
         ".write": "auth != null"
@@ -180,8 +152,6 @@
         ".read":  "auth != null",
         ".write": "auth != null"
       },
-
-      /* ── Collaboration ── */
       "collab_requests": {
         ".read":  true,
         ".write": "auth != null"
@@ -198,8 +168,6 @@
           ".write": "auth != null"
         }
       },
-
-      /* ── Services & Projets ── */
       "services": {
         ".read":  true,
         "$userFbKey": {
@@ -212,16 +180,12 @@
           ".write": "auth != null"
         }
       },
-
-      /* ── Avis ── */
       "reviews": {
         ".read":  true,
         "$profileFbKey": {
           ".write": "auth != null"
         }
       },
-
-      /* ── Modération ── */
       "bans": {
         ".read":  "auth != null",
         ".write": "auth != null"
@@ -238,16 +202,12 @@
           ".write": "auth != null"
         }
       },
-
-      /* ── Confidentialité ── */
       "privacy": {
         "$userFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
-
-      /* ── Administration ── */
       "admin_tasks": {
         ".read":  "auth != null",
         ".write": "auth != null"
@@ -264,7 +224,6 @@
         ".read":  true,
         ".write": "auth != null"
       }
-
     }
   }
 }
