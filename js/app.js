@@ -7947,7 +7947,10 @@ function _showVidMetaSheet() {
   overlay.innerHTML =
     '<div class="vm-sheet" id="vm-sheet-inner">' +
       '<div class="vm-handle"></div>' +
-      '<div class="vm-title"><i class="fas fa-sliders-h" style="margin-right:8px;color:#7C3AED"></i>Options de la vidéo</div>' +
+      '<div class="vm-title-row">' +
+        '<div class="vm-title"><i class="fas fa-sliders-h" style="margin-right:8px;color:#7C3AED"></i>Options de la vidéo</div>' +
+        '<button class="vm-close-btn" onclick="_vmClose()">✕</button>' +
+      '</div>' +
       '<p class="vm-subtitle">Sélectionnez le type et la catégorie pour que votre vidéo soit bien classée.</p>' +
 
       '<div class="vm-section-label">Type de vidéo <span class="vm-required">*</span></div>' +
@@ -8024,6 +8027,18 @@ function _vmOnCustom(inp) {
 function _vmRefreshConfirm() {
   var btn = document.getElementById('vm-confirm-btn');
   if (btn) btn.disabled = !_vmSelCat;
+}
+
+function _vmClose() {
+  var sheet = document.getElementById('vm-sheet-inner');
+  if (sheet) {
+    sheet.style.transition = 'transform .25s ease';
+    sheet.style.transform  = 'translateY(100%)';
+    setTimeout(function() {
+      var ov = document.getElementById('vid-meta-sheet');
+      if (ov) ov.remove();
+    }, 280);
+  }
 }
 
 function _vmConfirm() {

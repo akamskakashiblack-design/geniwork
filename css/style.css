@@ -12738,11 +12738,28 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   border-radius: 2px;
   margin: 0 auto 16px;
 }
+.vm-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
 .vm-title {
   font-size: 17px;
   font-weight: 700;
   color: #0F172A;
-  margin-bottom: 6px;
+}
+.vm-close-btn {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: #F1F5F9;
+  color: #64748B;
+  font-size: 15px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
 }
 .vm-subtitle {
   font-size: 12px;
