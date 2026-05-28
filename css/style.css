@@ -12907,3 +12907,140 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 /* ══════════════════════════════════════════
    FIN VIDEO META SHEET
 ══════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════
+   MODE CLAIR — Overrides pour les pages vidéo (Discover + Player)
+   Par défaut les pages vidéo sont sombres.
+   Quand dark-mode est OFF, on applique les couleurs claires.
+══════════════════════════════════════════════════════════════ */
+
+/* ── Videos Discover ── */
+body:not(.dark-mode) #vd-modal { background: #F1F5F9 !important; }
+
+body:not(.dark-mode) .vd-topbar {
+  background: #FFFFFF;
+  border-bottom: 1px solid #E2E8F0;
+}
+body:not(.dark-mode) .vd-topbar-title { color: #0F172A; }
+body:not(.dark-mode) .vd-topbar-btn   { color: #0F172A; }
+body:not(.dark-mode) .vd-topbar-btn:active { background: rgba(0,0,0,.06); }
+
+body:not(.dark-mode) .vd-search-wrap  { background: #FFFFFF; border-bottom: 1px solid #E2E8F0; }
+body:not(.dark-mode) .vd-search-bar   { background: #F1F5F9; border-color: rgba(0,0,0,.08); }
+body:not(.dark-mode) .vd-search-bar i { color: #94A3B8; }
+body:not(.dark-mode) .vd-search-bar input { color: #0F172A; }
+body:not(.dark-mode) .vd-search-bar input::placeholder { color: #94A3B8; }
+body:not(.dark-mode) .vd-search-bar:focus-within { border-color: #7C3AED; }
+body:not(.dark-mode) .vd-filter-icon-btn { background: #F1F5F9; color: #475569; }
+body:not(.dark-mode) .vd-filter-icon-btn:active { background: rgba(0,0,0,.08); }
+
+body:not(.dark-mode) .vd-chips-wrap   { background: #FFFFFF; border-bottom: 1px solid #E2E8F0; }
+body:not(.dark-mode) .vd-chip         { color: #475569; border-color: rgba(0,0,0,.12); background: #F8FAFC; }
+body:not(.dark-mode) .vd-chip.active  { background: #7C3AED; color: #fff; border-color: #7C3AED; }
+
+body:not(.dark-mode) .vd-scroll       { background: #F1F5F9; }
+body:not(.dark-mode) .vd-section-hdr  { border-bottom: none; }
+body:not(.dark-mode) .vd-section-hdr-title { color: #0F172A; }
+
+/* Featured card stays mostly dark (video thumb) */
+body:not(.dark-mode) .vd-featured-card { background: #FFFFFF; border: 1px solid #E2E8F0; }
+body:not(.dark-mode) .vd-featured-title { color: #0F172A; }
+body:not(.dark-mode) .vd-featured-desc  { color: #475569; }
+
+/* Category items */
+body:not(.dark-mode) .vd-cat-label { color: #0F172A; }
+
+/* List items */
+body:not(.dark-mode) .vd-list-item   { border-bottom-color: #E2E8F0; }
+body:not(.dark-mode) .vd-list-item:active { background: rgba(0,0,0,.04); }
+body:not(.dark-mode) .vd-list-title  { color: #0F172A; }
+body:not(.dark-mode) .vd-list-author { color: #475569; }
+body:not(.dark-mode) .vd-list-stats  { color: #94A3B8; }
+body:not(.dark-mode) .vd-list-menu   { color: #94A3B8; }
+body:not(.dark-mode) .vd-list-menu:active { background: rgba(0,0,0,.06); color: #0F172A; }
+body:not(.dark-mode) .vd-empty-state { color: #475569; }
+
+/* ── Video Player ── */
+body:not(.dark-mode) #video-player-modal { background: #FFFFFF !important; }
+
+body:not(.dark-mode) .vpd-topbar {
+  background: rgba(255,255,255,.92);
+  border-bottom: 1px solid rgba(0,0,0,.06);
+}
+body:not(.dark-mode) .vpd-topbar-btn { color: #0F172A; }
+body:not(.dark-mode) .vpd-topbar-btn:active { background: rgba(0,0,0,.06); }
+
+/* Speed bar below video */
+body:not(.dark-mode) .vpd-speed-bar { background: #F8FAFC; border-bottom: 1px solid #E2E8F0; }
+body:not(.dark-mode) .vp-speed      { color: #475569; border-color: #CBD5E1; background: #F1F5F9; }
+body:not(.dark-mode) .vp-speed.active { background: #7C3AED; color: #fff; border-color: #7C3AED; }
+
+/* Scrollable detail area */
+body:not(.dark-mode) .vpd-scroll    { background: #FFFFFF; }
+body:not(.dark-mode) .vpd-title     { color: #0F172A; }
+body:not(.dark-mode) .vpd-stats     { color: #64748B; }
+
+/* Action buttons */
+body:not(.dark-mode) .vpd-act-btn   { color: #475569; }
+body:not(.dark-mode) .vpd-act-btn.active { color: #7C3AED; }
+body:not(.dark-mode) .vpd-act-btn:active { background: rgba(0,0,0,.05); }
+body:not(.dark-mode) .vpd-act-label { color: #475569; }
+
+/* Separator */
+body:not(.dark-mode) .vpd-sep       { background: #E2E8F0; }
+
+/* Author row */
+body:not(.dark-mode) .vpd-author-row { background: #FFFFFF; }
+body:not(.dark-mode) .vpd-author-initials { background: #7C3AED; }
+body:not(.dark-mode) .vpd-author-name { color: #0F172A; }
+body:not(.dark-mode) .vpd-author-subs { color: #64748B; }
+
+/* Description */
+body:not(.dark-mode) .vpd-desc-wrap  { background: #FFFFFF; }
+body:not(.dark-mode) .vpd-desc-title { color: #0F172A; }
+body:not(.dark-mode) .vpd-desc-text  { color: #475569; }
+body:not(.dark-mode) .vpd-voir-plus  { color: #7C3AED; }
+
+/* Comments */
+body:not(.dark-mode) .vpd-comments-wrap  { background: #FFFFFF; }
+body:not(.dark-mode) .vpd-comments-title { color: #0F172A; }
+body:not(.dark-mode) .vpd-comment-author { color: #0F172A; }
+body:not(.dark-mode) .vpd-comment-text   { color: #475569; }
+body:not(.dark-mode) .vpd-comment-time   { color: #94A3B8; }
+body:not(.dark-mode) .vpd-comment-avatar-initials { background: #7C3AED; }
+body:not(.dark-mode) .vpd-no-comments    { color: #94A3B8; }
+body:not(.dark-mode) .vpd-add-comment-placeholder { background: #F1F5F9; color: #94A3B8; }
+
+/* Related (À suivre) */
+body:not(.dark-mode) .vpd-section-title  { color: #0F172A; }
+body:not(.dark-mode) .vd-list-dur        { background: rgba(0,0,0,.55); }
+
+/* Video meta sheet — light mode */
+body:not(.dark-mode) .vm-overlay  { background: rgba(0,0,0,.4); }
+body:not(.dark-mode) .vm-sheet    { background: #FFFFFF; }
+body:not(.dark-mode) .vm-handle   { background: #CBD5E1; }
+body:not(.dark-mode) .vm-title    { color: #0F172A; }
+body:not(.dark-mode) .vm-subtitle { color: #94A3B8; }
+body:not(.dark-mode) .vm-section-label { color: #475569; }
+body:not(.dark-mode) .vm-type-chip {
+  background: #F1F5F9; border-color: #E2E8F0; color: #475569;
+}
+body:not(.dark-mode) .vm-type-chip.active {
+  background: rgba(124,58,237,.1); border-color: #7C3AED; color: #7C3AED;
+}
+body:not(.dark-mode) .vm-cat-btn {
+  background: #F8FAFC; border-color: #E2E8F0; color: #475569;
+}
+body:not(.dark-mode) .vm-cat-btn.active {
+  background: rgba(124,58,237,.08); border-color: #7C3AED;
+}
+body:not(.dark-mode) .vm-cat-name  { color: #475569; }
+body:not(.dark-mode) .vm-cat-btn.active .vm-cat-name { color: #7C3AED; }
+body:not(.dark-mode) .vm-custom-input {
+  background: #F1F5F9; border-color: #E2E8F0; color: #0F172A;
+}
+body:not(.dark-mode) .vm-close-btn { background: #F1F5F9; color: #475569; }
+
+/* ══════════════════════════════════════════
+   FIN MODE CLAIR VIDÉO
+══════════════════════════════════════════ */
