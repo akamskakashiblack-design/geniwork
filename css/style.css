@@ -5818,7 +5818,9 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 }
 .badge-cond-ok      { background: #D1FAE5; color: #059669; }
 .badge-cond-fail    { background: #FEE2E2; color: #EF4444; }
-.badge-cond-pending { background: #F3F4F6; color: #9CA3AF; }
+.badge-cond-pending { background: #FEF3C7; color: #D97706; }
+.badge-cond-upload  { background: #DBEAFE; color: #2563EB; }
+.cond-upload        { color: #2563EB; }
 
 .badge-cond-text {
   display: flex;

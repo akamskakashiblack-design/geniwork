@@ -3073,6 +3073,7 @@ function checkVerifiedConditions(email) {
   var p = loadUserProfile(email) || {};
   var user = getUsers().find(function(u) { return u.email === email; }) || {};
   var reviews = loadReviews(email);
+  var pending = p.badgeStatus === 'pending';
 
   /* Note moyenne */
   var avgRating = reviews.length
@@ -3081,13 +3082,8 @@ function checkVerifiedConditions(email) {
 
   var missions = p.missionsCompleted || 0;
 
-  var conditions = [
-    {
-      key:   'identity',
-      label: 'Identité vérifiée (CNI / passeport)',
-      hint:  'Soumettez une pièce d\'identité valide',
-      met:   !!p.identityVerified
-    },
+  /* Les 7 conditions que l'utilisateur contrôle lui-même */
+  var userConditions = [
     {
       key:   'profile',
       label: 'Profil complété à 100 %',
@@ -3132,8 +3128,39 @@ function checkVerifiedConditions(email) {
     }
   ];
 
-  var metCount = conditions.filter(function(c) { return c.met; }).length;
-  return { conditions: conditions, metCount: metCount, total: conditions.length };
+  /* Condition identité — vérifiée par l'admin après soumission du document */
+  var identityHint = p.identityVerified
+    ? 'Identité confirmée par l\'équipe Geniwork'
+    : pending
+      ? 'Document soumis — en cours de vérification (48-72h)'
+      : 'Envoyez votre CNI ou passeport via le bouton ci-dessous';
+
+  var identityCond = {
+    key:        'identity',
+    label:      'Identité vérifiée (CNI / passeport)',
+    hint:       identityHint,
+    met:        !!p.identityVerified,
+    isPending:  pending && !p.identityVerified,
+    isUpload:   !p.identityVerified && !pending,
+    isIdentity: true
+  };
+
+  /* Identité affichée en premier */
+  var conditions = [identityCond].concat(userConditions);
+
+  var userMet   = userConditions.filter(function(c) { return c.met; }).length;
+  var metCount  = conditions.filter(function(c) { return c.met; }).length;
+  /* readyToApply = les 7 conditions utilisateur sont toutes remplies */
+  var readyToApply = userMet === userConditions.length;
+
+  return {
+    conditions:   conditions,
+    metCount:     metCount,
+    total:        conditions.length,
+    userMet:      userMet,
+    userTotal:    userConditions.length,
+    readyToApply: readyToApply
+  };
 }
 
 /* ── Ouvre la page badge ── */
@@ -4253,9 +4280,16 @@ function _renderBadgePage() {
   var list = document.getElementById('badge-conditions-list');
   if (list) {
     list.innerHTML = check.conditions.map(function(c) {
-      var iconClass = c.met ? 'badge-cond-ok' : 'badge-cond-fail';
-      var icon      = c.met ? 'fa-check' : 'fa-xmark';
-      var textClass = c.met ? 'cond-ok' : 'cond-fail';
+      var iconClass, icon, textClass;
+      if (c.met) {
+        iconClass = 'badge-cond-ok';   icon = 'fa-check';         textClass = 'cond-ok';
+      } else if (c.isPending) {
+        iconClass = 'badge-cond-pending'; icon = 'fa-hourglass-half'; textClass = 'cond-fail';
+      } else if (c.isUpload) {
+        iconClass = 'badge-cond-upload';  icon = 'fa-id-card';        textClass = 'cond-upload';
+      } else {
+        iconClass = 'badge-cond-fail';  icon = 'fa-xmark';         textClass = 'cond-fail';
+      }
       return '<li class="badge-cond">' +
         '<span class="badge-cond-icon ' + iconClass + '"><i class="fas ' + icon + '"></i></span>' +
         '<div class="badge-cond-text">' +
@@ -4267,28 +4301,29 @@ function _renderBadgePage() {
   }
 
   /* ── Bouton CTA ── */
-  var ctaBtn  = document.getElementById('badge-cta-verified');
-  var ctaNote = document.getElementById('badge-cta-note');
-  var allMet  = check.metCount === check.total;
-  var pending = profile.badgeStatus === 'pending';
+  var ctaBtn   = document.getElementById('badge-cta-verified');
+  var ctaNote  = document.getElementById('badge-cta-note');
+  var pending  = profile.badgeStatus === 'pending';
   var approved = !!profile.badgeType;
 
   if (ctaBtn) {
-    ctaBtn.disabled = !allMet || pending || approved;
+    ctaBtn.disabled = !check.readyToApply || pending || approved;
     if (approved) {
       ctaBtn.textContent = '✅ Badge déjà actif';
     } else if (pending) {
       ctaBtn.textContent = '⏳ Demande en cours…';
+    } else if (check.readyToApply) {
+      ctaBtn.textContent = 'Envoyer ma pièce d\'identité';
     } else {
       ctaBtn.textContent = 'Demander la vérification';
     }
   }
   if (ctaNote) {
-    if (allMet && !pending && !approved) {
-      ctaNote.textContent = 'Toutes les conditions sont remplies !';
-      ctaNote.style.color = '#059669';
+    if (check.readyToApply && !pending && !approved) {
+      ctaNote.textContent = 'Conditions remplies — envoyez votre pièce d\'identité pour finaliser';
+      ctaNote.style.color = '#2563EB';
     } else if (!approved && !pending) {
-      var remaining = check.total - check.metCount;
+      var remaining = check.userTotal - check.userMet;
       ctaNote.textContent = remaining + ' condition(s) manquante(s) pour activer la demande';
       ctaNote.style.color = '';
     } else {
@@ -4318,8 +4353,8 @@ var _bdmFiles = []; /* [{name, type, data}] */
 function openBadgeDocModal() {
   if (!_currentUser) return;
   var check = checkVerifiedConditions(_currentUser.email);
-  if (check.metCount < check.total) {
-    showToast('Certaines conditions ne sont pas encore remplies', 'err'); return;
+  if (!check.readyToApply) {
+    showToast('Remplissez d\'abord les 7 conditions requises', 'err'); return;
   }
   var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
   if (profile.badgeStatus === 'pending') {
