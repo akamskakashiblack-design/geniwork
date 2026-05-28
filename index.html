@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260538" />
+  <link rel="stylesheet" href="css/style.css?v=20260539" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -2627,21 +2627,16 @@
             <i class="fas fa-arrow-left"></i>
           </button>
           <span class="vd-topbar-title">Vidéos</span>
-          <button class="vd-topbar-btn">
-            <i class="fas fa-bell"></i>
-          </button>
-          <button class="vd-topbar-btn">
-            <i class="fas fa-ellipsis-v"></i>
-          </button>
         </div>
 
         <!-- Search bar -->
         <div class="vd-search-wrap">
           <div class="vd-search-bar">
             <i class="fas fa-search"></i>
-            <input type="text" placeholder="Rechercher une vidéo, une formation..." readonly />
+            <input type="text" id="vd-search-input" placeholder="Rechercher une vidéo, une formation..."
+              oninput="vdOnSearch(this)" autocomplete="off" />
           </div>
-          <button class="vd-filter-icon-btn">
+          <button class="vd-filter-icon-btn" onclick="vdOpenFilter()">
             <i class="fas fa-sliders-h"></i>
           </button>
         </div>
@@ -3474,7 +3469,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260538"></script>
+  <script src="js/app.js?v=20260539"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">

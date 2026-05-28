@@ -8660,16 +8660,26 @@ function openShortsDiscover() {
 
 /* ── Videos Discover — YouTube-style ─────────────────────────────────── */
 var _vdCurrentFilter = 'tout';
+var _vdSearchQuery   = '';
+var _vdSortBy        = 'recent'; /* 'recent' | 'views' | 'likes' */
 
 function openVideosDiscover() {
   var modal = document.getElementById('vd-modal');
   if (!modal) return;
   _vdCurrentFilter = 'tout';
+  _vdSearchQuery   = '';
+  var inp = document.getElementById('vd-search-input');
+  if (inp) inp.value = '';
   modal.querySelectorAll('.vd-chip').forEach(function(c) {
     c.classList.toggle('active', c.dataset.filter === 'tout');
   });
   _vdRenderContent();
   modal.style.display = 'flex';
+}
+
+function vdOnSearch(inp) {
+  _vdSearchQuery = (inp.value || '').trim().toLowerCase();
+  _vdRenderContent();
 }
 
 /* vidType chip keys vs category card keys */
@@ -8698,16 +8708,112 @@ function _vdRenderContent() {
   if (_vdCurrentFilter === 'tout') {
     list = all;
   } else if (_vdChipFilters[_vdCurrentFilter]) {
-    /* Filter by vidType (from chips) — 'tutoriels' chip maps to 'tutoriel' */
     var ft = _vdCurrentFilter === 'tutoriels' ? 'tutoriel' : _vdCurrentFilter;
     list = all.filter(function(p) { return (p.video.vidType || '') === ft; });
   } else {
-    /* Filter by category (from category cards) */
     list = all.filter(function(p) { return (p.video.category || '') === _vdCurrentFilter; });
   }
-  _vdRenderFeatured(all.length ? all[0] : null);
+
+  /* Apply search query */
+  if (_vdSearchQuery) {
+    var q = _vdSearchQuery;
+    list = list.filter(function(p) {
+      var title  = ((p.video && p.video.title) || p.text || p.content || '').toLowerCase();
+      var cat    = ((p.video && p.video.category) || '').toLowerCase();
+      var pr     = (p.ownerEmail && loadUserProfile(p.ownerEmail)) || {};
+      var author = (pr.nom || (p.ownerEmail ? p.ownerEmail.split('@')[0] : '')).toLowerCase();
+      return title.indexOf(q) !== -1 || cat.indexOf(q) !== -1 || author.indexOf(q) !== -1;
+    });
+  }
+
+  /* Apply sort */
+  if (_vdSortBy === 'views') {
+    list = list.slice().sort(function(a, b) { return _getVideoViews(b.id) - _getVideoViews(a.id); });
+  } else if (_vdSortBy === 'likes') {
+    list = list.slice().sort(function(a, b) {
+      var la = (b.baseLikes || 0) + (b.likers ? b.likers.length : 0);
+      var lb = (a.baseLikes || 0) + (a.likers ? a.likers.length : 0);
+      return la - lb;
+    });
+  }
+  /* default 'recent' keeps _vdAllVideos() order (already sorted by id desc) */
+
+  _vdRenderFeatured(_vdSearchQuery ? null : (all.length ? all[0] : null));
   _vdRenderCategories();
   _vdRenderList(list);
+}
+
+/* ── Filter bottom sheet ── */
+function vdOpenFilter() {
+  var existing = document.getElementById('vd-filter-sheet-bg');
+  if (existing) existing.remove();
+
+  var sorts = [
+    { key: 'recent', label: '🕐 Plus récent', },
+    { key: 'views',  label: '👁 Plus vus',    },
+    { key: 'likes',  label: '👍 Plus aimés',  }
+  ];
+
+  var bg = document.createElement('div');
+  bg.id = 'vd-filter-sheet-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:900;background:rgba(0,0,0,.5)';
+  bg.onclick = function(e) { if (e.target === bg) vdCloseFilter(); };
+
+  var sheet = document.createElement('div');
+  sheet.id = 'vd-filter-sheet';
+  sheet.style.cssText = 'position:absolute;bottom:0;left:0;right:0;background:#1E293B;border-radius:20px 20px 0 0;padding:20px 20px 32px;transform:translateY(100%);transition:transform .25s ease';
+
+  sheet.innerHTML =
+    '<div style="width:40px;height:4px;background:#334155;border-radius:2px;margin:0 auto 18px"></div>' +
+    '<div style="font-size:16px;font-weight:700;color:#F1F5F9;margin-bottom:16px">Filtres</div>' +
+
+    '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Trier par</div>' +
+    '<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:20px">' +
+      sorts.map(function(s) {
+        var active = _vdSortBy === s.key;
+        return '<button id="vdf-sort-' + s.key + '" onclick="vdSetSort(\'' + s.key + '\')" ' +
+          'style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-radius:12px;border:1.5px solid ' + (active ? '#7C3AED' : '#334155') + ';background:' + (active ? 'rgba(124,58,237,.12)' : 'transparent') + ';color:' + (active ? '#A78BFA' : '#94A3B8') + ';font-size:14px;font-weight:' + (active ? '700' : '400') + ';cursor:pointer;text-align:left;width:100%">' +
+          s.label +
+          (active ? '<i class="fas fa-check" style="color:#7C3AED"></i>' : '') +
+        '</button>';
+      }).join('') +
+    '</div>' +
+
+    '<button onclick="vdCloseFilter()" style="width:100%;padding:13px;border-radius:14px;border:none;background:#7C3AED;color:#fff;font-size:15px;font-weight:700;cursor:pointer">Appliquer</button>';
+
+  bg.appendChild(sheet);
+  document.body.appendChild(bg);
+
+  requestAnimationFrame(function() {
+    sheet.style.transform = 'translateY(0)';
+  });
+}
+
+function vdSetSort(key) {
+  _vdSortBy = key;
+  /* Refresh button styles */
+  ['recent','views','likes'].forEach(function(k) {
+    var btn = document.getElementById('vdf-sort-' + k);
+    if (!btn) return;
+    var active = k === key;
+    btn.style.border      = '1.5px solid ' + (active ? '#7C3AED' : '#334155');
+    btn.style.background  = active ? 'rgba(124,58,237,.12)' : 'transparent';
+    btn.style.color       = active ? '#A78BFA' : '#94A3B8';
+    btn.style.fontWeight  = active ? '700' : '400';
+    var ico = btn.querySelector('i');
+    if (active && !ico) { btn.insertAdjacentHTML('beforeend','<i class="fas fa-check" style="color:#7C3AED"></i>'); }
+    if (!active && ico) { ico.remove(); }
+  });
+}
+
+function vdCloseFilter() {
+  var sheet = document.getElementById('vd-filter-sheet');
+  var bg    = document.getElementById('vd-filter-sheet-bg');
+  if (sheet) {
+    sheet.style.transform = 'translateY(100%)';
+    setTimeout(function() { if (bg) bg.remove(); }, 280);
+  } else if (bg) { bg.remove(); }
+  _vdRenderContent();
 }
 
 function _vdRenderFeatured(post) {
