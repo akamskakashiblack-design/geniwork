@@ -5408,13 +5408,17 @@ function likePost(postId) {
 
   /* Notification au propriétaire du post (si différent de l'auteur du like) */
   if (liked && post.ownerEmail && post.ownerEmail !== email) {
+    var _likeType    = post.video ? 'votre vidéo' : (post.images && post.images.length ? 'votre photo' : 'votre publication');
+    var _likePreview = ((post.video && post.video.title) || post.text || '').slice(0, 60);
     pushNotif(post.ownerEmail, {
       id:          genNotifId(),
       type:        'like',
+      title:       '❤️ Nouveau like',
+      body:        _currentUser.nom + ' a aimé ' + _likeType,
       fromUser:    { nom: _currentUser.nom, email: _currentUser.email, role: 'Membre Geniwork' },
       postId:      post.id,
-      postPreview: post.text.slice(0, 60) + (post.text.length > 60 ? '…' : ''),
-      msg:         'a aimé votre publication',
+      postPreview: _likePreview + (_likePreview.length >= 60 ? '…' : ''),
+      msg:         'a aimé ' + _likeType,
       at:          Date.now(), time: 'À l\'instant',
       unread:      true
     });
@@ -6610,15 +6614,19 @@ function submitComment() {
   }
 
   /* Notification au propriétaire */
-  if (!post) post = getAllPosts().find(function(p) { return p.id === _currentPostId; });
+  if (!post) post = getAllPosts().find(function(p) { return String(p.id) === String(_currentPostId); });
   if (post && post.ownerEmail && post.ownerEmail !== _currentUser.email) {
+    var _cmtType = post.video ? 'votre vidéo' : (post.images && post.images.length ? 'votre photo' : 'votre publication');
+    var _cmtMsg  = parentId ? 'a répondu à un commentaire' : ('a commenté ' + _cmtType);
     pushNotif(post.ownerEmail, {
       id:          genNotifId(),
       type:        'comment',
+      title:       '💬 Nouveau commentaire',
+      body:        _currentUser.nom + ' ' + _cmtMsg,
       fromUser:    { nom: _currentUser.nom, email: _currentUser.email, role: 'Membre Geniwork' },
       postId:      post.id,
       postPreview: '"' + text.slice(0, 55) + (text.length > 55 ? '…' : '') + '"',
-      msg:         parentId ? 'a répondu à un commentaire' : 'a commenté votre publication',
+      msg:         _cmtMsg,
       at:          Date.now(), time: 'À l\'instant',
       unread:      true
     });
@@ -6984,16 +6992,19 @@ function notifyShare(post) {
   var newCount = _incShareCount(post.id);
   var sCnt = document.getElementById('vpd-share-cnt');
   if (sCnt) sCnt.textContent = _fmtViews(newCount);
-  if (!post.ownerEmail || !_currentUser) return;
-  if (post.ownerEmail === _currentUser.email) return;
+  if (!post.ownerEmail || !_currentUser || post.ownerEmail === _currentUser.email) return;
+  var _shType    = post.video ? 'votre vidéo' : (post.images && post.images.length ? 'votre photo' : 'votre publication');
+  var _shPreview = ((post.video && post.video.title) || post.text || '').slice(0, 60);
   pushNotif(post.ownerEmail, {
     id:          genNotifId(),
     type:        'share',
+    title:       '📤 Partage',
+    body:        _currentUser.nom + ' a partagé ' + _shType,
     fromUser:    { nom: _currentUser.nom, email: _currentUser.email, role: 'Membre Geniwork' },
     postId:      post.id,
-    postPreview: post.text.slice(0, 60) + (post.text.length > 60 ? '…' : ''),
-    msg:         'a partagé votre publication',
-    at: Date.now(), time:        'À l\'instant',
+    postPreview: _shPreview + (_shPreview.length >= 60 ? '…' : ''),
+    msg:         'a partagé ' + _shType,
+    at:          Date.now(), time: 'À l\'instant',
     unread:      true
   });
 }
@@ -7086,7 +7097,7 @@ function doRepost(postId) {
   if (!_currentUser) return;
   if (_hasReposted(postId)) { showToast('Déjà republié', ''); return; }
 
-  var orig = getAllPosts().find(function(p) { return p.id === postId; });
+  var orig = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
   if (!orig) return;
 
   /* Crée un nouveau post de type repost */
@@ -7127,13 +7138,17 @@ function doRepost(postId) {
 
   /* Notif au propriétaire original */
   if (orig.ownerEmail && orig.ownerEmail !== _currentUser.email) {
+    var _rpType    = orig.video ? 'votre vidéo' : (orig.images && orig.images.length ? 'votre photo' : 'votre publication');
+    var _rpPreview = ((orig.video && orig.video.title) || orig.text || '').slice(0, 60);
     pushNotif(orig.ownerEmail, {
       id:          genNotifId(),
       type:        'share',
+      title:       '🔁 Republication',
+      body:        _currentUser.nom + ' a republié ' + _rpType,
       fromUser:    { nom: _currentUser.nom, email: _currentUser.email, role: 'Membre Geniwork' },
       postId:      orig.id,
-      postPreview: orig.text.slice(0, 60) + (orig.text.length > 60 ? '…' : ''),
-      msg:         'a republié votre publication',
+      postPreview: _rpPreview + (_rpPreview.length >= 60 ? '…' : ''),
+      msg:         'a republié ' + _rpType,
       at:          Date.now(), time: 'À l\'instant',
       unread:      true
     });
