@@ -5994,9 +5994,10 @@ var _vpCurrentPost = null;
 function _vpPopulateDetail(post) {
   _vpCurrentPost = post;
 
-  /* Title */
-  var titleEl = document.getElementById('vpd-title');
-  if (titleEl) titleEl.textContent = post.text || post.content || 'Vidéo';
+  /* Title — prefer video.title (set at publish), fall back to post text */
+  var _vidTitle = (post.video && post.video.title) || post.text || post.content || 'Vidéo';
+  var titleEl   = document.getElementById('vpd-title');
+  if (titleEl) titleEl.textContent = _vidTitle;
 
   /* Stats: views + time */
   var statsEl = document.getElementById('vpd-stats');
@@ -6060,14 +6061,16 @@ function _vpPopulateDetail(post) {
         '</button>');
   }
 
-  /* Description */
+  /* Description — only show if user set a custom video title; otherwise post.text is
+     already displayed as the title and repeating it would create a duplicate */
   var descWrap = document.getElementById('vpd-desc-wrap');
   if (descWrap) {
-    var desc = post.text || post.content || '';
-    if (desc) {
+    var desc        = post.text || post.content || '';
+    var hasOwnTitle = post.video && post.video.title && post.video.title.trim().length > 0;
+    if (desc && hasOwnTitle) {
       descWrap.innerHTML =
         '<div class="vpd-desc-title">Description</div>' +
-        '<div class="vpd-desc-text" id="vpd-desc-text">' + escHtml(desc) + '</div>' +
+        '<div class="vpd-desc-text' + (desc.length > 120 ? '' : ' expanded') + '" id="vpd-desc-text">' + escHtml(desc) + '</div>' +
         (desc.length > 120 ?
           '<button class="vpd-voir-plus" id="vpd-voir-plus" onclick="vpExpandDesc()">Voir plus</button>' : '');
     } else {
@@ -7957,6 +7960,11 @@ function _showVidMetaSheet() {
         }).join('') +
       '</div>' +
 
+      '<div class="vm-section-label" style="margin-top:20px">Titre <span style="font-size:11px;font-weight:400;color:#64748B">(optionnel)</span></div>' +
+      '<input type="text" id="vm-title-input" class="vm-custom-input" ' +
+        'placeholder="Ex: Comment maîtriser le marketing digital..." maxlength="80" ' +
+        'value="' + escHtml((_pubVidMeta && _pubVidMeta.title) || '') + '" />' +
+
       '<div class="vm-section-label" style="margin-top:20px">Catégorie <span class="vm-required">*</span></div>' +
       '<div class="vm-cats-grid">' +
         cats.map(function(c) {
@@ -8020,10 +8028,12 @@ function _vmRefreshConfirm() {
 
 function _vmConfirm() {
   if (!_vmSelCat) return;
-  var inp = document.getElementById('vm-custom-input');
-  var cat = (inp && inp.value.trim()) ? inp.value.trim() : _vmSelCat;
-  _pubVidMeta = { vidType: _vmSelType, category: cat };
-  if (_pickedVideo) { _pickedVideo.vidType = _vmSelType; _pickedVideo.category = cat; }
+  var inp      = document.getElementById('vm-custom-input');
+  var titleInp = document.getElementById('vm-title-input');
+  var cat      = (inp && inp.value.trim()) ? inp.value.trim() : _vmSelCat;
+  var title    = (titleInp && titleInp.value.trim()) ? titleInp.value.trim() : '';
+  _pubVidMeta = { vidType: _vmSelType, category: cat, title: title };
+  if (_pickedVideo) { _pickedVideo.vidType = _vmSelType; _pickedVideo.category = cat; _pickedVideo.title = title; }
 
   var sheet = document.getElementById('vm-sheet-inner');
   if (sheet) {
@@ -9323,7 +9333,8 @@ function publierPost() {
     ? { idbId: videoIdbId, url: _pickedVideo.url, duration: _pickedVideo.duration, size: _pickedVideo.size,
         videoType: _pickedVideo.videoType || 'video',
         vidType:  (_pubVidMeta && _pubVidMeta.vidType)  || '',
-        category: (_pubVidMeta && _pubVidMeta.category) || '' }
+        category: (_pubVidMeta && _pubVidMeta.category) || '',
+        title:    (_pubVidMeta && _pubVidMeta.title)    || '' }
     : null;
 
   /* Document : idbId + url courante + métadonnées */
