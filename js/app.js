@@ -7834,6 +7834,8 @@ var _PLAN_LIMITS = {
   free: {
     postsPerDay  : 5,
     msgsPerDay   : 10,
+    photosPerDay : 10,
+    docsPerDay   : 10,
     servicesMax  : 3,
     projectsMax  : 5,
     photosPerPost: 3,
@@ -7842,6 +7844,8 @@ var _PLAN_LIMITS = {
   premium: {
     postsPerDay  : Infinity,
     msgsPerDay   : Infinity,
+    photosPerDay : Infinity,
+    docsPerDay   : Infinity,
     servicesMax  : 10,
     projectsMax  : Infinity,
     photosPerPost: 6,
@@ -7850,6 +7854,8 @@ var _PLAN_LIMITS = {
   business: {
     postsPerDay  : Infinity,
     msgsPerDay   : Infinity,
+    photosPerDay : Infinity,
+    docsPerDay   : Infinity,
     servicesMax  : 20,
     projectsMax  : Infinity,
     photosPerPost: 6,
@@ -7975,8 +7981,10 @@ function _renderPlanUsageBanner() {
   /* Stats usage */
   var svcs     = loadUserServices(_currentUser.email).length;
   var projs    = loadProjects(_currentUser.email).length;
-  var postsDay = _getDailyCount('posts', _currentUser.email);
-  var msgsDay  = _getDailyCount('msgs',  _currentUser.email);
+  var postsDay  = _getDailyCount('posts',  _currentUser.email);
+  var msgsDay   = _getDailyCount('msgs',   _currentUser.email);
+  var photosDay = _getDailyCount('photos', _currentUser.email);
+  var docsDay   = _getDailyCount('docs',   _currentUser.email);
 
   var planLabels = { free: 'Gratuit', premium: 'Premium 👑', business: 'Business Pro 💼' };
   var planColors = { free: '#64748B', premium: '#D97706', business: '#4F46E5' };
@@ -8012,8 +8020,10 @@ function _renderPlanUsageBanner() {
     '<div class="ppu-rows">' +
       _usageBar(svcs,     lim.servicesMax,   '🛠 Services') +
       _usageBar(projs,    lim.projectsMax,   '📁 Projets') +
-      _usageBar(postsDay, lim.postsPerDay,   '✏️ Posts aujourd\'hui') +
-      _usageBar(msgsDay,  lim.msgsPerDay,    '💬 Messages aujourd\'hui') +
+      _usageBar(postsDay,  lim.postsPerDay,   '✏️ Posts aujourd\'hui') +
+      _usageBar(msgsDay,   lim.msgsPerDay,    '💬 Messages aujourd\'hui') +
+      _usageBar(photosDay, lim.photosPerDay,  '📷 Photos aujourd\'hui') +
+      _usageBar(docsDay,   lim.docsPerDay,    '📎 Documents aujourd\'hui') +
     '</div>' +
   '</div>';
 
@@ -13185,6 +13195,27 @@ function handleChatAttach(input) {
     showToast('Fichier trop volumineux (max ' + (isVideo ? '200 Mo' : '8 Mo') + ')', 'err'); return;
   }
 
+  /* ── Vérification limites journalières photos / documents ── */
+  var _aLim = _getCurrentPlanLimits();
+  if (isImage) {
+    if (_aLim.photosPerDay !== Infinity) {
+      var _todayPhotos = _getDailyCount('photos', _currentUser.email);
+      if (_todayPhotos >= _aLim.photosPerDay) {
+        showToast('🚫 Limite de ' + _aLim.photosPerDay + ' photos/jour atteinte. Réinitialisé demain, ou passez Premium pour envoyer sans limite.', 'err');
+        return;
+      }
+    }
+  } else {
+    /* vidéos et fichiers comptent comme "documents" */
+    if (_aLim.docsPerDay !== Infinity) {
+      var _todayDocs = _getDailyCount('docs', _currentUser.email);
+      if (_todayDocs >= _aLim.docsPerDay) {
+        showToast('🚫 Limite de ' + _aLim.docsPerDay + ' documents/jour atteinte. Réinitialisé demain, ou passez Premium pour envoyer sans limite.', 'err');
+        return;
+      }
+    }
+  }
+
   /* ── Fonction commune : construit + envoie le message ── */
   function _dispatchChatMedia(dataOrUrl, isStorageUrl) {
     var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
@@ -13240,6 +13271,7 @@ function handleChatAttach(input) {
     var reader = new FileReader();
     reader.onload = function(e) {
       _compressImageForChat(e.target.result, 280000, function(compressed) {
+        _incDailyCount('photos', _currentUser.email);
         _dispatchChatMedia(compressed, false);
       });
     };
@@ -13257,7 +13289,7 @@ function handleChatAttach(input) {
     _uploadBlobToStorage(
       'chat_videos/' + _vMsgId + '_' + _gwFbKey(_currentUser.email) + '.' + _vExt2,
       file,
-      function(url) { showToast('Vidéo envoyée ✓', 'ok'); _dispatchChatMedia(url, true); },
+      function(url) { showToast('Vidéo envoyée ✓', 'ok'); _incDailyCount('docs', _currentUser.email); _dispatchChatMedia(url, true); },
       function()    { showToast('Erreur upload vidéo', 'err'); }
     );
 
@@ -13268,7 +13300,7 @@ function handleChatAttach(input) {
   } else {
     /* Petits fichiers (<280 Ko) → base64 direct dans RTDB */
     var reader2 = new FileReader();
-    reader2.onload = function(e) { _dispatchChatMedia(e.target.result, false); };
+    reader2.onload = function(e) { _incDailyCount('docs', _currentUser.email); _dispatchChatMedia(e.target.result, false); };
     reader2.readAsDataURL(file);
   }
 }
