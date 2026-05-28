@@ -5969,6 +5969,25 @@ function _openVideoClassic(post, duration) {
   _tryFirebaseFallback();
 }
 
+/* ── Helper: build a single comment item HTML ── */
+function _vpBuildCommentHtml(c) {
+  var cPr    = (c.email && loadUserProfile(c.email)) || {};
+  var cNom   = c.author || cPr.nom || (c.email ? c.email.split('@')[0] : 'Utilisateur');
+  var cBadge = cPr.badge ? '<i class="fas fa-circle-check vpd-verified"></i>' : '';
+  var cAva   = cPr.photo
+    ? '<img class="vpd-comment-avatar" src="' + escHtml(cPr.photo) + '" onerror="this.style.display=\'none\'" />'
+    : '<div class="vpd-comment-avatar-initials">' + escHtml(cNom.charAt(0).toUpperCase()) + '</div>';
+  return '<div class="vpd-comment-item">' +
+    cAva +
+    '<div class="vpd-comment-body">' +
+      '<div class="vpd-comment-author">' + escHtml(cNom) + ' ' + cBadge +
+        '<span class="vpd-comment-time">· ' + _timeAgo(c.at || 0) + '</span>' +
+      '</div>' +
+      '<div class="vpd-comment-text">' + escHtml((c.text || '').substring(0, 120)) + '</div>' +
+    '</div>' +
+  '</div>';
+}
+
 /* ── Populates YouTube-style detail sections (title/author/desc/comments/related) ── */
 var _vpCurrentPost = null;
 
@@ -6056,36 +6075,37 @@ function _vpPopulateDetail(post) {
     }
   }
 
-  /* Comments (first comment preview) */
+  /* Comments — count + cycling preview + add-comment bar */
+  if (_vpCommentsTimer) { clearInterval(_vpCommentsTimer); _vpCommentsTimer = null; }
   var commWrap = document.getElementById('vpd-comments-wrap');
   if (commWrap) {
     var cList  = (post.comments || []).slice().reverse();
     var cCount = cList.length;
-    var firstC = cList.length ? cList[0] : null;
-    var previewHtml = '';
-    if (firstC) {
-      var cPr   = (firstC.email && loadUserProfile(firstC.email)) || {};
-      var cNom  = firstC.author || cPr.nom || (firstC.email ? firstC.email.split('@')[0] : 'Utilisateur');
-      var cBadge = cPr.badge ? '<i class="fas fa-circle-check vpd-verified"></i>' : '';
-      var cAva  = cPr.photo
-        ? '<img class="vpd-comment-avatar" src="' + escHtml(cPr.photo) + '" onerror="this.style.display=\'none\'" />'
-        : '<div class="vpd-comment-avatar-initials">' + escHtml(cNom.charAt(0).toUpperCase()) + '</div>';
-      previewHtml =
-        '<div class="vpd-comment-item">' +
-          cAva +
-          '<div class="vpd-comment-body">' +
-            '<div class="vpd-comment-author">' + escHtml(cNom) + ' ' + cBadge +
-              '<span class="vpd-comment-time">· ' + _timeAgo(firstC.at || 0) + '</span>' +
-            '</div>' +
-            '<div class="vpd-comment-text">' + escHtml((firstC.text || '').substring(0, 120)) + '</div>' +
-          '</div>' +
-        '</div>';
-    }
+    var previewHtml = cCount > 0
+      ? '<div id="vpd-comment-preview" class="vpd-comment-preview">' + _vpBuildCommentHtml(cList[0]) + '</div>'
+      : '<div class="vpd-no-comments">Soyez le premier à commenter ✨</div>';
     commWrap.innerHTML =
       '<div class="vpd-comments-hdr">' +
-        '<span class="vpd-comments-title">Commentaires ' + (cCount > 0 ? cCount : '') + '</span>' +
+        '<span class="vpd-comments-title">Commentaires (' + cCount + ')</span>' +
         '<button class="vpd-voir-tout-btn" onclick="openComments(' + post.id + ')">Voir tout</button>' +
-      '</div>' + previewHtml;
+      '</div>' +
+      previewHtml +
+      '<div class="vpd-add-comment" onclick="openComments(' + post.id + ')">' +
+        '<div class="vpd-add-comment-placeholder"><i class="fas fa-pen-to-square"></i> Ajouter un commentaire...</div>' +
+      '</div>';
+    /* Start cycling if more than 1 comment */
+    if (cList.length > 1) {
+      var _cIdx = 0;
+      _vpCommentsTimer = setInterval(function() {
+        _cIdx = (_cIdx + 1) % cList.length;
+        var el = document.getElementById('vpd-comment-preview');
+        if (!el) { clearInterval(_vpCommentsTimer); _vpCommentsTimer = null; return; }
+        el.style.opacity = '0';
+        setTimeout(function() {
+          if (el) { el.innerHTML = _vpBuildCommentHtml(cList[_cIdx]); el.style.opacity = '1'; }
+        }, 300);
+      }, 3500);
+    }
   }
 
   /* Related videos */
@@ -6176,13 +6196,11 @@ function vpToggleFollow() {
   var pr   = (post.ownerEmail && loadUserProfile(post.ownerEmail)) || {};
   var nom  = pr.nom || (post.ownerEmail ? post.ownerEmail.split('@')[0] : '');
   _doFollowToggle({ nom: nom, email: post.ownerEmail, role: pr.role || '' });
-  /* Update both buttons */
+  /* Update subscribe button in author row */
   var profKey  = post.ownerEmail ? getProfileKey({ nom: nom, email: post.ownerEmail }) : '';
   var following = profKey ? isFollowing(profKey) : false;
-  var suivreBtn = document.getElementById('vpd-suivre-btn');
-  var subBtn    = document.querySelector('#vpd-author-row .vpd-subscribe-btn');
-  if (suivreBtn) { suivreBtn.textContent = following ? 'Suivi' : 'Suivre'; suivreBtn.classList.toggle('following', following); }
-  if (subBtn)    { subBtn.textContent = following ? 'Abonné' : 'S\'abonner'; subBtn.classList.toggle('following', following); }
+  var subBtn = document.querySelector('#vpd-author-row .vpd-subscribe-btn');
+  if (subBtn) { subBtn.textContent = following ? 'Abonné' : 'S\'abonner'; subBtn.classList.toggle('following', following); }
 }
 
 function vpToggleSave() {
@@ -6215,6 +6233,9 @@ function vpExpandDesc() {
   if (txt) txt.classList.add('expanded');
   if (btn) btn.remove();
 }
+
+/* ── Comments cycle timer ── */
+var _vpCommentsTimer = null;
 
 /* ── Auto-next (proposer la vidéo suivante à la fin) ── */
 var _vpAutoNextTimer    = null;
@@ -8844,6 +8865,7 @@ function openVideoPlayer(src, duration) {
 function closeVideoPlayer() {
   var video = document.getElementById('vp-video');
   if (video) { video.pause(); video.src = ''; video.ontimeupdate = null; video.onended = null; }
+  if (_vpCommentsTimer) { clearInterval(_vpCommentsTimer); _vpCommentsTimer = null; }
   var modal = document.getElementById('video-player-modal');
   if (modal) modal.style.display = 'none';
   /* Quitte le plein écran si actif */
