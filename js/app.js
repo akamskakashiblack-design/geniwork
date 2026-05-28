@@ -4895,6 +4895,11 @@ function _renderFeedNow(posts) {
     return !_admIsBanned(p.ownerEmail);
   });
 
+  /* ── Les Shorts n'apparaissent PAS dans le feed principal ── */
+  posts = posts.filter(function(p) {
+    return !(p.video && p.video.videoType === 'short');
+  });
+
   /* ── Réinitialise tout l'état ── */
   _feedPool     = _buildMergedFeedPool(posts); /* posts officiels mélangés toutes les 4 positions */
   _feedOffset   = 0;
