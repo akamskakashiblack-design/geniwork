@@ -12217,7 +12217,26 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   background: #000;
 }
 
-/* Controls overlay (always shown on top of video) */
+/* Back button always visible on video (top-left) */
+.vpd-video-back-btn {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: rgba(0,0,0,.55);
+  border: none;
+  color: #fff;
+  font-size: 15px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  backdrop-filter: blur(4px);
+}
+.vpd-video-back-btn:active { background: rgba(0,0,0,.8); }
+
+/* Controls overlay — hidden by default, tap to reveal */
 .vpd-ctrl-overlay {
   position: absolute;
   inset: 0;
@@ -12227,6 +12246,13 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   background: linear-gradient(to bottom, rgba(0,0,0,.18) 0%, transparent 28%, transparent 55%, rgba(0,0,0,.65) 100%);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .25s ease;
+}
+.vpd-ctrl-overlay.visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 .vpd-ctrl-row {
   flex: 1;
@@ -12297,6 +12323,73 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   flex-shrink: 0;
   -webkit-tap-highlight-color: transparent;
 }
+
+/* Auto-next overlay (shown when video ends) */
+.vpd-autonext {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  background: rgba(0,0,0,.82);
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+}
+.vpd-autonext-thumb {
+  width: 130px;
+  aspect-ratio: 16/9;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #1E293B;
+  flex-shrink: 0;
+}
+.vpd-autonext-info {
+  text-align: center;
+}
+.vpd-autonext-label {
+  font-size: 13px;
+  color: #94A3B8;
+  margin-bottom: 4px;
+}
+.vpd-autonext-countdown {
+  font-size: 52px;
+  font-weight: 900;
+  color: #fff;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.vpd-autonext-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 220px;
+}
+.vpd-autonext-play-btn {
+  padding: 12px 20px;
+  background: #7C3AED;
+  color: #fff;
+  border: none;
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.vpd-autonext-play-btn:active { background: #6D28D9; }
+.vpd-autonext-cancel-btn {
+  padding: 11px 20px;
+  background: rgba(255,255,255,.12);
+  color: #fff;
+  border: none;
+  border-radius: 24px;
+  font-size: 13px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.vpd-autonext-cancel-btn:active { background: rgba(255,255,255,.22); }
 
 /* Speed bar */
 .vpd-speed-bar {

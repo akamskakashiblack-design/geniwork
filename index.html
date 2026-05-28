@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260532" />
+  <link rel="stylesheet" href="css/style.css?v=20260533" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -2748,9 +2748,13 @@
                  style="width:100%;display:block;background:#000"></video>
           <div class="vp-play-flash" id="vp-play-flash"></div>
 
-          <!-- Controls overlay (always visible) -->
-          <div class="vpd-ctrl-overlay" onclick="vpTogglePlay()">
-            <!-- Skip + play/pause row -->
+          <!-- Back button — always visible on video -->
+          <button class="vpd-video-back-btn" onclick="closeVideoPlayer()">
+            <i class="fas fa-arrow-left"></i>
+          </button>
+
+          <!-- Controls overlay — hidden by default, tap to show/hide -->
+          <div class="vpd-ctrl-overlay" id="vpd-ctrl-overlay" onclick="vpAreaTap(event)">
             <div class="vpd-ctrl-row">
               <button class="vpd-skip-btn" onclick="event.stopPropagation();vpSkip(-10)">
                 <i class="fas fa-rotate-left"></i>
@@ -2764,7 +2768,6 @@
                 <span class="vpd-skip-lbl">10</span>
               </button>
             </div>
-            <!-- Progress row at bottom -->
             <div class="vpd-prog-row" onclick="event.stopPropagation()">
               <span class="vpd-ptime" id="vp-cur">0:00</span>
               <input type="range" class="vp-seek" id="vp-seek" min="0" max="100" step="0.01" value="0"
@@ -2773,6 +2776,23 @@
               <span class="vpd-ptime" id="vp-dur">0:00</span>
               <button class="vpd-fs-btn" onclick="event.stopPropagation();vpFullscreen()">
                 <i class="fas fa-expand"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- Auto-next overlay (shown when video ends) -->
+          <div class="vpd-autonext" id="vpd-autonext" style="display:none">
+            <div class="vpd-autonext-thumb" id="vpd-autonext-thumb"></div>
+            <div class="vpd-autonext-info">
+              <div class="vpd-autonext-label">Prochaine vidéo dans</div>
+              <div class="vpd-autonext-countdown" id="vpd-autonext-cd">5</div>
+            </div>
+            <div class="vpd-autonext-btns">
+              <button class="vpd-autonext-play-btn" onclick="vpPlayNext()">
+                <i class="fas fa-play" style="margin-right:6px"></i>Lire maintenant
+              </button>
+              <button class="vpd-autonext-cancel-btn" onclick="vpCancelAutoNext()">
+                <i class="fas fa-xmark" style="margin-right:4px"></i>Annuler
               </button>
             </div>
           </div>
@@ -3444,7 +3464,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260532"></script>
+  <script src="js/app.js?v=20260533"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">
