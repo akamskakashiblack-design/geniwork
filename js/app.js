@@ -8200,8 +8200,9 @@ function _vsCreateItem(post, idx) {
   var followed = ownerKey ? isFollowing(ownerKey) : false;
   var isOwn    = _currentUser && post.ownerEmail === _currentUser.email;
 
-  var likes   = (post.likes || []).length;
-  var isLiked = _currentUser && (post.likes || []).indexOf(_currentUser.email) !== -1;
+  var likers  = loadPostLikers(post.id);
+  var likes   = likers.length;
+  var isLiked = _currentUser && likers.indexOf(_currentUser.email) !== -1;
   var caption = (post.content || post.text || '').substring(0, 120);
   var postIdStr = String(post.id);
 
@@ -8246,7 +8247,7 @@ function _vsCreateItem(post, idx) {
     '<i class="fas fa-heart"></i><span id="vs-likes-' + postIdStr + '">' + _fmtViews(likes) + '</span></button>' +
     /* Commentaires */
     '<button class="vs-side-btn" onclick="vsOpenComments(\'' + postIdStr + '\');event.stopPropagation()">' +
-    '<i class="fas fa-comment"></i><span id="vs-coms-' + postIdStr + '">' + _fmtViews((post.comments || []).length) + '</span></button>' +
+    '<i class="fas fa-comment"></i><span id="vs-coms-' + postIdStr + '">' + _fmtViews(getAllComments(postIdStr).length) + '</span></button>' +
     /* Favoris */
     '<button class="vs-side-btn vs-fav-btn" id="vs-fav-btn-' + postIdStr + '"' +
     ' onclick="vsFavorite(\'' + postIdStr + '\');event.stopPropagation()">' +
@@ -8540,13 +8541,14 @@ function vsLike(postId) {
   likePost(postId);
   var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
   if (post) {
+    var likers = loadPostLikers(post.id);
     /* Compteur */
     var el = document.getElementById('vs-likes-' + postId);
-    if (el) el.textContent = _fmtViews((post.likes || []).length);
+    if (el) el.textContent = _fmtViews(likers.length);
     /* Colore le cœur si liké */
     var btn = document.getElementById('vs-like-btn-' + postId);
     if (btn) {
-      var isLiked = _currentUser && (post.likes || []).indexOf(_currentUser.email) !== -1;
+      var isLiked = _currentUser && likers.indexOf(_currentUser.email) !== -1;
       btn.classList.toggle('vs-liked', isLiked);
     }
   }
