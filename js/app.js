@@ -7003,6 +7003,7 @@ var _pickedImages  = [];      /* jusqu'à 6 photos */
 var _pickedVideo   = null;    /* { url, name, duration, size, videoType } */
 var _pickedDoc     = null;    /* { url, file, name, size, type } */
 var _pubVideoType  = 'video'; /* 'short' | 'video' — type sélectionné par l'utilisateur */
+var _pubVidMeta    = null;   /* { vidType: 'formation'|'tutoriel'|'autre', category: string } */
 
 /* ── Déclencheurs fichiers ── */
 function triggerImgPick()     { document.getElementById('img-picker').click(); }
@@ -7295,10 +7296,12 @@ function _gwFinishRecord() {
   if (_pickedImages.length > 0) { _pickedImages = []; renderImgPreviews(); }
   _clearVideo();
   _pickedVideo = { url: blobUrl, blob: blob, name: 'video_' + Date.now() + ext, duration: _camSeconds, size: blob.size, videoType: _pubVideoType };
+  _pubVidMeta = null;
 
   _gwCloseCamera();
   renderVideoPreview();
   showToast('Vidéo enregistrée ✓', 'ok');
+  if (_pubVideoType === 'video') { setTimeout(_showVidMetaSheet, 350); }
 }
 
 /* ── Retourner caméra ── */
@@ -7495,7 +7498,9 @@ function handleVideoPick(input) {
       size:      file.size,
       videoType: _pubVideoType  /* 'short' | 'video' */
     };
+    _pubVidMeta = null;
     renderVideoPreview();
+    if (_pubVideoType === 'video') { setTimeout(_showVidMetaSheet, 120); }
   }
 
   tempVid.onloadedmetadata = function() { _acceptVideo(tempVid.duration); };
@@ -7512,6 +7517,23 @@ function renderVideoPreview() {
     return;
   }
   preview.classList.remove('hidden');
+  var metaTag = '';
+  if (_pickedVideo.videoType === 'video') {
+    if (_pubVidMeta) {
+      var _vtLabel = { formation: 'Formation', tutoriel: 'Tutoriel', autre: 'Autre' }[_pubVidMeta.vidType] || _pubVidMeta.vidType;
+      metaTag = '<div class="pub-vid-meta-tag">' +
+        '<i class="fas fa-tag" style="margin-right:6px"></i>' +
+        _vtLabel + ' · ' + escHtml(_pubVidMeta.category) +
+        '<button onclick="_showVidMetaSheet()" style="margin-left:8px;background:none;border:none;color:#7C3AED;font-size:11px;font-weight:600;cursor:pointer;padding:0">Modifier</button>' +
+        '</div>';
+    } else {
+      metaTag = '<div class="pub-vid-meta-missing">' +
+        '<i class="fas fa-circle-exclamation" style="margin-right:6px"></i>' +
+        'Type et catégorie requis — ' +
+        '<button onclick="_showVidMetaSheet()" style="background:none;border:none;color:#DC2626;font-size:12px;font-weight:700;cursor:pointer;padding:0;text-decoration:underline">Définir</button>' +
+        '</div>';
+    }
+  }
   preview.innerHTML =
     '<video src="' + _pickedVideo.url + '" controls playsinline webkit-playsinline ' +
       'style="width:100%;max-height:260px;display:block"></video>' +
@@ -7520,11 +7542,12 @@ function renderVideoPreview() {
       '<span><i class="fas fa-clock"></i> ' + formatDuration(_pickedVideo.duration) + '</span>' +
       '<span><i class="fas fa-hdd"></i> '   + formatFileSize(_pickedVideo.size)     + '</span>' +
       '<span><i class="fas fa-film"></i> '  + escHtml(_pickedVideo.name.slice(0, 22)) + '</span>' +
-    '</div>';
+    '</div>' + metaTag;
 }
 
 function removeVideo() {
   _clearVideo();
+  _pubVidMeta = null;
   renderVideoPreview();
   document.getElementById('video-picker').value      = '';
   document.getElementById('cam-back-video').value    = '';
@@ -7547,6 +7570,126 @@ function showVideoError(msg) {
   var preview = document.getElementById('pub-video-preview');
   preview.parentNode.insertBefore(el, preview.nextSibling);
   setTimeout(function() { if (el.parentNode) el.remove(); }, 5000);
+}
+
+/* ── Fiche métadonnées vidéo (type + catégorie) ────────────────────────── */
+var _vmSelType = 'formation';
+var _vmSelCat  = null;
+
+function _showVidMetaSheet() {
+  var existing = document.getElementById('vid-meta-sheet');
+  if (existing) existing.remove();
+
+  var cats = [
+    { key: 'marketing', icon: '📈', label: 'Marketing'  },
+    { key: 'finance',   icon: '💰', label: 'Finance'    },
+    { key: 'coaching',  icon: '🎯', label: 'Coaching'   },
+    { key: 'design',    icon: '🎨', label: 'Design'     },
+    { key: 'dev',       icon: '💻', label: 'Dév. Web'   },
+    { key: 'montage',   icon: '🎬', label: 'Montage'    },
+    { key: 'autre',     icon: '➕', label: 'Autre'      }
+  ];
+
+  _vmSelType = (_pubVidMeta && _pubVidMeta.vidType)  || 'formation';
+  _vmSelCat  = (_pubVidMeta && _pubVidMeta.category) || null;
+
+  var overlay = document.createElement('div');
+  overlay.id = 'vid-meta-sheet';
+  overlay.className = 'vm-overlay';
+  overlay.innerHTML =
+    '<div class="vm-sheet" id="vm-sheet-inner">' +
+      '<div class="vm-handle"></div>' +
+      '<div class="vm-title"><i class="fas fa-sliders-h" style="margin-right:8px;color:#7C3AED"></i>Options de la vidéo</div>' +
+      '<p class="vm-subtitle">Sélectionnez le type et la catégorie pour que votre vidéo soit bien classée.</p>' +
+
+      '<div class="vm-section-label">Type de vidéo <span class="vm-required">*</span></div>' +
+      '<div class="vm-type-chips">' +
+        ['formation','tutoriel','autre'].map(function(t) {
+          var icons = { formation: '📚', tutoriel: '🎓', autre: '💡' };
+          var labels = { formation: 'Formation', tutoriel: 'Tutoriel', autre: 'Autre' };
+          return '<button class="vm-type-chip' + (_vmSelType === t ? ' active' : '') + '" data-type="' + t + '" onclick="_vmSelectType(this,\'' + t + '\')">' +
+            icons[t] + ' ' + labels[t] + '</button>';
+        }).join('') +
+      '</div>' +
+
+      '<div class="vm-section-label" style="margin-top:20px">Catégorie <span class="vm-required">*</span></div>' +
+      '<div class="vm-cats-grid">' +
+        cats.map(function(c) {
+          var isActive = _vmSelCat === c.key;
+          return '<button class="vm-cat-btn' + (isActive ? ' active' : '') + '" data-cat="' + c.key + '" onclick="_vmSelectCat(this,\'' + c.key + '\')">' +
+            '<span class="vm-cat-icon">' + c.icon + '</span>' +
+            '<span class="vm-cat-name">' + c.label + '</span>' +
+          '</button>';
+        }).join('') +
+      '</div>' +
+
+      '<div class="vm-section-label" style="margin-top:16px">Ou précisez votre domaine</div>' +
+      '<input type="text" id="vm-custom-input" class="vm-custom-input" ' +
+        'placeholder="Ex: Photographie, Musique, Sport..." maxlength="40" ' +
+        'oninput="_vmOnCustom(this)" />' +
+
+      '<button id="vm-confirm-btn" class="vm-confirm-btn" onclick="_vmConfirm()"' +
+        (_vmSelCat ? '' : ' disabled') + '>Confirmer</button>' +
+    '</div>';
+
+  document.body.appendChild(overlay);
+
+  var sheet = document.getElementById('vm-sheet-inner');
+  sheet.style.transform = 'translateY(100%)';
+  requestAnimationFrame(function() {
+    sheet.style.transition = 'transform .35s cubic-bezier(.25,.8,.25,1)';
+    sheet.style.transform  = 'translateY(0)';
+  });
+}
+
+function _vmSelectType(btn, type) {
+  _vmSelType = type;
+  document.querySelectorAll('.vm-type-chip').forEach(function(c) { c.classList.remove('active'); });
+  btn.classList.add('active');
+}
+
+function _vmSelectCat(btn, cat) {
+  _vmSelCat = cat;
+  document.querySelectorAll('.vm-cat-btn').forEach(function(c) { c.classList.remove('active'); });
+  btn.classList.add('active');
+  var inp = document.getElementById('vm-custom-input');
+  if (inp) inp.value = '';
+  _vmRefreshConfirm();
+}
+
+function _vmOnCustom(inp) {
+  var v = inp.value.trim();
+  if (v) {
+    _vmSelCat = v;
+    document.querySelectorAll('.vm-cat-btn').forEach(function(c) { c.classList.remove('active'); });
+  } else {
+    _vmSelCat = null;
+  }
+  _vmRefreshConfirm();
+}
+
+function _vmRefreshConfirm() {
+  var btn = document.getElementById('vm-confirm-btn');
+  if (btn) btn.disabled = !_vmSelCat;
+}
+
+function _vmConfirm() {
+  if (!_vmSelCat) return;
+  var inp = document.getElementById('vm-custom-input');
+  var cat = (inp && inp.value.trim()) ? inp.value.trim() : _vmSelCat;
+  _pubVidMeta = { vidType: _vmSelType, category: cat };
+  if (_pickedVideo) { _pickedVideo.vidType = _vmSelType; _pickedVideo.category = cat; }
+
+  var sheet = document.getElementById('vm-sheet-inner');
+  if (sheet) {
+    sheet.style.transition = 'transform .25s ease';
+    sheet.style.transform  = 'translateY(100%)';
+    setTimeout(function() {
+      var ov = document.getElementById('vid-meta-sheet');
+      if (ov) ov.remove();
+    }, 280);
+  }
+  renderVideoPreview();
 }
 
 function formatDuration(sec) {
@@ -8156,10 +8299,15 @@ function openVideosDiscover() {
   modal.style.display = 'flex';
 }
 
+/* vidType chip keys vs category card keys */
+var _vdChipFilters = { tout: 1, formation: 1, tutoriels: 1, autre: 1 };
+
 function vdSetFilter(filter, btn) {
   _vdCurrentFilter = filter;
-  document.querySelectorAll('#vd-modal .vd-chip').forEach(function(c) { c.classList.remove('active'); });
-  if (btn) btn.classList.add('active');
+  var isChip = !!_vdChipFilters[filter];
+  document.querySelectorAll('#vd-modal .vd-chip').forEach(function(c) {
+    c.classList.toggle('active', isChip ? (c.dataset.filter === filter) : (c.dataset.filter === 'tout'));
+  });
   _vdRenderContent();
 }
 
@@ -8172,10 +8320,18 @@ function _vdAllVideos() {
 }
 
 function _vdRenderContent() {
-  var all = _vdAllVideos();
-  var list = _vdCurrentFilter === 'tout' ? all : all.filter(function(p) {
-    return ((p.video && p.video.category) || '') === _vdCurrentFilter;
-  });
+  var all  = _vdAllVideos();
+  var list;
+  if (_vdCurrentFilter === 'tout') {
+    list = all;
+  } else if (_vdChipFilters[_vdCurrentFilter]) {
+    /* Filter by vidType (from chips) — 'tutoriels' chip maps to 'tutoriel' */
+    var ft = _vdCurrentFilter === 'tutoriels' ? 'tutoriel' : _vdCurrentFilter;
+    list = all.filter(function(p) { return (p.video.vidType || '') === ft; });
+  } else {
+    /* Filter by category (from category cards) */
+    list = all.filter(function(p) { return (p.video.category || '') === _vdCurrentFilter; });
+  }
   _vdRenderFeatured(all.length ? all[0] : null);
   _vdRenderCategories();
   _vdRenderList(list);
@@ -8216,16 +8372,18 @@ function _vdRenderCategories() {
   var el = document.getElementById('vd-cats');
   if (!el) return;
   var cats = [
-    { icon: '🎬', label: 'Montage &\nProduction',  bg: '#1A2E4A', f: 'montage'  },
-    { icon: '💻', label: 'Dév. Web &\nMobile',     bg: '#152E22', f: 'dev'      },
-    { icon: '🎨', label: 'Design &\nGraphisme',    bg: '#2A1550', f: 'design'   },
-    { icon: '📈', label: 'Marketing &\nBusiness',  bg: '#13301A', f: 'marketing'},
-    { icon: '➕', label: 'Plus',                   bg: '#1E293B', f: 'autre'    }
+    { icon: '📈', label: 'Marketing',   bg: '#13301A', f: 'marketing' },
+    { icon: '💰', label: 'Finance',     bg: '#1A2E14', f: 'finance'   },
+    { icon: '🎯', label: 'Coaching',    bg: '#2A1E10', f: 'coaching'  },
+    { icon: '🎨', label: 'Design',      bg: '#2A1550', f: 'design'    },
+    { icon: '💻', label: 'Dév. Web',    bg: '#152E22', f: 'dev'       },
+    { icon: '🎬', label: 'Montage',     bg: '#1A2E4A', f: 'montage'   },
+    { icon: '➕', label: 'Plus',        bg: '#1E293B', f: 'tout'      }
   ];
   el.innerHTML = cats.map(function(c) {
     return '<div class="vd-cat-item" onclick="vdSetFilter(\'' + c.f + '\',null)">' +
       '<div class="vd-cat-icon" style="background:' + c.bg + '">' + c.icon + '</div>' +
-      '<span class="vd-cat-label">' + c.label.replace('\n', '<br>') + '</span>' +
+      '<span class="vd-cat-label">' + c.label + '</span>' +
     '</div>';
   }).join('');
 }
@@ -8717,10 +8875,18 @@ function publierPost() {
   var docBlob     = _pickedDoc   ? (_pickedDoc.file  || null) : null;
   var docIdbId    = _pickedDoc   ? ('doc_' + postId) : null;
 
-  /* Vidéo : on stocke l'idbId + le blobUrl courant + le type (short/video) */
+  /* Pour les vidéos régulières : type et catégorie obligatoires */
+  if (_pickedVideo && (_pickedVideo.videoType || 'video') === 'video' && !_pubVidMeta) {
+    _showVidMetaSheet();
+    return;
+  }
+
+  /* Vidéo : on stocke l'idbId + le blobUrl courant + le type (short/video) + meta */
   var videoData = _pickedVideo
     ? { idbId: videoIdbId, url: _pickedVideo.url, duration: _pickedVideo.duration, size: _pickedVideo.size,
-        videoType: _pickedVideo.videoType || 'video' }
+        videoType: _pickedVideo.videoType || 'video',
+        vidType:  (_pubVidMeta && _pubVidMeta.vidType)  || '',
+        category: (_pubVidMeta && _pubVidMeta.category) || '' }
     : null;
 
   /* Document : idbId + url courante + métadonnées */
