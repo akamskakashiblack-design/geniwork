@@ -5880,7 +5880,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   transition: opacity 0.15s, transform 0.1s;
 }
 .badge-cta-btn:active { transform: scale(0.98); }
-.badge-cta-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.badge-cta-btn:disabled { background: #D1D5DB !important; color: #9CA3AF !important; cursor: not-allowed; opacity: 1; }
 
 .badge-cta-blue { background: #2563EB; color: #fff; }
 .badge-cta-blue:not(:disabled):hover { background: #1D4ED8; }

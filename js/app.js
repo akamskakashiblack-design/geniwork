@@ -2390,6 +2390,40 @@ var PENDING_POSTS = [];   /* Posts Firebase reçus en temps réel — vidé à l
 /* ══════════════════════════════════════════
    INITIALISATION DE L'APPLICATION
 ══════════════════════════════════════════ */
+/* ── Purge one-shot des données injectées par l'ancien mode démo ── */
+function _purgeDemoLegacy() {
+  if (localStorage.getItem('gw_demo_purged_v1') === '1') return;
+  var demoIds = ['dr1', 'dr2', 'dr3', 'dr4'];
+  var demoPhone = '+33 6 00 00 00 00';
+  try {
+    for (var i = 0; i < localStorage.length; i++) {
+      var _k = localStorage.key(i);
+      if (!_k || _k.indexOf('gw_profile_') !== 0) continue;
+      var _email = _k.replace('gw_profile_', '');
+      try {
+        var _p = JSON.parse(localStorage.getItem(_k)) || {};
+        /* Ne touche pas aux profils avec un badge admin-approuvé */
+        if (!_p.badgeType) {
+          var _changed = false;
+          if (_p.identityVerified)              { delete _p.identityVerified;  _changed = true; }
+          if (_p.phoneVerified)                 { delete _p.phoneVerified;     _changed = true; }
+          if (_p.missionsCompleted)             { delete _p.missionsCompleted; _changed = true; }
+          if (_p.rating)                        { delete _p.rating;            _changed = true; }
+          if (_p.phone === demoPhone)           { delete _p.phone;             _changed = true; }
+          if (_changed) localStorage.setItem(_k, JSON.stringify(_p));
+        }
+        /* Retire les faux avis démo (IDs dr1..dr4) */
+        var _rk = 'gw_reviews_' + _email;
+        var _rv = JSON.parse(localStorage.getItem(_rk) || '[]');
+        var _cl = _rv.filter(function(r) { return demoIds.indexOf(r.id) === -1; });
+        if (_cl.length !== _rv.length) localStorage.setItem(_rk, JSON.stringify(_cl));
+      } catch(e2) {}
+    }
+  } catch(e) {}
+  localStorage.setItem('gw_demo_purged_v1', '1');
+}
+_purgeDemoLegacy();
+
 function initApp(user) {
   _currentUser = user;
 
