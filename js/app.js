@@ -5999,10 +5999,12 @@ function _vpPopulateDetail(post) {
   var disBtn   = document.getElementById('vpd-dislike-btn');
   var saveIco  = document.getElementById('vpd-save-ico');
   var bmIco    = document.getElementById('vpd-bm-ico');
-  if (likeBtn) likeBtn.classList.toggle('active', liked);
-  if (disBtn)  disBtn.classList.toggle('active',  disliked);
-  if (saveIco) saveIco.className = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
-  if (bmIco)   bmIco.className   = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+  var saveActBtn = document.getElementById('vpd-save-act-btn');
+  if (likeBtn)    likeBtn.classList.toggle('active', liked);
+  if (disBtn)     disBtn.classList.toggle('active',  disliked);
+  if (saveIco)    saveIco.className = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+  if (bmIco)      bmIco.className   = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+  if (saveActBtn) saveActBtn.classList.toggle('active', saved);
 
   /* Author */
   var pr       = (post.ownerEmail && loadUserProfile(post.ownerEmail)) || {};
@@ -6133,34 +6135,39 @@ function _vpPopulateDetail(post) {
 }
 
 /* ── Video detail action buttons ── */
-function vpToggleLike() {
-  if (!_vpCurrentPost) return;
-  likePost(_vpCurrentPost.id);
-  /* Refresh counts in detail */
-  var lCnt = document.getElementById('vpd-like-cnt');
+/* ── Helpers pour rafraîchir les deux boutons ensemble (exclusivité mutuelle) ── */
+function _vpRefreshLikeDislike() {
+  var post  = _vpCurrentPost;
+  var email = _currentUser ? _currentUser.email : '';
+  var liked    = email && post.likers && post.likers.indexOf(email) !== -1;
+  var dislikers = loadPostDislikers(post.id);
+  var disliked  = email && dislikers.indexOf(email) !== -1;
+  var likeTotal = (post.baseLikes || 0) + (post.likers ? post.likers.length : 0);
+
   var lb   = document.getElementById('vpd-like-btn');
   var db   = document.getElementById('vpd-dislike-btn');
-  var post = _vpCurrentPost;
-  if (lCnt) lCnt.textContent = _fmtViews((post.baseLikes || 0) + (post.likers ? post.likers.length : 0));
-  var dislikers = loadPostDislikers(post.id);
+  var lCnt = document.getElementById('vpd-like-cnt');
   var dCnt = document.getElementById('vpd-dislike-cnt');
+
+  /* Exclusivité visuelle garantie : un seul peut être actif */
+  if (lb)   lb.classList.toggle('active', !!liked);
+  if (db)   db.classList.toggle('active', !!disliked);
+  if (lCnt) lCnt.textContent = _fmtViews(likeTotal);
   if (dCnt) dCnt.textContent = _fmtViews(dislikers.length);
-  var email = _currentUser ? _currentUser.email : '';
-  if (lb) lb.classList.toggle('active', email && post.likers && post.likers.indexOf(email) !== -1);
-  if (db) db.classList.remove('active');
+}
+
+function vpToggleLike() {
+  if (!_vpCurrentPost) return;
+  if (!_currentUser) { showToast('Connectez-vous pour liker', 'err'); return; }
+  likePost(_vpCurrentPost.id);   /* retire aussi le dislike en interne */
+  _vpRefreshLikeDislike();
 }
 
 function vpToggleDislike() {
   if (!_vpCurrentPost) return;
-  dislikePost(_vpCurrentPost.id);
-  var post = _vpCurrentPost;
-  var dCnt = document.getElementById('vpd-dislike-cnt');
-  if (dCnt) dCnt.textContent = _fmtViews(loadPostDislikers(post.id).length);
-  var email = _currentUser ? _currentUser.email : '';
-  var db = document.getElementById('vpd-dislike-btn');
-  var lb = document.getElementById('vpd-like-btn');
-  if (db) db.classList.toggle('active', email && loadPostDislikers(post.id).indexOf(email) !== -1);
-  if (lb) lb.classList.remove('active');
+  if (!_currentUser) { showToast('Connectez-vous pour réagir', 'err'); return; }
+  dislikePost(_vpCurrentPost.id); /* retire aussi le like en interne */
+  _vpRefreshLikeDislike();
 }
 
 function vpToggleFollow() {
@@ -6181,11 +6188,14 @@ function vpToggleFollow() {
 function vpToggleSave() {
   if (!_vpCurrentPost) return;
   toggleFavorite(_vpCurrentPost.id);
-  var saved   = isFavorite(_vpCurrentPost.id);
-  var saveIco = document.getElementById('vpd-save-ico');
-  var bmIco   = document.getElementById('vpd-bm-ico');
-  if (saveIco) saveIco.className = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
-  if (bmIco)   bmIco.className   = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+  var saved      = isFavorite(_vpCurrentPost.id);
+  var saveIco    = document.getElementById('vpd-save-ico');
+  var bmIco      = document.getElementById('vpd-bm-ico');
+  var saveActBtn = document.getElementById('vpd-save-act-btn');
+  if (saveIco)    saveIco.className = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+  if (bmIco)      bmIco.className   = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+  if (saveActBtn) saveActBtn.classList.toggle('active', saved);
+  _renderFavPosts();
   showToast(saved ? 'Vidéo enregistrée ✓' : 'Vidéo retirée des favoris', saved ? 'ok' : '');
 }
 
