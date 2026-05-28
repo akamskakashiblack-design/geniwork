@@ -7738,16 +7738,22 @@ function openVideoScroll(startPostId) {
 
 /* ── Crée un élément DOM pour un post vidéo ── */
 function _vsCreateItem(post, idx) {
-  var nom = '';
-  if (post.ownerEmail) {
-    var pr = loadUserProfile(post.ownerEmail);
-    nom = (pr && pr.nom) ? pr.nom : post.ownerEmail.split('@')[0];
-  } else {
-    nom = 'Utilisateur';
-  }
-  var likes   = (post.likes   || []).length;
+  var pr      = post.ownerEmail ? (loadUserProfile(post.ownerEmail) || {}) : {};
+  var nom     = pr.nom || (post.ownerEmail ? post.ownerEmail.split('@')[0] : 'Utilisateur');
+  var photo   = pr.photo || '';
+  var ownerKey = post.ownerEmail ? _gwFbKey(post.ownerEmail) : '';
+  var followed = ownerKey ? isFollowing(ownerKey) : false;
+  var isOwn    = _currentUser && post.ownerEmail === _currentUser.email;
+
+  var likes   = (post.likes || []).length;
+  var isLiked = _currentUser && (post.likes || []).indexOf(_currentUser.email) !== -1;
   var caption = (post.content || post.text || '').substring(0, 120);
   var postIdStr = String(post.id);
+
+  /* Avatar mini */
+  var avHtml = photo
+    ? '<img src="' + escHtml(photo) + '" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid #fff;flex-shrink:0" onerror="this.style.display=\'none\'">'
+    : '<div style="width:36px;height:36px;border-radius:50%;background:#4F46E5;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:14px;flex-shrink:0;border:2px solid #fff">' + escHtml(nom.charAt(0).toUpperCase()) + '</div>';
 
   var el = document.createElement('div');
   el.className = 'vs-item';
@@ -7755,43 +7761,53 @@ function _vsCreateItem(post, idx) {
   el.setAttribute('data-post-id', postIdStr);
 
   el.innerHTML =
+    /* Vidéo */
     '<video class="vs-video" playsinline webkit-playsinline preload="none"></video>' +
-    /* Zone tap pour play/pause */
+    /* Zone tap (play/pause au toucher) */
     '<div class="vs-tap-zone" onclick="vsTogglePlay(' + idx + ')"></div>' +
-    /* Flash icône centrale */
+    /* Flash icône centrale au tap */
     '<div class="vs-flash" id="vs-flash-' + idx + '">' +
     '<i class="fas fa-play" style="font-size:62px;color:rgba(255,255,255,.85);filter:drop-shadow(0 2px 8px rgba(0,0,0,.5))"></i></div>' +
-    /* Info auteur + caption */
-    '<div class="vs-info">' +
-    '<div class="vs-author">@' + escHtml(nom) + '</div>' +
-    (caption ? '<div class="vs-caption">' + escHtml(caption) + '</div>' : '') +
+
+    /* ── MINI PROFIL bas-gauche ── */
+    '<div class="vs-author-row">' +
+      avHtml +
+      '<div style="display:flex;flex-direction:column;gap:2px;min-width:0">' +
+        '<span class="vs-author">@' + escHtml(nom) + '</span>' +
+        (caption ? '<span class="vs-caption">' + escHtml(caption) + '</span>' : '') +
+      '</div>' +
+      (!isOwn
+        ? '<button class="vs-follow-btn" id="vs-follow-' + postIdStr + '"' +
+          ' onclick="vsFollow(\'' + postIdStr + '\',\'' + escHtml(post.ownerEmail || '') + '\',\'' + escHtml(ownerKey) + '\');event.stopPropagation()">' +
+          (followed ? '✓ Abonné' : '+ Suivre') + '</button>'
+        : '') +
     '</div>' +
-    /* Boutons latéraux droits */
+
+    /* ── BOUTONS LATÉRAUX droits ── */
     '<div class="vs-side">' +
-    /* Play / Pause */
-    '<button class="vs-side-btn" onclick="vsTogglePlay(' + idx + ');event.stopPropagation()" title="Pause / Lecture">' +
-    '<div class="vs-play-ico" id="vs-play-ico-' + idx + '"><i class="fas fa-pause"></i></div></button>' +
     /* Like */
-    '<button class="vs-side-btn vs-like-btn" id="vs-like-btn-' + postIdStr + '" onclick="vsLike(\'' + postIdStr + '\');event.stopPropagation()" title="J\'aime">' +
-    '<i class="fas fa-heart"></i>' +
-    '<span id="vs-likes-' + postIdStr + '">' + _fmtViews(likes) + '</span></button>' +
+    '<button class="vs-side-btn vs-like-btn' + (isLiked ? ' vs-liked' : '') + '" id="vs-like-btn-' + postIdStr + '"' +
+    ' onclick="vsLike(\'' + postIdStr + '\');event.stopPropagation()">' +
+    '<i class="fas fa-heart"></i><span id="vs-likes-' + postIdStr + '">' + _fmtViews(likes) + '</span></button>' +
     /* Commentaires */
-    '<button class="vs-side-btn" onclick="vsOpenComments(\'' + postIdStr + '\');event.stopPropagation()" title="Commentaires">' +
-    '<i class="fas fa-comment"></i>' +
-    '<span id="vs-coms-' + postIdStr + '">' + _fmtViews((post.comments || []).length) + '</span></button>' +
+    '<button class="vs-side-btn" onclick="vsOpenComments(\'' + postIdStr + '\');event.stopPropagation()">' +
+    '<i class="fas fa-comment"></i><span id="vs-coms-' + postIdStr + '">' + _fmtViews((post.comments || []).length) + '</span></button>' +
     /* Favoris */
-    '<button class="vs-side-btn vs-fav-btn" id="vs-fav-btn-' + postIdStr + '" onclick="vsFavorite(\'' + postIdStr + '\');event.stopPropagation()" title="Ajouter aux favoris">' +
+    '<button class="vs-side-btn vs-fav-btn" id="vs-fav-btn-' + postIdStr + '"' +
+    ' onclick="vsFavorite(\'' + postIdStr + '\');event.stopPropagation()">' +
     '<i class="fas fa-bookmark' + (isFavorite(postIdStr) ? ' vs-fav-active' : '') + '"></i>' +
     '<span>' + (isFavorite(postIdStr) ? 'Sauvé' : 'Sauver') + '</span></button>' +
     /* Partager */
-    '<button class="vs-side-btn" onclick="sharePost(\'' + postIdStr + '\');event.stopPropagation()" title="Partager">' +
-    '<i class="fas fa-share-nodes"></i>' +
-    '<span>Partager</span></button>' +
+    '<button class="vs-side-btn" onclick="sharePost(\'' + postIdStr + '\');event.stopPropagation()">' +
+    '<i class="fas fa-share-nodes"></i><span>Partager</span></button>' +
     /* Vues */
-    '<div class="vs-side-btn" style="pointer-events:none" title="Vues">' +
-    '<i class="fas fa-eye"></i>' +
-    '<span id="vs-views-' + postIdStr + '">' + _fmtViews(_getVideoViews(postIdStr)) + '</span></div>' +
+    '<div class="vs-side-btn" style="pointer-events:none">' +
+    '<i class="fas fa-eye"></i><span id="vs-views-' + postIdStr + '">' + _fmtViews(_getVideoViews(postIdStr)) + '</span></div>' +
+    /* ••• Menu options */
+    '<button class="vs-side-btn" onclick="vsShowMenu(\'' + postIdStr + '\',\'' + escHtml(post.ownerEmail || '') + '\');event.stopPropagation()">' +
+    '<i class="fas fa-ellipsis-vertical" style="font-size:22px"></i><span>Plus</span></button>' +
     '</div>' +
+
     /* Barre de progression */
     '<div class="vs-prog-bar"><div class="vs-prog-fill" id="vs-prog-' + idx + '"></div></div>';
 
@@ -7984,6 +8000,85 @@ function vsPlayNext() {
 
 /* ── Annule le countdown ── */
 function vsCancelNext() { _vsClearEndTimer(); }
+
+/* ── Suivre/ne plus suivre depuis le scroll player ── */
+function vsFollow(postId, ownerEmail, ownerKey) {
+  if (!ownerEmail) return;
+  var pr = loadUserProfile(ownerEmail) || {};
+  _doFollowToggle({ nom: pr.nom || ownerEmail.split('@')[0], email: ownerEmail, role: pr.role || '' });
+  /* Met à jour le bouton */
+  var btn = document.getElementById('vs-follow-' + postId);
+  if (btn) {
+    var nowFollowed = isFollowing(ownerKey);
+    btn.textContent = nowFollowed ? '✓ Abonné' : '+ Suivre';
+    btn.classList.toggle('vs-following', nowFollowed);
+  }
+}
+
+/* ── Menu ••• options de la vidéo ── */
+function vsShowMenu(postId, ownerEmail) {
+  /* Pause la vidéo courante pendant le menu */
+  var item = _vsItems[_vsCurIdx];
+  if (item) { try { item.videoEl.pause(); _vsSetPlayIco(_vsCurIdx, false); } catch(e){} }
+
+  var isOwn = _currentUser && ownerEmail === _currentUser.email;
+  var btns = [];
+
+  if (!isOwn) {
+    btns.push({ label: '🚫 Masquer cette vidéo',      fn: function() { vsHideShort(postId); } });
+    btns.push({ label: '🔇 Bloquer cet utilisateur',  fn: function() { blockUser(postId); } });
+    btns.push({ label: '⚠️ Signaler la vidéo',        fn: function() { reportPost(postId); } });
+  }
+  btns.push({ label: '🔁 Republier cette vidéo',      fn: function() { doRepost(postId); } });
+  if (isOwn) {
+    btns.push({ label: '🗑 Supprimer',                fn: function() { deletePost(postId); closeVideoScroll(); } });
+  }
+  btns.push({ label: 'Annuler',                       fn: function() {} });
+
+  /* Sheet bottom */
+  var sheet = document.createElement('div');
+  sheet.style.cssText = 'position:fixed;inset:0;z-index:900;display:flex;flex-direction:column;justify-content:flex-end';
+  sheet.innerHTML =
+    '<div onclick="this.parentNode.remove()" style="flex:1;background:rgba(0,0,0,.5)"></div>' +
+    '<div style="background:#1E293B;border-radius:20px 20px 0 0;padding:12px 0 max(env(safe-area-inset-bottom,0px),20px)">' +
+    '<div style="width:40px;height:4px;background:rgba(255,255,255,.3);border-radius:2px;margin:0 auto 16px"></div>' +
+    btns.map(function(b, i) {
+      var isCancel = b.label === 'Annuler';
+      return '<button data-vs-menu-idx="' + i + '" style="width:100%;background:none;border:none;' +
+        (isCancel ? 'color:#94A3B8;' : 'color:#F1F5F9;') +
+        'font-size:16px;padding:14px 20px;text-align:left;cursor:pointer;' +
+        (i < btns.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,.07);' : '') + '">' +
+        b.label + '</button>';
+    }).join('') +
+    '</div>';
+
+  /* Attache les handlers après injection dans le DOM */
+  document.body.appendChild(sheet);
+  sheet.querySelectorAll('[data-vs-menu-idx]').forEach(function(btn) {
+    var i = parseInt(btn.getAttribute('data-vs-menu-idx'), 10);
+    btn.onclick = function() { sheet.remove(); btns[i].fn(); };
+  });
+}
+
+/* ── Masquer un Short de la session courante ── */
+function vsHideShort(postId) {
+  /* Retire du scroll player sans supprimer le post */
+  _vsItems = _vsItems.filter(function(item) { return item.postId !== String(postId); });
+  /* Retire l'élément du DOM */
+  var feedEl = document.getElementById('vs-feed');
+  if (feedEl) {
+    var el = feedEl.querySelector('[data-post-id="' + postId + '"]');
+    if (el) el.remove();
+    /* Réindexe les data-idx */
+    feedEl.querySelectorAll('.vs-item').forEach(function(el2, i) { el2.setAttribute('data-idx', i); });
+  }
+  /* Rejoue le suivant ou ferme si plus rien */
+  if (_vsItems.length === 0) { closeVideoScroll(); return; }
+  var nextIdx = Math.min(_vsCurIdx, _vsItems.length - 1);
+  _vsSetupObserver();
+  _vsActivate(nextIdx);
+  showToast('Vidéo masquée', 'ok');
+}
 
 /* ── Like depuis le scroll player ── */
 function vsLike(postId) {
