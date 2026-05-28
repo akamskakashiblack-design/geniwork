@@ -7865,6 +7865,36 @@ function _getCurrentPlanLimits() {
   return _PLAN_LIMITS[plan] || _PLAN_LIMITS.free;
 }
 
+/* Met à jour le placeholder + l'état du bouton envoi selon la limite journalière */
+function _updateChatMsgCounter() {
+  if (!_currentUser) return;
+  var inp     = document.getElementById('chat-input');
+  var sendBtn = document.getElementById('chat-send-btn');
+  if (!inp) return;
+  var lim  = _getCurrentPlanLimits();
+  if (lim.msgsPerDay === Infinity) {
+    inp.disabled = false;
+    inp.placeholder = 'Écrire un message...';
+    if (sendBtn) sendBtn.disabled = false;
+    return;
+  }
+  var used = _getDailyCount('msgs', _currentUser.email);
+  var left = lim.msgsPerDay - used;
+  if (left <= 0) {
+    inp.disabled    = true;
+    inp.placeholder = '🚫 Limite ' + lim.msgsPerDay + ' messages/jour atteinte — réinitialisé demain';
+    if (sendBtn) sendBtn.disabled = true;
+  } else if (left <= 2) {
+    inp.disabled    = false;
+    inp.placeholder = '⚠️ ' + left + ' message' + (left > 1 ? 's' : '') + ' restant' + (left > 1 ? 's' : '') + ' aujourd\'hui';
+    if (sendBtn) sendBtn.disabled = false;
+  } else {
+    inp.disabled    = false;
+    inp.placeholder = 'Écrire un message...';
+    if (sendBtn) sendBtn.disabled = false;
+  }
+}
+
 /* Clé de comptage journalier : gw_daily_{feature}_{email}_{YYYY-MM-DD} */
 function _dailyKey(feature, email) {
   var today = new Date().toISOString().slice(0, 10);
@@ -11505,6 +11535,8 @@ function openChat(convId) {
     _renderChatMessages(conv);
     _dmOpen(conv);
   }
+  /* Affiche le compteur de messages dès l'ouverture */
+  _updateChatMsgCounter();
 
   /* Slide in */
   var screen = document.getElementById('chat-screen');
@@ -13254,11 +13286,8 @@ function sendChatMessage() {
   if (_mLim.msgsPerDay !== Infinity) {
     var _todayMsgs = _getDailyCount('msgs', _currentUser.email);
     if (_todayMsgs >= _mLim.msgsPerDay) {
-      _showPlanLimitModal(
-        'Limite de messages atteinte',
-        'Le plan Gratuit est limité à ' + _mLim.msgsPerDay + ' messages par jour. Passez Premium pour des messages illimités.',
-        'msgs'
-      );
+      showToast('🚫 Limite de ' + _mLim.msgsPerDay + ' messages/jour atteinte. Réinitialisé demain, ou passez Premium pour des messages illimités.', 'err');
+      _updateChatMsgCounter();
       return;
     }
   }
@@ -13270,6 +13299,7 @@ function sendChatMessage() {
 
   /* Incrémente le compteur journalier messages */
   _incDailyCount('msgs', _currentUser.email);
+  _updateChatMsgCounter();  /* Met à jour le placeholder selon le nouveau compteur */
 
   /* Stocke l'email réel de l'expéditeur (clé de livraison cross-session) */
   var newMsg = {
