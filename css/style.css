@@ -3117,6 +3117,10 @@ mark.srch-mark {
   width: 0%;
   transition: none;
 }
+/* États actifs boutons latéraux */
+.vs-liked i             { color: #F43F5E !important; }
+.vs-fav-active          { color: #FBBF24 !important; }
+.vs-side-btn:active     { transform: scale(.88); transition: transform .1s; }
 
 /* ── FEUILLE SÉLECTION CAMÉRA ── */
 .cam-sheet-bg {

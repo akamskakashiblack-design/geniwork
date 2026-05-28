@@ -7677,15 +7677,27 @@ function _vsCreateItem(post, idx) {
     '</div>' +
     /* Boutons latéraux droits */
     '<div class="vs-side">' +
-    /* Bouton play/pause */
-    '<button class="vs-side-btn" onclick="vsTogglePlay(' + idx + ');event.stopPropagation()">' +
+    /* Play / Pause */
+    '<button class="vs-side-btn" onclick="vsTogglePlay(' + idx + ');event.stopPropagation()" title="Pause / Lecture">' +
     '<div class="vs-play-ico" id="vs-play-ico-' + idx + '"><i class="fas fa-pause"></i></div></button>' +
     /* Like */
-    '<button class="vs-side-btn" onclick="vsLike(\'' + postIdStr + '\');event.stopPropagation()">' +
+    '<button class="vs-side-btn vs-like-btn" id="vs-like-btn-' + postIdStr + '" onclick="vsLike(\'' + postIdStr + '\');event.stopPropagation()" title="J\'aime">' +
     '<i class="fas fa-heart"></i>' +
     '<span id="vs-likes-' + postIdStr + '">' + _fmtViews(likes) + '</span></button>' +
+    /* Commentaires */
+    '<button class="vs-side-btn" onclick="vsOpenComments(\'' + postIdStr + '\');event.stopPropagation()" title="Commentaires">' +
+    '<i class="fas fa-comment"></i>' +
+    '<span id="vs-coms-' + postIdStr + '">' + _fmtViews((post.comments || []).length) + '</span></button>' +
+    /* Favoris */
+    '<button class="vs-side-btn vs-fav-btn" id="vs-fav-btn-' + postIdStr + '" onclick="vsFavorite(\'' + postIdStr + '\');event.stopPropagation()" title="Ajouter aux favoris">' +
+    '<i class="fas fa-bookmark' + (isFavorite(postIdStr) ? ' vs-fav-active' : '') + '"></i>' +
+    '<span>' + (isFavorite(postIdStr) ? 'Sauvé' : 'Sauver') + '</span></button>' +
+    /* Partager */
+    '<button class="vs-side-btn" onclick="sharePost(\'' + postIdStr + '\');event.stopPropagation()" title="Partager">' +
+    '<i class="fas fa-share-nodes"></i>' +
+    '<span>Partager</span></button>' +
     /* Vues */
-    '<div class="vs-side-btn" style="pointer-events:none">' +
+    '<div class="vs-side-btn" style="pointer-events:none" title="Vues">' +
     '<i class="fas fa-eye"></i>' +
     '<span id="vs-views-' + postIdStr + '">' + _fmtViews(_getVideoViews(postIdStr)) + '</span></div>' +
     '</div>' +
@@ -7887,9 +7899,35 @@ function vsLike(postId) {
   likePost(postId);
   var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
   if (post) {
+    /* Compteur */
     var el = document.getElementById('vs-likes-' + postId);
     if (el) el.textContent = _fmtViews((post.likes || []).length);
+    /* Colore le cœur si liké */
+    var btn = document.getElementById('vs-like-btn-' + postId);
+    if (btn) {
+      var isLiked = _currentUser && (post.likes || []).indexOf(_currentUser.email) !== -1;
+      btn.classList.toggle('vs-liked', isLiked);
+    }
   }
+}
+
+/* ── Ouvre les commentaires depuis le scroll player ── */
+function vsOpenComments(postId) {
+  openComments(postId);
+}
+
+/* ── Favori depuis le scroll player ── */
+function vsFavorite(postId) {
+  toggleFavorite(postId);
+  var fav = isFavorite(postId);
+  var btn = document.getElementById('vs-fav-btn-' + postId);
+  if (btn) {
+    var ico = btn.querySelector('i');
+    var lbl = btn.querySelector('span');
+    if (ico) ico.className = 'fas fa-bookmark' + (fav ? ' vs-fav-active' : '');
+    if (lbl) lbl.textContent = fav ? 'Sauvé' : 'Sauver';
+  }
+  showToast(fav ? '🔖 Ajouté aux favoris' : 'Retiré des favoris', fav ? 'ok' : '');
 }
 
 /* ── Ferme le player scroll ── */
