@@ -5893,56 +5893,8 @@ function _openOfficialVideo(postId) {
 }
 
 function _openVideoFromPost(postId, duration) {
-  var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(postId); });
-  if (!post || !post.video) return;
-  /* Comptage de la vue + milestone */
-  var _newViews = _incrementVideoViews(postId);
-  _checkViewMilestone(postId, post.ownerEmail || null, _newViews);
-
-  /* ── Ordre de priorité : URL mémoire → IDB locale → Firebase RTDB ── */
-  function _tryFirebaseFallback() {
-    if (_gwFbReady && _gwFbDB) {
-      showToast('Chargement vidéo…', '');
-      _gwFbDB.ref('gw/post_videos/' + postId).once('value').then(function(snap) {
-        var d = snap.val();
-        if (d && d.url) {
-          post.video.url = d.url;
-          /* Met à jour le <video> dans le feed si visible */
-          var vEl = document.getElementById('fv-' + postId);
-          if (vEl) vEl.src = d.url;
-          openVideoPlayer(d.url, duration);
-        } else {
-          showToast('Vidéo non disponible sur cet appareil', 'err');
-        }
-      }).catch(function() {
-        showToast('Vidéo non disponible sur cet appareil', 'err');
-      });
-    } else {
-      showToast('Vidéo non disponible sur cet appareil', 'err');
-    }
-  }
-
-  /* 1. URL Storage déjà en mémoire */
-  if (post.video.url) {
-    openVideoPlayer(post.video.url, duration);
-    return;
-  }
-  /* 2. Blob en IndexedDB (appareil d'origine) */
-  if (post.video.idbId) {
-    _gwLoadVideoBlob(post.video.idbId, function(blob) {
-      if (blob) {
-        var bUrl = URL.createObjectURL(blob);
-        post.video.url = bUrl;
-        openVideoPlayer(bUrl, duration);
-      } else {
-        /* 3. Fallback : chercher l'URL dans Firebase */
-        _tryFirebaseFallback();
-      }
-    });
-    return;
-  }
-  /* Pas d'idbId non plus → Firebase direct */
-  _tryFirebaseFallback();
+  /* Ouvre le scroll player (TikTok / Shorts) centré sur cette vidéo */
+  openVideoScroll(postId);
 }
 
 /* ── Signaler un post ── */
@@ -7625,6 +7577,335 @@ function _openPostDoc(postId) {
    LECTEUR VIDÉO PLEIN ÉCRAN
 ══════════════════════════════════════════ */
 var _vpFlashTimer = null;
+
+/* ══════════════════════════════════════════
+   VIDEO SCROLL PLAYER — style TikTok / Shorts
+   • Scroll vertical snappé entre les vidéos
+   • Auto-play dès qu'une vidéo est visible
+   • Fin de vidéo → countdown 10 s → vidéo suivante
+   • Comptage de vues : 1 vue / utilisateur / vidéo
+══════════════════════════════════════════ */
+var _vsItems    = [];   /* [{postId,post,el,videoEl,loaded}] */
+var _vsCurIdx   = -1;
+var _vsObserver = null;
+var _vsEndTimer = null;
+var _vsCountN   = 10;
+var _vsRafId    = null;
+
+/* ── Collecte tous les posts avec vidéo, tri du plus récent au plus ancien ── */
+function _vsBuildList() {
+  return getAllPosts().filter(function(p) {
+    return p && p.video && (
+      (typeof p.video === 'string' && p.video) ||
+      (typeof p.video === 'object' && (p.video.url || p.video.idbId))
+    );
+  }).sort(function(a, b) { return (Number(b.id) || 0) - (Number(a.id) || 0); });
+}
+
+/* ── Ouvre le player scroll, commence sur la vidéo du post donné ── */
+function openVideoScroll(startPostId) {
+  var modal = document.getElementById('vs-modal');
+  if (!modal) return;
+
+  /* Pause le feed principal */
+  document.querySelectorAll('[id^="fv-"]').forEach(function(v) {
+    try { if (!v.paused) v.pause(); } catch(e){}
+  });
+
+  var posts = _vsBuildList();
+  if (!posts.length) { showToast('Aucune vidéo disponible', ''); return; }
+
+  var startIdx = posts.findIndex(function(p) { return String(p.id) === String(startPostId); });
+  if (startIdx === -1) startIdx = 0;
+
+  /* Reconstruit le feed */
+  var feedEl = document.getElementById('vs-feed');
+  feedEl.innerHTML = '';
+  _vsItems = [];
+  posts.forEach(function(post, idx) {
+    var item = _vsCreateItem(post, idx);
+    feedEl.appendChild(item.el);
+    _vsItems.push(item);
+  });
+
+  /* Réinitialise le panel fin */
+  _vsClearEndTimer();
+  _vsCurIdx = startIdx;
+
+  /* Affiche */
+  modal.style.display = 'block';
+
+  /* Scroll immédiat vers la vidéo de départ (sans animation) */
+  feedEl.scrollTop = startIdx * (window.innerHeight || screen.height);
+
+  /* Joue la vidéo de départ */
+  _vsActivate(startIdx);
+
+  /* Observer pour auto-play au scroll */
+  _vsSetupObserver();
+}
+
+/* ── Crée un élément DOM pour un post vidéo ── */
+function _vsCreateItem(post, idx) {
+  var nom = '';
+  if (post.ownerEmail) {
+    var pr = loadUserProfile(post.ownerEmail);
+    nom = (pr && pr.nom) ? pr.nom : post.ownerEmail.split('@')[0];
+  } else {
+    nom = 'Utilisateur';
+  }
+  var likes   = (post.likes   || []).length;
+  var caption = (post.content || post.text || '').substring(0, 120);
+  var postIdStr = String(post.id);
+
+  var el = document.createElement('div');
+  el.className = 'vs-item';
+  el.setAttribute('data-idx',     idx);
+  el.setAttribute('data-post-id', postIdStr);
+
+  el.innerHTML =
+    '<video class="vs-video" playsinline webkit-playsinline preload="none"></video>' +
+    /* Zone tap pour play/pause */
+    '<div class="vs-tap-zone" onclick="vsTogglePlay(' + idx + ')"></div>' +
+    /* Flash icône centrale */
+    '<div class="vs-flash" id="vs-flash-' + idx + '">' +
+    '<i class="fas fa-play" style="font-size:62px;color:rgba(255,255,255,.85);filter:drop-shadow(0 2px 8px rgba(0,0,0,.5))"></i></div>' +
+    /* Info auteur + caption */
+    '<div class="vs-info">' +
+    '<div class="vs-author">@' + escHtml(nom) + '</div>' +
+    (caption ? '<div class="vs-caption">' + escHtml(caption) + '</div>' : '') +
+    '</div>' +
+    /* Boutons latéraux droits */
+    '<div class="vs-side">' +
+    /* Bouton play/pause */
+    '<button class="vs-side-btn" onclick="vsTogglePlay(' + idx + ');event.stopPropagation()">' +
+    '<div class="vs-play-ico" id="vs-play-ico-' + idx + '"><i class="fas fa-pause"></i></div></button>' +
+    /* Like */
+    '<button class="vs-side-btn" onclick="vsLike(\'' + postIdStr + '\');event.stopPropagation()">' +
+    '<i class="fas fa-heart"></i>' +
+    '<span id="vs-likes-' + postIdStr + '">' + _fmtViews(likes) + '</span></button>' +
+    /* Vues */
+    '<div class="vs-side-btn" style="pointer-events:none">' +
+    '<i class="fas fa-eye"></i>' +
+    '<span id="vs-views-' + postIdStr + '">' + _fmtViews(_getVideoViews(postIdStr)) + '</span></div>' +
+    '</div>' +
+    /* Barre de progression */
+    '<div class="vs-prog-bar"><div class="vs-prog-fill" id="vs-prog-' + idx + '"></div></div>';
+
+  return {
+    postId:  postIdStr,
+    post:    post,
+    el:      el,
+    videoEl: el.querySelector('.vs-video'),
+    loaded:  false
+  };
+}
+
+/* ── Charge la source vidéo d'un item (lazy) ── */
+function _vsLoadSrc(item, callback) {
+  if (item.loaded) { callback && callback(); return; }
+  var post    = item.post;
+  var videoEl = item.videoEl;
+
+  function _done(src) {
+    if (src) { videoEl.src = src; videoEl.load(); }
+    item.loaded = true;
+    callback && callback();
+  }
+
+  /* 1. URL déjà connue */
+  var url = typeof post.video === 'string' ? post.video
+          : (post.video && post.video.url ? post.video.url : '');
+  if (url) { _done(url); return; }
+
+  /* 2. Blob IndexedDB (appareil d'origine) */
+  var idbId = post.video && post.video.idbId ? post.video.idbId : null;
+  if (idbId) {
+    _gwLoadVideoBlob(idbId, function(blob) {
+      if (blob) {
+        var bUrl = URL.createObjectURL(blob);
+        if (post.video && typeof post.video === 'object') post.video.url = bUrl;
+        _done(bUrl);
+      } else {
+        _vsFetchFb(post, _done);
+      }
+    });
+    return;
+  }
+
+  /* 3. Firebase Storage */
+  _vsFetchFb(post, _done);
+}
+
+function _vsFetchFb(post, cb) {
+  if (!_gwFbReady || !_gwFbDB) { cb(''); return; }
+  _gwFbDB.ref('gw/post_videos/' + post.id).once('value').then(function(snap) {
+    var d = snap.val();
+    if (d && d.url) {
+      if (post.video && typeof post.video === 'object') post.video.url = d.url;
+      cb(d.url);
+    } else { cb(''); }
+  }).catch(function() { cb(''); });
+}
+
+/* ── Active (charge + joue) un item ── */
+function _vsActivate(idx) {
+  if (idx < 0 || idx >= _vsItems.length) return;
+  _vsCurIdx = idx;
+
+  /* Pause tous les autres */
+  _vsItems.forEach(function(it, i) {
+    if (i !== idx) { try { it.videoEl.pause(); } catch(e){} }
+  });
+
+  _vsClearEndTimer();
+
+  var item = _vsItems[idx];
+  _vsLoadSrc(item, function() {
+    if (_vsCurIdx !== idx) return; /* index changé pendant chargement */
+    var v = item.videoEl;
+    v.currentTime = 0;
+
+    /* Comptage vue (1 seule fois par utilisateur) */
+    _incrementVideoViews(item.postId);
+    var vBadge = document.getElementById('vs-views-' + item.postId);
+    if (vBadge) vBadge.textContent = _fmtViews(_getVideoViews(item.postId));
+
+    /* Handler fin de vidéo */
+    v.onended = function() { _vsStartEndCountdown(idx); };
+    v.onplay  = function() { _vsSetPlayIco(idx, true);  };
+    v.onpause = function() { _vsSetPlayIco(idx, false); };
+
+    /* Progress bar via rAF */
+    _vsStartRaf(idx);
+
+    v.play().catch(function() {});
+    _vsSetPlayIco(idx, true);
+  });
+}
+
+/* ── IntersectionObserver : auto-play quand visible à 70 %+ ── */
+function _vsSetupObserver() {
+  if (_vsObserver) _vsObserver.disconnect();
+  _vsObserver = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.intersectionRatio >= 0.7) {
+        var idx = parseInt(entry.target.getAttribute('data-idx'), 10);
+        if (idx !== _vsCurIdx) _vsActivate(idx);
+      }
+    });
+  }, { threshold: 0.7 });
+  _vsItems.forEach(function(item) { _vsObserver.observe(item.el); });
+}
+
+/* ── Progress bar animée via rAF ── */
+function _vsStartRaf(idx) {
+  if (_vsRafId) { cancelAnimationFrame(_vsRafId); _vsRafId = null; }
+  function tick() {
+    var item = _vsItems[idx];
+    if (!item) return;
+    var v = item.videoEl;
+    if (v.duration > 0) {
+      var bar = document.getElementById('vs-prog-' + idx);
+      if (bar) bar.style.width = ((v.currentTime / v.duration) * 100) + '%';
+    }
+    if (!v.paused && !v.ended && _vsCurIdx === idx) {
+      _vsRafId = requestAnimationFrame(tick);
+    }
+  }
+  _vsRafId = requestAnimationFrame(tick);
+}
+
+/* ── Toggle play/pause (clic utilisateur) ── */
+function vsTogglePlay(idx) {
+  var item = _vsItems[idx];
+  if (!item) return;
+  var v = item.videoEl;
+  if (v.paused) {
+    v.play().catch(function(){});
+    _vsFlash(idx, 'fa-play');
+    _vsStartRaf(idx);
+  } else {
+    v.pause();
+    _vsFlash(idx, 'fa-pause');
+  }
+}
+
+function _vsSetPlayIco(idx, playing) {
+  var ico = document.getElementById('vs-play-ico-' + idx);
+  if (ico) ico.innerHTML = '<i class="fas ' + (playing ? 'fa-pause' : 'fa-play') + '"></i>';
+}
+
+function _vsFlash(idx, iconClass) {
+  var flash = document.getElementById('vs-flash-' + idx);
+  if (!flash) return;
+  flash.querySelector('i').className = 'fas ' + iconClass;
+  flash.style.opacity = '1';
+  setTimeout(function() { flash.style.opacity = '0'; }, 500);
+}
+
+/* ── Countdown fin de vidéo ── */
+function _vsStartEndCountdown(fromIdx) {
+  if (fromIdx + 1 >= _vsItems.length) return; /* dernière vidéo */
+  var panel = document.getElementById('vs-end-panel');
+  if (!panel) return;
+  _vsCountN = 10;
+  var countEl = document.getElementById('vs-countdown');
+  if (countEl) countEl.textContent = '10';
+  panel.classList.add('show');
+
+  _vsEndTimer = setInterval(function() {
+    _vsCountN--;
+    if (countEl) countEl.textContent = _vsCountN;
+    if (_vsCountN <= 0) { _vsClearEndTimer(); vsPlayNext(); }
+  }, 1000);
+}
+
+function _vsClearEndTimer() {
+  if (_vsEndTimer) { clearInterval(_vsEndTimer); _vsEndTimer = null; }
+  var panel = document.getElementById('vs-end-panel');
+  if (panel) panel.classList.remove('show');
+}
+
+/* ── Vidéo suivante (manuel ou auto) ── */
+function vsPlayNext() {
+  _vsClearEndTimer();
+  var nextIdx = _vsCurIdx + 1;
+  if (nextIdx >= _vsItems.length) return;
+  var feedEl = document.getElementById('vs-feed');
+  if (feedEl) {
+    feedEl.scrollTo({ top: nextIdx * (feedEl.clientHeight || window.innerHeight), behavior: 'smooth' });
+  }
+  _vsActivate(nextIdx);
+}
+
+/* ── Annule le countdown ── */
+function vsCancelNext() { _vsClearEndTimer(); }
+
+/* ── Like depuis le scroll player ── */
+function vsLike(postId) {
+  likePost(postId);
+  var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+  if (post) {
+    var el = document.getElementById('vs-likes-' + postId);
+    if (el) el.textContent = _fmtViews((post.likes || []).length);
+  }
+}
+
+/* ── Ferme le player scroll ── */
+function closeVideoScroll() {
+  _vsClearEndTimer();
+  if (_vsRafId) { cancelAnimationFrame(_vsRafId); _vsRafId = null; }
+  if (_vsObserver) { _vsObserver.disconnect(); _vsObserver = null; }
+  _vsItems.forEach(function(item) {
+    try { item.videoEl.pause(); item.videoEl.src = ''; item.videoEl.load(); } catch(e){}
+  });
+  _vsItems   = [];
+  _vsCurIdx  = -1;
+  var modal = document.getElementById('vs-modal');
+  if (modal) modal.style.display = 'none';
+  _initFeedVideoObserver();
+}
 
 function openVideoPlayer(src, duration) {
   var modal = document.getElementById('video-player-modal');
