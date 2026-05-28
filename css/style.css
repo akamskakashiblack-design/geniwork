@@ -11894,10 +11894,15 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   background: transparent;
   border: none;
   outline: none;
-  color: #94A3B8;
+  color: #F1F5F9;
   font-size: 13px;
-  pointer-events: none;
+  pointer-events: auto;
+  caret-color: #7C3AED;
 }
+.vd-search-bar:focus-within {
+  border-color: rgba(124,58,237,.5);
+}
+.vd-search-bar input::placeholder { color: #64748B; }
 .vd-filter-icon-btn {
   width: 42px; height: 42px;
   border-radius: 12px;

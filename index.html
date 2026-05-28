@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260539" />
+  <link rel="stylesheet" href="css/style.css?v=20260540" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -2631,7 +2631,7 @@
 
         <!-- Search bar -->
         <div class="vd-search-wrap">
-          <div class="vd-search-bar">
+          <div class="vd-search-bar" onclick="document.getElementById('vd-search-input').focus()">
             <i class="fas fa-search"></i>
             <input type="text" id="vd-search-input" placeholder="Rechercher une vidéo, une formation..."
               oninput="vdOnSearch(this)" autocomplete="off" />
@@ -3469,7 +3469,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260539"></script>
+  <script src="js/app.js?v=20260540"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">
