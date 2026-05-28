@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260533" />
+  <link rel="stylesheet" href="css/style.css?v=20260534" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -2742,19 +2742,28 @@
           </button>
         </div>
 
-        <!-- Video area (id="vp-area" kept for fullscreen) -->
-        <div class="vpd-video-area" id="vp-area">
+        <!-- Video area — onclick handles tap when overlay is hidden -->
+        <div class="vpd-video-area" id="vp-area" onclick="vpAreaTap(event)">
           <video id="vp-video" playsinline webkit-playsinline preload="auto" x-webkit-airplay="allow"
                  style="width:100%;display:block;background:#000"></video>
           <div class="vp-play-flash" id="vp-play-flash"></div>
 
-          <!-- Back button — always visible on video -->
-          <button class="vpd-video-back-btn" onclick="closeVideoPlayer()">
+          <!-- Back button — always visible, stops tap propagation -->
+          <button class="vpd-video-back-btn" onclick="event.stopPropagation();closeVideoPlayer()">
             <i class="fas fa-arrow-left"></i>
           </button>
 
-          <!-- Controls overlay — hidden by default, tap to show/hide -->
+          <!-- Controls overlay — hidden by default, tap vp-area to reveal -->
           <div class="vpd-ctrl-overlay" id="vpd-ctrl-overlay" onclick="vpAreaTap(event)">
+
+            <!-- Top bar: speed pills (visible in fullscreen too) -->
+            <div class="vpd-ctrl-top" onclick="event.stopPropagation()">
+              <button class="vp-speed active" data-sp="1"   onclick="vpSetSpeed(1,this)">1×</button>
+              <button class="vp-speed"         data-sp="1.5" onclick="vpSetSpeed(1.5,this)">1.5×</button>
+              <button class="vp-speed"         data-sp="2"   onclick="vpSetSpeed(2,this)">2×</button>
+            </div>
+
+            <!-- Middle: skip + play/pause -->
             <div class="vpd-ctrl-row">
               <button class="vpd-skip-btn" onclick="event.stopPropagation();vpSkip(-10)">
                 <i class="fas fa-rotate-left"></i>
@@ -2768,6 +2777,8 @@
                 <span class="vpd-skip-lbl">10</span>
               </button>
             </div>
+
+            <!-- Bottom: progress bar + time + fullscreen -->
             <div class="vpd-prog-row" onclick="event.stopPropagation()">
               <span class="vpd-ptime" id="vp-cur">0:00</span>
               <input type="range" class="vp-seek" id="vp-seek" min="0" max="100" step="0.01" value="0"
@@ -2781,7 +2792,7 @@
           </div>
 
           <!-- Auto-next overlay (shown when video ends) -->
-          <div class="vpd-autonext" id="vpd-autonext" style="display:none">
+          <div class="vpd-autonext" id="vpd-autonext" style="display:none" onclick="event.stopPropagation()">
             <div class="vpd-autonext-thumb" id="vpd-autonext-thumb"></div>
             <div class="vpd-autonext-info">
               <div class="vpd-autonext-label">Prochaine vidéo dans</div>
@@ -2798,11 +2809,11 @@
           </div>
         </div>
 
-        <!-- Speed pills (keeps .vp-speed class + id="vp-controls" for compat) -->
+        <!-- Speed pills outside video area (portrait mode, keeps id="vp-controls") -->
         <div class="vpd-speed-bar" id="vp-controls">
-          <button class="vp-speed active" onclick="vpSetSpeed(1,this)">1×</button>
-          <button class="vp-speed" onclick="vpSetSpeed(1.5,this)">1.5×</button>
-          <button class="vp-speed" onclick="vpSetSpeed(2,this)">2×</button>
+          <button class="vp-speed active" data-sp="1"   onclick="vpSetSpeed(1,this)">1×</button>
+          <button class="vp-speed"         data-sp="1.5" onclick="vpSetSpeed(1.5,this)">1.5×</button>
+          <button class="vp-speed" data-sp="2" onclick="vpSetSpeed(2,this)">2×</button>
         </div>
 
         <!-- Scrollable detail below video -->
@@ -3464,7 +3475,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260533"></script>
+  <script src="js/app.js?v=20260534"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">

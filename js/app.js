@@ -8772,10 +8772,10 @@ function openVideoPlayer(src, duration) {
   var seek = document.getElementById('vp-seek');
   if (seek) { seek.value = 0; seek.max = duration || 100; }
 
-  /* Reset speed UI */
-  document.querySelectorAll('.vp-speed').forEach(function(b) { b.classList.remove('active'); });
-  var first = document.querySelector('.vp-speed');
-  if (first) first.classList.add('active');
+  /* Reset speed UI — mark all "1×" buttons active */
+  document.querySelectorAll('.vp-speed').forEach(function(b) {
+    b.classList.toggle('active', (b.dataset.sp || '') === '1' || b.textContent.trim() === '1×');
+  });
 
   /* Seek bar drag: évite que ontimeupdate écrase la position pendant le glissement */
   if (seek && !seek._gwDragBound) {
@@ -8865,14 +8865,19 @@ function _vpResetHideTimer() {
     _vpCtrlTimer = setTimeout(vpHideControls, 3000);
   }
 }
-/* Tapping the video area: first tap shows controls; subsequent taps toggle play */
+/* Tapping the video area:
+   - Controls hidden → show them + start 3s hide timer
+   - Controls visible + tap on overlay bg → play/pause  */
 function vpAreaTap(e) {
   if (e) e.stopPropagation();
   if (!_vpCtrlVisible) {
     vpShowControls();
     _vpResetHideTimer();
   } else {
-    vpTogglePlay();
+    /* Only toggle play if the tap landed on the overlay itself (not on a button inside) */
+    if (!e || e.target === document.getElementById('vpd-ctrl-overlay')) {
+      vpTogglePlay();
+    }
   }
 }
 
@@ -8934,8 +8939,13 @@ function vpSkip(sec) {
 function vpSetSpeed(speed, btn) {
   var video = document.getElementById('vp-video');
   if (video) video.playbackRate = speed;
-  document.querySelectorAll('.vp-speed').forEach(function(b) { b.classList.remove('active'); });
-  if (btn) btn.classList.add('active');
+  /* Sync ALL speed buttons (overlay + speed bar) by data-sp attribute */
+  var sp = String(speed);
+  document.querySelectorAll('.vp-speed').forEach(function(b) {
+    b.classList.toggle('active', (b.dataset.sp || b.textContent.replace('×','').trim()) === sp);
+  });
+  vpShowControls();
+  _vpResetHideTimer();
 }
 
 function vpFullscreen() {

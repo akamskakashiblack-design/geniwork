@@ -12254,6 +12254,33 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   opacity: 1;
   pointer-events: auto;
 }
+/* Speed pills inside overlay (top bar — also visible in fullscreen) */
+.vpd-ctrl-top {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 12px 0;
+  flex-shrink: 0;
+}
+.vpd-ctrl-top .vp-speed {
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,.3);
+  background: rgba(0,0,0,.4);
+  color: rgba(255,255,255,.7);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  backdrop-filter: blur(4px);
+}
+.vpd-ctrl-top .vp-speed.active {
+  background: #7C3AED;
+  border-color: #7C3AED;
+  color: #fff;
+}
+
 .vpd-ctrl-row {
   flex: 1;
   display: flex;
