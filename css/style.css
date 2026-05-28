@@ -3122,6 +3122,38 @@ mark.srch-mark {
 .vs-fav-active          { color: #FBBF24 !important; }
 .vs-side-btn:active     { transform: scale(.88); transition: transform .1s; }
 
+/* ── Badges type vidéo dans le feed (SHORT / VIDÉO) ── */
+.post-video-type-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .6px;
+  padding: 3px 8px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 4;
+  text-transform: uppercase;
+}
+.post-video-type-short {
+  background: #E11D48;
+  color: #fff;
+}
+.post-video-type-video {
+  background: #2563EB;
+  color: #fff;
+}
+
+/* Ligne active dans créer un post */
+.pub-row-active {
+  background: #F0FDF4;
+  border-radius: 10px;
+  outline: 2px solid #22C55E;
+}
+
 /* ── FEUILLE SÉLECTION CAMÉRA ── */
 .cam-sheet-bg {
   position: fixed;

@@ -5060,23 +5060,37 @@ function buildPostCard(post) {
   /* Vidéo HTML */
   var videoHtml = '';
   if (post.video && (post.video.idbId || post.video.url)) {
-    var vDur  = escHtml(formatDuration(post.video.duration || 0));
-    var vidId = 'fv-' + post.id;
+    var vDur   = escHtml(formatDuration(post.video.duration || 0));
+    var vidId  = 'fv-' + post.id;
+    var vType  = (post.video && post.video.videoType) || 'video';
+    var isShrt = vType === 'short';
     /* Préfère l'URL Storage (permanente) si disponible, sinon blob URL locale */
-    var vSrc  = (post.video.url && !post.video.url.startsWith('blob:')) ? escHtml(post.video.url)
-              : (post.video.url ? escHtml(post.video.url) : '');
+    var vSrc   = (post.video.url && !post.video.url.startsWith('blob:')) ? escHtml(post.video.url)
+               : (post.video.url ? escHtml(post.video.url) : '');
 
     var vViews = _getVideoViews(post.id);
+    /* Style portrait (short 9:16) vs paysage (video 16:9) */
+    var wrapStyle = isShrt
+      ? 'position:relative;overflow:hidden;border-radius:10px;max-width:240px;margin:0 auto;aspect-ratio:9/16;background:#000'
+      : 'position:relative;overflow:hidden;border-radius:10px;background:#000';
+    var vidStyle = isShrt
+      ? 'width:100%;height:100%;object-fit:cover;display:block;pointer-events:none'
+      : 'width:100%;display:block;max-height:320px;pointer-events:none';
+    var typeBadge = isShrt
+      ? '<span class="post-video-type-badge post-video-type-short"><i class="fas fa-mobile-screen-button"></i> SHORT</span>'
+      : '<span class="post-video-type-badge post-video-type-video"><i class="fas fa-video"></i> VIDÉO</span>';
+
     videoHtml =
-      '<div class="post-video-wrap" id="pvw-' + post.id + '" onclick="_openVideoFromPost(\'' + post.id + '\',' + (post.video.duration || 0) + ')">' +
+      '<div class="post-video-wrap" id="pvw-' + post.id + '" style="' + wrapStyle + '" onclick="_openVideoFromPost(\'' + post.id + '\',' + (post.video.duration || 0) + ')">' +
         '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + ' preload="metadata" muted playsinline loop ' +
-          'style="width:100%;display:block;max-height:320px;pointer-events:none"></video>' +
+          'style="' + vidStyle + '"></video>' +
         '<div class="post-video-thumb-overlay" id="fvo-' + post.id + '">' +
           '<div class="post-video-play-ico"><i class="fas fa-play"></i></div>' +
         '</div>' +
         '<div class="post-video-muted-badge" id="fvm-' + post.id + '">' +
           '<i class="fas fa-volume-mute"></i>' +
         '</div>' +
+        typeBadge +
         /* Badge durée — bas droite */
         '<span class="post-video-dur-badge"><i class="fas fa-clock" style="margin-right:4px"></i>' + vDur + '</span>' +
         /* Badge vues — bas gauche */
@@ -5097,7 +5111,7 @@ function buildPostCard(post) {
           /* Met à jour le onclick pour le player plein écran */
           var wrap = document.getElementById('pvw-' + pid);
           if (wrap) {
-            wrap.onclick = function() { openVideoPlayer(bUrl, dur); };
+            wrap.onclick = function() { _openVideoFromPost(pid, dur); };
           }
           /* Stocke l'URL temporaire dans le post en mémoire pour l'IntersectionObserver */
           var p = DEMO_POSTS.find(function(x) { return x.id == pid; });
@@ -5893,8 +5907,52 @@ function _openOfficialVideo(postId) {
 }
 
 function _openVideoFromPost(postId, duration) {
-  /* Ouvre le scroll player (TikTok / Shorts) centré sur cette vidéo */
-  openVideoScroll(postId);
+  var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(postId); });
+  if (!post || !post.video) return;
+
+  var vType = (post.video && post.video.videoType) || 'video';
+
+  if (vType === 'short') {
+    /* Short → scroll player TikTok */
+    openVideoScroll(postId);
+  } else {
+    /* Vidéo classique → player YouTube plein écran */
+    _openVideoClassic(post, duration);
+  }
+}
+
+/* Ouvre le player classique (YouTube style) pour une vidéo normale */
+function _openVideoClassic(post, duration) {
+  var postId = String(post.id);
+
+  function _tryFirebaseFallback() {
+    if (_gwFbReady && _gwFbDB) {
+      showToast('Chargement vidéo…', '');
+      _gwFbDB.ref('gw/post_videos/' + postId).once('value').then(function(snap) {
+        var d = snap.val();
+        if (d && d.url) {
+          post.video.url = d.url;
+          var vEl = document.getElementById('fv-' + postId);
+          if (vEl) vEl.src = d.url;
+          openVideoPlayer(d.url, duration);
+        } else { showToast('Vidéo non disponible sur cet appareil', 'err'); }
+      }).catch(function() { showToast('Vidéo non disponible sur cet appareil', 'err'); });
+    } else { showToast('Vidéo non disponible sur cet appareil', 'err'); }
+  }
+
+  /* Vue + milestone */
+  var _newViews = _incrementVideoViews(postId);
+  _checkViewMilestone(postId, post.ownerEmail || null, _newViews);
+
+  if (post.video.url) { openVideoPlayer(post.video.url, duration); return; }
+  if (post.video.idbId) {
+    _gwLoadVideoBlob(post.video.idbId, function(blob) {
+      if (blob) { var b = URL.createObjectURL(blob); post.video.url = b; openVideoPlayer(b, duration); }
+      else { _tryFirebaseFallback(); }
+    });
+    return;
+  }
+  _tryFirebaseFallback();
 }
 
 /* ── Signaler un post ── */
@@ -6936,14 +6994,40 @@ function scheduleNewPosts() {
 /* ══════════════════════════════════════════
    PUBLIER UN POST
 ══════════════════════════════════════════ */
-var _pickedImages = [];   /* jusqu'à 6 photos */
-var _pickedVideo  = null; /* { url, name, duration, size } */
-var _pickedDoc    = null; /* { url, file, name, size, type } */
+var _pickedImages  = [];      /* jusqu'à 6 photos */
+var _pickedVideo   = null;    /* { url, name, duration, size, videoType } */
+var _pickedDoc     = null;    /* { url, file, name, size, type } */
+var _pubVideoType  = 'video'; /* 'short' | 'video' — type sélectionné par l'utilisateur */
 
 /* ── Déclencheurs fichiers ── */
 function triggerImgPick()     { document.getElementById('img-picker').click(); }
-function triggerVideoGallery(){ document.getElementById('video-picker').click(); }
 function triggerDocPick()     { document.getElementById('doc-picker').click(); }
+
+/* Ouvre la galerie vidéo avec le bon type */
+function triggerVideoGallery(type) {
+  _pubVideoType = type || 'video';
+  document.getElementById('video-picker').click();
+}
+
+/* Ouvre la caméra vidéo avec le bon type */
+function triggerCameraVideo(type) {
+  _pubVideoType = type || 'video';
+  _camMode = 'video';
+  _gwOpenCamera();
+}
+
+/* Depuis le composer principal : navigue vers la page publish et pré-sélectionne le type */
+function pubOpenVideoType(type) {
+  _pubVideoType = type || 'video';
+  showPage('p-publish');
+  /* Surligne visuellement la ligne sélectionnée */
+  setTimeout(function() {
+    var rowShort = document.getElementById('pub-row-short');
+    var rowVideo = document.getElementById('pub-row-video');
+    if (rowShort) rowShort.classList.toggle('pub-row-active', type === 'short');
+    if (rowVideo) rowVideo.classList.toggle('pub-row-active', type === 'video');
+  }, 100);
+}
 
 /* ══════════════════════════════════════════
    DOCUMENT — UPLOAD & PRÉVISUALISATION
@@ -7028,7 +7112,7 @@ var _camTimer    = null;
 var _camSeconds  = 0;
 
 function triggerCameraPhoto() { _camMode = 'photo'; _gwOpenCamera(); }
-function triggerCameraVideo() { _camMode = 'video'; _gwOpenCamera(); }
+/* triggerCameraVideo est définie plus haut avec le paramètre type */
 
 /* ── Demande permission + ouvre la caméra ── */
 function _gwOpenCamera(facing) {
@@ -7205,7 +7289,7 @@ function _gwFinishRecord() {
 
   if (_pickedImages.length > 0) { _pickedImages = []; renderImgPreviews(); }
   _clearVideo();
-  _pickedVideo = { url: blobUrl, blob: blob, name: 'video_' + Date.now() + ext, duration: _camSeconds, size: blob.size };
+  _pickedVideo = { url: blobUrl, blob: blob, name: 'video_' + Date.now() + ext, duration: _camSeconds, size: blob.size, videoType: _pubVideoType };
 
   _gwCloseCamera();
   renderVideoPreview();
@@ -7399,11 +7483,12 @@ function handleVideoPick(input) {
       return;
     }
     _pickedVideo = {
-      url:      blobUrl,
-      file:     file,        /* ← gardé pour IndexedDB */
-      name:     file.name,
-      duration: duration || 0,
-      size:     file.size
+      url:       blobUrl,
+      file:      file,        /* ← gardé pour IndexedDB */
+      name:      file.name,
+      duration:  duration || 0,
+      size:      file.size,
+      videoType: _pubVideoType  /* 'short' | 'video' */
     };
     renderVideoPreview();
   }
@@ -7592,13 +7677,14 @@ var _vsEndTimer = null;
 var _vsCountN   = 10;
 var _vsRafId    = null;
 
-/* ── Collecte tous les posts avec vidéo, tri du plus récent au plus ancien ── */
+/* ── Collecte uniquement les Shorts (videoType='short'), tri plus récent → plus ancien ── */
 function _vsBuildList() {
   return getAllPosts().filter(function(p) {
-    return p && p.video && (
-      (typeof p.video === 'string' && p.video) ||
-      (typeof p.video === 'object' && (p.video.url || p.video.idbId))
-    );
+    if (!p || !p.video) return false;
+    var hasMedia = (typeof p.video === 'string' && p.video) ||
+                   (typeof p.video === 'object' && (p.video.url || p.video.idbId));
+    var isShort  = p.video && p.video.videoType === 'short';
+    return hasMedia && isShort;
   }).sort(function(a, b) { return (Number(b.id) || 0) - (Number(a.id) || 0); });
 }
 
@@ -8390,9 +8476,10 @@ function publierPost() {
   var docBlob     = _pickedDoc   ? (_pickedDoc.file  || null) : null;
   var docIdbId    = _pickedDoc   ? ('doc_' + postId) : null;
 
-  /* Vidéo : on stocke l'idbId + le blobUrl courant (pour affichage immédiat) */
+  /* Vidéo : on stocke l'idbId + le blobUrl courant + le type (short/video) */
   var videoData = _pickedVideo
-    ? { idbId: videoIdbId, url: _pickedVideo.url, duration: _pickedVideo.duration, size: _pickedVideo.size }
+    ? { idbId: videoIdbId, url: _pickedVideo.url, duration: _pickedVideo.duration, size: _pickedVideo.size,
+        videoType: _pickedVideo.videoType || 'video' }
     : null;
 
   /* Document : idbId + url courante + métadonnées */

@@ -708,7 +708,8 @@
               </div>
               <div class="composer-media">
                 <button onclick="showPage('p-publish')"><i class="fas fa-image"></i> Image</button>
-                <button onclick="showPage('p-publish')"><i class="fas fa-video"></i> Vidéo</button>
+                <button onclick="pubOpenVideoType('short')"><i class="fas fa-mobile-screen-button"></i> Short</button>
+                <button onclick="pubOpenVideoType('video')"><i class="fas fa-video"></i> Vidéo</button>
                 <button onclick="showPage('p-publish')"><i class="fas fa-file-alt"></i> Document</button>
               </div>
             </div>
@@ -1072,16 +1073,33 @@
                 </div>
               </div>
 
-              <!-- Vidéo -->
-              <div class="pub-media-row">
+              <!-- Short (vertical / TikTok) -->
+              <div class="pub-media-row pub-media-row-short" id="pub-row-short">
                 <div class="pub-media-label">
-                  <i class="fas fa-video"></i><span>Vidéo</span>
+                  <i class="fas fa-mobile-screen-button" style="color:#E11D48"></i>
+                  <span style="color:#E11D48;font-weight:700">Short</span>
                 </div>
                 <div class="pub-media-btns">
-                  <button class="pub-type-btn" onclick="triggerVideoGallery()">
+                  <button class="pub-type-btn" onclick="triggerVideoGallery('short')">
                     <i class="fas fa-film"></i> Galerie
                   </button>
-                  <button class="pub-type-btn" onclick="triggerCameraVideo()">
+                  <button class="pub-type-btn" onclick="triggerCameraVideo('short')">
+                    <i class="fas fa-circle-dot"></i> Caméra
+                  </button>
+                </div>
+              </div>
+
+              <!-- Vidéo (paysage / YouTube) -->
+              <div class="pub-media-row pub-media-row-video" id="pub-row-video">
+                <div class="pub-media-label">
+                  <i class="fas fa-video" style="color:#2563EB"></i>
+                  <span style="color:#2563EB;font-weight:700">Vidéo</span>
+                </div>
+                <div class="pub-media-btns">
+                  <button class="pub-type-btn" onclick="triggerVideoGallery('video')">
+                    <i class="fas fa-film"></i> Galerie
+                  </button>
+                  <button class="pub-type-btn" onclick="triggerCameraVideo('video')">
                     <i class="fas fa-circle-dot"></i> Caméra
                   </button>
                 </div>
@@ -1102,11 +1120,13 @@
             </div><!-- /pub-media-section -->
 
             <!-- Infos specs vidéo -->
-            <div class="pub-video-specs">
+            <div class="pub-video-specs" id="pub-video-specs">
               <i class="fas fa-circle-info"></i>
-              <div>
-                <strong>Vidéo</strong> : MP4 · H.264 · AAC · 30 fps · <strong>max 10 min</strong><br/>
-                <span>Recommandé : 4:5 (1080×1350) ou 16:9 (1920×1080)</span>
+              <div id="pub-video-specs-text">
+                <strong>Short</strong> : MP4 · vertical · <strong>max 3 min</strong><br/>
+                <span>Recommandé : 9:16 (1080×1920)</span><br/>
+                <strong>Vidéo</strong> : MP4 · H.264 · <strong>max 10 min</strong><br/>
+                <span>Recommandé : 16:9 (1920×1080)</span>
               </div>
             </div>
 
