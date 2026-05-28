@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260530" />
+  <link rel="stylesheet" href="css/style.css?v=20260531" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -2725,67 +2725,123 @@
 
       </div>
 
-      <!-- ── VIDEO PLAYER MODAL ── -->
-      <div id="video-player-modal" style="display:none;position:fixed;inset:0;z-index:700;background:#000;flex-direction:column">
+      <!-- ── VIDEO DETAIL PLAYER (YouTube dark style) ── -->
+      <div id="video-player-modal" style="display:none;position:fixed;inset:0;z-index:700;background:#0F172A;flex-direction:column;overflow:hidden">
 
-        <!-- Topbar -->
-        <div class="vp-topbar">
-          <button class="vp-close-btn" onclick="closeVideoPlayer()">
+        <!-- Topbar minimal -->
+        <div class="vpd-topbar">
+          <button class="vpd-topbar-btn" onclick="closeVideoPlayer()">
             <i class="fas fa-arrow-left"></i>
           </button>
-          <span class="vp-topbar-title" id="vp-title">Vidéo</span>
-          <button class="vp-fullscreen-topbtn" onclick="vpFullscreen()">
-            <i class="fas fa-expand"></i>
+          <div style="flex:1"></div>
+          <button class="vpd-topbar-btn" id="vpd-bm-btn" onclick="vpToggleSave()">
+            <i class="far fa-bookmark" id="vpd-bm-ico"></i>
+          </button>
+          <button class="vpd-topbar-btn" onclick="vpMoreMenu()">
+            <i class="fas fa-ellipsis-v"></i>
           </button>
         </div>
 
-        <!-- Zone vidéo -->
-        <div class="vp-video-area" id="vp-area" onclick="vpTogglePlay()">
+        <!-- Video area (id="vp-area" kept for fullscreen) -->
+        <div class="vpd-video-area" id="vp-area">
           <video id="vp-video" playsinline webkit-playsinline preload="auto" x-webkit-airplay="allow"
-                 style="width:100%;height:100%;object-fit:contain;display:block"></video>
+                 style="width:100%;display:block;background:#000"></video>
           <div class="vp-play-flash" id="vp-play-flash"></div>
-        </div>
 
-        <!-- Contrôles -->
-        <div class="vp-controls" id="vp-controls">
-
-          <!-- Barre de progression -->
-          <div class="vp-progress-row">
-            <span class="vp-time" id="vp-cur">0:00</span>
-            <input type="range" class="vp-seek" id="vp-seek" min="0" max="100" step="0.01" value="0"
-                   oninput="vpSeek(this.value)" onchange="vpSeek(this.value)"/>
-            <span class="vp-time" id="vp-dur">0:00</span>
-          </div>
-
-          <!-- Boutons -->
-          <div class="vp-btns-row">
-
-            <!-- Recul 10s -->
-            <button class="vp-ctrl-btn" onclick="vpSkip(-10)">
-              <i class="fas fa-rotate-left"></i>
-              <span class="vp-skip-label">10</span>
-            </button>
-
-            <!-- Play / Pause -->
-            <button class="vp-play-btn" id="vp-play-btn" onclick="vpTogglePlay()">
-              <i class="fas fa-play" id="vp-play-ico"></i>
-            </button>
-
-            <!-- Avance 10s -->
-            <button class="vp-ctrl-btn" onclick="vpSkip(10)">
-              <i class="fas fa-rotate-right"></i>
-              <span class="vp-skip-label">10</span>
-            </button>
-
-            <!-- Vitesse -->
-            <div class="vp-speed-group">
-              <button class="vp-speed active" onclick="vpSetSpeed(1,this)">1×</button>
-              <button class="vp-speed" onclick="vpSetSpeed(1.5,this)">1.5×</button>
-              <button class="vp-speed" onclick="vpSetSpeed(2,this)">2×</button>
+          <!-- Controls overlay (always visible) -->
+          <div class="vpd-ctrl-overlay" onclick="vpTogglePlay()">
+            <!-- Skip + play/pause row -->
+            <div class="vpd-ctrl-row">
+              <button class="vpd-skip-btn" onclick="event.stopPropagation();vpSkip(-10)">
+                <i class="fas fa-rotate-left"></i>
+                <span class="vpd-skip-lbl">10</span>
+              </button>
+              <button class="vpd-playpause-btn" id="vp-play-btn" onclick="event.stopPropagation();vpTogglePlay()">
+                <i class="fas fa-play" id="vp-play-ico"></i>
+              </button>
+              <button class="vpd-skip-btn" onclick="event.stopPropagation();vpSkip(10)">
+                <i class="fas fa-rotate-right"></i>
+                <span class="vpd-skip-lbl">10</span>
+              </button>
             </div>
-
+            <!-- Progress row at bottom -->
+            <div class="vpd-prog-row" onclick="event.stopPropagation()">
+              <span class="vpd-ptime" id="vp-cur">0:00</span>
+              <input type="range" class="vp-seek" id="vp-seek" min="0" max="100" step="0.01" value="0"
+                     oninput="vpSeek(this.value)" onchange="vpSeek(this.value)"
+                     onclick="event.stopPropagation()"/>
+              <span class="vpd-ptime" id="vp-dur">0:00</span>
+              <button class="vpd-fs-btn" onclick="event.stopPropagation();vpFullscreen()">
+                <i class="fas fa-expand"></i>
+              </button>
+            </div>
           </div>
         </div>
+
+        <!-- Speed pills (keeps .vp-speed class + id="vp-controls" for compat) -->
+        <div class="vpd-speed-bar" id="vp-controls">
+          <button class="vp-speed active" onclick="vpSetSpeed(1,this)">1×</button>
+          <button class="vp-speed" onclick="vpSetSpeed(1.5,this)">1.5×</button>
+          <button class="vp-speed" onclick="vpSetSpeed(2,this)">2×</button>
+        </div>
+
+        <!-- Scrollable detail below video -->
+        <div class="vpd-scroll" id="vpd-scroll">
+
+          <!-- Title + Suivre -->
+          <div class="vpd-title-row">
+            <h2 class="vpd-title" id="vpd-title"></h2>
+            <button class="vpd-suivre-btn" id="vpd-suivre-btn" onclick="vpToggleFollow()">Suivre</button>
+          </div>
+          <p class="vpd-stats" id="vpd-stats"></p>
+
+          <!-- Actions row -->
+          <div class="vpd-actions-row">
+            <button class="vpd-act-btn" id="vpd-like-btn" onclick="vpToggleLike()">
+              <i class="fas fa-thumbs-up"></i>
+              <span id="vpd-like-cnt">0</span>
+            </button>
+            <div class="vpd-act-sep"></div>
+            <button class="vpd-act-btn" id="vpd-dislike-btn" onclick="vpToggleDislike()">
+              <i class="fas fa-thumbs-down"></i>
+              <span id="vpd-dislike-cnt">0</span>
+            </button>
+            <div class="vpd-act-sep"></div>
+            <button class="vpd-act-btn" onclick="vpShare()">
+              <i class="fas fa-share"></i>
+              <span>Partager</span>
+            </button>
+            <div class="vpd-act-sep"></div>
+            <button class="vpd-act-btn" id="vpd-save-act-btn" onclick="vpToggleSave()">
+              <i class="far fa-bookmark" id="vpd-save-ico"></i>
+              <span>Enregistrer</span>
+            </button>
+          </div>
+
+          <div class="vpd-sep"></div>
+
+          <!-- Author card -->
+          <div id="vpd-author-row" class="vpd-author-row"></div>
+
+          <div class="vpd-sep"></div>
+
+          <!-- Description -->
+          <div id="vpd-desc-wrap" class="vpd-desc-wrap"></div>
+
+          <div class="vpd-sep"></div>
+
+          <!-- Comments -->
+          <div id="vpd-comments-wrap" class="vpd-comments-wrap"></div>
+
+          <div class="vpd-sep"></div>
+
+          <!-- À suivre (related) -->
+          <div class="vpd-section-title" style="padding:12px 16px 8px">À suivre</div>
+          <div id="vpd-related"></div>
+
+          <div style="height:32px"></div>
+        </div>
+
       </div>
 
       <!-- ── BOTTOM NAV ── -->
@@ -3388,7 +3444,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260530"></script>
+  <script src="js/app.js?v=20260531"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">

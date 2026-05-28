@@ -5926,7 +5926,7 @@ function _openVideoFromPost(postId, duration) {
   }
 }
 
-/* Ouvre le player classique (YouTube style) pour une vidéo normale */
+/* Ouvre le player YouTube-style pour une vidéo normale */
 function _openVideoClassic(post, duration) {
   var postId = String(post.id);
 
@@ -5940,6 +5940,7 @@ function _openVideoClassic(post, duration) {
           var vEl = document.getElementById('fv-' + postId);
           if (vEl) vEl.src = d.url;
           openVideoPlayer(d.url, duration);
+          _vpPopulateDetail(post);
         } else { showToast('Vidéo non disponible sur cet appareil', 'err'); }
       }).catch(function() { showToast('Vidéo non disponible sur cet appareil', 'err'); });
     } else { showToast('Vidéo non disponible sur cet appareil', 'err'); }
@@ -5949,15 +5950,260 @@ function _openVideoClassic(post, duration) {
   var _newViews = _incrementVideoViews(postId);
   _checkViewMilestone(postId, post.ownerEmail || null, _newViews);
 
-  if (post.video.url) { openVideoPlayer(post.video.url, duration); return; }
+  if (post.video.url) {
+    openVideoPlayer(post.video.url, duration);
+    _vpPopulateDetail(post);
+    return;
+  }
   if (post.video.idbId) {
     _gwLoadVideoBlob(post.video.idbId, function(blob) {
-      if (blob) { var b = URL.createObjectURL(blob); post.video.url = b; openVideoPlayer(b, duration); }
-      else { _tryFirebaseFallback(); }
+      if (blob) {
+        var b = URL.createObjectURL(blob);
+        post.video.url = b;
+        openVideoPlayer(b, duration);
+        _vpPopulateDetail(post);
+      } else { _tryFirebaseFallback(); }
     });
     return;
   }
   _tryFirebaseFallback();
+}
+
+/* ── Populates YouTube-style detail sections (title/author/desc/comments/related) ── */
+var _vpCurrentPost = null;
+
+function _vpPopulateDetail(post) {
+  _vpCurrentPost = post;
+
+  /* Title */
+  var titleEl = document.getElementById('vpd-title');
+  if (titleEl) titleEl.textContent = post.text || post.content || 'Vidéo';
+
+  /* Stats: views + time */
+  var statsEl = document.getElementById('vpd-stats');
+  if (statsEl) statsEl.textContent = _fmtViews(_getVideoViews(post.id)) + ' vues · ' + _timeAgo(post.at || post.id);
+
+  /* Like / dislike counts */
+  var lCnt = document.getElementById('vpd-like-cnt');
+  var dCnt = document.getElementById('vpd-dislike-cnt');
+  if (lCnt) lCnt.textContent = _fmtViews((post.baseLikes || 0) + (post.likers ? post.likers.length : 0));
+  var dislikers = loadPostDislikers(post.id);
+  if (dCnt) dCnt.textContent = _fmtViews(dislikers.length);
+
+  /* Like / dislike / save active state */
+  var email = _currentUser ? _currentUser.email : '';
+  var liked    = email && post.likers && post.likers.indexOf(email) !== -1;
+  var disliked = email && dislikers.indexOf(email) !== -1;
+  var saved    = isFavorite(post.id);
+  var likeBtn  = document.getElementById('vpd-like-btn');
+  var disBtn   = document.getElementById('vpd-dislike-btn');
+  var saveIco  = document.getElementById('vpd-save-ico');
+  var bmIco    = document.getElementById('vpd-bm-ico');
+  if (likeBtn) likeBtn.classList.toggle('active', liked);
+  if (disBtn)  disBtn.classList.toggle('active',  disliked);
+  if (saveIco) saveIco.className = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+  if (bmIco)   bmIco.className   = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+
+  /* Author */
+  var pr       = (post.ownerEmail && loadUserProfile(post.ownerEmail)) || {};
+  var nom      = pr.nom  || (post.ownerEmail ? post.ownerEmail.split('@')[0] : 'Utilisateur');
+  var photo    = pr.photo || '';
+  var ownerKey = post.ownerEmail ? _gwFbKey(post.ownerEmail) : '';
+  var profKey  = post.ownerEmail ? getProfileKey({ nom: nom, email: post.ownerEmail }) : '';
+  var following = profKey ? isFollowing(profKey) : false;
+  var subs      = profKey ? _getTotalFollowers(profKey, false) : 0;
+  var badge     = pr.badge ? '<i class="fas fa-circle-check vpd-author-verified"></i>' : '';
+  var isOwn     = email && post.ownerEmail === email;
+
+  var suivreBtn = document.getElementById('vpd-suivre-btn');
+  if (suivreBtn) {
+    suivreBtn.textContent = following ? 'Suivi' : 'Suivre';
+    suivreBtn.classList.toggle('following', following);
+    suivreBtn.style.display = isOwn ? 'none' : '';
+  }
+
+  var authorRow = document.getElementById('vpd-author-row');
+  if (authorRow) {
+    var avatarHtml = photo
+      ? '<img class="vpd-author-avatar" src="' + escHtml(photo) + '" alt="" onerror="this.style.display=\'none\'" />'
+      : '<div class="vpd-author-initials">' + escHtml(nom.charAt(0).toUpperCase()) + '</div>';
+    authorRow.innerHTML =
+      avatarHtml +
+      '<div class="vpd-author-info">' +
+        '<div class="vpd-author-name">' + escHtml(nom) + ' ' + badge + '</div>' +
+        '<div class="vpd-author-subs">' + _fmtViews(subs) + ' abonné' + (subs > 1 ? 's' : '') + '</div>' +
+      '</div>' +
+      (isOwn ? '' :
+        '<button class="vpd-subscribe-btn' + (following ? ' following' : '') + '" onclick="vpToggleFollow()">' +
+          (following ? 'Abonné' : 'S\'abonner') +
+        '</button>');
+  }
+
+  /* Description */
+  var descWrap = document.getElementById('vpd-desc-wrap');
+  if (descWrap) {
+    var desc = post.text || post.content || '';
+    if (desc) {
+      descWrap.innerHTML =
+        '<div class="vpd-desc-title">Description</div>' +
+        '<div class="vpd-desc-text" id="vpd-desc-text">' + escHtml(desc) + '</div>' +
+        (desc.length > 120 ?
+          '<button class="vpd-voir-plus" id="vpd-voir-plus" onclick="vpExpandDesc()">Voir plus</button>' : '');
+    } else {
+      descWrap.innerHTML = '';
+    }
+  }
+
+  /* Comments (first comment preview) */
+  var commWrap = document.getElementById('vpd-comments-wrap');
+  if (commWrap) {
+    var cList  = (post.comments || []).slice().reverse();
+    var cCount = cList.length;
+    var firstC = cList.length ? cList[0] : null;
+    var previewHtml = '';
+    if (firstC) {
+      var cPr   = (firstC.email && loadUserProfile(firstC.email)) || {};
+      var cNom  = firstC.author || cPr.nom || (firstC.email ? firstC.email.split('@')[0] : 'Utilisateur');
+      var cBadge = cPr.badge ? '<i class="fas fa-circle-check vpd-verified"></i>' : '';
+      var cAva  = cPr.photo
+        ? '<img class="vpd-comment-avatar" src="' + escHtml(cPr.photo) + '" onerror="this.style.display=\'none\'" />'
+        : '<div class="vpd-comment-avatar-initials">' + escHtml(cNom.charAt(0).toUpperCase()) + '</div>';
+      previewHtml =
+        '<div class="vpd-comment-item">' +
+          cAva +
+          '<div class="vpd-comment-body">' +
+            '<div class="vpd-comment-author">' + escHtml(cNom) + ' ' + cBadge +
+              '<span class="vpd-comment-time">· ' + _timeAgo(firstC.at || 0) + '</span>' +
+            '</div>' +
+            '<div class="vpd-comment-text">' + escHtml((firstC.text || '').substring(0, 120)) + '</div>' +
+          '</div>' +
+        '</div>';
+    }
+    commWrap.innerHTML =
+      '<div class="vpd-comments-hdr">' +
+        '<span class="vpd-comments-title">Commentaires ' + (cCount > 0 ? cCount : '') + '</span>' +
+        '<button class="vpd-voir-tout-btn" onclick="openComments(' + post.id + ')">Voir tout</button>' +
+      '</div>' + previewHtml;
+  }
+
+  /* Related videos */
+  var relEl = document.getElementById('vpd-related');
+  if (relEl) {
+    var cat   = (post.video && post.video.category) || '';
+    var all   = _vdAllVideos();
+    var related = all.filter(function(p) { return String(p.id) !== String(post.id); });
+    /* Prefer same category, then same author, then any */
+    var sameCat    = related.filter(function(p) { return cat && (p.video.category || '') === cat; });
+    var sameAuthor = related.filter(function(p) { return p.ownerEmail && p.ownerEmail === post.ownerEmail; });
+    var merged = []; var seen = {};
+    sameCat.concat(sameAuthor).concat(related).forEach(function(p) {
+      if (!seen[p.id]) { seen[p.id] = 1; merged.push(p); }
+    });
+    var toShow = merged.slice(0, 8);
+    if (!toShow.length) {
+      relEl.innerHTML = '<div style="padding:16px;color:#64748B;font-size:13px;text-align:center">Aucune autre vidéo disponible</div>';
+    } else {
+      relEl.innerHTML = toShow.map(function(p) {
+        var rpr   = (p.ownerEmail && loadUserProfile(p.ownerEmail)) || {};
+        var rnom  = rpr.nom || (p.ownerEmail ? p.ownerEmail.split('@')[0] : 'Utilisateur');
+        var rSrc  = (p.video.url && !p.video.url.startsWith('blob:')) ? escHtml(p.video.url) : '';
+        var rDur  = formatDuration(p.video.duration || 0);
+        var rView = _fmtViews(_getVideoViews(p.id));
+        var rBadge = rpr.badge ? '<i class="fas fa-circle-check vd-verified"></i>' : '';
+        return '<div class="vd-list-item" onclick="_openVideoFromPost(\'' + p.id + '\',' + (p.video.duration||0) + ')">' +
+          '<div class="vd-list-thumb">' +
+            (rSrc ? '<video src="' + rSrc + '" preload="metadata" muted playsinline></video>' :
+              '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><i class="fas fa-video" style="color:#3B82F6;opacity:.4;font-size:18px"></i></div>') +
+            '<span class="vd-list-dur">' + rDur + '</span>' +
+          '</div>' +
+          '<div class="vd-list-info">' +
+            '<div class="vd-list-title">' + escHtml((p.text || p.content || 'Vidéo').substring(0, 60)) + '</div>' +
+            '<div class="vd-list-author">@' + escHtml(rnom) + ' ' + rBadge + '</div>' +
+            '<div class="vd-list-stats">' + rView + ' vues</div>' +
+          '</div>' +
+          '<button class="vd-list-menu" onclick="event.stopPropagation();vsShowMenu(\'' + p.id + '\',\'' + escHtml(p.ownerEmail || '') + '\')"><i class="fas fa-ellipsis-v"></i></button>' +
+        '</div>';
+      }).join('');
+    }
+  }
+
+  /* Scroll to top */
+  var sc = document.getElementById('vpd-scroll');
+  if (sc) sc.scrollTop = 0;
+}
+
+/* ── Video detail action buttons ── */
+function vpToggleLike() {
+  if (!_vpCurrentPost) return;
+  likePost(_vpCurrentPost.id);
+  /* Refresh counts in detail */
+  var lCnt = document.getElementById('vpd-like-cnt');
+  var lb   = document.getElementById('vpd-like-btn');
+  var db   = document.getElementById('vpd-dislike-btn');
+  var post = _vpCurrentPost;
+  if (lCnt) lCnt.textContent = _fmtViews((post.baseLikes || 0) + (post.likers ? post.likers.length : 0));
+  var dislikers = loadPostDislikers(post.id);
+  var dCnt = document.getElementById('vpd-dislike-cnt');
+  if (dCnt) dCnt.textContent = _fmtViews(dislikers.length);
+  var email = _currentUser ? _currentUser.email : '';
+  if (lb) lb.classList.toggle('active', email && post.likers && post.likers.indexOf(email) !== -1);
+  if (db) db.classList.remove('active');
+}
+
+function vpToggleDislike() {
+  if (!_vpCurrentPost) return;
+  dislikePost(_vpCurrentPost.id);
+  var post = _vpCurrentPost;
+  var dCnt = document.getElementById('vpd-dislike-cnt');
+  if (dCnt) dCnt.textContent = _fmtViews(loadPostDislikers(post.id).length);
+  var email = _currentUser ? _currentUser.email : '';
+  var db = document.getElementById('vpd-dislike-btn');
+  var lb = document.getElementById('vpd-like-btn');
+  if (db) db.classList.toggle('active', email && loadPostDislikers(post.id).indexOf(email) !== -1);
+  if (lb) lb.classList.remove('active');
+}
+
+function vpToggleFollow() {
+  if (!_vpCurrentPost) return;
+  var post = _vpCurrentPost;
+  var pr   = (post.ownerEmail && loadUserProfile(post.ownerEmail)) || {};
+  var nom  = pr.nom || (post.ownerEmail ? post.ownerEmail.split('@')[0] : '');
+  _doFollowToggle({ nom: nom, email: post.ownerEmail, role: pr.role || '' });
+  /* Update both buttons */
+  var profKey  = post.ownerEmail ? getProfileKey({ nom: nom, email: post.ownerEmail }) : '';
+  var following = profKey ? isFollowing(profKey) : false;
+  var suivreBtn = document.getElementById('vpd-suivre-btn');
+  var subBtn    = document.querySelector('#vpd-author-row .vpd-subscribe-btn');
+  if (suivreBtn) { suivreBtn.textContent = following ? 'Suivi' : 'Suivre'; suivreBtn.classList.toggle('following', following); }
+  if (subBtn)    { subBtn.textContent = following ? 'Abonné' : 'S\'abonner'; subBtn.classList.toggle('following', following); }
+}
+
+function vpToggleSave() {
+  if (!_vpCurrentPost) return;
+  toggleFavorite(_vpCurrentPost.id);
+  var saved   = isFavorite(_vpCurrentPost.id);
+  var saveIco = document.getElementById('vpd-save-ico');
+  var bmIco   = document.getElementById('vpd-bm-ico');
+  if (saveIco) saveIco.className = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+  if (bmIco)   bmIco.className   = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
+  showToast(saved ? 'Vidéo enregistrée ✓' : 'Vidéo retirée des favoris', saved ? 'ok' : '');
+}
+
+function vpShare() {
+  if (!_vpCurrentPost) return;
+  sharePost(_vpCurrentPost.id);
+}
+
+function vpMoreMenu() {
+  if (!_vpCurrentPost) return;
+  vsShowMenu(_vpCurrentPost.id, _vpCurrentPost.ownerEmail || '');
+}
+
+function vpExpandDesc() {
+  var txt = document.getElementById('vpd-desc-text');
+  var btn = document.getElementById('vpd-voir-plus');
+  if (txt) txt.classList.add('expanded');
+  if (btn) btn.remove();
 }
 
 /* ── Signaler un post ── */
