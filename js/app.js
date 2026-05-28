@@ -2382,105 +2382,10 @@ var _feedTab = 'accueil';  /* onglet actif du feed */
 var _pickedImgData = null; /* image choisie pour publier */
 
 /* ══════════════════════════════════════════
-   DONNÉES DÉMO (posts simulés)
+   POSTS (chargés depuis Firebase / localStorage)
 ══════════════════════════════════════════ */
-var DEMO_POSTS = [
-  {
-    id: 1,
-    author: 'Sophie Lefebvre',
-    role: 'Designer UI/UX · Freelance',
-    verified: true,
-    time: 'Il y a 5 min',
-    text: '🎨 Nouveau projet : refonte complète de l\'identité visuelle pour une startup fintech !\n\nSuper challenge d\'allier clarté, confiance et modernité dans un secteur très codifié. Hâte de vous montrer le résultat final 🚀',
-    images: ['https://images.unsplash.com/photo-1561070791-2526d30994b5?w=600&q=80'],
-    baseLikes: 47,
-    likers: [],
-    comments: [
-      { author: 'Marc D.', text: 'Magnifique travail, bravo !' },
-      { author: 'Julie R.', text: 'Trop hâte de voir le résultat ✨' }
-    ]
-  },
-  {
-    id: 2,
-    author: 'Thomas Kone',
-    role: 'Développeur Full-Stack',
-    verified: true,
-    time: 'Il y a 23 min',
-    text: '🚀 Je viens de lancer mon SaaS de gestion de projets freelance après 8 mois de dev solo.\n\nPremiers retours : 50 inscrits en 48h. Merci à la communauté Geniwork ! 💙',
-    images: [],
-    baseLikes: 134,
-    likers: [],
-    comments: [
-      { author: 'Anna S.', text: 'Félicitations Thomas !' },
-      { author: 'Yves B.', text: '50 inscrits en 48h c\'est incroyable 🔥' },
-      { author: 'Sophie L.', text: 'Partagez le lien !' }
-    ]
-  },
-  {
-    id: 3,
-    author: 'Amina Traoré',
-    role: 'Consultante Marketing Digital',
-    verified: false,
-    time: 'Il y a 1h',
-    text: '📊 Astuce du jour : utilisez le storytelling dans vos publications LinkedIn pour augmenter votre taux d\'engagement de 3x.\n\nLes gens achètent des émotions avant d\'acheter un service. 💡',
-    images: [
-      'https://images.unsplash.com/photo-1611532736597-de2d4265fba3?w=600&q=80',
-      'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=600&q=80'
-    ],
-    baseLikes: 89,
-    likers: [],
-    comments: [
-      { author: 'Paul M.', text: 'Merci pour ce conseil !' }
-    ]
-  },
-  {
-    id: 4,
-    author: 'Julien Moreau',
-    role: 'Photographe & Vidéaste',
-    verified: true,
-    time: 'Il y a 2h',
-    text: '📸 Shooting corporate terminé pour une grande enseigne parisienne. Quelques shots behind the scenes 👇',
-    images: [
-      'https://images.unsplash.com/photo-1542038784456-1ea8e935640e?w=600&q=80',
-      'https://images.unsplash.com/photo-1493863641943-9b68992a8d07?w=600&q=80',
-      'https://images.unsplash.com/photo-1502982720700-bfff97f2ecac?w=600&q=80',
-      'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=600&q=80'
-    ],
-    baseLikes: 212,
-    likers: [],
-    comments: []
-  },
-  {
-    id: 5,
-    author: 'Fatou Diallo',
-    role: 'Rédactrice Web & SEO',
-    verified: false,
-    time: 'Il y a 3h',
-    text: '✍️ Besoin de contenu de qualité pour votre site ou blog ?\n\nJe propose des textes SEO-optimisés, engageants et livrés dans les délais. N\'hésitez pas à me contacter via la marketplace ! 📬',
-    images: [],
-    baseLikes: 31,
-    likers: [],
-    comments: [
-      { author: 'Kevin L.', text: 'Je vais te contacter pour un projet !' }
-    ]
-  }
-];
-
-/* Posts en attente (simulés pour le bouton "Nouveaux posts") */
-var PENDING_POSTS = [
-  {
-    id: 100,
-    author: 'Lucas Bernard',
-    role: 'Développeur Mobile',
-    verified: true,
-    at: Date.now(), time: 'À l\'instant',
-    text: '📱 Application Geniwork disponible sur Android ! Téléchargez-la et donnez-moi vos retours 🙌',
-    images: [],
-    baseLikes: 5,
-    likers: [],
-    comments: []
-  }
-];
+var DEMO_POSTS    = [];   /* Tous les posts réels — rempli au chargement */
+var PENDING_POSTS = [];   /* Posts Firebase reçus en temps réel — vidé à l'acceptation */
 
 /* ══════════════════════════════════════════
    INITIALISATION DE L'APPLICATION
@@ -2621,9 +2526,6 @@ function initApp(user) {
   if (sbName)  sbName.textContent  = user.nom;
   if (sbEmail) sbEmail.textContent = user.email;
   if (pubName) pubName.textContent = user.nom;
-
-  /* Génère des notifs de bienvenue si c'est la première connexion */
-  seedDemoNotifs(user);
 
   /* Charge les notifications personnelles */
   renderNotifs();
@@ -9732,40 +9634,8 @@ function pushNotif(targetEmail, notif) {
   }
 }
 
-/* Génère des notifs de bienvenue à la première connexion */
-function seedDemoNotifs(user) {
-  var existing = getNotifs(user.email);
-  if (existing.length > 0) return;
-
-  var base = Date.now();
-  var demos = [
-    {
-      id: base - 180000,   at: base - 180000,
-      type: 'follow',
-      fromUser: { nom: 'Sophie Lefebvre', email: 'demo_sophie_lefebvre', role: 'Designer UI/UX · Freelance' },
-      postId: null, postPreview: null,
-      msg: 'a commencé à vous suivre',
-      unread: true
-    },
-    {
-      id: base - 900000,   at: base - 900000,
-      type: 'like',
-      fromUser: { nom: 'Thomas Kone', email: 'demo_thomas_kone', role: 'Développeur Full-Stack' },
-      postId: null, postPreview: 'Votre première publication a été remarquée !',
-      msg: 'a aimé votre publication',
-      unread: true
-    },
-    {
-      id: base - 3600000,  at: base - 3600000,
-      type: 'comment',
-      fromUser: { nom: 'Amina Traoré', email: 'demo_amina_traore', role: 'Consultante Marketing' },
-      postId: null, postPreview: '"Bienvenue dans la communauté ! 👋"',
-      msg: 'a commenté votre publication',
-      unread: true
-    }
-  ];
-  saveNotifs(user.email, demos);
-}
+/* seedDemoNotifs — supprimé (plus de données démo) */
+function seedDemoNotifs(user) { /* no-op — kept for compat */ }
 
 function renderNotifs() {
   if (!_currentUser) return;
