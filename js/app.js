@@ -6049,11 +6049,14 @@ function _vpPopulateDetail(post) {
     var avatarHtml = photo
       ? '<img class="vpd-author-avatar" src="' + escHtml(photo) + '" alt="" onerror="this.style.display=\'none\'" />'
       : '<div class="vpd-author-initials">' + escHtml(nom.charAt(0).toUpperCase()) + '</div>';
+    var _vpProfCall = 'openUserProfile({nom:\'' + escHtml(nom).replace(/'/g,"\\'") + '\',email:\'' + escHtml(post.ownerEmail || '').replace(/'/g,"\\'") + '\'})';
     authorRow.innerHTML =
-      avatarHtml +
-      '<div class="vpd-author-info">' +
-        '<div class="vpd-author-name">' + escHtml(nom) + ' ' + badge + '</div>' +
-        '<div class="vpd-author-subs">' + _fmtViews(subs) + ' abonné' + (subs > 1 ? 's' : '') + '</div>' +
+      '<div class="vpd-author-clickable" onclick="' + _vpProfCall + '">' +
+        avatarHtml +
+        '<div class="vpd-author-info">' +
+          '<div class="vpd-author-name">' + escHtml(nom) + ' ' + badge + '</div>' +
+          '<div class="vpd-author-subs">' + _fmtViews(subs) + ' abonné' + (subs > 1 ? 's' : '') + '</div>' +
+        '</div>' +
       '</div>' +
       (isOwn ? '' :
         '<button class="vpd-subscribe-btn' + (following ? ' following' : '') + '" onclick="vpToggleFollow()">' +

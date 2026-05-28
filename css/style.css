@@ -12535,8 +12535,17 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 .vpd-author-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 0;
   padding: 12px 16px;
+}
+.vpd-author-clickable {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 .vpd-author-avatar {
   width: 46px; height: 46px;
@@ -12555,7 +12564,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   display: flex; align-items: center; justify-content: center;
   flex-shrink: 0;
 }
-.vpd-author-info { flex: 1; min-width: 0; }
+.vpd-author-info { flex: 1; min-width: 0; overflow: hidden; }
 .vpd-author-name {
   font-size: 14px;
   font-weight: 700;
