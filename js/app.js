@@ -2552,6 +2552,11 @@ function initApp(user) {
           merged2 = Object.assign({}, existing2, data);
         }
         try { localStorage.setItem('gw_profile_' + email2, JSON.stringify(merged2)); } catch(e2){}
+        /* Si c'est l'utilisateur courant → synchronise les limites en temps réel */
+        if (_currentUser && email2 === _currentUser.email) {
+          try { _updateChatMsgCounter(); } catch(e2){}
+          try { _subUpdateSidebarChip(merged2.planType || 'free'); } catch(e2){}
+        }
         /* Rafraîchit le feed pour mettre à jour les avatars (debounce 300ms) */
         if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e2){} }
       } catch(e){}
