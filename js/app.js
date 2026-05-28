@@ -8142,52 +8142,129 @@ function openShortsDiscover() {
   openVideoScroll(posts[0].id);
 }
 
-/* Ouvre la page de découverte des Vidéos (YouTube-style) */
+/* ── Videos Discover — YouTube-style ─────────────────────────────────── */
+var _vdCurrentFilter = 'tout';
+
 function openVideosDiscover() {
   var modal = document.getElementById('vd-modal');
   if (!modal) return;
+  _vdCurrentFilter = 'tout';
+  modal.querySelectorAll('.vd-chip').forEach(function(c) {
+    c.classList.toggle('active', c.dataset.filter === 'tout');
+  });
+  _vdRenderContent();
+  modal.style.display = 'flex';
+}
 
-  var videos = getAllPosts().filter(function(p) {
-    return p && p.video && (p.video.videoType === 'video' || !p.video.videoType) &&
+function vdSetFilter(filter, btn) {
+  _vdCurrentFilter = filter;
+  document.querySelectorAll('#vd-modal .vd-chip').forEach(function(c) { c.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+  _vdRenderContent();
+}
+
+function _vdAllVideos() {
+  return getAllPosts().filter(function(p) {
+    return p && p.video &&
+           (p.video.videoType === 'video' || !p.video.videoType) &&
            (p.video.url || p.video.idbId);
   }).sort(function(a, b) { return (Number(b.id) || 0) - (Number(a.id) || 0); });
+}
 
-  var grid = document.getElementById('vd-grid');
-  if (!grid) return;
+function _vdRenderContent() {
+  var all = _vdAllVideos();
+  var list = _vdCurrentFilter === 'tout' ? all : all.filter(function(p) {
+    return ((p.video && p.video.category) || '') === _vdCurrentFilter;
+  });
+  _vdRenderFeatured(all.length ? all[0] : null);
+  _vdRenderCategories();
+  _vdRenderList(list);
+}
 
+function _vdRenderFeatured(post) {
+  var el = document.getElementById('vd-featured');
+  if (!el) return;
+  if (!post) { el.innerHTML = ''; return; }
+  var pr    = (post.ownerEmail && loadUserProfile(post.ownerEmail)) || {};
+  var nom   = pr.nom || (post.ownerEmail ? post.ownerEmail.split('@')[0] : 'Utilisateur');
+  var vSrc  = (post.video.url && !post.video.url.startsWith('blob:')) ? escHtml(post.video.url) : '';
+  var title = escHtml((post.text || post.content || 'Apprenez à votre rythme').substring(0, 60));
+  var views = _fmtViews(_getVideoViews(post.id));
+  var pid   = post.id;
+  var dur   = post.video.duration || 0;
+  el.innerHTML =
+    '<div class="vd-featured-card" onclick="_openVideoFromPost(\'' + pid + '\',' + dur + ')">' +
+      '<div class="vd-featured-thumb">' +
+        (vSrc
+          ? '<video src="' + vSrc + '" preload="metadata" muted playsinline></video>'
+          : '<div style="width:100%;height:100%;background:linear-gradient(135deg,#1E3A5F,#0D1B2E);display:flex;align-items:center;justify-content:center"><i class="fas fa-video" style="color:#3B82F6;font-size:40px;opacity:.45"></i></div>') +
+        '<div class="vd-featured-overlay"></div>' +
+        '<div class="vd-featured-play-wrap"><button class="vd-featured-play-btn"><i class="fas fa-play" style="margin-left:3px"></i></button></div>' +
+      '</div>' +
+      '<div class="vd-featured-meta">' +
+        '<span class="vd-featured-badge">FORMATION</span>' +
+        '<div class="vd-featured-title">' + title + '</div>' +
+        '<div class="vd-featured-desc">' + views + ' vues · @' + escHtml(nom) + '</div>' +
+        '<button class="vd-featured-discover-btn" onclick="event.stopPropagation();_openVideoFromPost(\'' + pid + '\',' + dur + ')">' +
+          'Découvrir <i class="fas fa-arrow-right" style="margin-left:5px"></i>' +
+        '</button>' +
+      '</div>' +
+    '</div>';
+}
+
+function _vdRenderCategories() {
+  var el = document.getElementById('vd-cats');
+  if (!el) return;
+  var cats = [
+    { icon: '🎬', label: 'Montage &\nProduction',  bg: '#1A2E4A', f: 'montage'  },
+    { icon: '💻', label: 'Dév. Web &\nMobile',     bg: '#152E22', f: 'dev'      },
+    { icon: '🎨', label: 'Design &\nGraphisme',    bg: '#2A1550', f: 'design'   },
+    { icon: '📈', label: 'Marketing &\nBusiness',  bg: '#13301A', f: 'marketing'},
+    { icon: '➕', label: 'Plus',                   bg: '#1E293B', f: 'autre'    }
+  ];
+  el.innerHTML = cats.map(function(c) {
+    return '<div class="vd-cat-item" onclick="vdSetFilter(\'' + c.f + '\',null)">' +
+      '<div class="vd-cat-icon" style="background:' + c.bg + '">' + c.icon + '</div>' +
+      '<span class="vd-cat-label">' + c.label.replace('\n', '<br>') + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+function _vdRenderList(videos) {
+  var el = document.getElementById('vd-list');
+  if (!el) return;
   if (!videos.length) {
-    grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#94A3B8;padding:60px 20px">' +
-      '<i class="fas fa-video" style="font-size:48px;margin-bottom:16px;display:block;opacity:.4"></i>' +
-      'Aucune vidéo publiée pour l\'instant</div>';
-  } else {
-    grid.innerHTML = videos.map(function(p) {
-      var vSrc  = (p.video.url && !p.video.url.startsWith('blob:')) ? escHtml(p.video.url) : (p.video.url ? escHtml(p.video.url) : '');
-      var dur   = formatDuration(p.video.duration || 0);
-      var views = _fmtViews(_getVideoViews(p.id));
-      var pr    = (p.ownerEmail && loadUserProfile(p.ownerEmail)) || {};
-      var nom   = pr.nom || (p.ownerEmail ? p.ownerEmail.split('@')[0] : 'Utilisateur');
-      return '<div onclick="_openVideoFromPost(\'' + p.id + '\',' + (p.video.duration || 0) + ')"' +
-        ' style="background:#1E293B;border-radius:12px;overflow:hidden;cursor:pointer">' +
-        '<div style="position:relative;aspect-ratio:16/9;background:#000">' +
-        (vSrc ? '<video src="' + vSrc + '" preload="metadata" muted playsinline style="width:100%;height:100%;object-fit:cover"></video>' : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><i class="fas fa-video" style="color:#475569;font-size:28px"></i></div>') +
-        '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">' +
-        '<div style="width:44px;height:44px;background:rgba(0,0,0,.55);border-radius:50%;display:flex;align-items:center;justify-content:center">' +
-        '<i class="fas fa-play" style="color:#fff;font-size:16px;margin-left:3px"></i></div></div>' +
-        '<span style="position:absolute;bottom:6px;right:8px;color:#fff;font-size:11px;font-weight:700;' +
-        'background:rgba(0,0,0,.65);padding:2px 6px;border-radius:6px">' + dur + '</span>' +
-        '<span style="position:absolute;bottom:6px;left:8px;color:#fff;font-size:11px;' +
-        'background:rgba(0,0,0,.55);padding:2px 6px;border-radius:6px">' +
-        '<i class="fas fa-eye" style="margin-right:3px"></i>' + views + '</span>' +
-        '</div>' +
-        '<div style="padding:8px 10px 10px">' +
-        '<div style="color:#F1F5F9;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
-        escHtml((p.text || p.content || 'Vidéo').substring(0, 40)) + '</div>' +
-        '<div style="color:#94A3B8;font-size:11px;margin-top:3px">@' + escHtml(nom) + '</div>' +
-        '</div></div>';
-    }).join('');
+    el.innerHTML = '<div class="vd-empty-state"><i class="fas fa-video"></i><p>Aucune vidéo pour l\'instant</p></div>';
+    return;
   }
-
-  modal.style.display = 'flex';
+  el.innerHTML = videos.map(function(p) {
+    var pr      = (p.ownerEmail && loadUserProfile(p.ownerEmail)) || {};
+    var nom     = pr.nom || (p.ownerEmail ? p.ownerEmail.split('@')[0] : 'Utilisateur');
+    var vSrc    = (p.video.url && !p.video.url.startsWith('blob:')) ? escHtml(p.video.url) : '';
+    var dur     = formatDuration(p.video.duration || 0);
+    var views   = _fmtViews(_getVideoViews(p.id));
+    var ago     = _timeAgo(p.at || p.id);
+    var title   = escHtml((p.text || p.content || 'Vidéo').substring(0, 60));
+    var badge   = pr.badge ? '<i class="fas fa-circle-check vd-verified"></i>' : '';
+    var pid     = p.id;
+    var pdur    = p.video.duration || 0;
+    return '<div class="vd-list-item" onclick="_openVideoFromPost(\'' + pid + '\',' + pdur + ')">' +
+      '<div class="vd-list-thumb">' +
+        (vSrc
+          ? '<video src="' + vSrc + '" preload="metadata" muted playsinline></video>'
+          : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><i class="fas fa-video" style="color:#3B82F6;opacity:.4;font-size:20px"></i></div>') +
+        '<span class="vd-list-dur">' + dur + '</span>' +
+      '</div>' +
+      '<div class="vd-list-info">' +
+        '<div class="vd-list-title">' + title + '</div>' +
+        '<div class="vd-list-author">@' + escHtml(nom) + ' ' + badge + '</div>' +
+        '<div class="vd-list-stats">' + views + ' vues · ' + ago + '</div>' +
+      '</div>' +
+      '<button class="vd-list-menu" onclick="event.stopPropagation();vsShowMenu(\'' + pid + '\',\'' + escHtml(p.ownerEmail || '') + '\')">' +
+        '<i class="fas fa-ellipsis-v"></i>' +
+      '</button>' +
+    '</div>';
+  }).join('');
 }
 
 function closeVideosDiscover() {
