@@ -4274,43 +4274,6 @@ function _renderBadgePage() {
 }
 
 /* ── Simulation démo : remplit toutes les conditions ── */
-function simulateBadgeConditions() {
-  if (!_currentUser) return;
-  var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
-
-  /* Simule identité + missions + reviews + no dispute */
-  p.identityVerified  = true;
-  p.missionsCompleted = 8;
-  p.hasDispute        = false;
-  if (!p.phone) p.phone = '+33 6 00 00 00 00';
-  p.phoneVerified = true;
-
-  /* Simule 4 avis 5 étoiles dans le storage */
-  var reviewKey = _currentUser.email;
-  var demoReviews = [
-    { id: 'dr1', authorName: 'Alice Martin',   rating: 5, text: 'Excellent travail !',   time: 'il y a 2 semaines' },
-    { id: 'dr2', authorName: 'Bob Dupont',     rating: 5, text: 'Très professionnel.',    time: 'il y a 1 mois'    },
-    { id: 'dr3', authorName: 'Clara Lemaire',  rating: 4, text: 'Très bonne expérience.', time: 'il y a 1 mois'    },
-    { id: 'dr4', authorName: 'David Roux',     rating: 5, text: 'Je recommande vivement.', time: 'il y a 2 mois'  }
-  ];
-  var existing = loadReviews(reviewKey);
-  var merged = demoReviews.filter(function(dr) {
-    return !existing.find(function(er) { return er.id === dr.id; });
-  }).concat(existing);
-  localStorage.setItem('gw_reviews_' + reviewKey, JSON.stringify(merged));
-
-  /* Complète le profil si des champs manquent */
-  if (!p.bio || p.bio.length < 11)    p.bio      = 'Passionné(e) par mon métier, je propose des services de qualité.';
-  if (!p.domain)                       p.domain   = 'Freelance';
-  if (!p.location)                     p.location = 'Paris, France';
-  if (!p.skills || !p.skills.length)   p.skills   = ['HTML', 'CSS', 'JavaScript'];
-  p.rating = 4.8;
-
-  saveUserProfile(_currentUser.email, p);
-  renderProfilePage();
-  _renderBadgePage();
-  showToast('Conditions simulées ✅ — Vous pouvez maintenant demander le badge !', 'ok');
-}
 
 /* ══════════════════════════════════════════
    MODAL UPLOAD DOCUMENTS BADGE

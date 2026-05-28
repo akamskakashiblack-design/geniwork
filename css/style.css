@@ -6024,22 +6024,6 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 .profil-contact-row-view:active { background: #F0FDF4; }
 
 /* Bouton démo */
-.badge-demo-btn {
-  width: 100%;
-  padding: 9px;
-  margin-top: 8px;
-  border: 1px dashed #D1D5DB;
-  background: none;
-  border-radius: 10px;
-  font-size: 12px;
-  color: #9CA3AF;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
-.badge-demo-btn:active { background: #F9FAFB; }
 
 /* ══════════════════════════════════════════
    SETTINGS SCREEN
