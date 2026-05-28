@@ -8031,6 +8031,70 @@ function closeVideoScroll() {
   _initFeedVideoObserver();
 }
 
+/* ══════════════════════════════════════════
+   DISCOVER — Shorts & Vidéos
+══════════════════════════════════════════ */
+
+/* Ouvre le scroll TikTok avec tous les Shorts publiés */
+function openShortsDiscover() {
+  var posts = _vsBuildList();
+  if (!posts.length) { showToast('Aucun Short publié pour l\'instant', ''); return; }
+  openVideoScroll(posts[0].id);
+}
+
+/* Ouvre la page de découverte des Vidéos (YouTube-style) */
+function openVideosDiscover() {
+  var modal = document.getElementById('vd-modal');
+  if (!modal) return;
+
+  var videos = getAllPosts().filter(function(p) {
+    return p && p.video && (p.video.videoType === 'video' || !p.video.videoType) &&
+           (p.video.url || p.video.idbId);
+  }).sort(function(a, b) { return (Number(b.id) || 0) - (Number(a.id) || 0); });
+
+  var grid = document.getElementById('vd-grid');
+  if (!grid) return;
+
+  if (!videos.length) {
+    grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#94A3B8;padding:60px 20px">' +
+      '<i class="fas fa-video" style="font-size:48px;margin-bottom:16px;display:block;opacity:.4"></i>' +
+      'Aucune vidéo publiée pour l\'instant</div>';
+  } else {
+    grid.innerHTML = videos.map(function(p) {
+      var vSrc  = (p.video.url && !p.video.url.startsWith('blob:')) ? escHtml(p.video.url) : (p.video.url ? escHtml(p.video.url) : '');
+      var dur   = formatDuration(p.video.duration || 0);
+      var views = _fmtViews(_getVideoViews(p.id));
+      var pr    = (p.ownerEmail && loadUserProfile(p.ownerEmail)) || {};
+      var nom   = pr.nom || (p.ownerEmail ? p.ownerEmail.split('@')[0] : 'Utilisateur');
+      return '<div onclick="_openVideoFromPost(\'' + p.id + '\',' + (p.video.duration || 0) + ')"' +
+        ' style="background:#1E293B;border-radius:12px;overflow:hidden;cursor:pointer">' +
+        '<div style="position:relative;aspect-ratio:16/9;background:#000">' +
+        (vSrc ? '<video src="' + vSrc + '" preload="metadata" muted playsinline style="width:100%;height:100%;object-fit:cover"></video>' : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><i class="fas fa-video" style="color:#475569;font-size:28px"></i></div>') +
+        '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">' +
+        '<div style="width:44px;height:44px;background:rgba(0,0,0,.55);border-radius:50%;display:flex;align-items:center;justify-content:center">' +
+        '<i class="fas fa-play" style="color:#fff;font-size:16px;margin-left:3px"></i></div></div>' +
+        '<span style="position:absolute;bottom:6px;right:8px;color:#fff;font-size:11px;font-weight:700;' +
+        'background:rgba(0,0,0,.65);padding:2px 6px;border-radius:6px">' + dur + '</span>' +
+        '<span style="position:absolute;bottom:6px;left:8px;color:#fff;font-size:11px;' +
+        'background:rgba(0,0,0,.55);padding:2px 6px;border-radius:6px">' +
+        '<i class="fas fa-eye" style="margin-right:3px"></i>' + views + '</span>' +
+        '</div>' +
+        '<div style="padding:8px 10px 10px">' +
+        '<div style="color:#F1F5F9;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
+        escHtml((p.text || p.content || 'Vidéo').substring(0, 40)) + '</div>' +
+        '<div style="color:#94A3B8;font-size:11px;margin-top:3px">@' + escHtml(nom) + '</div>' +
+        '</div></div>';
+    }).join('');
+  }
+
+  modal.style.display = 'flex';
+}
+
+function closeVideosDiscover() {
+  var modal = document.getElementById('vd-modal');
+  if (modal) modal.style.display = 'none';
+}
+
 function openVideoPlayer(src, duration) {
   var modal = document.getElementById('video-player-modal');
   var video = document.getElementById('vp-video');

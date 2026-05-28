@@ -1460,6 +1460,30 @@ mark.srch-mark {
 
 .composer-media button i { color: #2563EB; font-size: 13px; }
 
+/* Boutons découverte Short / Vidéo */
+.composer-media-discover { justify-content: center; gap: 12px; }
+.composer-discover-btn {
+  flex: 1 !important;
+  max-width: 160px;
+  padding: 10px 8px !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  border-radius: 24px !important;
+  gap: 7px !important;
+  transition: opacity .15s;
+}
+.composer-discover-btn:active { opacity: .75; }
+.composer-short-btn {
+  background: linear-gradient(135deg,#E11D48,#BE185D) !important;
+  color: #fff !important;
+}
+.composer-short-btn i { color: #fff !important; font-size: 15px !important; }
+.composer-video-btn {
+  background: linear-gradient(135deg,#2563EB,#1D4ED8) !important;
+  color: #fff !important;
+}
+.composer-video-btn i { color: #fff !important; font-size: 15px !important; }
+
 /* ── Scroll infini — spinner de chargement ── */
 .feed-inf-loader {
   display: flex;
