@@ -24381,6 +24381,13 @@ function _mkOpenCreate() {
   } else {
     _mkDetectLocation(true); /* silent */
   }
+
+  /* Pré-remplir PayPal depuis le profil ou l'email du compte */
+  var _ppInp = document.getElementById('mk-paypal-inp');
+  if (_ppInp && _currentUser) {
+    var _prof = loadUserProfile(_currentUser.email) || {};
+    _ppInp.value = _prof.paypalEmail || _currentUser.email || '';
+  }
 }
 
 function _mkSetType(type) {
@@ -24465,18 +24472,23 @@ function _mkDetectLocation(silent) {
 }
 
 function _mkPublishListing() {
-  var title   = (document.getElementById('mk-title-inp')   ||{}).value && document.getElementById('mk-title-inp').value.trim();
-  var desc    = (document.getElementById('mk-desc-inp')    ||{}).value && document.getElementById('mk-desc-inp').value.trim();
-  var price   = parseFloat(document.getElementById('mk-price-inp') ? document.getElementById('mk-price-inp').value : 0) || 0;
-  var cat     = document.getElementById('mk-cat-sel')     ? document.getElementById('mk-cat-sel').value     : '';
-  var city    = document.getElementById('mk-city-inp')    ? document.getElementById('mk-city-inp').value.trim()    : '';
-  var country = document.getElementById('mk-country-inp') ? document.getElementById('mk-country-inp').value.trim() : '';
-  var radius  = parseInt(document.getElementById('mk-radius-sel') ? document.getElementById('mk-radius-sel').value : 50) || 50;
-  var paypal  = document.getElementById('mk-paypal-inp')  ? document.getElementById('mk-paypal-inp').value.trim()  : '';
-  var allowOffer = document.getElementById('mk-offer-chk') ? document.getElementById('mk-offer-chk').checked : false;
+  function _val(id)  { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
+  function _chk(id)  { var el = document.getElementById(id); return el ? el.checked : false; }
+  function _num(id)  { return parseFloat(_val(id)) || 0; }
+  function _int(id)  { return parseInt(_val(id), 10) || 50; }
+
+  var title      = _val('mk-title-inp');
+  var desc       = _val('mk-desc-inp');
+  var price      = _num('mk-price-inp');
+  var cat        = _val('mk-cat-sel');
+  var city       = _val('mk-city-inp');
+  var country    = _val('mk-country-inp');
+  var radius     = _int('mk-radius-sel');
+  var paypal     = _val('mk-paypal-inp');
+  var allowOffer = _chk('mk-offer-chk');
 
   if (!title)   { showToast('Ajoutez un titre', 'err'); return; }
-  if (!price)   { showToast('Ajoutez un prix', 'err'); return; }
+  if (!price)   { showToast('Ajoutez un prix valide', 'err'); return; }
   if (!city)    { showToast('Ajoutez votre ville', 'err'); return; }
   if (!country) { showToast('Ajoutez votre pays', 'err'); return; }
   if (!paypal)  { showToast('Ajoutez votre email PayPal', 'err'); return; }
@@ -24524,8 +24536,9 @@ function _mkPublishListing() {
   if (card) card.remove();
 
   _mkPickedImages = [];
-  showToast('Annonce publiée ✓', 'ok');
-  renderMarketplaceUserServices();
+  showToast('Annonce publiée ✓ Elle est visible dans le Marketplace', 'ok');
+  try { renderMarketplaceUserServices(); } catch(e) {}
+  try { _mkRenderSystemListings();       } catch(e) {}
 }
 
 /* ── Détail d'une annonce + PayPal ── */
