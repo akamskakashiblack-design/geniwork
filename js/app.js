@@ -8390,10 +8390,10 @@ function _vsPreloadItem(idx) {
     if (!url || item.loaded) return;
     if (typeof item.post.video === 'object') item.post.video.url = url;
     _gwVidUrlCache[String(item.postId)] = url;
-    /* Pose la src + demande metadata seulement (pas de lecture) */
+    /* Pose la src + buffer réel pour la vidéo suivante */
     if (!item.videoEl.src) {
-      item.videoEl.src = url;
-      item.videoEl.preload = 'metadata';
+      item.videoEl.src     = url;
+      item.videoEl.preload = 'auto'; /* buffer les premières secondes */
       item.videoEl.load();
     }
   });
@@ -8453,13 +8453,7 @@ function openVideoScroll(startPostId) {
 
   /* Joue la vidéo de départ */
   _vsActivate(startIdx);
-
-  /* Pré-résout les URLs en arrière-plan pour les prochaines vidéos */
-  setTimeout(function() {
-    _vsPreloadItem(startIdx + 1);
-    _vsPreloadItem(startIdx + 2);
-    _vsPreloadItem(startIdx - 1);
-  }, 800);
+  /* _vsActivate pré-charge déjà idx+1, idx+2, idx-1 immédiatement */
 
   /* Observer pour auto-play au scroll */
   _vsSetupObserver();
@@ -8566,56 +8560,80 @@ function _vsLoadSrc(item, callback) {
 /* Gardé pour compatibilité — utilise maintenant _gwResolveVideoUrlFromFb */
 function _vsFetchFb(post, cb) { _gwResolveVideoUrlFromFb(post, cb); }
 
-/* ── Active (charge + joue) un item ── */
+/* ── Lance la lecture d'un item (URL déjà dans videoEl.src) ── */
+function _vsStartPlayback(idx, item) {
+  if (_vsCurIdx !== idx) return;
+  var v = item.videoEl;
+  v.currentTime = 0;
+  _incrementVideoViews(item.postId);
+  var vBadge = document.getElementById('vs-views-' + item.postId);
+  if (vBadge) vBadge.textContent = _fmtViews(_getVideoViews(item.postId));
+  v.onended = function() { _vsStartEndCountdown(idx); };
+  v.onplay  = function() { _vsSetPlayIco(idx, true);  };
+  v.onpause = function() { _vsSetPlayIco(idx, false); };
+  _vsStartRaf(idx);
+  v.play().catch(function() {});
+  _vsSetPlayIco(idx, true);
+}
+
+/* ── Active (charge + joue) un item — comportement TikTok ── */
 function _vsActivate(idx) {
   if (idx < 0 || idx >= _vsItems.length) return;
   _vsCurIdx = idx;
 
-  /* Pause tous les autres */
+  /* Pause les autres + libère le buffer des vidéos lointaines */
   _vsItems.forEach(function(it, i) {
-    if (i !== idx) { try { it.videoEl.pause(); } catch(e){} }
+    if (i === idx) return;
+    try { it.videoEl.pause(); } catch(e){}
+    if (Math.abs(i - idx) > 2) {
+      it.videoEl.removeAttribute('src');
+      it.videoEl.load();
+      it.loaded = false;
+    }
   });
 
   _vsClearEndTimer();
 
   var item = _vsItems[idx];
-  /* Pré-charge en silence la vidéo suivante et la précédente */
-  setTimeout(function() { _vsPreloadItem(idx + 1); _vsPreloadItem(idx - 1); }, 300);
 
-  _vsLoadSrc(item, function() {
-    if (_vsCurIdx !== idx) return; /* index changé pendant chargement */
-    var v = item.videoEl;
-    v.currentTime = 0;
+  /* Pré-charge immédiatement (sans délai) les vidéos adjacentes */
+  _vsPreloadItem(idx + 1);
+  _vsPreloadItem(idx + 2);
+  _vsPreloadItem(idx - 1);
 
-    /* Comptage vue (1 seule fois par utilisateur) */
-    _incrementVideoViews(item.postId);
-    var vBadge = document.getElementById('vs-views-' + item.postId);
-    if (vBadge) vBadge.textContent = _fmtViews(_getVideoViews(item.postId));
+  /* URL déjà connue → lecture immédiate */
+  var knownUrl = _gwVidUrlCache[String(item.postId)] ||
+                 (item.post.video && typeof item.post.video === 'object' && item.post.video.url) ||
+                 (typeof item.post.video === 'string' ? item.post.video : '');
 
-    /* Handler fin de vidéo */
-    v.onended = function() { _vsStartEndCountdown(idx); };
-    v.onplay  = function() { _vsSetPlayIco(idx, true);  };
-    v.onpause = function() { _vsSetPlayIco(idx, false); };
-
-    /* Progress bar via rAF */
-    _vsStartRaf(idx);
-
-    v.play().catch(function() {});
-    _vsSetPlayIco(idx, true);
-  });
+  if (knownUrl) {
+    if (item.videoEl.src !== knownUrl) {
+      item.videoEl.src     = knownUrl;
+      item.videoEl.preload = 'auto'; /* buffer réel pour la vidéo courante */
+    }
+    item.loaded = true;
+    _vsStartPlayback(idx, item);
+  } else {
+    /* URL inconnue → résoudre puis jouer */
+    _vsLoadSrc(item, function() {
+      if (_vsCurIdx !== idx) return;
+      item.videoEl.preload = 'auto';
+      _vsStartPlayback(idx, item);
+    });
+  }
 }
 
-/* ── IntersectionObserver : auto-play quand visible à 70 %+ ── */
+/* ── IntersectionObserver : auto-play quand visible à 50 %+ ── */
 function _vsSetupObserver() {
   if (_vsObserver) _vsObserver.disconnect();
   _vsObserver = new IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
-      if (entry.intersectionRatio >= 0.7) {
+      if (entry.intersectionRatio >= 0.5) {
         var idx = parseInt(entry.target.getAttribute('data-idx'), 10);
         if (idx !== _vsCurIdx) _vsActivate(idx);
       }
     });
-  }, { threshold: 0.7 });
+  }, { threshold: [0.5] });
   _vsItems.forEach(function(item) { _vsObserver.observe(item.el); });
 }
 
@@ -9111,7 +9129,8 @@ function openVideoPlayer(src, duration) {
     if (mb) mb.style.opacity = '0';
   });
 
-  /* Source */
+  /* Source — preload auto pour commencer à bufferer immédiatement */
+  video.preload = 'auto';
   video.src = src;
   video.currentTime = 0;
   video.playbackRate = 1;
