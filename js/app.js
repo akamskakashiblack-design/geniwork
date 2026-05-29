@@ -537,6 +537,15 @@ function _gwFbSyncStart() {
   /* ── Posts utilisateurs (sync temps réel) ── */
   _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
   _gwFbDB.ref('gw/posts').on('child_changed', function(snap) { try { _gwMergePost(snap); } catch(e){} });
+  /* Quand un nœud user est supprimé (tous ses posts effacés), retirer du feed */
+  _gwFbDB.ref('gw/posts').on('child_removed', function(snap) {
+    try {
+      var email = snap.key.replace(/__d__/g, '.').replace(/__a__/g, '@');
+      DEMO_POSTS = DEMO_POSTS.filter(function(p) { return p.ownerEmail !== email; });
+      try { localStorage.removeItem(_userPostsKey(email)); } catch(e2){}
+      try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e2){}
+    } catch(e){}
+  });
 
   /* ── URLs vidéos des posts (canal séparé pour livraison fiable) ── */
   _gwFbDB.ref('gw/post_videos').on('child_added', function(snap) {
@@ -856,14 +865,39 @@ function _gwMergePost(snap) {
   if (!snap) return;
   var fbKey = snap.key;
   var posts = snap.val();
-  if (!Array.isArray(posts) || !posts.length) return;
   var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+
+  /* Array vide ou null = tous les posts de cet utilisateur ont été supprimés */
+  if (!Array.isArray(posts) || !posts.length) {
+    var had = DEMO_POSTS.some(function(p) { return p.ownerEmail === email; });
+    if (had) {
+      DEMO_POSTS = DEMO_POSTS.filter(function(p) { return p.ownerEmail !== email; });
+      try { localStorage.removeItem(_userPostsKey(email)); } catch(e2){}
+      try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e2){}
+    }
+    return;
+  }
 
   /* Sauvegarde dans localStorage */
   try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e){}
 
-  /* Merger dans DEMO_POSTS (sans doublons) */
-  var changed = false;
+  /* ── Retire les posts supprimés de DEMO_POSTS pour cet utilisateur ── */
+  var incomingIds = {};
+  posts.forEach(function(p) { if (p && p.id) incomingIds[p.id] = true; });
+  var removedAny = false;
+  DEMO_POSTS = DEMO_POSTS.filter(function(p) {
+    if (p.ownerEmail !== email) return true; /* pas de cet user → conserver */
+    if (incomingIds[p.id]) return true;       /* encore dans Firebase → conserver */
+    /* Post supprimé → fermer les players si nécessaire */
+    try {
+      if (_vpCurrentPost && String(_vpCurrentPost.id) === String(p.id)) closeVideoPlayer();
+    } catch(e2){}
+    removedAny = true;
+    return false;
+  });
+
+  /* ── Ajoute/met à jour les posts ── */
+  var changed = removedAny;
   posts.forEach(function(p) {
     if (!p || !p.id) return;
     if (!p.images) p.images = [];
@@ -5610,26 +5644,44 @@ function archivePost(postId) {
 function deletePost(postId) {
   if (!confirm('Supprimer cette publication ?')) return;
 
-  /* Supprime les blobs vidéo + document dans IndexedDB si présents */
-  var post = DEMO_POSTS.find(function(p) { return p.id === postId; }) ||
-             PENDING_POSTS.find(function(p) { return p.id === postId; });
-  if (post && post.video && post.video.idbId) { _gwDeleteVideoBlob(post.video.idbId); }
-  if (post && post.doc   && post.doc.idbId)   { _gwDeleteDocBlob(post.doc.idbId); }
+  /* Trouve le post */
+  var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(postId); }) ||
+             PENDING_POSTS.find(function(p) { return String(p.id) === String(postId); });
 
-  var idx = DEMO_POSTS.findIndex(function(p) { return p.id === postId; });
-  if (idx !== -1) DEMO_POSTS.splice(idx, 1);
-  var pidx = PENDING_POSTS.findIndex(function(p) { return p.id === postId; });
-  if (pidx !== -1) PENDING_POSTS.splice(pidx, 1);
+  /* Supprime les blobs dans IndexedDB */
+  if (post && post.video && post.video.idbId) { try { _gwDeleteVideoBlob(post.video.idbId); } catch(e){} }
+  if (post && post.doc   && post.doc.idbId)   { try { _gwDeleteDocBlob(post.doc.idbId); } catch(e){} }
 
-  /* Retire du localStorage de l'utilisateur */
-  if (_currentUser) {
-    var stored = JSON.parse(localStorage.getItem(_userPostsKey(_currentUser.email)) || '[]');
-    stored = stored.filter(function(p) { return p.id !== postId; });
-    localStorage.setItem(_userPostsKey(_currentUser.email), JSON.stringify(stored));
-  }
+  /* Ferme les players si la vidéo supprimée est en cours de lecture */
+  try {
+    if (_vpCurrentPost && String(_vpCurrentPost.id) === String(postId)) closeVideoPlayer();
+  } catch(e){}
 
+  /* Retire de la mémoire */
+  DEMO_POSTS = DEMO_POSTS.filter(function(p) { return String(p.id) !== String(postId); });
+  PENDING_POSTS = PENDING_POSTS.filter(function(p) { return String(p.id) !== String(postId); });
+
+  /* Retire la card du DOM */
   var card = document.getElementById('post-' + postId);
   if (card) card.remove();
+
+  /* ── Sync vers localStorage + Firebase (source de vérité permanente) ── */
+  if (_currentUser) {
+    var email = _currentUser.email;
+    var stored = loadPersistedUserPosts(email).filter(function(p) { return String(p.id) !== String(postId); });
+    savePersistedUserPosts(email, stored);   /* écrit localStorage ET Firebase gw/posts/{key} */
+
+    /* Supprime aussi les métadonnées vidéo et images sur Firebase */
+    if (_gwFbReady && _gwFbDB) {
+      if (post && post.video) {
+        _gwFbDB.ref('gw/post_videos/' + postId).remove().catch(function(){});
+      }
+      if (post && post.images && post.images.length) {
+        _gwFbDB.ref('gw/post_imgs/' + postId).remove().catch(function(){});
+      }
+    }
+  }
+
   showToast('Publication supprimée', 'ok');
 }
 
