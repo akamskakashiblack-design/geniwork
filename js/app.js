@@ -25361,6 +25361,20 @@ function _clAttachRender() {
   if (lbl) lbl.style.display = (imgs >= 3 && docs >= 1) ? 'none' : 'inline-flex';
 }
 
+/* Ferme tout (modal limite + formulaire collab) et ouvre la page abonnements */
+function _collabGoUpgrade() {
+  /* Ferme le modal de limite */
+  var lm = document.getElementById('collab-limit-modal');
+  if (lm) lm.remove();
+  /* Ferme le formulaire de publication collab s'il est ouvert */
+  var bg   = document.getElementById('collab-post-bg');
+  var card = document.getElementById('collab-post-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+  /* Ouvre la page abonnements */
+  openSubPage();
+}
+
 /* ── Modal limite mensuelle collaboration avec proposition d'upgrade ── */
 function _showCollabLimitModal(usedMax) {
   var existing = document.getElementById('collab-limit-modal');
@@ -25413,7 +25427,7 @@ function _showCollabLimitModal(usedMax) {
             '<div style="font-size:12px;color:#78350F;margin-top:3px"><strong>15 annonces</strong> de collaboration par mois</div>' +
             '<div style="font-size:11px;color:#92400E;margin-top:2px">+ Posts illimités · Messages illimités</div>' +
           '</div>' +
-          '<button onclick="document.getElementById(\'collab-limit-modal\').remove();openSubPage()" ' +
+          '<button onclick="_collabGoUpgrade()" ' +
             'style="background:linear-gradient(135deg,#F59E0B,#D97706);color:#fff;border:none;border-radius:10px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">' +
             'Choisir' +
           '</button>' +
@@ -25428,7 +25442,7 @@ function _showCollabLimitModal(usedMax) {
             '<div style="font-size:12px;color:#3730A3;margin-top:3px"><strong>Illimitées</strong> — aucune restriction</div>' +
             '<div style="font-size:11px;color:#4338CA;margin-top:2px">Toutes les fonctionnalités débloquées</div>' +
           '</div>' +
-          '<button onclick="document.getElementById(\'collab-limit-modal\').remove();openSubPage()" ' +
+          '<button onclick="_collabGoUpgrade()" ' +
             'style="background:linear-gradient(135deg,#6366F1,#4F46E5);color:#fff;border:none;border-radius:10px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">' +
             'Choisir' +
           '</button>' +
