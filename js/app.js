@@ -24244,7 +24244,6 @@ function _mkOpenCreate() {
     return;
   }
   _mkPickedImages = [];
-  _mkCurrentType  = 'service'; /* Uniquement services — produits retirés */
 
   var existing = document.getElementById('mk-create-bg');
   if (existing) existing.remove();
@@ -24274,6 +24273,14 @@ function _mkOpenCreate() {
         'style="width:32px;height:32px;border-radius:50%;border:none;background:#F1F5F9;color:#64748B;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>'+
     '</div>'+
 
+    /* Type */
+    '<div style="margin-bottom:14px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Type</label>'+
+      '<div style="display:flex;gap:8px;margin-top:6px">'+
+        '<button id="mk-type-svc" onclick="_mkSetType(\'service\')" style="flex:1;padding:10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">🛠️ Service</button>'+
+        '<button id="mk-type-prod" onclick="_mkSetType(\'product\')" style="flex:1;padding:10px;background:#F1F5F9;color:#64748B;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">📦 Produit</button>'+
+      '</div>'+
+    '</div>'+
 
     /* Catégorie */
     '<div style="margin-bottom:12px">'+
