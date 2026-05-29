@@ -5339,8 +5339,14 @@ function buildPostCard(post) {
                    ' <span id="rcount-' + post.id + '">' + (rcount > 0 ? rcount : '') + '</span>' +
                  '</button>';
         })() +
-        /* Boutons cachés — gardent l'état pour toggleFavorite et translatePost */
-        '<button style="display:none" class="fav-btn' + (fav ? ' favorited' : '') + '" id="fav-btn-' + post.id + '" onclick="toggleFavorite(' + post.id + ')"></button>' +
+        /* Bouton Favori visible avec compteur */
+        (function() {
+          var fc = _getFavCount(post.id);
+          return '<button class="act-btn fav-btn' + (fav ? ' favorited' : '') + '" id="fav-btn-' + post.id + '" onclick="toggleFavorite(' + post.id + ')">' +
+            '<i class="' + (fav ? 'fas' : 'far') + ' fa-bookmark"></i>' +
+            '<span data-fav-cnt="' + post.id + '" style="' + (fc > 0 ? '' : 'display:none') + '">' + (fc > 0 ? _fmtViews(fc) : '0') + '</span>' +
+          '</button>';
+        })() +
         (post.text && post.text.length > 0
           ? '<button style="display:none" id="translate-btn-' + post.id + '" data-translated="0"></button>'
           : '') +
@@ -6270,9 +6276,15 @@ function vpToggleSave() {
   var saveIco    = document.getElementById('vpd-save-ico');
   var bmIco      = document.getElementById('vpd-bm-ico');
   var saveActBtn = document.getElementById('vpd-save-act-btn');
+  var favCntEl   = document.getElementById('vpd-fav-cnt');
   if (saveIco)    saveIco.className = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
   if (bmIco)      bmIco.className   = saved ? 'fas fa-bookmark' : 'far fa-bookmark';
   if (saveActBtn) saveActBtn.classList.toggle('active', saved);
+  if (favCntEl) {
+    var fc = _getFavCount(_vpCurrentPost.id);
+    favCntEl.textContent = fc > 0 ? _fmtViews(fc) : '';
+    favCntEl.style.display = fc > 0 ? '' : 'none';
+  }
   _renderFavPosts();
   showToast(saved ? 'Vidéo enregistrée ✓' : 'Vidéo retirée des favoris', saved ? 'ok' : '');
 }
@@ -6880,6 +6892,24 @@ function saveFavorites(list) {
 function isFavorite(postId) {
   return getFavorites().some(function(f) { return f.postId === postId; });
 }
+/* ── Compteur global de favoris par post ── */
+function _getFavCount(postId) {
+  return parseInt(localStorage.getItem('gw_fav_count_' + postId) || '0', 10);
+}
+function _changeFavCount(postId, delta) {
+  var n = Math.max(0, _getFavCount(postId) + delta);
+  localStorage.setItem('gw_fav_count_' + postId, n);
+  /* Sync Firebase */
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/rcounts/' + postId + '/favs').set(n).catch(function(){});
+  }
+  /* Met à jour tous les affichages dans le DOM */
+  document.querySelectorAll('[data-fav-cnt="' + postId + '"]').forEach(function(el) {
+    el.textContent = _fmtViews(n);
+    el.style.display = n > 0 ? '' : 'none';
+  });
+}
+
 function toggleFavorite(postId) {
   if (!_currentUser) { showToast('Connectez-vous pour sauvegarder', 'err'); return; }
   var list = getFavorites();
@@ -6889,12 +6919,14 @@ function toggleFavorite(postId) {
     list.splice(idx, 1);
     saveFavorites(list);
     _setFavBtn(postId, false);
+    _changeFavCount(postId, -1);
     showToast('Retiré des favoris', '');
   } else {
     list.unshift({ postId: postId, savedAt: Date.now() });
     saveFavorites(list);
     _setFavBtn(postId, true);
-    showToast('Ajouté aux favoris ✓', 'ok');
+    _changeFavCount(postId, +1);
+    showToast('🔖 Ajouté aux favoris ✓', 'ok');
   }
 }
 function _setFavBtn(postId, active) {
@@ -6989,19 +7021,63 @@ function _renderFavPosts() {
   var favIds   = favs.map(function(f) { return f.postId; });
   var allPosts = getAllPosts();
   var posts    = favIds.map(function(id) {
-    return allPosts.find(function(p) { return p.id === id; });
+    return allPosts.find(function(p) { return String(p.id) === String(id); });
   }).filter(Boolean);
-  if (!posts.length) {
-    container.innerHTML =
-      '<div class="fav-empty"><i class="fas fa-bookmark"></i><p>Aucune publication trouvée</p></div>';
-    return;
-  }
-  /* buildPostCard retourne un élément DOM → on utilise outerHTML */
+
+  /* Sépare les shorts des autres publications */
+  var shorts  = posts.filter(function(p) { return p.video && p.video.videoType === 'short'; });
+  var regular = posts.filter(function(p) { return !(p.video && p.video.videoType === 'short'); });
+
   container.innerHTML = '';
-  var wrap = document.createElement('div');
-  wrap.id = 'fav-posts-list';
-  posts.forEach(function(p) { wrap.appendChild(buildPostCard(p)); });
-  container.appendChild(wrap);
+
+  /* ── Section Shorts sauvegardés ── */
+  if (shorts.length) {
+    var shortsSec = document.createElement('div');
+    shortsSec.innerHTML =
+      '<div style="padding:14px 16px 8px;font-size:13px;font-weight:700;color:#374151;display:flex;align-items:center;gap:6px">' +
+        '<i class="fas fa-play-circle" style="color:#EF4444"></i> Shorts sauvegardés (' + shorts.length + ')' +
+      '</div>';
+    var shortsGrid = document.createElement('div');
+    shortsGrid.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:0 3px 12px';
+    shorts.forEach(function(p) {
+      var thumb = document.createElement('div');
+      thumb.style.cssText = 'aspect-ratio:9/16;background:#1E293B;border-radius:8px;overflow:hidden;cursor:pointer;position:relative';
+      var vidSrc = (p.video && typeof p.video === 'object' && p.video.url) ||
+                   (typeof p.video === 'string' ? p.video : '') ||
+                   _gwVidUrlCache[String(p.id)] || '';
+      thumb.innerHTML =
+        (vidSrc ? '<video src="' + escHtml(vidSrc) + '" muted preload="none" style="width:100%;height:100%;object-fit:cover"></video>' :
+          '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><i class="fas fa-film" style="color:#475569;font-size:22px"></i></div>') +
+        '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">' +
+          '<i class="fas fa-play" style="color:rgba(255,255,255,.85);font-size:20px;filter:drop-shadow(0 1px 4px rgba(0,0,0,.6))"></i>' +
+        '</div>' +
+        '<div style="position:absolute;bottom:4px;left:4px;font-size:10px;color:#fff;background:rgba(0,0,0,.5);padding:2px 5px;border-radius:4px">' +
+          '<i class="fas fa-heart" style="margin-right:2px"></i>' + _fmtViews((p.likers||[]).length) +
+        '</div>';
+      thumb.onclick = function() { openVideoScroll(p.id); };
+      shortsGrid.appendChild(thumb);
+    });
+    shortsSec.appendChild(shortsGrid);
+    container.appendChild(shortsSec);
+  }
+
+  /* ── Publications normales ── */
+  if (regular.length) {
+    if (shorts.length) {
+      var sep = document.createElement('div');
+      sep.style.cssText = 'padding:14px 16px 8px;font-size:13px;font-weight:700;color:#374151;display:flex;align-items:center;gap:6px;border-top:1px solid #F1F5F9';
+      sep.innerHTML = '<i class="fas fa-bookmark" style="color:#6366F1"></i> Publications sauvegardées (' + regular.length + ')';
+      container.appendChild(sep);
+    }
+    var wrap = document.createElement('div');
+    wrap.id = 'fav-posts-list';
+    regular.forEach(function(p) { wrap.appendChild(buildPostCard(p)); });
+    container.appendChild(wrap);
+  }
+
+  if (!shorts.length && !regular.length) {
+    container.innerHTML = '<div class="fav-empty"><i class="fas fa-bookmark"></i><p>Aucune publication trouvée</p></div>';
+  }
 }
 
 function _renderFavServices() {
@@ -8520,7 +8596,9 @@ function _vsCreateItem(post, idx) {
     '<button class="vs-side-btn vs-fav-btn" id="vs-fav-btn-' + postIdStr + '"' +
     ' onclick="vsFavorite(\'' + postIdStr + '\');event.stopPropagation()">' +
     '<i class="fas fa-bookmark' + (isFavorite(postIdStr) ? ' vs-fav-active' : '') + '"></i>' +
-    '<span>' + (isFavorite(postIdStr) ? 'Sauvé' : 'Sauver') + '</span></button>' +
+    '<span>' + (isFavorite(postIdStr) ? 'Sauvé' : 'Sauver') + '</span>' +
+    (function(){ var fc=_getFavCount(postIdStr); return fc>0 ? '<span style="font-size:11px;color:rgba(255,255,255,.7)" data-fav-cnt="'+postIdStr+'">'+_fmtViews(fc)+'</span>' : '<span style="font-size:11px;display:none" data-fav-cnt="'+postIdStr+'">0</span>'; })() +
+    '</button>' +
     /* Partager */
     '<button class="vs-side-btn" onclick="sharePost(\'' + postIdStr + '\');event.stopPropagation()">' +
     '<i class="fas fa-share-nodes"></i><span>Partager</span></button>' +
