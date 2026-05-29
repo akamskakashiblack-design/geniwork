@@ -8222,6 +8222,22 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 /* ══════════════════════════════════════════
    BADGE PREMIUM — MISE EN AVANT FEED
 ══════════════════════════════════════════ */
+/* Card collaboration dans le feed */
+.post-card.post-card-collab {
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  position: relative;
+  overflow: hidden;
+}
+.post-card.post-card-collab::before {
+  content: '';
+  position: absolute; inset: -2px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #6366F1, #8B5CF6, #A78BFA);
+  z-index: -1;
+  border-radius: 20px;
+}
+
 .post-card.post-card-premium {
   border: 2px solid transparent;
   background-clip: padding-box;

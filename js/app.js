@@ -5015,7 +5015,61 @@ function _timeAgo(ts) {
   return yrs + ' an' + (yrs > 1 ? 's' : '');
 }
 
+/* ── Card spéciale pour les annonces de collaboration dans le feed ── */
+function _buildCollabFeedCard(post) {
+  var card = document.createElement('div');
+  card.className = 'post-card post-card-collab';
+  card.id = 'post-' + post.id;
+
+  var cl      = post.collab || {};
+  var profile = post.ownerEmail ? (loadUserProfile(post.ownerEmail) || {}) : {};
+  var nom     = profile.nom || post.author || 'Membre';
+  var domLabel= _COLLAB_DOMAINS && _COLLAB_DOMAINS[cl.domain] ? _COLLAB_DOMAINS[cl.domain] : (cl.domain || '');
+  var skillsHtml = (cl.skills || []).slice(0, 3).map(function(s) {
+    return '<span style="font-size:11px;padding:3px 8px;background:#EEF2FF;color:#4F46E5;border-radius:20px;font-weight:600">' + escHtml(s) + '</span>';
+  }).join('');
+
+  var isOwn = _currentUser && post.ownerEmail === _currentUser.email;
+
+  card.innerHTML =
+    /* En-tête auteur */
+    '<div style="display:flex;align-items:center;gap:10px;padding:12px 14px 0">' +
+      getAvatarHtml(post.ownerEmail, nom, 'sm') +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:13.5px;font-weight:700;color:#0F172A">' + escHtml(nom) + getBadgeHtml(post.ownerEmail) + '</div>' +
+        '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(post.at ? new Date(post.at).toISOString() : post.date || '') + '</div>' +
+      '</div>' +
+      (isOwn
+        ? '<button onclick="event.stopPropagation();deletePost(' + post.id + ')" style="background:none;border:none;color:#CBD5E1;font-size:16px;cursor:pointer;padding:4px"><i class="fas fa-ellipsis-vertical"></i></button>'
+        : '') +
+    '</div>' +
+
+    /* Bandeau collab */
+    '<div style="margin:10px 14px 0;padding:12px 14px;background:linear-gradient(135deg,#6366F1,#8B5CF6);border-radius:12px;color:#fff">' +
+      '<div style="font-size:11px;font-weight:700;opacity:.8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">' +
+        '<i class="fas fa-handshake" style="margin-right:5px"></i>Recherche collaborateur' +
+        (domLabel ? ' · ' + domLabel : '') +
+      '</div>' +
+      '<div style="font-size:15px;font-weight:800;margin-bottom:4px">' + escHtml(cl.title || '') + '</div>' +
+      '<div style="font-size:12.5px;opacity:.9;line-height:1.4">' + escHtml((cl.description || '').slice(0, 100)) + (cl.description && cl.description.length > 100 ? '…' : '') + '</div>' +
+    '</div>' +
+
+    /* Skills + CTA */
+    '<div style="padding:10px 14px 12px">' +
+      (skillsHtml ? '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px">' + skillsHtml + '</div>' : '') +
+      '<button onclick="event.stopPropagation();showPage(\'p-marketplace\');setTimeout(function(){_collabOpenDetail(\'' + escHtml(cl.id || '') + '\');},300)" ' +
+        'style="width:100%;padding:10px;background:#F5F3FF;color:#6366F1;border:1.5px solid #C7D2FE;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">' +
+        '<i class="fas fa-arrow-right" style="margin-right:6px"></i>Voir la demande dans le Marketplace' +
+      '</button>' +
+    '</div>';
+
+  return card;
+}
+
 function buildPostCard(post) {
+  /* Card dédiée pour les annonces de collaboration */
+  if (post.type === 'collab') return _buildCollabFeedCard(post);
+
   var card = document.createElement('div');
 
   /* Mise en avant Premium : bordure dorée si l'auteur a un badge Premium */
@@ -25446,6 +25500,25 @@ function _collabSubmitPost() {
 
   /* Incrémenter le compteur mensuel */
   _incMonthlyCount('collab', _currentUser.email);
+
+  /* ── Publier aussi dans le feed principal ── */
+  var feedPost = {
+    id:         Date.now() + 1,   /* +1 pour ne pas collisionner avec request.id */
+    type:       'collab',
+    collab:     request,          /* référence complète à la demande */
+    ownerEmail: _currentUser.email,
+    author:     nom,
+    text:       '',
+    images:     [],
+    likers:     [],
+    baseLikes:  0,
+    comments:   [],
+    at:         Date.now(),
+    date:       new Date().toISOString()
+  };
+  persistNewPost(feedPost);
+  DEMO_POSTS.unshift(feedPost);
+  try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e) {}
 
   /* Réinitialiser les pièces jointes */
   _clAttachFiles = [];
