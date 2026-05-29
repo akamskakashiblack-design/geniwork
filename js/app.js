@@ -529,7 +529,18 @@ function _gwFbSyncStart() {
         }
       }
     } catch(e){}
+    /* Nouvel utilisateur inscrit → rafraîchit le dashboard admin en temps réel */
+    if (_adminUser) {
+      try {
+        var totalEl = document.getElementById('adm-total-users');
+        if (totalEl) totalEl.textContent = getUsers().length;
+        if (_adminTab === 'dashboard') _admRender();
+      } catch(e2){}
+    }
   });
+
+  /* ── Présence en ligne — watcher admin ── */
+  _gwWatchOnlineUsers();
 
   /* ── DM : les messages sont chargés directement depuis Firebase à l'ouverture
      de chaque conversation (_dmOpen). Pas de listener global gw/dm_msgs. ── */
@@ -1009,6 +1020,57 @@ function _gwMergeGroupMsg(snap) {
 }
 
 /* ── Active le listener notifs pour un utilisateur ── */
+/* ══════════════════════════════════════════
+   PRÉSENCE EN LIGNE — Temps réel admin
+══════════════════════════════════════════ */
+var _gwOnlineRef = null;
+
+function _gwSetOnlinePresence(user) {
+  if (!_gwFbReady || !_gwFbDB || !user) return;
+  var fbKey = _gwFbKey(user.email);
+  var ref   = _gwFbDB.ref('gw/online/' + fbKey);
+  _gwOnlineRef = ref;
+
+  /* Écrit la présence */
+  ref.set({
+    nom:   user.nom   || user.email,
+    email: user.email,
+    at:    Date.now()
+  });
+
+  /* Supprime automatiquement à la déconnexion */
+  ref.onDisconnect().remove();
+
+  /* Renouvelle la présence toutes les 2 minutes (keepalive) */
+  if (_gwOnlineRef._heartbeat) clearInterval(_gwOnlineRef._heartbeat);
+  _gwOnlineRef._heartbeat = setInterval(function() {
+    try { ref.update({ at: Date.now() }); } catch(e){}
+  }, 120000);
+}
+
+/* ── Listener admin : compte les utilisateurs en ligne en temps réel ── */
+function _gwWatchOnlineUsers() {
+  if (!_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/online').on('value', function(snap) {
+    var data  = snap.val() || {};
+    var count = Object.keys(data).length;
+    localStorage.setItem('gw_online_count', count);
+
+    /* Met à jour le compteur en live dans le dashboard admin */
+    var el = document.getElementById('adm-online-count');
+    if (el) el.textContent = count;
+
+    /* Rafraîchit le dashboard si l'admin est dessus */
+    if (_adminUser && _adminTab === 'dashboard') {
+      try { _admRender(); } catch(e){}
+    }
+  });
+}
+
+function _gwGetOnlineCount() {
+  return parseInt(localStorage.getItem('gw_online_count') || '0', 10);
+}
+
 function _gwFbWatchUserNotifs(email) {
   if (!_gwFbReady || !_gwFbDB || !email) return;
   _gwFbDB.ref('gw/notifs/' + _gwFbKey(email)).on('value', function(snap) {
@@ -2502,6 +2564,8 @@ function initApp(user) {
   _gwFbWatchFollowers(user.email);
   /* ── Firebase : écoute le compteur d'abonnés du compte officiel ── */
   _gwWatchOfficialFollowers();
+  /* ── Présence en ligne (visible par l'admin en temps réel) ── */
+  _gwSetOnlinePresence(user);
 
   /* ── Firebase : sync DMs, inbox et profils en temps réel ── */
   if (_gwFbReady && _gwFbDB && user.email) {
@@ -20660,7 +20724,19 @@ function _admBuildDashboard() {
   if (_admHasTab('users') || _admHasTab('analytics')) {
     html += '<div class="adm-db2-section-label">Vue d\'ensemble</div>';
     html += '<div class="adm-kpi-row">';
-    html += _admKpiCard('fas fa-users',         '#EFF6FF','#2563EB', users.length,    'Utilisateurs',    _admSeed(users.length,'u')%20+2,  wkUsers, '_admSwitchTab(\'users\')');
+    var onlineCount = _gwGetOnlineCount();
+    html += '<div class="adm-kpi-card" onclick="_admSwitchTab(\'users\')" style="cursor:pointer">' +
+      '<div class="adm-kpi-icon" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-users"></i></div>' +
+      '<div class="adm-kpi-info">' +
+        '<div class="adm-kpi-val" id="adm-total-users">' + users.length + '</div>' +
+        '<div class="adm-kpi-label">Utilisateurs inscrits</div>' +
+        '<div style="display:flex;align-items:center;gap:5px;margin-top:4px">' +
+          '<span style="width:8px;height:8px;border-radius:50%;background:#22C55E;display:inline-block;animation:pulse-green 1.5s ease-in-out infinite"></span>' +
+          '<span style="font-size:11px;color:#22C55E;font-weight:600" id="adm-online-count">' + onlineCount + '</span>' +
+          '<span style="font-size:11px;color:#94A3B8">en ligne maintenant</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
     html += _admKpiCard('fas fa-crown',         '#FEF3C7','#D97706', paidUsers.length,'Membres payants', _admSeed(paidUsers.length,'p')%18+3, wkPaid, '_admSwitchTab(\'analytics\')');
     if (_admHasTab('payments'))
       html += _admKpiCard('fas fa-euro-sign',   '#ECFDF5','#059669', totalRevenue.toFixed(0) + ' €', 'Revenus totaux', _admSeed(Math.round(totalRevenue),'r')%25+5, wkRev, '_admSwitchTab(\'payments\')');
