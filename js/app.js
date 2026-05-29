@@ -1434,7 +1434,7 @@ function _gwPreloadUserData(user, callback) {
           merged._googlePhoto = false;
           try { _pushProfileToFirebase(user.email, merged); } catch(e){}
         }
-        try { localStorage.setItem('gw_profile_' + user.email, JSON.stringify(merged)); } catch(e){}
+        try { localStorage.setItem('gw_profile_' + user.email, JSON.stringify(merged)); _invalidateProfileCache(user.email); } catch(e){}
       }
     }
     /* snaps[3] = gw/dms (ancien chemin, remplacé par gw/dm_msgs — ignoré) */
@@ -1626,7 +1626,7 @@ function _gwFbPreloadAndStart() {
         var _hasLocalPhotoOnly = !!(existing && existing.photo && !profile.photo);
         /* Fusionne existing + Firebase (existing en base, Firebase par-dessus) pour ne perdre aucune donnée locale */
         var merged = Object.assign({}, existing || {}, profile, _hasLocalPhotoOnly ? { photo: existing.photo } : {});
-        localStorage.setItem('gw_profile_' + email, JSON.stringify(merged));
+        localStorage.setItem('gw_profile_' + email, JSON.stringify(merged)); _invalidateProfileCache(email);
         /* Re-push vers Firebase si la photo est locale mais absente de Firebase */
         if (_hasLocalPhotoOnly) {
           try { _pushProfileToFirebase(email, merged); } catch(e2){}
@@ -2641,7 +2641,7 @@ function initApp(user) {
     var _initProfile = loadUserProfile(_currentUser.email);
     if (!_initProfile) {
       _initProfile = getDefaultProfile(_currentUser);
-      try { localStorage.setItem('gw_profile_' + _currentUser.email, JSON.stringify(_initProfile)); } catch(e) {}
+      try { localStorage.setItem('gw_profile_' + _currentUser.email, JSON.stringify(_initProfile)); _invalidateProfileCache(_currentUser.email); } catch(e) {}
     }
     _subUpdateSidebarChip(_initProfile.planType || 'free');
   } catch(e) {}
@@ -3526,7 +3526,7 @@ function _doChangeMainEmail() {
 
     /* Profil */
     var profileData = localStorage.getItem('gw_profile_' + oldEmail);
-    if (profileData) { localStorage.setItem('gw_profile_' + newEmail, profileData); localStorage.removeItem('gw_profile_' + oldEmail); }
+    if (profileData) { localStorage.setItem('gw_profile_' + newEmail, profileData); localStorage.removeItem('gw_profile_' + oldEmail); _invalidateProfileCache(oldEmail); _invalidateProfileCache(newEmail); }
 
     /* Services */
     var svcData = localStorage.getItem('gw_services_' + oldEmail);
@@ -6467,7 +6467,7 @@ function blockUser(postId) {
 var _likersCache = {};
 function loadPostLikers(postId) {
   var k = String(postId);
-  if (_likersCache[k]) return _likersCache[k];
+  if (_likersCache[k] !== undefined) return _likersCache[k]; /* [] (0 likes) est falsy — vérifier undefined */
   var v = JSON.parse(localStorage.getItem('gw_likers_' + k) || '[]');
   _likersCache[k] = v;
   return v;
@@ -6662,7 +6662,8 @@ function _openEmojiPicker() {
     panel._built = true;
   }
   panel.classList.remove('hidden');
-  /* Ferme si clic ailleurs */
+  /* Ferme si clic ailleurs — retire l'ancien listener avant d'en ajouter un nouveau */
+  document.removeEventListener('click', _closeEmojiPicker);
   setTimeout(function() {
     document.addEventListener('click', _closeEmojiPicker, { once: true });
   }, 0);
@@ -24526,21 +24527,23 @@ function _mkDetectLocation(silent) {
   }
 }
 
-function _mkPublishListing() {
-  function _val(id)  { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
-  function _chk(id)  { var el = document.getElementById(id); return el ? el.checked : false; }
-  function _num(id)  { return parseFloat(_val(id)) || 0; }
-  function _int(id)  { return parseInt(_val(id), 10) || 50; }
+/* ── Helpers lecture de champs DOM (module scope — réutilisables) ── */
+function _fldVal(id)  { var el = document.getElementById(id); return el ? (el.value || '').trim() : ''; }
+function _fldChk(id)  { var el = document.getElementById(id); return el ? el.checked : false; }
+function _fldNum(id)  { return parseFloat(_fldVal(id)) || 0; }
+function _fldInt(id, def) { return parseInt(_fldVal(id), 10) || (def !== undefined ? def : 50); }
 
-  var title      = _val('mk-title-inp');
-  var desc       = _val('mk-desc-inp');
-  var price      = _num('mk-price-inp');
-  var cat        = _val('mk-cat-sel');
-  var city       = _val('mk-city-inp');
-  var country    = _val('mk-country-inp');
-  var radius     = _int('mk-radius-sel');
-  var paypal     = _val('mk-paypal-inp');
-  var allowOffer = _chk('mk-offer-chk');
+function _mkPublishListing() {
+
+  var title      = _fldVal('mk-title-inp');
+  var desc       = _fldVal('mk-desc-inp');
+  var price      = _fldNum('mk-price-inp');
+  var cat        = _fldVal('mk-cat-sel');
+  var city       = _fldVal('mk-city-inp');
+  var country    = _fldVal('mk-country-inp');
+  var radius     = _fldInt('mk-radius-sel', 50);
+  var paypal     = _fldVal('mk-paypal-inp');
+  var allowOffer = _fldChk('mk-offer-chk');
 
   if (!title)   { showToast('Ajoutez un titre', 'err'); return; }
   if (!price)   { showToast('Ajoutez un prix valide', 'err'); return; }
@@ -25882,20 +25885,16 @@ function _mkRefreshTxBtn(btn) {
   }
 
   if (_gwFbReady && _gwFbDB) {
-    /* Sync transactions depuis Firebase */
-    _gwFbDB.ref('gw/mk_txns').once('value').then(function(snap) {
-      var val = snap.val();
-      if (val !== null) {
-        try { localStorage.setItem('gw_mk_txns', JSON.stringify(Array.isArray(val) ? val : Object.values(val))); } catch(e){}
-      }
-      /* Sync annonces marketplace */
-      _gwFbDB.ref('gw/mk_listings').once('value').then(function(snap2) {
-        var val2 = snap2.val();
-        if (val2 !== null) {
-          try { localStorage.setItem('gw_mk_listings', JSON.stringify(Array.isArray(val2) ? val2 : Object.values(val2))); } catch(e){}
-        }
-        _done();
-      }).catch(function() { _done(); });
+    /* Sync transactions + annonces en parallèle */
+    Promise.all([
+      _gwFbDB.ref('gw/mk_txns').once('value'),
+      _gwFbDB.ref('gw/mk_listings').once('value')
+    ]).then(function(snaps) {
+      var txVal = snaps[0].val();
+      var lstVal = snaps[1].val();
+      if (txVal  !== null) try { localStorage.setItem('gw_mk_txns',     JSON.stringify(Array.isArray(txVal)  ? txVal  : Object.values(txVal)));  } catch(e){}
+      if (lstVal !== null) try { localStorage.setItem('gw_mk_listings', JSON.stringify(Array.isArray(lstVal) ? lstVal : Object.values(lstVal))); } catch(e){}
+      _done();
     }).catch(function() { _done(); });
   } else {
     _done();
