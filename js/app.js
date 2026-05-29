@@ -808,19 +808,38 @@ function _gwFbSyncStart() {
     }
   });
 
-  /* ── Signalements (tous les utilisateurs) ── */
+  /* ── Signalements (tous les utilisateurs) — PAS de _gwFbSkip ici car READ seule ── */
+  var _prevReportCount = 0;
   _gwFbDB.ref('gw/reports').on('value', function(snap) {
-    if (_gwFbSkip) return;
+    /* Ne JAMAIS sauter ce listener avec _gwFbSkip — les signalements sont critiques */
     var all = snap.val() || {};
-    _gwFbSkip = true;
+    var newCount = 0;
     Object.keys(all).forEach(function(fbKey) {
       var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
-      localStorage.setItem('gw_reports_' + email, JSON.stringify(all[fbKey]));
+      var reps = Array.isArray(all[fbKey]) ? all[fbKey] : Object.values(all[fbKey] || {});
+      newCount += reps.length;
+      try { localStorage.setItem('gw_reports_' + email, JSON.stringify(reps)); } catch(e2){}
     });
-    _gwFbSkip = false;
-    if (_adminUser && _adminTab === 'reports') {
-      try { _admRender(); } catch(e){}
+
+    if (_adminUser) {
+      /* Toujours mettre à jour le badge quel que soit l'onglet actif */
+      try { _admUpdateNavBadges(); } catch(e){}
+
+      /* Nouveaux signalements arrivés → alerte visuelle + re-render si sur l'onglet reports */
+      if (newCount > _prevReportCount && _prevReportCount > 0) {
+        var diff = newCount - _prevReportCount;
+        showToast('🚩 ' + diff + ' nouveau(x) signalement(s) reçu(s)', 'err');
+        /* Faire clignoter le bouton signalements dans la nav admin */
+        try {
+          var rb = document.getElementById('adm-badge-reports');
+          if (rb) { rb.style.animation = 'pulse .4s ease 3'; setTimeout(function(){ rb.style.animation=''; }, 1200); }
+        } catch(e3){}
+      }
+      if (_adminTab === 'reports') {
+        try { _admRender(); } catch(e){}
+      }
     }
+    _prevReportCount = newCount;
   });
 
   /* ── Marketplace listings ── auto-sync toutes les sections ── */
@@ -19854,25 +19873,46 @@ function _admLog(action, target) {
 /* Collecte tous les signalements de tous les utilisateurs */
 function _admGetAllReports() {
   var all = [];
+  /* Scanne tous les utilisateurs inscrits */
   var users = getUsers();
+  var seenEmails = {};
+  users.forEach(function(u) { seenEmails[u.email] = true; });
+
+  /* Aussi scanne toutes les clés gw_reports_* en localStorage
+     (couvre les signaleurs non encore dans getUsers() sur cet appareil) */
+  for (var i = 0; i < localStorage.length; i++) {
+    var k = localStorage.key(i);
+    if (!k || k.indexOf('gw_reports_') !== 0) continue;
+    var email = k.replace('gw_reports_', '');
+    if (seenEmails[email]) continue; /* déjà dans users */
+    users.push({ email: email, nom: email });
+  }
+
   users.forEach(function(u) {
     try {
-      var reps = JSON.parse(localStorage.getItem('gw_reports_' + u.email) || '[]');
+      var raw  = localStorage.getItem('gw_reports_' + u.email);
+      if (!raw) return;
+      var reps = JSON.parse(raw);
+      /* Firebase peut retourner un objet plutôt qu'un tableau */
+      if (!Array.isArray(reps)) reps = Object.values(reps);
       reps.forEach(function(r, i) {
         all.push({
-          rid:        r.id || ('legacy_' + u.email + '_' + i),
-          reporter:   u.email,
-          reporterNom: u.nom || u.email,
-          target:     r.target || '?',
-          reason:     r.reason || '?',
-          date:       r.date   || '',
-          type:       r.type   || 'post',
-          key:        'gw_reports_' + u.email
+          rid:         r.id || ('legacy_' + u.email + '_' + i),
+          reporter:    u.email,
+          reporterNom: r.reporterNom || u.nom || u.email,
+          target:      r.targetEmail || r.target || '?',
+          targetEmail: r.targetEmail || '',
+          reason:      r.reason   || '?',
+          date:        r.date     || '',
+          type:        r.type     || 'post',
+          postId:      r.postId   || '',
+          preview:     r.preview  || '',
+          key:         'gw_reports_' + u.email
         });
       });
     } catch(e) {}
   });
-  /* Tri par date desc */
+  /* Tri par date desc — plus récent en premier */
   all.sort(function(a,b){ return b.date.localeCompare(a.date); });
   return all;
 }
