@@ -9282,34 +9282,37 @@ function formatFileSize(bytes) {
 /* ── Définition des limites par plan ── */
 var _PLAN_LIMITS = {
   free: {
-    postsPerDay  : 5,
-    msgsPerDay   : 10,
-    photosPerDay : 10,
-    docsPerDay   : 10,
-    servicesMax  : 3,
-    projectsMax  : 5,
-    photosPerPost: 3,
-    photosSvc    : 2
+    postsPerDay    : 5,
+    msgsPerDay     : 10,
+    photosPerDay   : 10,
+    docsPerDay     : 10,
+    servicesMax    : 3,
+    projectsMax    : 5,
+    photosPerPost  : 3,
+    photosSvc      : 2,
+    collabPerMonth : 4        /* 4 annonces de collaboration par mois */
   },
   premium: {
-    postsPerDay  : Infinity,
-    msgsPerDay   : Infinity,
-    photosPerDay : Infinity,
-    docsPerDay   : Infinity,
-    servicesMax  : 10,
-    projectsMax  : Infinity,
-    photosPerPost: 6,
-    photosSvc    : 4
+    postsPerDay    : Infinity,
+    msgsPerDay     : Infinity,
+    photosPerDay   : Infinity,
+    docsPerDay     : Infinity,
+    servicesMax    : 10,
+    projectsMax    : Infinity,
+    photosPerPost  : 6,
+    photosSvc      : 4,
+    collabPerMonth : 15       /* sera complété au prochain message */
   },
   business: {
-    postsPerDay  : Infinity,
-    msgsPerDay   : Infinity,
-    photosPerDay : Infinity,
-    docsPerDay   : Infinity,
-    servicesMax  : 20,
-    projectsMax  : Infinity,
-    photosPerPost: 6,
-    photosSvc    : 4
+    postsPerDay    : Infinity,
+    msgsPerDay     : Infinity,
+    photosPerDay   : Infinity,
+    docsPerDay     : Infinity,
+    servicesMax    : 20,
+    projectsMax    : Infinity,
+    photosPerPost  : 6,
+    photosSvc      : 4,
+    collabPerMonth : Infinity /* sera complété au prochain message */
   }
 };
 
@@ -9366,6 +9369,27 @@ function _incDailyCount(feature, email) {
   var n = _getDailyCount(feature, email) + 1;
   localStorage.setItem(k, n);
   return n;
+}
+
+/* ── Comptage MENSUEL : gw_monthly_{feature}_{email}_{YYYY-MM} ── */
+function _monthlyKey(feature, email) {
+  var ym = new Date().toISOString().slice(0, 7); /* "2026-05" */
+  return 'gw_monthly_' + feature + '_' + email + '_' + ym;
+}
+function _getMonthlyCount(feature, email) {
+  return parseInt(localStorage.getItem(_monthlyKey(feature, email)) || '0', 10);
+}
+function _incMonthlyCount(feature, email) {
+  var k = _monthlyKey(feature, email);
+  var n = _getMonthlyCount(feature, email) + 1;
+  localStorage.setItem(k, n);
+  return n;
+}
+/* Retourne le 1er du mois prochain au format lisible */
+function _nextMonthReset() {
+  var d = new Date();
+  var next = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+  return next.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
 /* Affiche un modal de blocage + envoie une notification à l'utilisateur */
@@ -25139,9 +25163,21 @@ function _collabOpenPost() {
     '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
     '<div style="padding:16px 20px 28px">' +
 
-    '<div style="font-size:17px;font-weight:800;color:#0F172A;margin-bottom:18px">' +
-      '<i class="fas fa-handshake" style="color:#6366F1;margin-right:8px"></i>Chercher un collaborateur' +
-    '</div>' +
+    (function() {
+      var lim2  = _getCurrentPlanLimits();
+      var max2  = lim2.collabPerMonth || 4;
+      var used2 = _getMonthlyCount('collab', _currentUser.email);
+      var left2 = max2 === Infinity ? null : Math.max(0, max2 - used2);
+      var quota = left2 === null
+        ? ''
+        : '<span style="font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;margin-left:8px;background:' +
+          (left2 > 0 ? '#ECFDF5;color:#059669' : '#FEE2E2;color:#EF4444') + '">' +
+          (left2 > 0 ? left2 + ' annonce(s) restante(s) ce mois' : 'Limite mensuelle atteinte') +
+          '</span>';
+      return '<div style="font-size:17px;font-weight:800;color:#0F172A;margin-bottom:18px;display:flex;align-items:center;flex-wrap:wrap;gap:4px">' +
+        '<i class="fas fa-handshake" style="color:#6366F1;margin-right:8px"></i>Chercher un collaborateur' + quota +
+        '</div>';
+    }()) +
 
     /* Titre du projet */
     '<div style="margin-bottom:13px">' +
@@ -25275,6 +25311,23 @@ function _clAttachRender() {
 function _collabSubmitPost() {
   if (!_currentUser) return;
 
+  /* ── Vérification limite mensuelle ── */
+  var lim      = _getCurrentPlanLimits();
+  var maxCollab = lim.collabPerMonth || 4;
+  var usedMonth = _getMonthlyCount('collab', _currentUser.email);
+
+  if (maxCollab !== Infinity && usedMonth >= maxCollab) {
+    var profile  = loadUserProfile(_currentUser.email) || {};
+    var planName = profile.planType === 'premium' ? 'Premium' : profile.planType === 'business' ? 'Business Pro' : 'Gratuit';
+    _showPlanLimitModal(
+      '🤝 Limite mensuelle atteinte',
+      'Votre plan <strong>' + planName + '</strong> autorise <strong>' + maxCollab + ' annonce(s) de collaboration par mois</strong>.<br><br>' +
+      'Votre quota se renouvelle le <strong>' + _nextMonthReset() + '</strong>.',
+      'collab'
+    );
+    return;
+  }
+
   var title    = (document.getElementById('cl-title')    || {}).value || '';
   var desc     = (document.getElementById('cl-desc')     || {}).value || '';
   var domain   = (document.getElementById('cl-domain')   || {}).value || 'autre';
@@ -25311,6 +25364,9 @@ function _collabSubmitPost() {
   var all = _collabGetAll();
   all.unshift(request);
   _collabSaveAll(all);
+
+  /* Incrémenter le compteur mensuel */
+  _incMonthlyCount('collab', _currentUser.email);
 
   /* Réinitialiser les pièces jointes */
   _clAttachFiles = [];
