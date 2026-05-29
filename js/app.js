@@ -17855,8 +17855,8 @@ function renderSrchResults(query) {
         var officialLogo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
         /* L'avatar a un id fixe pour que _ensureOfficialLogo puisse le mettre à jour */
         var offAvHtml = officialLogo
-          ? '<div class="avatar sm srch-av" id="srch-off-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);padding:0;overflow:hidden"><img src="' + escHtml(officialLogo) + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%"></div>'
-          : '<div class="avatar sm srch-av" id="srch-off-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center"><i class="fas fa-star" style="font-size:.9rem;color:#fff"></i></div>';
+          ? '<div class="user-av sm srch-av av-photo" id="srch-off-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);padding:0;overflow:hidden"><img src="' + escHtml(officialLogo) + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%"></div>'
+          : '<div class="user-av sm srch-av" id="srch-off-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center"><i class="fas fa-star" style="font-size:.9rem;color:#fff"></i></div>';
         html +=
           '<div class="srch-user-item" onclick="closeSearch();openOfficialProfile()">' +
             offAvHtml +
