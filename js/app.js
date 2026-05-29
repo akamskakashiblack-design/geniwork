@@ -6621,6 +6621,62 @@ function buildCommentEl(c, isReply) {
 }
 
 /* ── SOUMETTRE UN COMMENTAIRE / RÉPONSE ── */
+/* ══════════════════════════════════════════
+   EMOJI PICKER — commentaires
+══════════════════════════════════════════ */
+var _EMOJI_LIST = [
+  '😀','😂','🤣','😊','😍','🥰','😘','😎','🤩','😏',
+  '😢','😭','😡','🤬','😱','🤯','🥳','🤔','🙄','😴',
+  '👍','👎','👏','🙌','🤝','🤜','💪','🙏','👀','🫶',
+  '❤️','🧡','💛','💚','💙','💜','🖤','🤍','💔','💯',
+  '🔥','⭐','✨','🎉','🎊','🎶','🎵','💡','⚡','🌈',
+  '😅','😬','🤭','🥴','🤗','😤','😫','😩','🥺','😋',
+  '👋','✌️','🤞','🖖','🤙','💅','🫁','🤦','🤷','🫠',
+  '🍕','🍔','🎂','🍦','☕','🍺','🥂','🍾','🌮','🍜'
+];
+
+function _toggleEmojiPicker(e) {
+  if (e) e.stopPropagation();
+  var panel = document.getElementById('emoji-picker-panel');
+  if (!panel) return;
+  if (panel.classList.contains('hidden')) {
+    _openEmojiPicker();
+  } else {
+    _closeEmojiPicker();
+  }
+}
+
+function _openEmojiPicker() {
+  var panel = document.getElementById('emoji-picker-panel');
+  if (!panel) return;
+  if (!panel._built) {
+    panel.innerHTML = _EMOJI_LIST.map(function(e) {
+      return '<button class="emoji-btn" onclick="_insertEmoji(\'' + e + '\')">' + e + '</button>';
+    }).join('');
+    panel._built = true;
+  }
+  panel.classList.remove('hidden');
+  /* Ferme si clic ailleurs */
+  setTimeout(function() {
+    document.addEventListener('click', _closeEmojiPicker, { once: true });
+  }, 0);
+}
+
+function _closeEmojiPicker() {
+  var panel = document.getElementById('emoji-picker-panel');
+  if (panel) panel.classList.add('hidden');
+}
+
+function _insertEmoji(emoji) {
+  var inp = document.getElementById('comment-input');
+  if (!inp) return;
+  var start = inp.selectionStart || inp.value.length;
+  var end   = inp.selectionEnd   || inp.value.length;
+  inp.value = inp.value.slice(0, start) + emoji + inp.value.slice(end);
+  inp.selectionStart = inp.selectionEnd = start + emoji.length;
+  inp.focus();
+}
+
 function submitComment() {
   var input    = document.getElementById('comment-input');
   var text     = input.value.trim();
