@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260565" />
+  <link rel="stylesheet" href="css/style.css?v=20260566" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -926,7 +926,7 @@
             <!-- Transactions récentes -->
             <div class="mk-section-head" style="margin-top:24px">
               <h3>Transactions récentes</h3>
-              <button class="mk-see-all" onclick="_mkRenderTxTabs()">Actualiser</button>
+              <button class="mk-see-all" id="mk-tx-refresh-btn" onclick="_mkRefreshTxBtn(this)">Actualiser</button>
             </div>
 
             <!-- Tabs Achats / Ventes -->
@@ -3383,7 +3383,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260565"></script>
+  <script src="js/app.js?v=20260566"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">

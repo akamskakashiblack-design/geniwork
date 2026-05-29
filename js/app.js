@@ -25790,6 +25790,48 @@ function _collabTimeAgo(dateStr) {
   return Math.floor(days / 7) + ' sem.';
 }
 
+/* ── Bouton "Actualiser" Transactions avec sync Firebase + feedback ── */
+function _mkRefreshTxBtn(btn) {
+  if (btn) { btn.innerHTML = '<i class="fas fa-sync-alt" style="animation:spin .7s linear infinite"></i> Chargement…'; btn.disabled = true; }
+
+  function _done() {
+    _mkRenderTxTabs();
+    /* Actualise aussi les annonces membres */
+    try { renderMarketplaceUserServices(); } catch(e) {}
+    try { _mkRenderSystemListings();       } catch(e) {}
+    if (btn) {
+      btn.innerHTML = '✓ Actualisé';
+      btn.style.color = '#059669';
+      setTimeout(function() {
+        btn.innerHTML = 'Actualiser';
+        btn.style.color = '';
+        btn.disabled = false;
+      }, 1500);
+    }
+    showToast('Marketplace actualisé', 'ok');
+  }
+
+  if (_gwFbReady && _gwFbDB) {
+    /* Sync transactions depuis Firebase */
+    _gwFbDB.ref('gw/mk_txns').once('value').then(function(snap) {
+      var val = snap.val();
+      if (val !== null) {
+        try { localStorage.setItem('gw_mk_txns', JSON.stringify(Array.isArray(val) ? val : Object.values(val))); } catch(e){}
+      }
+      /* Sync annonces marketplace */
+      _gwFbDB.ref('gw/mk_listings').once('value').then(function(snap2) {
+        var val2 = snap2.val();
+        if (val2 !== null) {
+          try { localStorage.setItem('gw_mk_listings', JSON.stringify(Array.isArray(val2) ? val2 : Object.values(val2))); } catch(e){}
+        }
+        _done();
+      }).catch(function() { _done(); });
+    }).catch(function() { _done(); });
+  } else {
+    _done();
+  }
+}
+
 /* ── Bouton "Actualiser" collaboration avec feedback visuel ── */
 function _collabRefresh(btn) {
   if (btn) {
