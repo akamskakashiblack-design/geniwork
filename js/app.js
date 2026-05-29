@@ -529,12 +529,14 @@ function _gwFbSyncStart() {
         }
       }
     } catch(e){}
-    /* Nouvel utilisateur inscrit → rafraîchit le dashboard admin en temps réel */
+    /* Nouvel utilisateur inscrit ou profil modifié → rafraîchit l'admin en temps réel */
     if (_adminUser) {
       try {
         var totalEl = document.getElementById('adm-total-users');
         if (totalEl) totalEl.textContent = getUsers().length;
-        if (_adminTab === 'dashboard') _admRender();
+        /* Rafraîchit dashboard ET onglet utilisateurs */
+        if (_adminTab === 'dashboard' || _adminTab === 'users') _admRender();
+        _admUpdateNavBadges();
       } catch(e2){}
     }
   });
@@ -734,20 +736,29 @@ function _gwFbSyncStart() {
   _gwFbDB.ref('gw/follow_counts').on('child_added',   _onFollowCountSnap);
 
   /* ── Bans ── */
-  _listen('bans', 'gw_bans', function() {
-    if (_adminUser) { try { _admUpdateNavBadges(); } catch(e){} }
-  });
+  /* ════════════════════════════════════════════════════════════
+     HELPER — Synchronise le panel admin en temps réel
+     tab : onglet à re-rendre si actif ('*' = toujours re-rendre)
+     ════════════════════════════════════════════════════════════ */
+  function _admSync(tab) {
+    if (!_adminUser) return;
+    try { _admUpdateNavBadges(); } catch(e){}
+    if (!tab) return;
+    if (tab === '*' || _adminTab === tab) {
+      try { _admRender(); } catch(e){}
+    }
+  }
+
+  _listen('bans', 'gw_bans', function() { _admSync(null); });
 
   /* ── Appels de ban (recours) ── */
-  _listen('ban_appeals', 'gw_ban_appeals', function() {
-    if (_adminUser) { try { _admUpdateNavBadges(); } catch(e){} }
-  });
+  _listen('ban_appeals', 'gw_ban_appeals', function() { _admSync(null); });
 
   /* ── Admins secondaires ── */
-  _listen('admins', 'gw_admins');
+  _listen('admins', 'gw_admins', function() { _admSync('team'); });
 
   /* ── Super admin ── */
-  _listen('sadmin', 'gw_sadmin');
+  _listen('sadmin', 'gw_sadmin', function() { _admSync('team'); });
 
   /* ── Publications officielles ── */
   _listen('official_posts', 'gw_official_posts', function(freshList) {
@@ -793,12 +804,10 @@ function _gwFbSyncStart() {
   });
 
   /* ── Log admin ── */
-  _listen('admin_log', 'gw_admin_log');
+  _listen('admin_log', 'gw_admin_log', function() { _admSync('dashboard'); });
 
   /* ── Demandes d'accès admin ── */
-  _listen('admin_requests', 'gw_admin_requests', function() {
-    if (_adminUser) { try { _admUpdateNavBadges(); } catch(e){} }
-  });
+  _listen('admin_requests', 'gw_admin_requests', function() { _admSync('team'); });
 
   /* ── Permissions déléguées (admin_extra_perms) ── */
   _listen('admin_extra_perms', 'gw_admin_extra_perms', function() {
@@ -855,25 +864,39 @@ function _gwFbSyncStart() {
   /* ── Marketplace transactions ── */
   _listen('mk_txns', 'gw_mk_txns', function() {
     try { _mkRenderTxTabs(); } catch(e){}
+    _admSync('payments'); /* Met à jour l'onglet paiements admin */
   });
 
   /* ── Demandes de collaboration ── */
   _listen('collab_requests', 'gw_collab_requests', function() {
     if (document.getElementById('collab-list-wrap')) { try { _collabRender(); } catch(e){} }
+    _admSync('reports'); /* Visible dans signalements si modérés */
+  });
+
+  /* ── Paiements / abonnements ── */
+  _listen('payments', 'gw_payments', function() { _admSync('payments'); });
+
+  /* ── Profils utilisateurs — changements visibles en temps réel dans l'admin ── */
+  _gwFbDB.ref('gw/profiles').on('child_changed', function(snap) {
+    if (!_adminUser) return;
+    /* Invalide le cache profil et rafraîchit l'onglet utilisateurs si actif */
+    try {
+      var email2 = snap.key.replace(/__d__/g,'.').replace(/__a__/g,'@');
+      _invalidateProfileCache(email2);
+    } catch(e){}
+    if (_adminTab === 'users' || _adminTab === 'dashboard') {
+      try { _admRender(); } catch(e){}
+    }
   });
 
   /* ── Éditeurs officiels ── */
-  _listen('publishers', 'gw_publishers');
+  _listen('publishers', 'gw_publishers', function() { _admSync('*'); });
 
   /* ── Tâches admin ── */
-  _listen('admin_tasks', 'gw_admin_tasks', function() {
-    if (_adminUser) { try { _admRender(); } catch(e){} }
-  });
+  _listen('admin_tasks', 'gw_admin_tasks', function() { _admSync('team'); });
 
   /* ── Demandes de badge ── */
-  _listen('badge_requests', 'gw_badge_requests', function() {
-    if (_adminUser) { try { _admRender(); } catch(e){} }
-  });
+  _listen('badge_requests', 'gw_badge_requests', function() { _admSync('badges'); });
 
   /* ── Milestones de l'utilisateur connecté ── */
   if (_currentUser) {
@@ -19739,9 +19762,17 @@ function _admSavePlansConfig(cfg) { localStorage.setItem('gw_plans_config', JSON
 
 /* ── Helpers : paiements ── */
 function _admGetPayments() {
-  try { return JSON.parse(localStorage.getItem('gw_payments') || '[]'); } catch(e) { return []; }
+  try {
+    var raw = localStorage.getItem('gw_payments');
+    if (!raw) return [];
+    var v = JSON.parse(raw);
+    return Array.isArray(v) ? v : Object.values(v);
+  } catch(e) { return []; }
 }
-function _admSavePayments(list) { localStorage.setItem('gw_payments', JSON.stringify(list)); }
+function _admSavePayments(list) {
+  localStorage.setItem('gw_payments', JSON.stringify(list));
+  _gwFbSet('payments', list); /* Sync Firebase */
+}
 
 /* Active/désactive un plan (Premium ou Business) */
 function _admTogglePlan(plan) {
