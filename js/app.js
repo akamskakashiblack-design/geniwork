@@ -25224,13 +25224,21 @@ function _collabOpenPost() {
       var left2 = max2 === Infinity ? null : Math.max(0, max2 - used2);
       var quota = left2 === null
         ? ''
-        : '<span style="font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;margin-left:8px;background:' +
+        : '<span style="font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;background:' +
           (left2 > 0 ? '#ECFDF5;color:#059669' : '#FEE2E2;color:#EF4444') + '">' +
           (left2 > 0 ? left2 + ' annonce(s) restante(s) ce mois' : 'Limite mensuelle atteinte') +
           '</span>';
-      return '<div style="font-size:17px;font-weight:800;color:#0F172A;margin-bottom:18px;display:flex;align-items:center;flex-wrap:wrap;gap:4px">' +
-        '<i class="fas fa-handshake" style="color:#6366F1;margin-right:8px"></i>Chercher un collaborateur' + quota +
-        '</div>';
+      return '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px">' +
+        '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;flex:1">' +
+          '<span style="font-size:17px;font-weight:800;color:#0F172A">' +
+            '<i class="fas fa-handshake" style="color:#6366F1;margin-right:8px"></i>Chercher un collaborateur' +
+          '</span>' + quota +
+        '</div>' +
+        '<button onclick="(function(){var b=document.getElementById(\'collab-post-bg\');var c=document.getElementById(\'collab-post-card\');if(b)b.remove();if(c)c.remove();})()" ' +
+          'style="flex-shrink:0;width:32px;height:32px;border-radius:50%;border:none;background:#F1F5F9;color:#64748B;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;margin-left:8px">' +
+          '✕' +
+        '</button>' +
+      '</div>';
     }()) +
 
     /* Titre du projet */
