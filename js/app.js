@@ -16211,33 +16211,18 @@ function openAddService(svcId) {
   var card = document.createElement('div');
   card.className = 'cam-sheet-card add-service-card'; card.id = 'add-service-card';
 
-  /* Toggle Service / Produit (uniquement pour les nouveaux items) */
-  var toggleHtml = !_editSvcId
-    ? '<div class="svc-type-toggle">' +
-        '<button class="svc-type-btn' + (_svcItemType === 'service' ? ' active' : '') + '" ' +
-          'data-type="service" onclick="_setSvcItemType(\'service\')">' +
-          '<i class="fas fa-concierge-bell"></i> Service' +
-        '</button>' +
-        '<button class="svc-type-btn' + (_svcItemType === 'produit' ? ' active' : '') + '" ' +
-          'data-type="produit" onclick="_setSvcItemType(\'produit\')">' +
-          '<i class="fas fa-box"></i> Produit / Article' +
-        '</button>' +
-      '</div>'
-    : '';
+  /* Uniquement Service — option Produit retirée du profil */
+  var toggleHtml = '';
+  if (!_editSvcId) _svcItemType = 'service';
 
   card.innerHTML =
     '<div class="cam-sheet-handle"></div>' +
     toggleHtml +
     '<p class="cam-sheet-title" id="svc-form-title">' +
-      (_editSvcId
-        ? (_svcItemType === 'produit' ? 'Modifier le produit' : 'Modifier le service')
-        : (_svcItemType === 'produit' ? 'Ajouter un produit / article' : 'Ajouter un service')) +
+      (_editSvcId ? 'Modifier le service' : 'Ajouter un service') +
     '</p>' +
     '<p style="margin:-8px 16px 10px;font-size:11.5px;color:#6366F1;background:#EEF2FF;border-radius:8px;padding:7px 10px;display:flex;align-items:center;gap:6px" id="svc-form-notice">' +
-      '<i class="fas fa-circle-info"></i>' +
-      (_svcItemType === 'produit'
-        ? 'Visible dans la Marketplace'
-        : 'Visible sur votre profil uniquement') +
+      '<i class="fas fa-circle-info"></i> Visible sur votre profil' +
     '</p>' +
     '<div id="svc-form-inner"></div>' +
     '<div class="svc-form-btns">' +
@@ -24259,6 +24244,7 @@ function _mkOpenCreate() {
     return;
   }
   _mkPickedImages = [];
+  _mkCurrentType  = 'service'; /* Uniquement services — produits retirés */
 
   var existing = document.getElementById('mk-create-bg');
   if (existing) existing.remove();
@@ -24288,14 +24274,6 @@ function _mkOpenCreate() {
         'style="width:32px;height:32px;border-radius:50%;border:none;background:#F1F5F9;color:#64748B;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>'+
     '</div>'+
 
-    /* Type */
-    '<div style="margin-bottom:14px">'+
-      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Type</label>'+
-      '<div style="display:flex;gap:8px;margin-top:6px">'+
-        '<button id="mk-type-svc" onclick="_mkSetType(\'service\')" style="flex:1;padding:10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">🛠️ Service</button>'+
-        '<button id="mk-type-prod" onclick="_mkSetType(\'product\')" style="flex:1;padding:10px;background:#F1F5F9;color:#64748B;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">📦 Produit</button>'+
-      '</div>'+
-    '</div>'+
 
     /* Catégorie */
     '<div style="margin-bottom:12px">'+
