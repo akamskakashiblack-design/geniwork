@@ -25073,6 +25073,19 @@ function _collabRender() {
       '<div class="collab-card-title">' + escHtml(c.title) + '</div>' +
       '<div class="collab-card-desc">' + escHtml((c.description || '').slice(0, 80)) + (c.description && c.description.length > 80 ? '…' : '') + '</div>' +
       (skillsHtml ? '<div class="collab-skills-row">' + skillsHtml + '</div>' : '') +
+      /* Aperçu photos jointes */
+      (c.attachments && c.attachments.some(function(a){ return a.isImg; })
+        ? '<div style="display:flex;gap:5px;margin:6px 0 4px">' +
+            c.attachments.filter(function(a){ return a.isImg; }).slice(0,3).map(function(a) {
+              return '<img src="' + escHtml(a.data) + '" style="width:52px;height:52px;border-radius:7px;object-fit:cover;border:1.5px solid #E2E8F0">';
+            }).join('') +
+          '</div>'
+        : '') +
+      (c.attachments && c.attachments.some(function(a){ return !a.isImg; })
+        ? '<div style="display:inline-flex;align-items:center;gap:5px;padding:4px 8px;background:#F1F5F9;border-radius:6px;font-size:11px;color:#6366F1;margin-bottom:4px">' +
+            '<i class="fas fa-file-alt"></i> ' + escHtml(c.attachments.find(function(a){ return !a.isImg; }).name.slice(0,20)) +
+          '</div>'
+        : '') +
       '<div class="collab-card-footer">' +
         '<div class="collab-card-poster">' +
           '<div class="collab-poster-av">' + escHtml(c.postedByNom.slice(0,2).toUpperCase()) + '</div>' +
@@ -25096,6 +25109,8 @@ function _collabRender() {
 /* ── Ouvre le formulaire de publication ── */
 function _collabOpenPost() {
   if (!_currentUser) { showToast('Connectez-vous pour publier', 'err'); return; }
+
+  _clAttachFiles = []; /* réinitialise les pièces jointes à chaque ouverture */
 
   var existing = document.getElementById('collab-post-bg');
   if (existing) existing.remove();
@@ -25178,6 +25193,16 @@ function _collabOpenPost() {
       '</div>' +
     '</div>' +
 
+    /* Pièces jointes */
+    '<div style="margin-bottom:16px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Pièces jointes <span style="font-weight:400;text-transform:none;font-size:10px">optionnel — max 3 photos + 1 doc</span></label>' +
+      '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center" id="cl-attach-preview"></div>' +
+      '<label id="cl-attach-label" style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;padding:9px 14px;border:1.5px dashed #C7D2FE;border-radius:10px;font-size:13px;color:#6366F1;cursor:pointer;background:#F5F3FF">' +
+        '<i class="fas fa-paperclip"></i> Ajouter photo / document' +
+        '<input type="file" id="cl-attach-input" accept="image/*,.pdf,.doc,.docx" multiple style="display:none" onchange="_clAttachAdd(this)">' +
+      '</label>' +
+    '</div>' +
+
     /* Bouton publier */
     '<button onclick="_collabSubmitPost()" style="width:100%;padding:14px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(99,102,241,.4)">' +
       '<i class="fas fa-paper-plane" style="margin-right:8px"></i>Publier la demande' +
@@ -25187,6 +25212,63 @@ function _collabOpenPost() {
 
   document.body.appendChild(bg);
   document.body.appendChild(card);
+}
+
+/* ── Gestion des pièces jointes du formulaire collab ── */
+var _clAttachFiles = []; /* [{name, type, data, isImg}] */
+
+function _clAttachAdd(input) {
+  if (!input.files || !input.files.length) return;
+  var files = Array.from(input.files);
+  var curImgs = _clAttachFiles.filter(function(f) { return f.isImg; }).length;
+  var curDocs = _clAttachFiles.filter(function(f) { return !f.isImg; }).length;
+
+  files.forEach(function(file) {
+    var isImg = file.type.startsWith('image/');
+    if (isImg  && curImgs >= 3) { showToast('Maximum 3 photos', 'err'); return; }
+    if (!isImg && curDocs >= 1) { showToast('Maximum 1 document', 'err'); return; }
+    if (file.size > 5 * 1024 * 1024) { showToast(file.name.slice(0,20) + ' trop lourd (max 5 Mo)', 'err'); return; }
+
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var f = { name: file.name, type: file.type, data: e.target.result, isImg: isImg };
+      _clAttachFiles.push(f);
+      if (isImg) curImgs++; else curDocs++;
+      _clAttachRender();
+    };
+    reader.readAsDataURL(file);
+  });
+  input.value = '';
+}
+
+function _clAttachRemove(idx) {
+  _clAttachFiles.splice(idx, 1);
+  _clAttachRender();
+}
+
+function _clAttachRender() {
+  var wrap = document.getElementById('cl-attach-preview');
+  var lbl  = document.getElementById('cl-attach-label');
+  if (!wrap) return;
+  var imgs = _clAttachFiles.filter(function(f) { return f.isImg; }).length;
+  var docs = _clAttachFiles.filter(function(f) { return !f.isImg; }).length;
+
+  wrap.innerHTML = _clAttachFiles.map(function(f, i) {
+    if (f.isImg) {
+      return '<div style="position:relative;width:64px;height:64px;border-radius:8px;overflow:hidden;border:1.5px solid #E2E8F0">' +
+        '<img src="' + f.data + '" style="width:100%;height:100%;object-fit:cover">' +
+        '<button onclick="_clAttachRemove(' + i + ')" style="position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,.55);border:none;color:#fff;font-size:9px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-xmark"></i></button>' +
+      '</div>';
+    }
+    return '<div style="display:flex;align-items:center;gap:6px;padding:7px 10px;background:#F1F5F9;border-radius:8px;border:1.5px solid #E2E8F0;max-width:160px">' +
+      '<i class="fas fa-file-alt" style="color:#6366F1;font-size:14px;flex-shrink:0"></i>' +
+      '<span style="font-size:11.5px;color:#374151;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(f.name.slice(0,18)) + '</span>' +
+      '<button onclick="_clAttachRemove(' + i + ')" style="background:none;border:none;color:#9CA3AF;cursor:pointer;padding:0;margin-left:auto"><i class="fas fa-xmark"></i></button>' +
+    '</div>';
+  }).join('');
+
+  /* Masquer le bouton si limites atteintes */
+  if (lbl) lbl.style.display = (imgs >= 3 && docs >= 1) ? 'none' : 'inline-flex';
 }
 
 /* ── Soumettre la demande de collaboration ── */
@@ -25222,12 +25304,16 @@ function _collabSubmitPost() {
     postedByNom: nom,
     date:        new Date().toISOString(),
     status:      'active',
-    applicants:  []
+    applicants:  [],
+    attachments: _clAttachFiles.slice() /* photos + doc */
   };
 
   var all = _collabGetAll();
   all.unshift(request);
   _collabSaveAll(all);
+
+  /* Réinitialiser les pièces jointes */
+  _clAttachFiles = [];
 
   /* Fermer le formulaire */
   var bg   = document.getElementById('collab-post-bg');
@@ -25320,6 +25406,22 @@ function _collabOpenDetail(id) {
 
     /* Budget */
     budgetHtml +
+
+    /* Pièces jointes */
+    (c.attachments && c.attachments.length
+      ? '<div style="margin:14px 0">' +
+          '<div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Pièces jointes</div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+            c.attachments.map(function(a) {
+              if (a.isImg) {
+                return '<img src="' + escHtml(a.data) + '" style="width:90px;height:90px;border-radius:10px;object-fit:cover;border:1.5px solid #E2E8F0;cursor:pointer" onclick="window.open(this.src)">';
+              }
+              return '<a href="' + escHtml(a.data) + '" download="' + escHtml(a.name) + '" style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#EEF2FF;border-radius:10px;text-decoration:none;font-size:12px;color:#6366F1;font-weight:600">' +
+                '<i class="fas fa-file-arrow-down"></i>' + escHtml(a.name.slice(0, 22)) + '</a>';
+            }).join('') +
+          '</div>' +
+        '</div>'
+      : '') +
 
     /* Poster */
     '<div style="display:flex;align-items:center;gap:10px;padding:12px;background:#F8FAFC;border-radius:12px;margin:14px 0">' +
