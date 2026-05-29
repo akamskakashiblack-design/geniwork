@@ -3085,8 +3085,26 @@ mark.srch-mark {
   position: relative;
   overflow: hidden;
   flex-shrink: 0;
-  background: #000;
+  /* Dégradé sombre pendant le chargement — pas d'écran noir brutal */
+  background: linear-gradient(160deg, #0F172A 0%, #1E293B 50%, #0F172A 100%);
 }
+/* Spinner de chargement au centre pendant le buffering */
+.vs-item::after {
+  content: '';
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 36px; height: 36px;
+  margin: -18px 0 0 -18px;
+  border: 3px solid rgba(255,255,255,.15);
+  border-top-color: rgba(255,255,255,.7);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity .3s;
+}
+/* Cache le spinner dès que la vidéo joue */
+.vs-item.vs-playing::after { opacity: 0; }
 .vs-video {
   width: 100%;
   height: 100%;

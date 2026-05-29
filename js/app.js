@@ -8527,9 +8527,26 @@ function openVideoScroll(startPostId) {
   /* Scroll immédiat vers la vidéo de départ (sans animation) */
   feedEl.scrollTop = startIdx * (window.innerHeight || screen.height);
 
+  /* ── RÉSOLUTION PARALLÈLE de toutes les URLs dès l'ouverture ──
+     Chaque URL résolue → src posée immédiatement → browser buffere
+     pendant que l'utilisateur regarde la vidéo courante           */
+  _vsItems.forEach(function(item) {
+    if (item._preloading || item.loaded) return;
+    item._preloading = true;
+    _gwResolveVideoUrl(item.post, function(url) {
+      if (!url) return;
+      if (typeof item.post.video === 'object') item.post.video.url = url;
+      _gwVidUrlCache[String(item.postId)] = url;
+      if (!item.videoEl.src) {
+        item.videoEl.src     = url;
+        item.videoEl.preload = 'auto';
+        item.videoEl.load(); /* commence à bufferer en fond */
+      }
+    });
+  });
+
   /* Joue la vidéo de départ */
   _vsActivate(startIdx);
-  /* _vsActivate pré-charge déjà idx+1, idx+2, idx-1 immédiatement */
 
   /* Observer pour auto-play au scroll */
   _vsSetupObserver();
@@ -8642,15 +8659,29 @@ function _vsFetchFb(post, cb) { _gwResolveVideoUrlFromFb(post, cb); }
 function _vsStartPlayback(idx, item) {
   if (_vsCurIdx !== idx) return;
   var v = item.videoEl;
-  v.currentTime = 0;
+
+  /* Reset position seulement si nécessaire (évite un seek coûteux) */
+  if (v.currentTime > 0.1) v.currentTime = 0;
+
   _incrementVideoViews(item.postId);
   var vBadge = document.getElementById('vs-views-' + item.postId);
   if (vBadge) vBadge.textContent = _fmtViews(_getVideoViews(item.postId));
+
   v.onended = function() { _vsStartEndCountdown(idx); };
-  v.onplay  = function() { _vsSetPlayIco(idx, true);  };
+  v.onplay  = function() { _vsSetPlayIco(idx, true);  _vsStartRaf(idx); };
   v.onpause = function() { _vsSetPlayIco(idx, false); };
-  _vsStartRaf(idx);
-  v.play().catch(function() {});
+
+  /* Tente play immédiat — si pas assez bufferé, canplay relancera */
+  var playPromise = v.play();
+  if (playPromise !== undefined) {
+    playPromise.catch(function() {
+      /* Autoplay bloqué ou pas encore bufferé → attend canplay */
+      v.addEventListener('canplay', function _onCanPlay() {
+        v.removeEventListener('canplay', _onCanPlay);
+        if (_vsCurIdx === idx) v.play().catch(function(){});
+      });
+    });
+  }
   _vsSetPlayIco(idx, true);
 }
 
@@ -8674,31 +8705,40 @@ function _vsActivate(idx) {
 
   var item = _vsItems[idx];
 
-  /* Pré-charge immédiatement (sans délai) les vidéos adjacentes */
-  _vsPreloadItem(idx + 1);
-  _vsPreloadItem(idx + 2);
-  _vsPreloadItem(idx - 1);
+  /* Si la src est déjà dans l'élément vidéo (posée par la résolution parallèle) → play direct */
+  if (item.videoEl.src) {
+    item.loaded = true;
+    item.videoEl.preload = 'auto';
+    _vsStartPlayback(idx, item);
+    /* pré-charge les suivantes */
+    _vsPreloadItem(idx + 1);
+    _vsPreloadItem(idx + 2);
+    _vsPreloadItem(idx - 1);
+    return;
+  }
 
-  /* URL déjà connue → lecture immédiate */
+  /* URL en cache mémoire → pose src et joue */
   var knownUrl = _gwVidUrlCache[String(item.postId)] ||
                  (item.post.video && typeof item.post.video === 'object' && item.post.video.url) ||
                  (typeof item.post.video === 'string' ? item.post.video : '');
 
   if (knownUrl) {
-    if (item.videoEl.src !== knownUrl) {
-      item.videoEl.src     = knownUrl;
-      item.videoEl.preload = 'auto'; /* buffer réel pour la vidéo courante */
-    }
+    item.videoEl.src     = knownUrl;
+    item.videoEl.preload = 'auto';
     item.loaded = true;
     _vsStartPlayback(idx, item);
   } else {
-    /* URL inconnue → résoudre puis jouer */
+    /* URL pas encore résolue → attend (résolution parallèle en cours) */
     _vsLoadSrc(item, function() {
       if (_vsCurIdx !== idx) return;
       item.videoEl.preload = 'auto';
       _vsStartPlayback(idx, item);
     });
   }
+
+  _vsPreloadItem(idx + 1);
+  _vsPreloadItem(idx + 2);
+  _vsPreloadItem(idx - 1);
 }
 
 /* ── IntersectionObserver : auto-play quand visible à 50 %+ ── */
@@ -8751,6 +8791,9 @@ function vsTogglePlay(idx) {
 function _vsSetPlayIco(idx, playing) {
   var ico = document.getElementById('vs-play-ico-' + idx);
   if (ico) ico.innerHTML = '<i class="fas ' + (playing ? 'fa-pause' : 'fa-play') + '"></i>';
+  /* Cache le spinner dès que la vidéo joue */
+  var item = _vsItems[idx];
+  if (item && item.el) item.el.classList.toggle('vs-playing', playing);
 }
 
 function _vsFlash(idx, iconClass) {
