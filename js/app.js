@@ -504,7 +504,11 @@ function _gwFbSyncStart() {
       var val = snap.val();
       if (val === null || val === undefined) return;
       _gwFbSkip = true;
-      localStorage.setItem(lsKey, JSON.stringify(val));
+      /* Les valeurs primitives (string/number/boolean) sont stockées brutes ;
+         les objets/tableaux sont JSON-sérialisés. Evite les guillemets parasites
+         sur les logos/URLs qui cassent les src d'images. */
+      var toStore = (typeof val === 'object') ? JSON.stringify(val) : String(val);
+      localStorage.setItem(lsKey, toStore);
       try { if (typeof onSync === 'function') onSync(val); } catch(e){}
       _gwFbSkip = false;
     });
@@ -754,7 +758,19 @@ function _gwFbSyncStart() {
   });
 
   /* ── Logo officiel ── */
-  _listen('settings_logo', 'gw_official_logo');
+  _listen('settings_logo', 'gw_official_logo', function() {
+    /* Re-rendre partout où le logo officiel apparaît */
+    try { renderFeed(getAllPosts()); } catch(e){}
+    try { _renderNotifList(); }       catch(e){}
+    try { _renderOfficialProfile(); } catch(e){}
+    /* Mettre à jour les balises <img> déjà dans le DOM */
+    var logo = localStorage.getItem('gw_official_logo');
+    if (logo) {
+      document.querySelectorAll('.post-official-avatar img, .off-av-img, #srch-off-av img').forEach(function(img) {
+        img.src = logo;
+      });
+    }
+  });
 
   /* ── Log admin ── */
   _listen('admin_log', 'gw_admin_log');
@@ -19792,7 +19808,16 @@ function _admAvatarChange(input) {
 /* ══════════════════════════════════════════
    LOGO COMPTE OFFICIEL GENIWORK
 ══════════════════════════════════════════ */
-function _admGetOfficialLogo()      { return localStorage.getItem('gw_official_logo') || null; }
+function _admGetOfficialLogo() {
+  var raw = localStorage.getItem('gw_official_logo');
+  if (!raw) return null;
+  /* Rétrocompatibilité : anciens navigateurs avaient la valeur JSON-wrappée
+     (ex: '"data:image/..."') — on la dépaque si nécessaire */
+  if (raw.charAt(0) === '"') {
+    try { var parsed = JSON.parse(raw); if (typeof parsed === 'string') return parsed; } catch(e) {}
+  }
+  return raw;
+}
 function _admSaveOfficialLogo(data) {
   if (data) { localStorage.setItem('gw_official_logo', data); _gwFbSet('settings_logo', data); }
   else      { localStorage.removeItem('gw_official_logo');    _gwFbSet('settings_logo', null); }
