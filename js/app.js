@@ -25516,9 +25516,7 @@ function _collabSubmitPost() {
     at:         Date.now(),
     date:       new Date().toISOString()
   };
-  persistNewPost(feedPost);
-  DEMO_POSTS.unshift(feedPost);
-  try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e) {}
+  persistNewPost(feedPost); /* Firebase child_changed → _gwMergePost → renderFeed automatique */
 
   /* Réinitialiser les pièces jointes */
   _clAttachFiles = [];
