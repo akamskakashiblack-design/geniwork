@@ -6378,6 +6378,16 @@ function vpCancelAutoNext() {
 }
 
 /* ── Signaler un post ── */
+/* Retourne tous les emails admin (super admin + admins membres) */
+function _gwGetAdminEmails() {
+  var emails = [];
+  var sa = (function(){ try { return JSON.parse(localStorage.getItem('gw_sadmin')); } catch(e){ return null; } })();
+  if (sa && sa.email) emails.push(sa.email);
+  var admins = (function(){ try { return JSON.parse(localStorage.getItem('gw_admins') || '[]'); } catch(e){ return []; } })();
+  admins.forEach(function(a) { if (a.email && emails.indexOf(a.email) === -1) emails.push(a.email); });
+  return emails;
+}
+
 function reportPost(postId) {
   _closeGenericSheet('report-post');
   var bg = document.createElement('div');
@@ -6410,23 +6420,63 @@ function reportPost(postId) {
 function _sendReport(postId, reason) {
   _closeGenericSheet('report-post');
   if (!_currentUser) return;
-  /* Retrouve le post pour identifier l'auteur */
-  var post = getAllPosts().find(function(p) { return p.id == postId; });
-  var target = post ? (post.ownerEmail || post.author || '?') : String(postId);
-  /* Sauvegarde dans le tableau de signalements du reporter */
+
+  /* Retrouve le post pour enrichir le signalement */
+  var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+  var targetEmail   = post ? (post.ownerEmail || '') : '';
+  var targetDisplay = post ? (post.ownerEmail || post.author || '?') : String(postId);
+
+  /* Détermine le type exact de contenu */
+  var postType = 'texte';
+  if (post && post.video) {
+    postType = (post.video.videoType === 'short') ? 'short' : 'video';
+  } else if (post && post.images && post.images.length) {
+    postType = 'image';
+  }
+
+  /* Prévisualisation du contenu signalé */
+  var preview = '';
+  if (post) {
+    if (post.video && post.video.title) preview = post.video.title;
+    else if (post.text) preview = post.text.slice(0, 80);
+    else if (post.video) preview = '[' + postType + ']';
+  }
+
+  var report = {
+    id:           'rpt_' + Date.now(),
+    date:         new Date().toISOString(),
+    postId:       String(postId),
+    target:       targetDisplay,
+    targetEmail:  targetEmail,
+    reason:       reason,
+    type:         postType,   /* 'texte' | 'image' | 'video' | 'short' */
+    preview:      preview,
+    reporterEmail: _currentUser.email,
+    reporterNom:  _currentUser.nom || _currentUser.email
+  };
+
   try {
     var key  = 'gw_reports_' + _currentUser.email;
     var reps = JSON.parse(localStorage.getItem(key) || '[]');
-    reps.push({
-      id:     'rpt_' + Date.now(),
-      date:   new Date().toISOString(),
-      target: target,
-      reason: reason,
-      type:   'post'
-    });
+    reps.unshift(report); /* plus récent en premier */
     localStorage.setItem(key, JSON.stringify(reps));
     _gwFbSet('reports/' + _gwFbKey(_currentUser.email), reps);
   } catch(e) {}
+
+  /* Notifie tous les admins en temps réel */
+  _gwGetAdminEmails().forEach(function(adminEmail) {
+    pushNotif(adminEmail, {
+      id:       'adm_rpt_' + Date.now(),
+      type:     'bug_report',
+      at:       Date.now(),
+      title:    '🚩 Nouveau signalement',
+      body:     postType.toUpperCase() + ' signalé par ' + (_currentUser.nom || _currentUser.email) + ' : ' + reason,
+      msg:      '🚩 Signalement ' + postType + ' : "' + preview.slice(0,50) + '" — Raison : ' + reason,
+      fromUser: { nom: _currentUser.nom, email: _currentUser.email },
+      unread:   true
+    });
+  });
+
   showToast('Signalement envoyé. Merci !', 'ok');
 }
 
@@ -21686,19 +21736,23 @@ function _admBuildReports() {
       var escRid      = r.rid.replace(/'/g,"\\'");
       var escReporter = r.reporter.replace(/'/g,"\\'");
       var escTarget   = r.target.replace(/'/g,"\\'");
-      var typeIcon    = r.type === 'chat' ? '<i class="fas fa-comment" style="color:#3B82F6;margin-right:4px"></i>Chat'
-                      : '<i class="fas fa-image" style="color:#8B5CF6;margin-right:4px"></i>Post';
+      var typeIcon = r.type === 'chat'  ? '<i class="fas fa-comment" style="color:#3B82F6;margin-right:4px"></i>Chat'
+                  : r.type === 'short' ? '<i class="fas fa-mobile-screen-button" style="color:#EF4444;margin-right:4px"></i>Short'
+                  : r.type === 'video' ? '<i class="fas fa-play-circle" style="color:#F59E0B;margin-right:4px"></i>Vidéo'
+                  : r.type === 'image' ? '<i class="fas fa-image" style="color:#8B5CF6;margin-right:4px"></i>Image'
+                  :                      '<i class="fas fa-align-left" style="color:#6B7280;margin-right:4px"></i>Texte';
       html +=
         '<div class="adm-report-card">' +
           '<div class="adm-report-head">' +
-            '<div class="adm-report-target"><i class="fas fa-user" style="color:#EF4444;margin-right:5px"></i>' + escHtml(r.target) + '</div>' +
+            '<div class="adm-report-target"><i class="fas fa-user" style="color:#EF4444;margin-right:5px"></i>' + escHtml(r.targetEmail || r.target) + '</div>' +
             '<div style="display:flex;align-items:center;gap:8px">' +
               '<span style="font-size:10px;color:#6B7280">' + typeIcon + '</span>' +
               '<div class="adm-report-date">' + d + '</div>' +
             '</div>' +
           '</div>' +
+          (r.preview ? '<div style="font-size:12px;color:#374151;background:#F8FAFC;border-radius:6px;padding:6px 10px;margin-bottom:6px;border-left:3px solid #EA580C">' + escHtml(r.preview.slice(0,80)) + '</div>' : '') +
           '<div class="adm-report-reason"><i class="fas fa-comment-dots" style="margin-right:4px;color:#EA580C"></i>' + escHtml(r.reason) + '</div>' +
-          '<div class="adm-report-by">Signalé par : <strong>' + escHtml(r.reporterNom) + '</strong></div>' +
+          '<div class="adm-report-by">Signalé par : <strong>' + escHtml(r.reporterNom || r.reporter) + '</strong></div>' +
           '<div class="adm-report-actions">' +
             (_admHasAction('dismiss_report') ? '<button class="adm-btn-sm adm-btn-dismiss" onclick="_admDismissReport(\'' + escRid + '\',\'' + escReporter + '\')">Ignorer</button>' : '') +
             (_admHasAction('warn_user') ? '<button class="adm-btn-sm adm-btn-warn" onclick="_admWarnUser(\'' + escTarget + '\')"><i class="fas fa-triangle-exclamation"></i> Avertir</button>' : '') +
