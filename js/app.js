@@ -25307,6 +25307,92 @@ function _clAttachRender() {
   if (lbl) lbl.style.display = (imgs >= 3 && docs >= 1) ? 'none' : 'inline-flex';
 }
 
+/* ── Modal limite mensuelle collaboration avec proposition d'upgrade ── */
+function _showCollabLimitModal(usedMax) {
+  var existing = document.getElementById('collab-limit-modal');
+  if (existing) existing.remove();
+
+  var profile  = loadUserProfile(_currentUser ? _currentUser.email : '') || {};
+  var plan     = profile.planType || 'free';
+  var reset    = _nextMonthReset();
+
+  /* Notification dans le centre de notifs (1 fois par jour) */
+  var nKey = 'collab_limit_' + new Date().toISOString().slice(0,10);
+  var notifs = getNotifs(_currentUser.email);
+  if (!notifs.some(function(n) { return n.id === nKey; })) {
+    notifs.unshift({ id: nKey, type: 'plan_limit', at: Date.now(),
+      msg: '🤝 Limite de ' + usedMax + ' collaboration(s)/mois atteinte. Passez à Premium ou Business Pro pour publier davantage.',
+      unread: true, fromUser: null });
+    saveNotifs(_currentUser.email, notifs);
+    try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+  }
+
+  var overlay = document.createElement('div');
+  overlay.id = 'collab-limit-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(15,23,42,.6);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center';
+
+  overlay.innerHTML =
+    '<div style="width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;padding:28px 20px 36px;box-shadow:0 -8px 40px rgba(0,0,0,.18)">' +
+
+      /* Handle */
+      '<div style="width:36px;height:4px;background:#E2E8F0;border-radius:2px;margin:0 auto 20px"></div>' +
+
+      /* Icône + titre */
+      '<div style="text-align:center;margin-bottom:6px">' +
+        '<div style="width:56px;height:56px;border-radius:16px;background:#FEE2E2;display:flex;align-items:center;justify-content:center;margin:0 auto 12px">' +
+          '<i class="fas fa-hand-stop" style="font-size:24px;color:#EF4444"></i>' +
+        '</div>' +
+        '<div style="font-size:18px;font-weight:800;color:#0F172A">Limite mensuelle atteinte</div>' +
+        '<div style="font-size:13px;color:#64748B;margin-top:5px">Vous avez utilisé vos <strong>' + usedMax + ' annonces</strong> du mois.<br>Renouvellement le <strong>' + reset + '</strong>.</div>' +
+      '</div>' +
+
+      '<div style="border-top:1px solid #F1F5F9;margin:18px 0"></div>' +
+
+      /* Label */
+      '<div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px">Passez à un plan supérieur</div>' +
+
+      /* Card Premium */
+      '<div style="border:2px solid #F59E0B;border-radius:14px;padding:14px 16px;margin-bottom:10px;background:#FFFBEB">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between">' +
+          '<div>' +
+            '<div style="font-size:15px;font-weight:800;color:#92400E"><i class="fas fa-crown" style="margin-right:6px;color:#F59E0B"></i>Premium</div>' +
+            '<div style="font-size:12px;color:#78350F;margin-top:3px"><strong>15 annonces</strong> de collaboration par mois</div>' +
+            '<div style="font-size:11px;color:#92400E;margin-top:2px">+ Posts illimités · Messages illimités</div>' +
+          '</div>' +
+          '<button onclick="document.getElementById(\'collab-limit-modal\').remove();openSubPage()" ' +
+            'style="background:linear-gradient(135deg,#F59E0B,#D97706);color:#fff;border:none;border-radius:10px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">' +
+            'Choisir' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+
+      /* Card Business Pro */
+      '<div style="border:2px solid #6366F1;border-radius:14px;padding:14px 16px;margin-bottom:18px;background:#EEF2FF">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between">' +
+          '<div>' +
+            '<div style="font-size:15px;font-weight:800;color:#3730A3"><i class="fas fa-briefcase" style="margin-right:6px;color:#6366F1"></i>Business Pro</div>' +
+            '<div style="font-size:12px;color:#3730A3;margin-top:3px"><strong>Illimitées</strong> — aucune restriction</div>' +
+            '<div style="font-size:11px;color:#4338CA;margin-top:2px">Toutes les fonctionnalités débloquées</div>' +
+          '</div>' +
+          '<button onclick="document.getElementById(\'collab-limit-modal\').remove();openSubPage()" ' +
+            'style="background:linear-gradient(135deg,#6366F1,#4F46E5);color:#fff;border:none;border-radius:10px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">' +
+            'Choisir' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+
+      /* Fermer */
+      '<button onclick="document.getElementById(\'collab-limit-modal\').remove()" ' +
+        'style="width:100%;padding:12px;background:#F1F5F9;border:none;border-radius:12px;font-size:14px;font-weight:600;color:#64748B;cursor:pointer">' +
+        'Attendre le renouvellement' +
+      '</button>' +
+
+    '</div>';
+
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
 /* ── Soumettre la demande de collaboration ── */
 function _collabSubmitPost() {
   if (!_currentUser) return;
@@ -25317,14 +25403,7 @@ function _collabSubmitPost() {
   var usedMonth = _getMonthlyCount('collab', _currentUser.email);
 
   if (maxCollab !== Infinity && usedMonth >= maxCollab) {
-    var profile  = loadUserProfile(_currentUser.email) || {};
-    var planName = profile.planType === 'premium' ? 'Premium' : profile.planType === 'business' ? 'Business Pro' : 'Gratuit';
-    _showPlanLimitModal(
-      '🤝 Limite mensuelle atteinte',
-      'Votre plan <strong>' + planName + '</strong> autorise <strong>' + maxCollab + ' annonce(s) de collaboration par mois</strong>.<br><br>' +
-      'Votre quota se renouvelle le <strong>' + _nextMonthReset() + '</strong>.',
-      'collab'
-    );
+    _showCollabLimitModal(maxCollab);
     return;
   }
 
