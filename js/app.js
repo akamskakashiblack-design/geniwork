@@ -24282,7 +24282,11 @@ function _mkOpenCreate() {
   card.innerHTML =
     '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>'+
     '<div style="padding:16px 20px 24px">'+
-    '<div style="font-size:16px;font-weight:800;color:#0F172A;margin-bottom:16px"><i class="fas fa-store" style="color:#6366F1;margin-right:8px"></i>Créer une annonce</div>'+
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'+
+      '<div style="font-size:16px;font-weight:800;color:#0F172A"><i class="fas fa-store" style="color:#6366F1;margin-right:8px"></i>Créer une annonce</div>'+
+      '<button onclick="(function(){var b=document.getElementById(\'mk-create-bg\');var c=document.getElementById(\'mk-create-card\');if(b)b.remove();if(c)c.remove();})()" '+
+        'style="width:32px;height:32px;border-radius:50%;border:none;background:#F1F5F9;color:#64748B;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>'+
+    '</div>'+
 
     /* Type */
     '<div style="margin-bottom:14px">'+
