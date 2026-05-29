@@ -2540,7 +2540,7 @@ function initApp(user) {
         } else {
           merged2 = Object.assign({}, existing2, data);
         }
-        try { localStorage.setItem('gw_profile_' + email2, JSON.stringify(merged2)); } catch(e2){}
+        try { localStorage.setItem('gw_profile_' + email2, JSON.stringify(merged2)); _invalidateProfileCache(email2); } catch(e2){}
         /* Si c'est l'utilisateur courant → synchronise les limites en temps réel */
         if (_currentUser && email2 === _currentUser.email) {
           try { _updateChatMsgCounter(); } catch(e2){}
@@ -4863,7 +4863,7 @@ function renderFeed(posts) {
   /* Debounce : si appelé plusieurs fois rapidement (sync Firebase), attend 300ms */
   if (_renderFeedTimer) {
     clearTimeout(_renderFeedTimer);
-    _renderFeedTimer = setTimeout(function() { _renderFeedTimer = null; _renderFeedNow(posts); }, 300);
+    _renderFeedTimer = setTimeout(function() { _renderFeedTimer = null; _renderFeedNow(posts); }, 600);
     return;
   }
   _renderFeedNow(posts);
@@ -5125,7 +5125,7 @@ function buildPostCard(post) {
 
     videoHtml =
       '<div class="post-video-wrap" id="pvw-' + post.id + '" style="' + wrapStyle + '" onclick="_openVideoFromPost(\'' + post.id + '\',' + (post.video.duration || 0) + ')">' +
-        '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + ' preload="metadata" muted playsinline loop ' +
+        '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + ' preload="none" muted playsinline loop ' +
           'style="' + vidStyle + '"></video>' +
         '<div class="post-video-thumb-overlay" id="fvo-' + post.id + '">' +
           '<div class="post-video-play-ico"><i class="fas fa-play"></i></div>' +
@@ -6464,10 +6464,16 @@ function blockUser(postId) {
    COMMENTAIRES — STOCKAGE PERSISTANT
 ══════════════════════════════════════════ */
 
+var _likersCache = {};
 function loadPostLikers(postId) {
-  return JSON.parse(localStorage.getItem('gw_likers_' + postId) || '[]');
+  var k = String(postId);
+  if (_likersCache[k]) return _likersCache[k];
+  var v = JSON.parse(localStorage.getItem('gw_likers_' + k) || '[]');
+  _likersCache[k] = v;
+  return v;
 }
 function savePostLikers(postId, likers) {
+  _likersCache[String(postId)] = likers; /* met à jour le cache */
   localStorage.setItem('gw_likers_' + postId, JSON.stringify(likers));
   if (_gwFbReady && _gwFbDB) {
     _gwFbDB.ref('gw/likes/' + postId).set(likers).catch(function(){});
@@ -10178,13 +10184,20 @@ function closeProfileModal() { /* compat — no-op */ }
 ══════════════════════════════════════════ */
 
 /* ── Storage ── */
+/* ── Cache mémoire profils (évite JSON.parse localStorage répété) ── */
+var _profileCache = {};
+function _invalidateProfileCache(email) { if (email) delete _profileCache[email]; }
+
 function loadUserProfile(email) {
+  if (!email) return null;
+  if (_profileCache[email] !== undefined) return _profileCache[email];
   var profile = JSON.parse(localStorage.getItem('gw_profile_' + email) || 'null');
   /* Restauration automatique depuis la sauvegarde dédiée si la photo manque */
   if (profile && !profile.photo) {
     var _backupPhoto = localStorage.getItem('gw_photo_' + email);
     if (_backupPhoto) { profile.photo = _backupPhoto; }
   }
+  _profileCache[email] = profile;
   return profile;
 }
 
@@ -10208,6 +10221,7 @@ function _pushProfileToFirebase(email, data) {
 }
 
 function saveUserProfile(email, data) {
+  _invalidateProfileCache(email); /* invalide le cache mémoire */
   var ts = Date.now();
   var saved = false;
   try {
