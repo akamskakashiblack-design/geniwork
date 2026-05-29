@@ -30,7 +30,7 @@ var _GW_PAYPAL_EMAIL     = 'geniwork.admin@gmail.com';
 var _GW_COMMISSION_RATE  = 0.01;
 
 var _MK_PLAN_LIMITS = {
-  free:     { maxListings: 5,        canAd: false, priority: false, durationDays: 30 },
+  free:     { maxListings: Infinity, canAd: false, priority: false, durationDays: 30 },
   premium:  { maxListings: Infinity, canAd: true,  priority: false, durationDays: 60 },
   business: { maxListings: Infinity, canAd: true,  priority: true,  durationDays: 60 }
 };
