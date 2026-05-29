@@ -5906,18 +5906,11 @@ function _openOfficialVideo(postId) {
     }
   }
 
-  /* Sinon charge depuis IndexedDB (appareil d'origine) puis Storage */
-  var idbId = typeof post.video === 'object' ? post.video.idbId : null;
-  if (idbId) {
-    _gwLoadVideoBlob(idbId, function(blob) {
-      if (!blob) { _tryStorageFallback(); return; }
-      var bUrl = URL.createObjectURL(blob);
-      post.video.url = bUrl;
-      openVideoPlayer(bUrl, dur);
-    });
-  } else {
-    _tryStorageFallback();
-  }
+  /* Résoudre via cache commun (IndexedDB → Firebase) */
+  _gwResolveVideoUrl(post, function(url) {
+    if (url) { openVideoPlayer(url, dur); }
+    else { _tryStorageFallback(); }
+  });
 }
 
 function _openVideoFromPost(postId, duration) {
@@ -5939,43 +5932,36 @@ function _openVideoFromPost(postId, duration) {
 function _openVideoClassic(post, duration) {
   var postId = String(post.id);
 
-  function _tryFirebaseFallback() {
-    if (_gwFbReady && _gwFbDB) {
-      showToast('Chargement vidéo…', '');
-      _gwFbDB.ref('gw/post_videos/' + postId).once('value').then(function(snap) {
-        var d = snap.val();
-        if (d && d.url) {
-          post.video.url = d.url;
-          var vEl = document.getElementById('fv-' + postId);
-          if (vEl) vEl.src = d.url;
-          openVideoPlayer(d.url, duration);
-          _vpPopulateDetail(post);
-        } else { showToast('Vidéo non disponible sur cet appareil', 'err'); }
-      }).catch(function() { showToast('Vidéo non disponible sur cet appareil', 'err'); });
-    } else { showToast('Vidéo non disponible sur cet appareil', 'err'); }
-  }
-
   /* Vue + milestone */
   var _newViews = _incrementVideoViews(postId);
   _checkViewMilestone(postId, post.ownerEmail || null, _newViews);
 
-  if (post.video.url) {
-    openVideoPlayer(post.video.url, duration);
+  /* Ouvre le player UI immédiatement — ne pas attendre l'URL */
+  _vpPopulateDetail(post);
+  var modal = document.getElementById('video-player-modal');
+  var video  = document.getElementById('vp-video');
+  if (modal) modal.style.display = 'flex';
+
+  /* Si URL déjà résolue → lecture directe */
+  if (_gwVidUrlCache[postId] || post.video.url) {
+    var readyUrl = _gwVidUrlCache[postId] || post.video.url;
+    openVideoPlayer(readyUrl, duration);
     _vpPopulateDetail(post);
     return;
   }
-  if (post.video.idbId) {
-    _gwLoadVideoBlob(post.video.idbId, function(blob) {
-      if (blob) {
-        var b = URL.createObjectURL(blob);
-        post.video.url = b;
-        openVideoPlayer(b, duration);
-        _vpPopulateDetail(post);
-      } else { _tryFirebaseFallback(); }
-    });
-    return;
+
+  /* Sinon résoudre en arrière-plan (IndexedDB → Firebase) */
+  if (video) {
+    video.removeAttribute('src');
+    /* Spinner visuel pendant la résolution */
+    var vpIco = document.getElementById('vp-play-ico');
+    if (vpIco) vpIco.className = 'fas fa-spinner fa-spin';
   }
-  _tryFirebaseFallback();
+  _gwResolveVideoUrl(post, function(url) {
+    if (!url) { showToast('Vidéo non disponible sur cet appareil', 'err'); return; }
+    openVideoPlayer(url, duration);
+    _vpPopulateDetail(post);
+  });
 }
 
 /* ── Helper: build a single comment item HTML ── */
@@ -8231,6 +8217,70 @@ var _vpFlashTimer = null;
    • Comptage de vues : 1 vue / utilisateur / vidéo
 ══════════════════════════════════════════ */
 var _vsItems    = [];   /* [{postId,post,el,videoEl,loaded}] */
+
+/* ── Cache mémoire des URLs vidéo (évite les appels Firebase répétés) ──
+   Clé : String(post.id), Valeur : URL (blob: ou https://)              */
+var _gwVidUrlCache = {};
+
+/* Résout l'URL d'une vidéo — cache mémoire → post.video.url → IndexedDB → Firebase */
+function _gwResolveVideoUrl(post, cb) {
+  var postId = String(post.id);
+  /* 1. Cache mémoire */
+  if (_gwVidUrlCache[postId]) { cb(_gwVidUrlCache[postId]); return; }
+  /* 2. URL déjà dans le post */
+  var url = typeof post.video === 'string' ? post.video
+          : (post.video && post.video.url ? post.video.url : '');
+  if (url) { _gwVidUrlCache[postId] = url; cb(url); return; }
+  /* 3. Blob IndexedDB (appareil d'origine) */
+  var idbId = post.video && post.video.idbId ? post.video.idbId : null;
+  if (idbId) {
+    _gwLoadVideoBlob(idbId, function(blob) {
+      if (blob) {
+        var bUrl = URL.createObjectURL(blob);
+        if (typeof post.video === 'object') post.video.url = bUrl;
+        _gwVidUrlCache[postId] = bUrl;
+        cb(bUrl);
+      } else {
+        _gwResolveVideoUrlFromFb(post, cb);
+      }
+    });
+    return;
+  }
+  /* 4. Firebase */
+  _gwResolveVideoUrlFromFb(post, cb);
+}
+
+function _gwResolveVideoUrlFromFb(post, cb) {
+  var postId = String(post.id);
+  if (!_gwFbReady || !_gwFbDB) { cb(''); return; }
+  _gwFbDB.ref('gw/post_videos/' + postId).once('value').then(function(snap) {
+    var d = snap.val();
+    if (d && d.url) {
+      if (typeof post.video === 'object') post.video.url = d.url;
+      _gwVidUrlCache[postId] = d.url;
+      cb(d.url);
+    } else { cb(''); }
+  }).catch(function() { cb(''); });
+}
+
+/* Pré-charge silencieusement l'URL + metadata d'un item shorts (idx) */
+function _vsPreloadItem(idx) {
+  if (idx < 0 || idx >= _vsItems.length) return;
+  var item = _vsItems[idx];
+  if (item.loaded || item._preloading) return;
+  item._preloading = true;
+  _gwResolveVideoUrl(item.post, function(url) {
+    if (!url || item.loaded) return;
+    if (typeof item.post.video === 'object') item.post.video.url = url;
+    _gwVidUrlCache[String(item.postId)] = url;
+    /* Pose la src + demande metadata seulement (pas de lecture) */
+    if (!item.videoEl.src) {
+      item.videoEl.src = url;
+      item.videoEl.preload = 'metadata';
+      item.videoEl.load();
+    }
+  });
+}
 var _vsCurIdx   = -1;
 var _vsObserver = null;
 var _vsEndTimer = null;
@@ -8287,6 +8337,13 @@ function openVideoScroll(startPostId) {
   /* Joue la vidéo de départ */
   _vsActivate(startIdx);
 
+  /* Pré-résout les URLs en arrière-plan pour les prochaines vidéos */
+  setTimeout(function() {
+    _vsPreloadItem(startIdx + 1);
+    _vsPreloadItem(startIdx + 2);
+    _vsPreloadItem(startIdx - 1);
+  }, 800);
+
   /* Observer pour auto-play au scroll */
   _vsSetupObserver();
 }
@@ -8318,7 +8375,7 @@ function _vsCreateItem(post, idx) {
 
   el.innerHTML =
     /* Vidéo */
-    '<video class="vs-video" playsinline webkit-playsinline preload="none"></video>' +
+    '<video class="vs-video" playsinline webkit-playsinline preload="metadata"></video>' +
     /* Zone tap (play/pause au toucher) */
     '<div class="vs-tap-zone" onclick="vsTogglePlay(' + idx + ')"></div>' +
     /* Flash icône centrale au tap */
@@ -8379,49 +8436,18 @@ function _vsCreateItem(post, idx) {
 /* ── Charge la source vidéo d'un item (lazy) ── */
 function _vsLoadSrc(item, callback) {
   if (item.loaded) { callback && callback(); return; }
-  var post    = item.post;
   var videoEl = item.videoEl;
-
-  function _done(src) {
-    if (src) { videoEl.src = src; videoEl.load(); }
+  _gwResolveVideoUrl(item.post, function(url) {
+    if (url && videoEl.src !== url) { videoEl.src = url; }
+    if (url) videoEl.load();
     item.loaded = true;
+    item._preloading = false;
     callback && callback();
-  }
-
-  /* 1. URL déjà connue */
-  var url = typeof post.video === 'string' ? post.video
-          : (post.video && post.video.url ? post.video.url : '');
-  if (url) { _done(url); return; }
-
-  /* 2. Blob IndexedDB (appareil d'origine) */
-  var idbId = post.video && post.video.idbId ? post.video.idbId : null;
-  if (idbId) {
-    _gwLoadVideoBlob(idbId, function(blob) {
-      if (blob) {
-        var bUrl = URL.createObjectURL(blob);
-        if (post.video && typeof post.video === 'object') post.video.url = bUrl;
-        _done(bUrl);
-      } else {
-        _vsFetchFb(post, _done);
-      }
-    });
-    return;
-  }
-
-  /* 3. Firebase Storage */
-  _vsFetchFb(post, _done);
+  });
 }
 
-function _vsFetchFb(post, cb) {
-  if (!_gwFbReady || !_gwFbDB) { cb(''); return; }
-  _gwFbDB.ref('gw/post_videos/' + post.id).once('value').then(function(snap) {
-    var d = snap.val();
-    if (d && d.url) {
-      if (post.video && typeof post.video === 'object') post.video.url = d.url;
-      cb(d.url);
-    } else { cb(''); }
-  }).catch(function() { cb(''); });
-}
+/* Gardé pour compatibilité — utilise maintenant _gwResolveVideoUrlFromFb */
+function _vsFetchFb(post, cb) { _gwResolveVideoUrlFromFb(post, cb); }
 
 /* ── Active (charge + joue) un item ── */
 function _vsActivate(idx) {
@@ -8436,6 +8462,9 @@ function _vsActivate(idx) {
   _vsClearEndTimer();
 
   var item = _vsItems[idx];
+  /* Pré-charge en silence la vidéo suivante et la précédente */
+  setTimeout(function() { _vsPreloadItem(idx + 1); _vsPreloadItem(idx - 1); }, 300);
+
   _vsLoadSrc(item, function() {
     if (_vsCurIdx !== idx) return; /* index changé pendant chargement */
     var v = item.videoEl;
