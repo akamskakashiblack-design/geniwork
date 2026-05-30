@@ -876,6 +876,16 @@ function _gwFbSyncStart() {
   /* ── Paiements / abonnements ── */
   _listen('payments', 'gw_payments', function() { _admSync('payments'); });
 
+  /* ── Config plans (activé/désactivé par admin) ── */
+  _listen('plans_config', 'gw_plans_config', function() {
+    /* Si page abonnements ouverte → masquer/afficher les cartes en temps réel */
+    var ss = document.getElementById('sub-screen');
+    if (ss && ss.classList.contains('open')) {
+      try { _subRenderCurrentPlan(); } catch(e) {}
+    }
+    _admSync('dashboard');
+  });
+
   /* ── Profils utilisateurs — changements visibles en temps réel dans l'admin ── */
   _gwFbDB.ref('gw/profiles').on('child_changed', function(snap) {
     if (!_adminUser) return;
@@ -18631,34 +18641,27 @@ function _subRenderCurrentPlan() {
   /* Chip sidebar */
   _subUpdateSidebarChip(planType);
 
-  /* ── Appliquer l'état activé/désactivé des plans (config admin) ── */
+  /* ── Appliquer l'état activé/désactivé des plans (config admin) ──
+     Plan désactivé = complètement masqué pour les utilisateurs       */
   var cfg = _admGetPlansConfig();
   ['premium', 'business'].forEach(function(p) {
-    var card = document.getElementById('sub-card-' + p);
-    var btn  = document.getElementById('sub-btn-' + p);
+    var card    = document.getElementById('sub-card-' + p);
+    var btn     = document.getElementById('sub-btn-' + p);
     var enabled = p === 'premium' ? cfg.premiumEnabled : cfg.businessEnabled;
-    if (!card || !btn) return;
+    if (!card) return;
+
     if (!enabled) {
-      card.classList.add('sub-plan-disabled');
-      btn.disabled = true;
-      if (loadUserProfile(_currentUser.email || '').planType !== p) {
-        btn.innerHTML = '<i class="fas fa-ban"></i> Indisponible';
-      }
-      /* Ajouter/mettre à jour la bannière "indisponible" */
-      var bann = card.querySelector('.sub-unavail-banner');
-      if (!bann) {
-        bann = document.createElement('div');
-        bann.className = 'sub-unavail-banner';
-        bann.innerHTML = '<i class="fas fa-circle-pause"></i> Temporairement indisponible';
-        card.insertBefore(bann, card.firstChild);
-      }
+      /* Masquer complètement la carte */
+      card.style.display = 'none';
     } else {
+      /* Afficher la carte */
+      card.style.display = '';
       card.classList.remove('sub-plan-disabled');
       var existing = card.querySelector('.sub-unavail-banner');
       if (existing) existing.remove();
       /* Restaurer le bouton si pas plan courant */
-      var pBtns = { premium: '<i class="fas fa-crown"></i> Passer Premium', business: '<i class="fas fa-briefcase"></i> Passer Business Pro' };
       if (btn && !btn.classList.contains('sub-cta-current')) {
+        var pBtns = { premium: '<i class="fas fa-crown"></i> Passer Premium', business: '<i class="fas fa-briefcase"></i> Passer Business Pro' };
         btn.disabled = false;
         btn.innerHTML = pBtns[p];
       }
@@ -19758,7 +19761,10 @@ function _admGetPlansConfig() {
   try { return JSON.parse(localStorage.getItem('gw_plans_config') || '{"premiumEnabled":true,"businessEnabled":true}'); }
   catch(e) { return { premiumEnabled: true, businessEnabled: true }; }
 }
-function _admSavePlansConfig(cfg) { localStorage.setItem('gw_plans_config', JSON.stringify(cfg)); }
+function _admSavePlansConfig(cfg) {
+  localStorage.setItem('gw_plans_config', JSON.stringify(cfg));
+  _gwFbSet('plans_config', cfg); /* Sync Firebase → tous les appareils */
+}
 
 /* ── Helpers : paiements ── */
 function _admGetPayments() {
