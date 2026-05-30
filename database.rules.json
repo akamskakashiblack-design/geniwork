@@ -191,8 +191,8 @@
         ".write": "auth != null"
       },
       "reports": {
+        ".read":  "auth != null",
         "$userFbKey": {
-          ".read":  "auth != null",
           ".write": "auth != null"
         }
       },
@@ -222,6 +222,44 @@
       },
       "settings_logo": {
         ".read":  true,
+        ".write": "auth != null"
+      },
+      "online": {
+        ".read":  "auth != null",
+        "$userFbKey": {
+          ".write": "auth != null"
+        }
+      },
+      "payments": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "plans_config": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
+      "ban_appeals": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "admin_log": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "admin_requests": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "admin_extra_perms": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "admins": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "sadmin": {
+        ".read":  "auth != null",
         ".write": "auth != null"
       }
     }
