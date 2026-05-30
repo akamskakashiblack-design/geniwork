@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260576" />
+  <link rel="stylesheet" href="css/style.css?v=20260577" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -3371,6 +3371,10 @@
             <span class="adm-topbar-date" id="adm-topbar-date"></span>
           </div>
           <div class="adm-topbar-right">
+            <button id="adm-refresh-btn" onclick="_admRefreshAll(this)" title="Actualiser les données"
+              style="display:flex;align-items:center;gap:6px;padding:7px 14px;background:#F1F5F9;border:none;border-radius:8px;font-size:13px;font-weight:600;color:#374151;cursor:pointer;transition:background .15s">
+              <i class="fas fa-rotate-right" id="adm-refresh-ico"></i> Actualiser
+            </button>
             <div class="adm-topbar-stat" id="adm-topbar-stat">
               <i class="fas fa-circle" style="color:#22C55E;font-size:8px"></i> Panneau actif
             </div>
@@ -3387,7 +3391,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260576"></script>
+  <script src="js/app.js?v=20260577"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">

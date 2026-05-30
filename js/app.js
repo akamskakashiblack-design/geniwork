@@ -20450,6 +20450,70 @@ function _admSwitchTab(tab) {
 }
 
 /* Met à jour les badges de nombre sur la nav */
+/* ── Bouton Actualiser du panel admin ── */
+function _admRefreshAll(btn) {
+  var ico = document.getElementById('adm-refresh-ico');
+  if (btn)  { btn.disabled = true;  btn.style.opacity = '.6'; }
+  if (ico)  { ico.style.animation = 'spin .7s linear infinite'; }
+
+  function _done() {
+    if (btn)  { btn.disabled = false; btn.style.opacity = '1'; }
+    if (ico)  { ico.style.animation = ''; }
+    showToast('Panel actualisé ✓', 'ok');
+  }
+
+  /* Sync Firebase en parallèle */
+  var tasks = [];
+  if (_gwFbReady && _gwFbDB) {
+    var paths = [
+      ['gw/users',           'gw_users'],
+      ['gw/reports',         null],   /* géré séparément par son listener */
+      ['gw/payments',        'gw_payments'],
+      ['gw/bans',            'gw_bans'],
+      ['gw/badge_requests',  'gw_badge_requests'],
+      ['gw/admin_tasks',     'gw_admin_tasks'],
+      ['gw/admins',          'gw_admins'],
+      ['gw/mk_txns',         'gw_mk_txns'],
+      ['gw/mk_listings',     'gw_mk_listings'],
+      ['gw/collab_requests', 'gw_collab_requests'],
+      ['gw/online',          null]
+    ];
+    var pending = paths.length;
+    paths.forEach(function(pair) {
+      _gwFbDB.ref(pair[0]).once('value').then(function(snap) {
+        var val = snap.val();
+        if (val !== null && pair[1]) {
+          try {
+            var stored = Array.isArray(val) ? val : Object.values(val);
+            localStorage.setItem(pair[1], JSON.stringify(stored));
+          } catch(e) {}
+        }
+        if (pair[0] === 'gw/online') {
+          var cnt = val ? Object.keys(val).length : 0;
+          localStorage.setItem('gw_online_count', cnt);
+          var el = document.getElementById('adm-online-count');
+          if (el) el.textContent = cnt;
+        }
+        pending--;
+        if (pending <= 0) {
+          /* Tout récupéré → re-render le panel + badges */
+          try { _admUpdateNavBadges(); } catch(e) {}
+          try { _admRender(); } catch(e) {}
+          _done();
+        }
+      }).catch(function() {
+        pending--;
+        if (pending <= 0) { try { _admRender(); } catch(e){} _done(); }
+      });
+    });
+  } else {
+    /* Pas de Firebase → re-render depuis localStorage */
+    try { _admUpdateNavBadges(); } catch(e) {}
+    try { _admRender(); } catch(e) {}
+    _done();
+  }
+}
+
 function _admUpdateNavBadges() {
   var appeals   = _gwGetAppeals().filter(function(a){ return a.status === 'pending'; }).length;
   var unreadThr = _getSupportThreads().reduce(function(s,t){ return s + (t.unreadAdmin||0); }, 0);
