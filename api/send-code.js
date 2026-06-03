@@ -1,16 +1,15 @@
 /* ═══════════════════════════════════════════════════════════════
-   GENIWORK — Vercel Serverless Function : envoi du code de vérification
+   GENIWORK — Envoi du code de vérification / réinitialisation
    POST /api/send-code  { email, code, type }
    type = "register" | "reset"
 
-   Variables d'env requises :
-     GMAIL_USER          → ex: geniwork.noreply@gmail.com
-     GMAIL_APP_PASSWORD  → mot de passe d'application Google
-
-   Pour meilleure délivrabilité (recommandé) :
-     Passer à Resend.com — gratuit 100/jour, DKIM inclus :
-     RESEND_API_KEY → clé API Resend
-     (décommentez le bloc Resend ci-dessous)
+   Ordre de priorité des expéditeurs :
+   1. Resend.com  (DKIM/SPF automatique — recommandé, gratuit 100/j)
+      → Variable Vercel : RESEND_API_KEY
+   2. Brevo SMTP  (300 emails/jour gratuits, DKIM inclus)
+      → Variables Vercel : BREVO_USER + BREVO_PASS
+   3. Gmail SMTP  (fallback, risque spam)
+      → Variables Vercel : GMAIL_USER + GMAIL_APP_PASSWORD
 ═══════════════════════════════════════════════════════════════ */
 
 var nodemailer = require('nodemailer');
@@ -39,77 +38,118 @@ module.exports = async function handler(req, res) {
 
   var htmlContent = isReset ? buildResetHtml(code, email) : buildRegisterHtml(code, email);
   var textContent = isReset
-    ? `Geniwork — Réinitialisation de mot de passe\n\nCode : ${code}\n\nCe code expire dans 10 minutes.\nSi vous n'avez pas demandé cette réinitialisation, ignorez cet e-mail.`
-    : `Geniwork — Vérification de compte\n\nBonjour,\n\nVotre code de vérification : ${code}\n\nCe code expire dans 10 minutes.\nSi vous n'avez pas créé ce compte, ignorez cet e-mail.`;
+    ? 'Geniwork — Réinitialisation\n\nCode : ' + code + '\n\nExpire dans 10 minutes.\nSi vous n\'avez pas demandé cela, ignorez cet e-mail.'
+    : 'Geniwork — Vérification de compte\n\nCode : ' + code + '\n\nExpire dans 10 minutes.\nSi vous n\'avez pas créé ce compte, ignorez cet e-mail.';
 
-  /* ── Option 1 : Resend.com (meilleure délivrabilité — recommandé) ──
+  /* ══════════════════════════════════════
+     1. RESEND.COM — Priorité maximale
+        DKIM/SPF gérés automatiquement
+        → Atterrit dans la boîte principale
+     ══════════════════════════════════════ */
   if (process.env.RESEND_API_KEY) {
     try {
-      const { Resend } = require('resend');
-      const resend = new Resend(process.env.RESEND_API_KEY);
-      await resend.emails.send({
-        from:    'Geniwork <noreply@geniwork.app>',
+      var resendResp = await fetch('https://api.resend.com/emails', {
+        method:  'POST',
+        headers: {
+          'Authorization': 'Bearer ' + process.env.RESEND_API_KEY,
+          'Content-Type':  'application/json'
+        },
+        body: JSON.stringify({
+          from:    'Geniwork <onboarding@resend.dev>',
+          to:      [email],
+          subject: subject,
+          html:    htmlContent,
+          text:    textContent
+        })
+      });
+      var resendData = await resendResp.json();
+      if (resendResp.ok && resendData.id) {
+        console.log('[Geniwork] ✅ Email envoyé via Resend:', resendData.id);
+        return res.status(200).json({ ok: true, via: 'resend' });
+      }
+      console.warn('[Geniwork] ⚠️ Resend échec:', JSON.stringify(resendData));
+    } catch (err) {
+      console.error('[Geniwork] Resend erreur:', err.message);
+    }
+  }
+
+  /* ══════════════════════════════════════
+     2. BREVO (SendinBlue) — Fallback pro
+        SMTP Brevo → bonne délivrabilité
+        Créer compte sur brevo.com (gratuit)
+        SMTP Settings → login + mot de passe
+     ══════════════════════════════════════ */
+  if (process.env.BREVO_USER && process.env.BREVO_PASS) {
+    try {
+      var brevoTransport = nodemailer.createTransport({
+        host: 'smtp-relay.brevo.com',
+        port: 587,
+        secure: false,
+        auth: {
+          user: process.env.BREVO_USER,
+          pass: process.env.BREVO_PASS
+        }
+      });
+      await brevoTransport.sendMail({
+        from:    '"Geniwork" <' + process.env.BREVO_USER + '>',
         to:      email,
         subject: subject,
         html:    htmlContent,
         text:    textContent
       });
-      return res.status(200).json({ ok: true });
-    } catch(err) {
-      console.error('[Geniwork Resend]', err.message);
+      console.log('[Geniwork] ✅ Email envoyé via Brevo');
+      return res.status(200).json({ ok: true, via: 'brevo' });
+    } catch (err) {
+      console.error('[Geniwork] Brevo erreur:', err.message);
     }
   }
-  ── */
 
-  /* ── Option 2 : Gmail SMTP ── */
+  /* ══════════════════════════════════════
+     3. GMAIL SMTP — Fallback (risque spam)
+        Utiliser uniquement si pas de Resend/Brevo
+     ══════════════════════════════════════ */
   var gmailUser = process.env.GMAIL_USER;
   var gmailPwd  = process.env.GMAIL_APP_PASSWORD;
 
   if (!gmailUser || !gmailPwd) {
-    return res.status(500).json({ error: 'Configuration email manquante (GMAIL_USER / GMAIL_APP_PASSWORD)' });
+    console.error('[Geniwork] Aucun service email configuré.');
+    return res.status(500).json({ error: 'Configuration email manquante. Ajoutez RESEND_API_KEY dans Vercel.' });
   }
 
-  /* Message-ID unique — réduit le risque de spam */
   var msgId = '<' + Date.now() + '.' + Math.random().toString(36).slice(2) + '@geniwork.app>';
 
   try {
-    var transporter = nodemailer.createTransport({
+    var gmailTransport = nodemailer.createTransport({
       service: 'gmail',
-      auth: { user: gmailUser, pass: gmailPwd },
-      pool: true
+      auth: { user: gmailUser, pass: gmailPwd }
     });
-
-    await transporter.sendMail({
-      from:             '"Geniwork" <' + gmailUser + '>',
-      to:               email,
-      subject:          subject,
-      html:             htmlContent,
-      text:             textContent,         /* version texte brut — RÉDUIT LES SPAMS */
-      messageId:        msgId,
+    await gmailTransport.sendMail({
+      from:      '"Geniwork" <' + gmailUser + '>',
+      to:        email,
+      subject:   subject,
+      html:      htmlContent,
+      text:      textContent,
+      messageId: msgId,
       headers: {
-        /* En-têtes anti-spam essentiels */
         'List-Unsubscribe': '<mailto:' + gmailUser + '?subject=unsubscribe>',
-        'X-Mailer':         'Geniwork Mailer 1.0',
-        'X-Priority':       '1',
-        'Precedence':       'bulk'
+        'X-Mailer':         'Geniwork Mailer 1.0'
       }
     });
-
-    return res.status(200).json({ ok: true });
+    console.log('[Geniwork] ✅ Email envoyé via Gmail (risque spam)');
+    return res.status(200).json({ ok: true, via: 'gmail' });
   } catch (err) {
-    console.error('[Geniwork email]', err.message);
+    console.error('[Geniwork] Gmail erreur:', err.message);
     return res.status(500).json({ error: 'Envoi échoué : ' + err.message });
   }
 };
 
+/* ════════════════════════════════════
+   TEMPLATES HTML
+════════════════════════════════════ */
 function buildRegisterHtml(code, email) {
   return `<!DOCTYPE html>
 <html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Vérification Geniwork</title>
-</head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vérification Geniwork</title></head>
 <body style="margin:0;padding:0;background:#f0f2f5;font-family:'Segoe UI',Arial,sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f2f5;padding:32px 0;">
     <tr><td align="center">
@@ -121,9 +161,8 @@ function buildRegisterHtml(code, email) {
         <tr><td style="padding:40px 40px 24px;">
           <p style="color:#1a1a2e;font-size:16px;margin:0 0 8px;">Bonjour,</p>
           <p style="color:#555;font-size:15px;margin:0 0 28px;line-height:1.6;">
-            Merci de rejoindre <strong>Geniwork</strong> ! Pour finaliser la création de votre compte associé à<br/>
-            <strong style="color:#1a2a5e;">${email}</strong>,<br/>
-            entrez le code ci-dessous dans l'application :
+            Merci de rejoindre <strong>Geniwork</strong> !<br>
+            Pour activer votre compte <strong style="color:#1a2a5e;">${email}</strong>, entrez ce code :
           </p>
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr><td align="center" style="padding:8px 0 32px;">
@@ -133,13 +172,13 @@ function buildRegisterHtml(code, email) {
             </td></tr>
           </table>
           <p style="color:#888;font-size:13px;margin:0 0 8px;">⏱ Ce code expire dans <strong>10 minutes</strong>.</p>
-          <p style="color:#888;font-size:13px;margin:0 0 16px;">Si vous n'avez pas demandé ce code, ignorez cet e-mail.</p>
-          <p style="color:#bbb;font-size:12px;margin:0;background:#f8f9fb;padding:10px;border-radius:8px;">
-            💡 <strong>Vous ne trouvez pas cet email ?</strong> Vérifiez votre dossier <strong>Spams/Courriers indésirables</strong> et marquez-le comme "Pas un spam" pour les prochains emails.
-          </p>
+          <p style="color:#888;font-size:13px;margin:0 0 16px;">Si vous n'avez pas créé ce compte, ignorez cet e-mail.</p>
+          <div style="background:#FEF9C3;border-left:4px solid #EAB308;border-radius:8px;padding:10px 14px;font-size:12.5px;color:#854D0E;">
+            📬 <strong>Pas trouvé ?</strong> Vérifiez votre dossier <strong>Spams</strong> et marquez-le <em>"Pas un spam"</em>.
+          </div>
         </td></tr>
         <tr><td style="background:#f7f8fc;padding:20px 40px;text-align:center;border-top:1px solid #e8ecf4;">
-          <p style="color:#aaa;font-size:12px;margin:0;">© 2026 Geniwork · Tous droits réservés · Cet email a été envoyé automatiquement, merci de ne pas y répondre.</p>
+          <p style="color:#aaa;font-size:12px;margin:0;">© 2026 Geniwork · Email automatique, merci de ne pas répondre.</p>
         </td></tr>
       </table>
     </td></tr>
@@ -151,11 +190,7 @@ function buildRegisterHtml(code, email) {
 function buildResetHtml(code, email) {
   return `<!DOCTYPE html>
 <html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Réinitialisation Geniwork</title>
-</head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Réinitialisation Geniwork</title></head>
 <body style="margin:0;padding:0;background:#f0f2f5;font-family:'Segoe UI',Arial,sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f2f5;padding:32px 0;">
     <tr><td align="center">
@@ -167,9 +202,8 @@ function buildResetHtml(code, email) {
         <tr><td style="padding:40px 40px 24px;">
           <p style="color:#1a1a2e;font-size:16px;margin:0 0 8px;">Bonjour,</p>
           <p style="color:#555;font-size:15px;margin:0 0 28px;line-height:1.6;">
-            Une demande de réinitialisation de mot de passe a été effectuée pour le compte<br/>
-            <strong style="color:#1a2a5e;">${email}</strong>.<br/>
-            Utilisez ce code pour continuer :
+            Demande de réinitialisation pour <strong style="color:#1a2a5e;">${email}</strong>.<br>
+            Entrez ce code dans l'application :
           </p>
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr><td align="center" style="padding:8px 0 32px;">
@@ -179,13 +213,13 @@ function buildResetHtml(code, email) {
             </td></tr>
           </table>
           <p style="color:#888;font-size:13px;margin:0 0 8px;">⏱ Ce code expire dans <strong>10 minutes</strong>.</p>
-          <p style="color:#888;font-size:13px;margin:0 0 16px;">Si vous n'avez pas demandé cette réinitialisation, ignorez cet e-mail — votre compte reste sécurisé.</p>
-          <p style="color:#bbb;font-size:12px;margin:0;background:#f8f9fb;padding:10px;border-radius:8px;">
-            💡 <strong>Vous ne trouvez pas cet email ?</strong> Vérifiez votre dossier <strong>Spams/Courriers indésirables</strong>.
-          </p>
+          <p style="color:#888;font-size:13px;margin:0 0 16px;">Si vous n'avez pas fait cette demande, ignorez cet e-mail — votre compte est sécurisé.</p>
+          <div style="background:#FEF9C3;border-left:4px solid #EAB308;border-radius:8px;padding:10px 14px;font-size:12.5px;color:#854D0E;">
+            📬 <strong>Pas trouvé ?</strong> Vérifiez votre dossier <strong>Spams</strong>.
+          </div>
         </td></tr>
         <tr><td style="background:#f7f8fc;padding:20px 40px;text-align:center;border-top:1px solid #e8ecf4;">
-          <p style="color:#aaa;font-size:12px;margin:0;">© 2026 Geniwork · Tous droits réservés · Cet email a été envoyé automatiquement, merci de ne pas y répondre.</p>
+          <p style="color:#aaa;font-size:12px;margin:0;">© 2026 Geniwork · Email automatique, merci de ne pas répondre.</p>
         </td></tr>
       </table>
     </td></tr>
