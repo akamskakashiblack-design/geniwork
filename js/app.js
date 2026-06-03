@@ -14567,105 +14567,128 @@ function _dmClose() {
   }
 }
 
-/* ── Ouvre une conversation Firebase-first :
-      1. Charge tous les messages depuis Firebase (once value), fusionne avec la mémoire locale
-      2. Démarre child_added sur la même ref pour les messages en temps réel
-         _seenIds est le seul garde-fou contre les doublons ── */
+/* ══════════════════════════════════════════════════════════════════
+   _dmOpen — Architecture SIMPLIFIÉE sans race condition
+   ─────────────────────────────────────────────────────────────────
+   Un seul listener child_added sur gw/dm_msgs/{fbKey} :
+   • Quand la conv s'ouvre  → child_added rejoue tous les msgs existants
+   • Nouveau msg arrivant   → child_added fire automatiquement
+   • _appendBubble() empêche les doublons via data-msg-id dans le DOM
+   ─────────────────────────────────────────────────────────────────
+   Eliminé : once('value') + child_added imbriqué → c'était la source
+   de la race condition qui faisait disparaître les messages texte.
+══════════════════════════════════════════════════════════════════ */
 function _dmOpen(conv) {
   _dmClose();
-  if (!conv || conv.isGroup || !conv.email || !_currentUser || !_gwFbDB) return;
+  if (!conv || conv.isGroup || !conv.email || !_currentUser) return;
 
-  var fbKey   = _dmFbKey(_currentUser.email, conv.email);
-  /* thisRef est capturé localement → évite que des callbacks périmés
-     n'utilisent le _dmRef d'une conversation plus récente */
-  var thisRef = _gwFbDB.ref('gw/dm_msgs/' + fbKey);
-  _dmRef    = thisRef;
-  _dmRefKey = fbKey;
-
-  /* ── Helper : ajoute une bulle dans le DOM si elle n'y est pas encore ── */
-  function _appendBubble(box, msg) {
-    var idStr = String(msg.id);
-    if (box.querySelector('[data-msg-id="' + idStr + '"]')) return;  /* déjà là */
-    var isMine = _currentUser && msg.from === _currentUser.email;
-    var row = document.createElement('div');
-    row.className = 'chat-msg-row ' + (isMine ? 'mine' : 'theirs');
-    row.setAttribute('data-msg-id', idStr);
-    row.innerHTML = _buildBubbleHtml(msg, isMine);
-    box.appendChild(row);
+  /* Firebase requis pour les DM */
+  if (!_gwFbDB) {
+    showToast('Messagerie non disponible — Firebase non connecté', 'err');
+    return;
   }
 
-  /* Snapshot Firebase initial */
-  thisRef.once('value', function(snap) {
-    /* Stale-check : si _dmOpen a été rappelé entre-temps → abandon */
-    if (_dmRef !== thisRef || _dmRefKey !== fbKey) return;
-    var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
-    if (!activeConv) return;
+  var fbKey   = _dmFbKey(_currentUser.email, conv.email);
+  var ref     = _gwFbDB.ref('gw/dm_msgs/' + fbKey);
+  _dmRef      = ref;
+  _dmRefKey   = fbKey;
 
-    /* Messages depuis Firebase */
-    var fbMsgs = [];
-    if (snap && snap.val()) {
-      Object.keys(snap.val()).forEach(function(k) {
-        var m = snap.val()[k];
-        if (m && m.id && m.from) fbMsgs.push(m);
-      });
+  /* Vide la boîte de messages pour afficher proprement */
+  var box = document.getElementById('chat-messages');
+  if (box) box.innerHTML = '';
+
+  /* Indicateur de chargement */
+  if (box) {
+    box.innerHTML = '<div style="text-align:center;padding:32px;color:#94A3B8;font-size:13px">' +
+      '<i class="fas fa-spinner fa-spin" style="font-size:20px;display:block;margin-bottom:8px"></i>' +
+      'Chargement des messages…</div>';
+  }
+
+  /* ── child_added : unique source de vérité ─────────────────────
+     Firebase rejoue TOUS les enfants existants au premier attach,
+     puis envoie les nouveaux en temps réel.
+     _appendBubble() (via data-msg-id) garantit l'idempotence.     */
+  var firstBatch = true;
+  var batchBuffer = [];
+
+  ref.on('child_added', function(snap) {
+    /* Stale-check : protège contre les callbacks d'une conv fermée */
+    if (_dmRef !== ref || _dmRefKey !== fbKey) return;
+
+    var msg = snap.val();
+    if (!msg || !msg.id || !msg.from) return;
+
+    if (firstBatch) {
+      /* Accumule le premier lot → rendu groupé après 150 ms */
+      batchBuffer.push(msg);
+    } else {
+      /* Message temps réel → rendu immédiat */
+      _dmRenderMsg(msg, ref, fbKey);
     }
-
-    /* Fusion Firebase + messages locaux en attente (envoyés mais pas encore confirmés) */
-    var fbIds = {};
-    fbMsgs.forEach(function(m) { fbIds[String(m.id)] = true; });
-    var localPending = (activeConv.messages || []).filter(function(m) {
-      return m && m.id && !fbIds[String(m.id)];
-    });
-    var merged = fbMsgs.concat(localPending);
-    merged.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-
-    activeConv.messages = merged;
-    activeConv.unread   = 0;
-
-    /* ── Rendu INCRÉMENTAL — on n'efface JAMAIS le DOM existant ──────────
-       Cela évite la disparition de messages texte envoyés juste avant ce
-       callback (race condition innerHTML vs appendChild de sendChatMessage) */
-    var box = document.getElementById('chat-messages');
-    if (box) {
-      merged.forEach(function(m) { _appendBubble(box, m); });
-      setTimeout(_scrollChatToBottom, 60);
-    }
-
-    /* Index de déduplication pour child_added */
-    var _seenIds = {};
-    merged.forEach(function(m) { _seenIds[String(m.id)] = true; });
-
-    /* ── Listener temps réel ─────────────────────────────────────────── */
-    thisRef.on('child_added', function(snap2) {
-      /* Stale-check par identité objet */
-      if (_dmRef !== thisRef || _dmRefKey !== fbKey) return;
-      var msg = snap2.val();
-      if (!msg || !msg.id) return;
-      var idStr = String(msg.id);
-
-      if (_seenIds[idStr]) return;
-      _seenIds[idStr] = true;
-
-      var conv2 = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
-      if (!conv2) return;
-
-      if (!conv2.messages.some(function(m) { return String(m.id) === idStr; })) {
-        conv2.messages.push(msg);
-        conv2.messages.sort(function(a, b) { return (Number(a.id)||0) - (Number(b.id)||0); });
-      }
-
-      var lbl = msg.text
-        || (msg.type === 'img' ? '📷 Photo' : msg.type === 'video' ? '🎥 Vidéo' : '📎 ' + (msg.fileName || 'Fichier'));
-      conv2.lastMsg = lbl;
-      conv2.lastAt  = msg.at || Date.now();
-
-      var box2 = document.getElementById('chat-messages');
-      if (box2) { _appendBubble(box2, msg); _scrollChatToBottom(); }
-      renderConversations();
-    });
   }, function(err) {
-    console.error('[DM] Erreur chargement messages:', err && err.code);
+    console.error('[DM] ❌ child_added erreur:', err && err.code, err && err.message);
+    if (box) box.innerHTML = '<div style="text-align:center;padding:32px;color:#EF4444;font-size:13px">' +
+      '<i class="fas fa-exclamation-circle" style="display:block;margin-bottom:8px;font-size:20px"></i>' +
+      'Impossible de charger les messages.<br><small>' + (err && err.code || '') + '</small></div>';
   });
+
+  /* Rendu groupé du premier lot (messages historiques) */
+  setTimeout(function() {
+    if (_dmRef !== ref || _dmRefKey !== fbKey) return;
+    firstBatch = false;
+
+    var b = document.getElementById('chat-messages');
+    if (b) b.innerHTML = ''; /* vide le spinner */
+
+    /* Trie chronologiquement avant de rendre */
+    batchBuffer.sort(function(a, b2) { return (Number(a.id)||0) - (Number(b2.id)||0); });
+    batchBuffer.forEach(function(m) { _dmRenderMsg(m, ref, fbKey); });
+    batchBuffer = [];
+
+    setTimeout(_scrollChatToBottom, 60);
+
+    /* Marque les messages comme lus */
+    var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+    if (activeConv) { activeConv.unread = 0; }
+    renderConversations();
+  }, 200);
+}
+
+/* ── Rend un message dans le DOM + met à jour l'état de la conversation ── */
+function _dmRenderMsg(msg, ref, fbKey) {
+  if (_dmRef !== ref || _dmRefKey !== fbKey) return;
+
+  var box = document.getElementById('chat-messages');
+  if (!box) return;
+
+  var idStr  = String(msg.id);
+  var isMine = _currentUser && msg.from === _currentUser.email;
+
+  /* Idempotence : ne pas ajouter si déjà présent */
+  if (box.querySelector('[data-msg-id="' + idStr + '"]')) return;
+
+  var row = document.createElement('div');
+  row.className = 'chat-msg-row ' + (isMine ? 'mine' : 'theirs');
+  row.setAttribute('data-msg-id', idStr);
+  row.innerHTML = _buildBubbleHtml(msg, isMine);
+  box.appendChild(row);
+  _scrollChatToBottom();
+
+  /* Met à jour la conv dans DEMO_CONVERSATIONS */
+  var conv2 = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (conv2) {
+    if (!conv2.messages) conv2.messages = [];
+    if (!conv2.messages.some(function(m) { return String(m.id) === idStr; })) {
+      conv2.messages.push(msg);
+    }
+    var lbl = msg.text ||
+      (msg.type === 'img'   ? '📷 Photo' :
+       msg.type === 'video' ? '🎥 Vidéo' :
+       '📎 ' + (msg.fileName || 'Fichier'));
+    conv2.lastMsg = lbl;
+    conv2.lastAt  = msg.at || Date.now();
+    renderConversations();
+  }
 }
 
 /* ── Écrit un message dans Firebase + met à jour l'inbox du destinataire ── */
@@ -15216,47 +15239,47 @@ function sendChatMessage() {
   _incDailyCount('msgs', _currentUser.email);
   _updateChatMsgCounter();  /* Met à jour le placeholder selon le nouveau compteur */
 
-  /* Stocke l'email réel de l'expéditeur (clé de livraison cross-session) */
+  var ts = Date.now();
   var newMsg = {
-    id:      Date.now(),
-    from:    _currentUser.email,
-    to:      conv.email,
-    text:    text,
-    type:    'text',
-    time:    _nowTime(),
-    at:      Date.now(),
-    replyTo: _chatReplyRef || undefined
+    id:   ts,
+    from: _currentUser.email,
+    to:   conv.email,
+    text: text,
+    type: 'text',
+    at:   ts
   };
-  cancelChatReply(); /* Efface le bandeau de citation */
-  conv.messages.push(newMsg);
-  conv.lastMsg = text;
-  conv.lastAt  = Date.now();
+  /* Ajoute replyTo seulement si présent (Firebase n'accepte pas undefined) */
+  if (_chatReplyRef) newMsg.replyTo = _chatReplyRef;
+  cancelChatReply();
 
-  /* Persistance */
-  if (conv.isGroup) {
-    _saveGroupMsg(conv, newMsg);
-    _saveGroupConvs();
-  } else {
-    /* DM : écriture directe dans Firebase */
-    _dmWriteMsg(conv, newMsg);
-    _saveDMConvList();
-    /* Push notification vers le destinataire */
-    if (conv.email) {
-      _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', text, 'msg-' + _gwFbKey(conv.email));
-    }
-  }
-
-  /* Ajoute la bulle dans le DOM */
+  /* ── Affichage optimiste immédiat pour l'expéditeur ── */
   var box = document.getElementById('chat-messages');
   if (box) {
     var row = document.createElement('div');
     row.className = 'chat-msg-row mine';
-    row.setAttribute('data-msg-id', newMsg.id);
+    row.setAttribute('data-msg-id', String(ts));
     row.innerHTML = _buildBubbleHtml(newMsg, true);
     box.appendChild(row);
     _scrollChatToBottom();
   }
+
+  /* Mise à jour sidebar */
+  conv.lastMsg = text;
+  conv.lastAt  = ts;
   renderConversations();
+
+  /* ── Écriture Firebase ── */
+  if (conv.isGroup) {
+    _saveGroupMsg(conv, newMsg);
+    _saveGroupConvs();
+  } else {
+    /* DM : child_added sur l'autre appareil affichera le message automatiquement */
+    _dmWriteMsg(conv, newMsg);
+    _saveDMConvList();
+    if (conv.email) {
+      _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', text, 'msg-' + _gwFbKey(conv.email));
+    }
+  }
 }
 
 /* ══════════════════════════════════════════

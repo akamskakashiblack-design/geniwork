@@ -20,10 +20,7 @@
       "dm_msgs": {
         "$dmFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null",
-          "$msgId": {
-            ".validate": "newData.hasChildren(['id','from','at']) && (newData.hasChild('text') || (newData.hasChild('type') && (newData.child('type').val() === 'img' || newData.child('type').val() === 'video' || newData.child('type').val() === 'file')))"
-          }
+          ".write": "auth != null"
         }
       },
       "dm_meta": {
