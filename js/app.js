@@ -17421,6 +17421,7 @@ function renderMarketplaceUserServices() {
     var card = document.createElement('div');
     card.className = 'mk-service-card mk-user-svc-card';
     card.dataset.category = svc.category;
+    card.dataset.type     = itemType;
 
     /* Lien vendeur cliquable → profil */
     var sellerClickFn = ownerEmail
@@ -17465,17 +17466,34 @@ function renderMarketplaceUserServices() {
 function setMkCat(btn, cat) {
   document.querySelectorAll('.mk-cat').forEach(function(b) { b.classList.remove('active'); });
   btn.classList.add('active');
-  /* Filtre les cartes par catégorie */
-  var catMap = {
-    all:'', dev:'Développement', design:'Design', redac:'Rédaction',
-    mkt:'Marketing', video:'Vidéo', more:''
-  };
-  var keyword = catMap[cat] || '';
+
+  /* ── Filtre par type de contenu ── */
   document.querySelectorAll('.mk-service-card').forEach(function(c) {
-    var title = c.querySelector('.mk-service-title');
-    var match = !keyword || (title && title.textContent.indexOf(keyword) !== -1);
-    c.style.display = match ? '' : 'none';
+    if (cat === 'all') { c.style.display = ''; return; }
+
+    /* type stocké dans data-type ou data-listing-type par les cartes */
+    var cardType = (c.dataset.type || c.dataset.listingType || '').toLowerCase();
+
+    /* Collaboration : les cartes de collaboration ont data-type="collab" ou la classe mk-collab-card */
+    var isCollab  = cardType === 'collab' || c.classList.contains('mk-collab-card');
+    var isEbook   = cardType === 'ebook';
+    var isProduct = cardType === 'product' || cardType === 'produit';
+    var isService = !isCollab && !isEbook && !isProduct; /* service = tout le reste */
+
+    var show = false;
+    if (cat === 'service')  show = isService;
+    if (cat === 'product')  show = isProduct;
+    if (cat === 'ebook')    show = isEbook;
+    if (cat === 'collab')   show = isCollab;
+
+    c.style.display = show ? '' : 'none';
   });
+
+  /* Afficher/masquer aussi la section "Offres de collaboration" */
+  var collabSection = document.getElementById('mk-collab-section');
+  if (collabSection) {
+    collabSection.style.display = (cat === 'all' || cat === 'collab') ? '' : 'none';
+  }
 }
 
 function filterMarketplace(q) {
@@ -26252,6 +26270,7 @@ function _mkRenderSystemListings() {
       cardE.id        = 'mk-lst-'+listing.id;
       cardE.className = 'mk-service-card mk-listing-card';
       cardE.style.cssText = 'cursor:pointer;overflow:hidden;position:relative';
+      cardE.dataset.type  = 'ebook';
       cardE.onclick   = function(){ _mkOpenDetail(listing.id); };
       var coverStyle  = listing.coverImage
         ? 'background:url(\''+listing.coverImage+'\') center/cover no-repeat'
@@ -26293,6 +26312,7 @@ function _mkRenderSystemListings() {
     var card = document.createElement('div');
     card.id        = 'mk-lst-'+listing.id;
     card.className = 'mk-service-card mk-listing-card';
+    card.dataset.type = listing.type || 'service';
     card.onclick   = function(){ _mkOpenDetail(listing.id); };
 
     var imgStyle = (listing.images && listing.images.length)

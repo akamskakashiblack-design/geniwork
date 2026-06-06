@@ -574,6 +574,28 @@
       <div id="sidebar-overlay" class="sidebar-overlay" onclick="closeSidebar()"></div>
       <aside id="app-sidebar" class="app-sidebar">
 
+        <!-- ── Navigation principale (desktop uniquement) ── -->
+        <div class="sdb-desktop-header" onclick="_admTapLogo()" style="cursor:default;user-select:none">
+          <img src="./img/logo princ.svg" alt="" class="sdb-desk-logo"/>
+          <span class="sdb-desk-brand">Geni<strong>work</strong></span>
+        </div>
+        <nav class="sdb-desktop-mainnav">
+          <button class="sdb-main-item active" id="sdb-nav-home" data-sdb-page="p-home" onclick="navTo(this,'p-home')">
+            <span class="sdb-main-icon"><i class="fas fa-home"></i></span><span class="sdb-main-label">Accueil</span>
+          </button>
+          <button class="sdb-main-item" id="sdb-nav-mk" data-sdb-page="p-marketplace" onclick="navTo(this,'p-marketplace');renderMarketplaceUserServices()">
+            <span class="sdb-main-icon"><i class="fas fa-store"></i></span><span class="sdb-main-label">Marketplace</span>
+          </button>
+          <button class="sdb-main-item" id="sdb-nav-msg" data-sdb-page="p-messages" onclick="navTo(this,'p-messages');renderConversations()" style="position:relative">
+            <span class="sdb-main-icon"><i class="fas fa-comment-dots"></i></span><span class="sdb-main-label">Messages</span>
+            <span class="msg-nav-badge hidden" id="msg-nav-badge-desk">0</span>
+          </button>
+          <button class="sdb-main-item sdb-publish-btn" onclick="navToPublish()">
+            <span class="sdb-main-icon"><i class="fas fa-plus"></i></span><span class="sdb-main-label">Publier</span>
+          </button>
+        </nav>
+        <div class="sdb-divider sdb-desktop-divider"></div>
+
         <!-- En-tête utilisateur -->
         <div class="sidebar-user-header" onclick="closeSidebar();showPage('p-profil');renderProfilePage()">
           <div class="sidebar-av" id="sidebar-av">
@@ -844,50 +866,44 @@
                 <div class="mk-cat-ico"><i class="fas fa-border-all"></i></div>
                 <span>Tous</span>
               </button>
-              <button class="mk-cat" onclick="setMkCat(this,'dev')">
-                <div class="mk-cat-ico"><i class="fas fa-code"></i></div>
-                <span>Développement</span>
+              <button class="mk-cat" onclick="setMkCat(this,'service')">
+                <div class="mk-cat-ico"><i class="fas fa-briefcase"></i></div>
+                <span>Service</span>
               </button>
-              <button class="mk-cat" onclick="setMkCat(this,'design')">
-                <div class="mk-cat-ico"><i class="fas fa-pen-ruler"></i></div>
-                <span>Design</span>
+              <button class="mk-cat" onclick="setMkCat(this,'product')">
+                <div class="mk-cat-ico"><i class="fas fa-box-open"></i></div>
+                <span>Produit</span>
               </button>
-              <button class="mk-cat" onclick="setMkCat(this,'redac')">
-                <div class="mk-cat-ico"><i class="fas fa-file-pen"></i></div>
-                <span>Rédaction</span>
+              <button class="mk-cat" onclick="setMkCat(this,'ebook')">
+                <div class="mk-cat-ico"><i class="fas fa-book-open"></i></div>
+                <span>Ebook</span>
               </button>
-              <button class="mk-cat" onclick="setMkCat(this,'mkt')">
-                <div class="mk-cat-ico"><i class="fas fa-bullhorn"></i></div>
-                <span>Marketing</span>
-              </button>
-              <button class="mk-cat" onclick="setMkCat(this,'video')">
-                <div class="mk-cat-ico"><i class="fas fa-clapperboard"></i></div>
-                <span>Vidéo &amp; Audio</span>
-              </button>
-              <button class="mk-cat" onclick="setMkCat(this,'more')">
-                <div class="mk-cat-ico"><i class="fas fa-ellipsis"></i></div>
-                <span>Plus</span>
+              <button class="mk-cat" onclick="setMkCat(this,'collab')">
+                <div class="mk-cat-ico"><i class="fas fa-handshake"></i></div>
+                <span>Collaboration</span>
               </button>
             </div>
 
             <!-- ══ CHERCHER UN COLLABORATEUR ══ -->
-            <div class="collab-banner" onclick="_collabOpenPost()">
-              <div class="collab-banner-left">
-                <div class="collab-banner-ico"><i class="fas fa-handshake"></i></div>
-                <div class="collab-banner-text">
-                  <strong>Chercher un collaborateur</strong>
-                  <span>Publiez votre projet, trouvez le bon partenaire</span>
+            <div id="mk-collab-section">
+              <div class="collab-banner" onclick="_collabOpenPost()">
+                <div class="collab-banner-left">
+                  <div class="collab-banner-ico"><i class="fas fa-handshake"></i></div>
+                  <div class="collab-banner-text">
+                    <strong>Chercher un collaborateur</strong>
+                    <span>Publiez votre projet, trouvez le bon partenaire</span>
+                  </div>
                 </div>
+                <i class="fas fa-chevron-right collab-banner-arrow"></i>
               </div>
-              <i class="fas fa-chevron-right collab-banner-arrow"></i>
-            </div>
 
-            <!-- Liste des offres de collaboration -->
-            <div class="mk-section-head" style="margin-top:4px">
-              <h3>Offres de collaboration</h3>
-              <button class="mk-see-all" id="collab-refresh-btn" onclick="_collabRefresh(this)">Actualiser</button>
+              <!-- Liste des offres de collaboration -->
+              <div class="mk-section-head" style="margin-top:4px">
+                <h3>Offres de collaboration</h3>
+                <button class="mk-see-all" id="collab-refresh-btn" onclick="_collabRefresh(this)">Actualiser</button>
+              </div>
+              <div id="collab-list-wrap" style="padding:0 16px"></div>
             </div>
-            <div id="collab-list-wrap" style="padding:0 16px"></div>
 
 
             <!-- Services des membres -->
@@ -3333,6 +3349,13 @@
           </button>
           <button class="adm-sidebar-item" id="adm-nav-settings" onclick="_admSwitchTab('settings')">
             <i class="fas fa-sliders"></i><span>Paramètres</span>
+          </button>
+
+          <!-- ── Sécurité ── -->
+          <div class="adm-sidebar-nav-label">Sécurité</div>
+          <button class="adm-sidebar-item" id="adm-nav-security" onclick="_admSwitchTab('security')">
+            <i class="fas fa-shield-halved"></i><span>Sécurité</span>
+            <span class="adm-sidebar-badge hidden" id="adm-badge-security">0</span>
           </button>
 
         </nav>
