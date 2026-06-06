@@ -25097,7 +25097,7 @@ function _mkOpenCreate() {
 
   var card = document.createElement('div');
   card.id = 'mk-create-card';
-  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column';
   card.innerHTML =
     '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>'+
     '<div style="padding:16px 20px 24px">'+
@@ -25230,8 +25230,10 @@ function _mkOpenCreate() {
       '<select id="mk-radius-sel" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;background:#F8FAFC;color:#0F172A">'+radOpts+'</select>'+
     '</div>'+
 
-    /* Bouton publier */
-    '<button onclick="_mkPublishListing()" style="width:100%;padding:14px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer"><i class="fas fa-check" style="margin-right:6px"></i>Publier l\'annonce</button>'+
+    '</div>'+
+    /* Bouton publier — sticky en bas, toujours visible */
+    '<div style="position:sticky;bottom:0;background:#fff;padding:12px 20px 20px;border-top:1.5px solid #F1F5F9;flex-shrink:0">'+
+      '<button onclick="_mkPublishListing()" style="width:100%;padding:14px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(99,102,241,.35)"><i class="fas fa-check" style="margin-right:6px"></i>Publier l\'annonce</button>'+
     '</div>';
 
   document.body.appendChild(bg);
