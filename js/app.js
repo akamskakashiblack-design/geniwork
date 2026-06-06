@@ -26298,6 +26298,7 @@ function _mkRenderSystemListings() {
       var coverStyle  = listing.coverImage
         ? 'background:url(\''+listing.coverImage+'\') center/cover no-repeat'
         : 'background:linear-gradient(135deg,#6366F1,#8B5CF6)';
+      var liveNameE = getDisplayName(listing.sellerEmail, listing.sellerNom);
       cardE.innerHTML =
         '<div class="mk-service-img" style="'+coverStyle+';position:relative;aspect-ratio:3/4;min-height:130px">'+
           '<span class="mk-service-badge" style="background:'+(isFreeE?'#10B981':'#6366F1')+'">'+
@@ -26306,11 +26307,9 @@ function _mkRenderSystemListings() {
         '</div>'+
         '<div class="mk-service-body">'+
           '<div class="mk-service-seller">'+
-            '<div class="mk-seller-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:700">'+
-              escHtml(listing.sellerNom.slice(0,2).toUpperCase())+
-            '</div>'+
-            '<span>'+escHtml(listing.sellerNom)+'</span>'+
-            (listing.sellerVerified ? '<i class="fas fa-circle-check mk-verified"></i>' : '')+
+            getAvatarHtml(listing.sellerEmail, liveNameE, 'xs')+
+            '<span>'+escHtml(liveNameE)+'</span>'+
+            getBadgeHtml(listing.sellerEmail)+
             (isMineE ? '<span style="font-size:10px;padding:2px 7px;background:#EEF2FF;color:#6366F1;border-radius:20px;font-weight:700;margin-left:4px">Mon ebook</span>' : '')+
           '</div>'+
           '<p class="mk-service-title">'+escHtml(listing.title)+'</p>'+
@@ -26353,6 +26352,7 @@ function _mkRenderSystemListings() {
           '<i class="fas fa-cart-plus"></i>'+
         '</button>';
 
+    var liveName = getDisplayName(listing.sellerEmail, listing.sellerNom);
     card.innerHTML =
       '<div class="mk-service-img" style="'+imgStyle+';position:relative">'+
         '<span class="mk-service-badge">'+escHtml(catLabel)+'</span>'+
@@ -26363,11 +26363,9 @@ function _mkRenderSystemListings() {
       '</div>'+
       '<div class="mk-service-body">'+
         '<div class="mk-service-seller">'+
-          '<div class="mk-seller-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:700">'+
-            escHtml(listing.sellerNom.slice(0,2).toUpperCase())+
-          '</div>'+
-          '<span>'+escHtml(listing.sellerNom)+'</span>'+
-          (listing.sellerVerified ? '<i class="fas fa-circle-check mk-verified"></i>' : '')+
+          getAvatarHtml(listing.sellerEmail, liveName, 'xs')+
+          '<span>'+escHtml(liveName)+'</span>'+
+          getBadgeHtml(listing.sellerEmail)+
           (isMine ? '<span style="font-size:10px;padding:2px 7px;background:#EEF2FF;color:#6366F1;border-radius:20px;font-weight:700;margin-left:4px">Ma annonce</span>' : '')+
         '</div>'+
         '<p class="mk-service-title">'+escHtml(listing.title)+'</p>'+

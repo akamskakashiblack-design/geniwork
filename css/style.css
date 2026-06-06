@@ -1373,6 +1373,7 @@ mark.srch-mark {
   overflow: hidden;
 }
 
+.user-av.xs { width: 26px; height: 26px; min-width: 26px; font-size: 10px; }
 .user-av.sm { width: 32px; height: 32px; min-width: 32px; font-size: 12px; }
 .user-av.lg { width: 48px; height: 48px; min-width: 48px; font-size: 17px; }
 
