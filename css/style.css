@@ -5267,15 +5267,15 @@ mark.srch-mark {
 
 /* Scroll horizontal services */
 .mk-services-scroll {
-  display: flex; gap: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
   padding: 0 16px 16px;
-  overflow-x: auto; scrollbar-width: none;
 }
-.mk-services-scroll::-webkit-scrollbar { display: none; }
 
 /* Carte service */
 .mk-service-card {
-  flex-shrink: 0; width: 195px;
+  width: 100%;
   background: #fff; border-radius: 16px;
   border: 1px solid #E5E7EB;
   overflow: hidden;
@@ -13379,6 +13379,12 @@ body:not(.dark-mode) .vm-close-btn { background: #F1F5F9; color: #475569; }
   /* ── Page Marketplace ── */
   #p-marketplace .page-scroll {
     padding: 12px 16px;
+  }
+
+  /* ── Grille marketplace : 3 colonnes sur desktop ── */
+  .mk-services-scroll {
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 14px;
   }
 
   /* ── Page Publier ── */
