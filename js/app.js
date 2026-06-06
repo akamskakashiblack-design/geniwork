@@ -44,12 +44,15 @@ var _MK_RADIUS_BY_COUNTRY = {
 
 var _MK_SVC_CATS  = { dev:'💻 Développement', design:'🎨 Design', redac:'✍️ Rédaction', mkt:'📣 Marketing', video:'🎬 Vidéo', photo:'📷 Photo', conseil:'🧠 Conseil', support:'🛠️ Support', autre:'📦 Autre' };
 var _MK_PROD_CATS = { electronique:'📱 Électronique', vetements:'👗 Vêtements', maison:'🏠 Maison', vehicule:'🚗 Véhicules', sport:'⚽ Sport', beaute:'💄 Beauté', livre:'📚 Livres', bebe:'👶 Bébé', jardin:'🌿 Jardin', autre:'📦 Autre' };
+var _MK_EBOOK_CATS = { business:'💼 Business', dev_perso:'🌱 Développement personnel', roman:'📖 Roman & Fiction', education:'🎓 Éducation', sante:'❤️ Santé & Bien-être', finance:'💰 Finance', tech:'💻 Technologie', cuisine:'🍽️ Cuisine', voyage:'✈️ Voyage', autre:'📦 Autre' };
 
 var _mkCurrentListing = null;
 var _mkUserLocation   = null;
 var _mkPaypalLoaded   = false;
 var _mkPickedImages   = [];
 var _mkCurrentType    = 'service';
+var _mkEbookFile      = null;   /* File object du PDF/EPUB sélectionné */
+var _mkEbookCover     = null;   /* base64 cover image ebook */
 
 /* ── État Firebase ── */
 var _gwFbDB      = null;   /* Instance Realtime Database */
@@ -854,10 +857,10 @@ function _gwFbSyncStart() {
   /* ── Marketplace listings ── auto-sync toutes les sections ── */
   _listen('mk_listings', 'gw_mk_listings', function() {
     try { _mkCheckExpired(); } catch(e){}
-    /* Rafraîchit tous les endroits qui affichent des annonces */
-    if (document.getElementById('mk-user-services-section'))  { try { renderMarketplaceUserServices(); } catch(e){} }
-    if (document.getElementById('mk-annonces-list'))          { try { _mkRenderSystemListings(); } catch(e){} }
-    if (document.getElementById('mk-all-listings-wrap'))      { try { _mkRefreshAllListings(); }   catch(e){} }
+    /* Rafraîchit toujours les annonces, que la page soit déjà ouverte ou non */
+    try { renderMarketplaceUserServices(); } catch(e){}
+    try { _mkRenderSystemListings(); }       catch(e){}
+    if (document.getElementById('mk-all-listings-wrap')) { try { _mkRefreshAllListings(); } catch(e){} }
     try { _mkRenderTxTabs(); } catch(e){}
   });
 
@@ -1100,7 +1103,7 @@ function _gwSetOnlinePresence(user) {
   }, 120000);
 }
 
-/* ── Listener admin : compte les utilisateurs en ligne en temps réel ── */
+/* ── Listener présence en ligne — temps réel pour toute l'app ── */
 function _gwWatchOnlineUsers() {
   if (!_gwFbReady || !_gwFbDB) return;
   _gwFbDB.ref('gw/online').on('value', function(snap) {
@@ -1108,13 +1111,49 @@ function _gwWatchOnlineUsers() {
     var count = Object.keys(data).length;
     localStorage.setItem('gw_online_count', count);
 
-    /* Met à jour le compteur en live dans le dashboard admin */
+    /* Met à jour le compteur admin */
     var el = document.getElementById('adm-online-count');
     if (el) el.textContent = count;
-
-    /* Rafraîchit le dashboard si l'admin est dessus */
     if (_adminUser && _adminTab === 'dashboard') {
       try { _admRender(); } catch(e){}
+    }
+
+    /* ── Mise à jour des statuts en ligne dans les conversations ── */
+    /* Construire l'ensemble des emails en ligne */
+    var onlineEmails = {};
+    Object.values(data).forEach(function(entry) {
+      if (entry && entry.email) onlineEmails[entry.email.toLowerCase()] = true;
+    });
+
+    /* Mettre à jour conv.online pour chaque DM */
+    var changed = false;
+    DEMO_CONVERSATIONS.forEach(function(conv) {
+      if (conv.isGroup || !conv.email) return;
+      var isNowOnline = !!onlineEmails[conv.email.toLowerCase()];
+      if (conv.online !== isNowOnline) {
+        conv.online = isNowOnline;
+        changed = true;
+      }
+    });
+
+    /* Rafraîchir la liste des conversations si un statut a changé */
+    if (changed) {
+      var msgPage = document.getElementById('p-messages');
+      if (msgPage && msgPage.classList.contains('active')) {
+        try { renderConversations(); } catch(e) {}
+      }
+    }
+
+    /* Mettre à jour l'en-tête du chat ouvert */
+    if (_chatConvId) {
+      var openConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+      if (openConv && !openConv.isGroup) {
+        var statusEl = document.getElementById('chat-contact-status');
+        if (statusEl) {
+          statusEl.textContent = openConv.online ? 'En ligne' : 'Hors ligne';
+          statusEl.style.color = openConv.online ? '#22C55E' : '#94A3B8';
+        }
+      }
     }
   });
 }
@@ -1666,17 +1705,75 @@ function _gwStartApp() {
     if (storedUser && !_admIsBanned(session.email)) {
       _currentUser = { nom: storedUser.nom, email: storedUser.email, loginMethod: storedUser.loginMethod || 'email' };
       _gwCreateSession(_currentUser);
-      /* Précharge les DMs, inbox et données utilisateur depuis Firebase (même chemin que doLogin)
-         avant d'initialiser l'app — garantit que les messages reçus hors connexion sont visibles */
       _gwPreloadUserData(_currentUser, function() {
         initApp(_currentUser);
         scheduleNewPosts();
         goTo('screen-app');
+        /* Deep link : ouvre la publication ciblée si ?p=ID est dans l'URL */
+        setTimeout(_gwHandleDeepLink, 800);
       });
     } else {
       localStorage.removeItem('gw_session');
     }
   }
+}
+
+function _gwHandleDeepLink() {
+  try {
+    var params = new URLSearchParams(window.location.search);
+    var postId = params.get('p');
+    var ptype  = params.get('pt') || 'post';
+    if (!postId) return;
+
+    /* Nettoie l'URL sans recharger la page */
+    var cleanUrl = window.location.origin + window.location.pathname;
+    window.history.replaceState({}, '', cleanUrl);
+
+    /* Cherche le post dans le cache local */
+    var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+    if (!post && _gwFbDB) {
+      /* Pas encore en cache — récupère depuis Firebase */
+      _gwFbDB.ref('gw/posts').once('value').then(function(snap) {
+        var obj = snap.val() || {};
+        Object.keys(obj).forEach(function(k) {
+          var arr = Array.isArray(obj[k]) ? obj[k] : Object.values(obj[k] || {});
+          arr.forEach(function(p) { if (p && String(p.id) === String(postId)) post = p; });
+        });
+        if (!post) {
+          /* Essaie dans les posts officiels */
+          _gwFbDB.ref('gw/official_posts').once('value').then(function(s2) {
+            var o2 = s2.val();
+            if (o2) {
+              var arr2 = Array.isArray(o2) ? o2 : Object.values(o2);
+              post = arr2.find(function(p) { return p && String(p.id) === String(postId); }) || null;
+            }
+            if (post) _gwOpenDeepPost(post, ptype);
+            else showToast('Publication introuvable', 'warn');
+          }).catch(function(){});
+        } else {
+          _gwOpenDeepPost(post, ptype);
+        }
+      }).catch(function(){});
+      return;
+    }
+
+    if (post) _gwOpenDeepPost(post, ptype);
+    else showToast('Publication introuvable', 'warn');
+  } catch(e) {}
+}
+
+function _gwOpenDeepPost(post, ptype) {
+  if (!post) return;
+  navTo(null, 'p-home');
+  setTimeout(function() {
+    try {
+      if (post.video && post.video.url) {
+        openVideoPlayer(post.video.url, post.video.duration || 0);
+      } else {
+        openComments(post.id);
+      }
+    } catch(e) {}
+  }, 400);
 }
 
 /* Précharge toutes les données Firebase dans localStorage, PUIS lance l'app */
@@ -2219,6 +2316,7 @@ function doLogin() {
   /* Message générique : ne révèle pas si l'email existe */
   if (!user) {
     _gwRecordFail(bruteKey);
+    try { _secOnLoginFail(email); } catch(e){}
     showToast('Email ou mot de passe incorrect', 'err'); return;
   }
   /* Compte Google → inviter à utiliser le bouton Google */
@@ -2241,6 +2339,7 @@ function doLogin() {
 
     if (!ok) {
       _gwRecordFail(bruteKey);
+      try { _secOnLoginFail(email); } catch(e){}
       var remaining = 5 - ((_gwAttempts[bruteKey] || {}).count || 0);
       showToast('Email ou mot de passe incorrect' + (remaining <= 2 ? ' (' + remaining + ' essai(s) restant)' : ''), 'err');
       return;
@@ -3070,12 +3169,43 @@ function navTo(btn, pageId) {
   });
   if (btn) btn.classList.add('active');
 
+  /* Sync desktop sidebar nav active state */
+  document.querySelectorAll('[data-sdb-page]').forEach(function(b) {
+    b.classList.toggle('active', b.getAttribute('data-sdb-page') === pageId);
+  });
+
   /* Refresh feed au retour sur Accueil */
   if (pageId === 'p-home') {
     _feedDoRefresh();
   }
 
-  if (pageId === 'p-marketplace') { renderMarketplaceUserServices(); _updateMkNotifBadge(); _updateCartBadge(); try { _collabRender(); } catch(e){} try { _mkRenderTxTabs(); } catch(e){} }
+  if (pageId === 'p-marketplace') {
+    /* Rendu immédiat avec ce qui est déjà en cache (localStorage) */
+    try { renderMarketplaceUserServices(); } catch(e) {}
+    try { _updateMkNotifBadge(); }          catch(e) {}
+    try { _updateCartBadge(); }             catch(e) {}
+    try { _collabRender(); }                catch(e) {}
+    try { _mkRenderTxTabs(); }              catch(e) {}
+    /* Sync Firebase en arrière-plan → re-rendu automatique sans bouton */
+    if (_gwFbReady && _gwFbDB) {
+      Promise.all([
+        _gwFbDB.ref('gw/mk_listings').once('value'),
+        _gwFbDB.ref('gw/collab_requests').once('value'),
+        _gwFbDB.ref('gw/mk_txns').once('value')
+      ]).then(function(snaps) {
+        var lstVal    = snaps[0].val();
+        var collabVal = snaps[1].val();
+        var txVal     = snaps[2].val();
+        if (lstVal    !== null) try { localStorage.setItem('gw_mk_listings',      JSON.stringify(Array.isArray(lstVal)    ? lstVal    : Object.values(lstVal)));    } catch(e){}
+        if (collabVal !== null) try { localStorage.setItem('gw_collab_requests',  JSON.stringify(Array.isArray(collabVal) ? collabVal : Object.values(collabVal))); } catch(e){}
+        if (txVal     !== null) try { localStorage.setItem('gw_mk_txns',          JSON.stringify(Array.isArray(txVal)     ? txVal     : Object.values(txVal)));     } catch(e){}
+        try { renderMarketplaceUserServices(); } catch(e) {}
+        try { _mkRenderSystemListings(); }       catch(e) {}
+        try { _collabRender(); }                 catch(e) {}
+        try { _mkRenderTxTabs(); }               catch(e) {}
+      }).catch(function(){});
+    }
+  }
 
   /* Recalcule les temps relatifs à l'ouverture de la page notifications */
   if (pageId === 'p-notifs') {
@@ -4817,6 +4947,9 @@ function _initFeedVideoObserver() {
         var mutedBadge = isRp ? null : document.getElementById((isOff ? 'off-fvm-' : 'fvm-') + rawId);
 
         if (entry.isIntersecting) {
+          if (!video.src) { return; } /* src pas encore chargée, skip */
+          /* Buffer agressif dès que visible */
+          video.preload = 'auto';
           /* Pause toutes les autres vidéos du feed */
           document.querySelectorAll('[id^="fv-"],[id^="off-fv-"],[id^="rp-fv-"]').forEach(function(v) {
             if (v !== video && !v.paused) {
@@ -4832,21 +4965,42 @@ function _initFeedVideoObserver() {
               }
             }
           });
-          video.play().catch(function() {});
+          /* Lance la lecture : immédiate si buffer prêt, sinon attend canplay */
+          if (video.readyState >= 3) {
+            video.play().catch(function(){});
+          } else {
+            video.play().catch(function() {
+              var onCp = function() {
+                video.removeEventListener('canplay', onCp);
+                video.play().catch(function(){});
+              };
+              video.addEventListener('canplay', onCp);
+            });
+          }
           if (overlay)    overlay.style.opacity    = '0';
           if (mutedBadge) mutedBadge.style.opacity = '1';
+          /* Preload la vidéo adjacente suivante pour éviter le buffering */
+          var nextSib = video.closest('.post-card, .feed-card, [data-post-id]');
+          if (nextSib) {
+            var nextPost = nextSib.nextElementSibling;
+            if (nextPost) {
+              var nextVid = nextPost.querySelector('[id^="fv-"],[id^="off-fv-"]');
+              if (nextVid && nextVid.src) nextVid.preload = 'auto';
+            }
+          }
         } else {
           video.pause();
           if (overlay)    overlay.style.opacity    = '1';
           if (mutedBadge) mutedBadge.style.opacity = '0';
         }
       });
-    }, { threshold: 0.5 });
+    }, { threshold: 0.5, rootMargin: '100px 0px' });
   }
 
-  /* Observe toutes les nouvelles vidéos non encore trackées (normales + officielles + reposts) */
+  /* Observe toutes les nouvelles vidéos non encore trackées (normales + officielles + reposts)
+     — y compris celles sans src encore (src sera posée plus tard via _gwLoadVideoBlob / Firebase) */
   document.querySelectorAll('[id^="fv-"],[id^="off-fv-"],[id^="rp-fv-"]').forEach(function(vid) {
-    if (!vid._gwVidTracked && vid.src) {
+    if (!vid._gwVidTracked) {
       vid._gwVidTracked = true;
       _feedVideoObserver.observe(vid);
     }
@@ -5241,8 +5395,8 @@ function buildPostCard(post) {
 
     videoHtml =
       '<div class="post-video-wrap" id="pvw-' + post.id + '" style="' + wrapStyle + '" onclick="_openVideoFromPost(\'' + post.id + '\',' + (post.video.duration || 0) + ')">' +
-        '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + ' preload="none" muted playsinline loop ' +
-          'style="' + vidStyle + '"></video>' +
+        '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + ' preload="metadata" muted playsinline loop ' +
+          'style="' + vidStyle + ';will-change:transform;transform:translateZ(0)"></video>' +
         '<div class="post-video-thumb-overlay" id="fvo-' + post.id + '">' +
           '<div class="post-video-play-ico"><i class="fas fa-play"></i></div>' +
         '</div>' +
@@ -7313,23 +7467,39 @@ function _incShareCount(postId) {
 }
 
 function sharePost(postId) {
-  var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
-  var text = post ? (post.author || '') + ' sur Geniwork : ' + (post.text || '').slice(0,80) + '…' : 'Geniwork';
+  var post      = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+  var shareUrl  = window.location.origin + '/p/' + postId;
+  var shareText = post
+    ? (post.author || '') + ' sur Geniwork' + (post.text ? ' : ' + post.text.slice(0, 80) + '…' : '')
+    : 'Découvrez cette publication sur Geniwork !';
 
   if (navigator.share) {
-    navigator.share({ title: 'Geniwork', text: text, url: 'https://geniwork.com' })
+    navigator.share({ title: 'Geniwork', text: shareText, url: shareUrl })
       .then(function() { notifyShare(post); })
       .catch(function() {});
   } else {
-    /* Fallback : copier le lien */
-    var dummy = document.createElement('textarea');
-    dummy.value = 'https://geniwork.com/post/' + postId;
-    document.body.appendChild(dummy);
-    dummy.select();
-    document.execCommand('copy');
-    document.body.removeChild(dummy);
-    showToast('Lien copié ✓', 'ok');
-    notifyShare(post);
+    _gwCopyLink(shareUrl, post);
+  }
+}
+
+function _gwCopyLink(text, post) {
+  var done = function() { showToast('Lien copié ✓', 'ok'); notifyShare(post); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(function() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.style.cssText = 'position:fixed;opacity:0';
+        document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+        document.body.removeChild(ta); done();
+      } catch(e) { showToast('Lien : ' + text, 'info'); }
+    });
+  } else {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.style.cssText = 'position:fixed;opacity:0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+      document.body.removeChild(ta); done();
+    } catch(e) { showToast('Lien : ' + text, 'info'); }
   }
 }
 
@@ -8196,11 +8366,15 @@ function handleVideoPick(input) {
     return;
   }
 
-  /* Taille max : 500 Mo */
-  if (file.size > 500 * 1024 * 1024) {
-    showVideoError('Fichier trop lourd — maximum 500 Mo');
+  /* Taille max : 300 Mo */
+  if (file.size > 300 * 1024 * 1024) {
+    showVideoError('Fichier trop lourd — maximum 300 Mo. Compresse ta vidéo avant de l\'envoyer.');
     input.value = '';
     return;
+  }
+  /* Avertissement fluidité au-delà de 80 Mo */
+  if (file.size > 80 * 1024 * 1024) {
+    showToast('⚠️ Vidéo lourde (' + Math.round(file.size/1048576) + ' Mo) — peut être lente sur mobile. Préfère un MP4 compressé.', 'warn');
   }
 
   var blobUrl = URL.createObjectURL(file);
@@ -8745,7 +8919,7 @@ function _vsCreateItem(post, idx) {
 
   el.innerHTML =
     /* Vidéo */
-    '<video class="vs-video" playsinline webkit-playsinline preload="metadata"></video>' +
+    '<video class="vs-video" playsinline webkit-playsinline x5-playsinline preload="metadata"></video>' +
     /* Zone tap (play/pause au toucher) */
     '<div class="vs-tap-zone" onclick="vsTogglePlay(' + idx + ')"></div>' +
     /* Flash icône centrale au tap */
@@ -8826,7 +9000,6 @@ function _vsStartPlayback(idx, item) {
   if (_vsCurIdx !== idx) return;
   var v = item.videoEl;
 
-  /* Reset position seulement si nécessaire (évite un seek coûteux) */
   if (v.currentTime > 0.1) v.currentTime = 0;
 
   _incrementVideoViews(item.postId);
@@ -8834,21 +9007,46 @@ function _vsStartPlayback(idx, item) {
   if (vBadge) vBadge.textContent = _fmtViews(_getVideoViews(item.postId));
 
   v.onended = function() { _vsStartEndCountdown(idx); };
-  v.onplay  = function() { _vsSetPlayIco(idx, true);  _vsStartRaf(idx); };
+  v.onplay  = function() { _vsSetPlayIco(idx, true);  _vsStartRaf(idx); _vsForceRender(v); };
   v.onpause = function() { _vsSetPlayIco(idx, false); };
 
-  /* Tente play immédiat — si pas assez bufferé, canplay relancera */
-  var playPromise = v.play();
-  if (playPromise !== undefined) {
-    playPromise.catch(function() {
-      /* Autoplay bloqué ou pas encore bufferé → attend canplay */
-      v.addEventListener('canplay', function _onCanPlay() {
-        v.removeEventListener('canplay', _onCanPlay);
-        if (_vsCurIdx === idx) v.play().catch(function(){});
+  if (v.readyState >= 3) {
+    v.play().catch(function(){});
+  } else {
+    var playPromise = v.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(function() {
+        var _onCanPlay = function() {
+          v.removeEventListener('canplay', _onCanPlay);
+          if (_vsCurIdx === idx) v.play().catch(function(){});
+        };
+        v.addEventListener('canplay', _onCanPlay);
       });
-    });
+    }
   }
   _vsSetPlayIco(idx, true);
+}
+
+/* Force le rendu GPU sur desktop quand l'image ne sort pas (son présent, image noire) */
+function _vsForceRender(v) {
+  if (window.innerWidth < 768) return;
+  /* Technique : modifier opacity sur deux frames consécutifs force Chrome
+     à recréer le compositing layer et à afficher le frame vidéo courant */
+  requestAnimationFrame(function() {
+    v.style.opacity = '0.999';
+    requestAnimationFrame(function() {
+      v.style.opacity = '';
+      /* Si toujours pas de frame visible après 400ms → reload du décodeur */
+      setTimeout(function() {
+        if (!v.paused && v.readyState >= 2 && v.videoWidth === 0) {
+          var t = v.currentTime;
+          v.load();
+          v.currentTime = t;
+          v.play().catch(function(){});
+        }
+      }, 400);
+    });
+  });
 }
 
 /* ── Active (charge + joue) un item — comportement TikTok ── */
@@ -9416,9 +9614,13 @@ function openVideoPlayer(src, duration) {
     if (mb) mb.style.opacity = '0';
   });
 
-  /* Source — preload auto pour commencer à bufferer immédiatement */
+  /* Source — preload auto + force le navigateur à commencer le buffer immédiatement */
   video.preload = 'auto';
+  video.playsInline = true;
+  video.style.willChange = 'transform';
+  video.style.transform  = 'translateZ(0)';
   video.src = src;
+  video.load(); /* force le fetch immédiat — évite la saccade au premier play */
   video.currentTime = 0;
   video.playbackRate = 1;
 
@@ -9484,9 +9686,17 @@ function openVideoPlayer(src, duration) {
 
   modal.style.display = 'flex';
 
-  /* Show controls briefly at start, then start playing */
+  /* Lance la lecture : immédiate si buffer suffisant, sinon attend canplaythrough */
   vpShowControls();
-  video.play().catch(function() {});
+  if (video.readyState >= 3) {
+    video.play().catch(function(){});
+  } else {
+    var _vpOnReady = function() {
+      video.removeEventListener('canplay', _vpOnReady);
+      video.play().catch(function(){});
+    };
+    video.addEventListener('canplay', _vpOnReady);
+  }
 }
 
 function closeVideoPlayer() {
@@ -10029,39 +10239,46 @@ function publierPost() {
   renderFeed(DEMO_POSTS);
 
   /* ── Upload médias vers Firebase Storage puis sauvegarde définitive ── */
-  function _finalizePost(finalImages, finalVideoUrl) {
+  function _finalizePost(finalImages, finalVideoUrl, finalDocUrl) {
     newPost.images = finalImages;
     var postToStore = JSON.parse(JSON.stringify(newPost));
     if (postToStore.video) {
       if (finalVideoUrl) {
-        /* URL Storage permanente : on la conserve pour la sync inter-appareils */
         postToStore.video.url = finalVideoUrl;
         if (newPost.video) newPost.video.url = finalVideoUrl;
       } else {
-        /* Pas d'URL Storage : on retire le blobUrl (non sérialisable) */
         delete postToStore.video.url;
       }
     }
-    if (postToStore.doc) { delete postToStore.doc.url; }
+    if (postToStore.doc) {
+      if (finalDocUrl) {
+        /* URL Storage permanente — accessible par tous les utilisateurs */
+        postToStore.doc.url = finalDocUrl;
+        if (newPost.doc) newPost.doc.url = finalDocUrl;
+        delete postToStore.doc.idbId; /* idbId inutile si Storage URL disponible */
+      } else {
+        delete postToStore.doc.url; /* blob URL non sérialisable */
+      }
+    }
     persistNewPost(postToStore);
-    /* Re-render pour remplacer base64/blob par URLs Storage dans le DOM */
     var dp = DEMO_POSTS.find(function(p) { return p.id === newPost.id; });
     if (dp) {
       dp.images = finalImages;
       if (finalVideoUrl && dp.video) dp.video.url = finalVideoUrl;
+      if (finalDocUrl   && dp.doc)   dp.doc.url   = finalDocUrl;
     }
     renderFeed(DEMO_POSTS);
   }
 
-  if (_gwFbStorage && (_imagesSnapshot.length > 0 || videoBlob)) {
-    /* Compte combien d'uploads sont en cours (images + vidéo) */
-    var _pendingUploads  = (_imagesSnapshot.length > 0 ? 1 : 0) + (videoBlob ? 1 : 0);
-    var _uploadedImages  = _imagesSnapshot;
+  if (_gwFbStorage && (_imagesSnapshot.length > 0 || videoBlob || docBlob)) {
+    var _pendingUploads   = (_imagesSnapshot.length > 0 ? 1 : 0) + (videoBlob ? 1 : 0) + (docBlob ? 1 : 0);
+    var _uploadedImages   = _imagesSnapshot;
     var _uploadedVideoUrl = null;
+    var _uploadedDocUrl   = null;
 
     function _onUploadDone() {
       if (--_pendingUploads <= 0) {
-        _finalizePost(_uploadedImages, _uploadedVideoUrl);
+        _finalizePost(_uploadedImages, _uploadedVideoUrl, _uploadedDocUrl);
       }
     }
 
@@ -10079,7 +10296,6 @@ function publierPost() {
           _uploadedVideoUrl = url;
           _hideVideoProgress();
           showToast('Vidéo synchronisée ✓', 'ok');
-          /* Écriture séparée pour livraison fiable aux autres appareils */
           if (_gwFbReady && _gwFbDB) {
             _gwFbDB.ref('gw/post_videos/' + postId).set({
               url: url,
@@ -10092,8 +10308,22 @@ function publierPost() {
         function(pct) { _showVideoProgress(pct); }
       );
     }
+    if (docBlob) {
+      var _dExt = (_pickedDoc && _pickedDoc.type) ? ('.' + _pickedDoc.type) : '.bin';
+      _uploadBlobToStorage('post_docs/' + postId + _dExt, docBlob,
+        function(url) {
+          _uploadedDocUrl = url;
+          showToast('Document synchronisé ✓', 'ok');
+          _onUploadDone();
+        },
+        function() {
+          /* Échec upload — le doc reste accessible localement via IndexedDB */
+          _onUploadDone();
+        }
+      );
+    }
   } else {
-    _finalizePost(_imagesSnapshot, null);
+    _finalizePost(_imagesSnapshot, null, null);
   }
 
   /* Réinitialise */
@@ -13217,7 +13447,7 @@ function renderConversations() {
                'onclick="openChat(' + c.id + ')">' +
         '<div class="conv-av-wrap">' +
           avHtml +
-          (!c.isGroup && c.online ? '<span class="conv-online-dot"></span>' : '') +
+          (!c.isGroup ? '<span class="conv-online-dot' + (c.online ? ' online' : '') + '"></span>' : '') +
         '</div>' +
         '<div class="conv-body">' +
           '<div class="conv-top">' +
@@ -13246,14 +13476,16 @@ function renderConversations() {
 }
 
 function _updateMsgNavBadge(count) {
-  var nav = document.getElementById('msg-nav-badge');
-  if (!nav) return;
-  if (count > 0) {
-    nav.textContent = count > 99 ? '99+' : count;
-    nav.classList.remove('hidden');
-  } else {
-    nav.classList.add('hidden');
-  }
+  ['msg-nav-badge', 'msg-nav-badge-desk'].forEach(function(id) {
+    var nav = document.getElementById(id);
+    if (!nav) return;
+    if (count > 0) {
+      nav.textContent = count > 99 ? '99+' : count;
+      nav.classList.remove('hidden');
+    } else {
+      nav.classList.add('hidden');
+    }
+  });
 }
 
 function _convAvatar(c, size) {
@@ -13415,7 +13647,10 @@ function openChat(convId) {
     var liveName = conv.email ? getDisplayName(conv.email, conv.name) : conv.name;
     if (nameEl) nameEl.innerHTML = escHtml(liveName) +
       (conv.verified ? ' <i class="fas fa-circle-check" style="color:#2563EB;font-size:12px"></i>' : '');
-    if (statusEl) statusEl.textContent = conv.online ? 'En ligne' : 'Hors ligne';
+    if (statusEl) {
+      statusEl.textContent = conv.online ? 'En ligne' : 'Hors ligne';
+      statusEl.style.color = conv.online ? '#22C55E' : '#94A3B8';
+    }
   }
 
   /* Groupes : charge depuis le storage partagé + rendu synchrone */
@@ -14940,6 +15175,46 @@ function _buildBubbleHtml(m, isMine) {
       (!isMine ? replyBtn : '') +
     '</div>';
   }
+  if (m.type === 'collab_apply_card') {
+    return '<div class="bubble-reply-wrap">' +
+      (isMine ? replyBtn : '') +
+      '<div class="chat-bubble ' + cls + '" style="padding:0;overflow:hidden;min-width:195px;max-width:240px;border-radius:12px">' +
+        '<div style="background:linear-gradient(135deg,#059669,#10B981);padding:14px 14px 10px;display:flex;align-items:center;gap:9px">' +
+          '<i class="fas fa-handshake" style="color:#fff;font-size:20px;flex-shrink:0"></i>' +
+          '<div>' +
+            '<div style="color:#fff;font-size:11px;font-weight:700;opacity:.85">Candidature collaboration</div>' +
+            '<div style="color:#fff;font-size:13px;font-weight:800;line-height:1.3;margin-top:2px">' + escHtml(m.collabTitle || 'Projet') + '</div>' +
+          '</div>' +
+        '</div>' +
+        (m.collabDomain ? '<div style="padding:8px 12px 0;"><span style="font-size:10px;background:#ECFDF5;color:#059669;border-radius:10px;padding:2px 8px;font-weight:700">' + escHtml(m.collabDomain) + '</span></div>' : '') +
+        '<div style="padding:8px 12px 6px;font-size:12px;color:#475569">' +
+          (isMine ? 'Tu as postulé pour ce projet.' : 'A postulé pour collaborer sur ce projet.') +
+        '</div>' +
+        '<div style="padding:3px 10px 6px;text-align:right">' + timeHtml + '</div>' +
+      '</div>' +
+      (!isMine ? replyBtn : '') +
+    '</div>';
+  }
+  if (m.type === 'collab_invite_card') {
+    return '<div class="bubble-reply-wrap">' +
+      (isMine ? replyBtn : '') +
+      '<div class="chat-bubble ' + cls + '" style="padding:0;overflow:hidden;min-width:195px;max-width:240px;border-radius:12px">' +
+        '<div style="background:linear-gradient(135deg,#4F46E5,#7C3AED);padding:14px 14px 10px;display:flex;align-items:center;gap:9px">' +
+          '<i class="fas fa-handshake" style="color:#fff;font-size:20px;flex-shrink:0"></i>' +
+          '<div>' +
+            '<div style="color:#fff;font-size:11px;font-weight:700;opacity:.85">Invitation à collaborer</div>' +
+            '<div style="color:#fff;font-size:13px;font-weight:800;line-height:1.3;margin-top:2px">' + escHtml(m.projTitle || 'Projet') + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div style="padding:9px 12px 6px;font-size:12px;color:#475569">' +
+          (isMine ? 'Tu as envoyé une invitation à collaborer.' : 'Tu as reçu une invitation à collaborer.') +
+          '<br><span style="font-size:11px;color:#94A3B8">Accepte depuis ton profil pour rejoindre la discussion de groupe.</span>' +
+        '</div>' +
+        '<div style="padding:3px 10px 6px;text-align:right">' + timeHtml + '</div>' +
+      '</div>' +
+      (!isMine ? replyBtn : '') +
+    '</div>';
+  }
   /* Texte par défaut */
   return '<div class="bubble-reply-wrap">' +
     (isMine ? replyBtn : '') +
@@ -16113,8 +16388,55 @@ function _inviteCollaborator(projId, targetEmail) {
   });
   _saveCollabInvites(targetEmail, invites);
 
+  /* Créer un DM entre l'invitant et l'invité avec une carte d'invitation */
+  var targetNom = tp.nom || targetEmail;
+  var existingDM = DEMO_CONVERSATIONS.find(function(c) {
+    return !c.isGroup && c.email === targetEmail;
+  });
+  var dmConv;
+  if (existingDM) {
+    dmConv = existingDM;
+  } else {
+    dmConv = {
+      id:       _newConvId(),
+      name:     targetNom,
+      email:    targetEmail,
+      role:     tp.domain || 'Membre Geniwork',
+      verified: !!(tp.badgeType),
+      online:   false,
+      avatar:   { type: 'color', color: '#6366F1', initials: getInitials(targetNom) },
+      at:       Date.now(),
+      time:     'À l\'instant',
+      lastMsg:  '💼 Invitation à collaborer sur "' + proj.title + '"',
+      lastAt:   Date.now(),
+      unread:   0,
+      archived: false,
+      messages: []
+    };
+    DEMO_CONVERSATIONS.unshift(dmConv);
+    _saveDMConvList();
+  }
+  var invMsg = {
+    id:        Date.now(),
+    from:      _currentUser.email,
+    time:      _nowTime(),
+    at:        Date.now(),
+    type:      'collab_invite_card',
+    projId:    projId,
+    projTitle: proj.title,
+    text:      '💼 Invitation à collaborer sur "' + proj.title + '"'
+  };
+  dmConv.messages.push(invMsg);
+  dmConv.lastMsg = invMsg.text;
+  dmConv.lastAt  = invMsg.at;
+  _dmWriteMsg(dmConv, invMsg);
+
   showToast('Invitation envoyée !', 'ok');
-  _renderCollabResults(projId, (document.getElementById('collab-search-input') || {}).value || '');
+  _closeGenericSheet('collab-invite');
+  var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+  if (msgsBtn) navTo(msgsBtn, 'p-messages');
+  renderConversations();
+  setTimeout(function() { openChat(dmConv.id); }, 220);
 }
 
 /* ── Accepter une invitation ── */
@@ -19836,7 +20158,7 @@ var _admTapTimer  = null;
 */
 var _ADM_ROLE_PERMS = {
   'Super Admin': {
-    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','marketplace','notifs','settings'],
+    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','marketplace','notifs','settings','security'],
     actions: ['ban','unban','delete_post','delete_user','send_notif','publish','manage_team','manage_payments','change_settings','approve_badge','dismiss_report','warn_user','reset_password','change_role','approve_request']
   },
   'Admin': {
@@ -20210,12 +20532,14 @@ function _admLogin() {
 
   if (!targetUser) {
     _gwRecordFail(bruteKey);
+    try { _secOnAdminFail(email); } catch(e){}
     _loginErr('Aucun compte administrateur trouvé pour cet email'); return;
   }
 
   /* ── Vérification du rôle ── */
   if (selectedRole !== targetUser.role) {
     _gwRecordFail(bruteKey);
+    try { _secOnAdminFail(email); } catch(e){}
     _loginErr('Rôle incorrect. Votre rôle attribué est différent de celui sélectionné.'); return;
   }
 
@@ -20226,6 +20550,7 @@ function _admLogin() {
     if (btn) { btn.disabled = false; btn.textContent = 'Se connecter'; }
     if (!ok) {
       _gwRecordFail(bruteKey);
+      try { _secOnAdminFail(email); } catch(e){}
       _loginErr('Mot de passe incorrect'); return;
     }
     _gwResetBrute(bruteKey);
@@ -20276,7 +20601,7 @@ function _admApplySidebarPerms() {
     users:'adm-nav-users',         badges:'adm-nav-badges',
     team:'adm-nav-team',           publi:'adm-nav-publi',
     marketplace:'adm-nav-marketplace', notifs:'adm-nav-notifs',
-    settings:'adm-nav-settings'
+    settings:'adm-nav-settings',       security:'adm-nav-security'
   };
   Object.keys(tabNav).forEach(function(tab) {
     var el = document.getElementById(tabNav[tab]);
@@ -20578,6 +20903,7 @@ function _admRender() {
   else if (_adminTab === 'marketplace') content.innerHTML = _admBuildMarketplace();
   else if (_adminTab === 'notifs')      content.innerHTML = _admBuildNotifs();
   else if (_adminTab === 'settings')    content.innerHTML = _admBuildSettings();
+  else if (_adminTab === 'security')    { content.innerHTML = _admBuildSecurity(); _admSecurityListen(); }
   _admUpdateNavBadges();
 }
 
@@ -24700,7 +25026,7 @@ setInterval(function() {
 ══════════════════════════════════════════ */
 
 /* ── Data helpers ── */
-function _mkGetListings()      { try { return JSON.parse(localStorage.getItem('gw_mk_listings') || '[]'); } catch(e){ return []; } }
+function _mkGetListings()      { try { var r = JSON.parse(localStorage.getItem('gw_mk_listings') || '[]'); return Array.isArray(r) ? r : Object.values(r); } catch(e){ return []; } }
 function _mkSaveListings(list) { localStorage.setItem('gw_mk_listings', JSON.stringify(list)); _gwFbSet('mk_listings', list); }
 function _mkGetTxns()          { try { return JSON.parse(localStorage.getItem('gw_mk_txns') || '[]'); } catch(e){ return []; } }
 function _mkSaveTxns(list)     { localStorage.setItem('gw_mk_txns', JSON.stringify(list)); _gwFbSet('mk_txns', list); }
@@ -24760,8 +25086,11 @@ function _mkOpenCreate() {
   bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
   bg.onclick = function(e){ if(e.target===bg){ bg.remove(); card.remove(); } };
 
-  var svcOpts  = Object.keys(_MK_SVC_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_SVC_CATS[k]+'</option>'; }).join('');
-  var prodOpts = Object.keys(_MK_PROD_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_PROD_CATS[k]+'</option>'; }).join('');
+  var svcOpts   = Object.keys(_MK_SVC_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_SVC_CATS[k]+'</option>'; }).join('');
+  var prodOpts  = Object.keys(_MK_PROD_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_PROD_CATS[k]+'</option>'; }).join('');
+  var ebookOpts = Object.keys(_MK_EBOOK_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_EBOOK_CATS[k]+'</option>'; }).join('');
+  _mkEbookFile  = null;
+  _mkEbookCover = null;
   var country  = (_mkUserLocation && _mkUserLocation.country) || 'default';
   var radii    = _MK_RADIUS_BY_COUNTRY[country] || _MK_RADIUS_BY_COUNTRY['default'];
   var radOpts  = radii.map(function(r){ return '<option value="'+r+'">'+r+' km</option>'; }).join('');
@@ -24784,6 +25113,7 @@ function _mkOpenCreate() {
       '<div style="display:flex;gap:8px;margin-top:6px">'+
         '<button id="mk-type-svc" onclick="_mkSetType(\'service\')" style="flex:1;padding:10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">🛠️ Service</button>'+
         '<button id="mk-type-prod" onclick="_mkSetType(\'product\')" style="flex:1;padding:10px;background:#F1F5F9;color:#64748B;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">📦 Produit</button>'+
+        '<button id="mk-type-ebook" onclick="_mkSetType(\'ebook\')" style="flex:1;padding:10px;background:#F1F5F9;color:#64748B;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">📖 Ebook</button>'+
       '</div>'+
     '</div>'+
 
@@ -24799,14 +25129,20 @@ function _mkOpenCreate() {
       '<input id="mk-title-inp" placeholder="Ex: Création de logo professionnel..." style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box">'+
     '</div>'+
 
+    /* Auteur — ebook seulement */
+    '<div id="mk-author-wrap" style="margin-bottom:12px;display:none">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Auteur</label>'+
+      '<input id="mk-author-inp" placeholder="Nom de l\'auteur" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
+    '</div>'+
+
     /* Description */
     '<div style="margin-bottom:12px">'+
       '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Description</label>'+
       '<textarea id="mk-desc-inp" placeholder="Décrivez votre offre..." rows="3" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;resize:none;box-sizing:border-box"></textarea>'+
     '</div>'+
 
-    /* Prix */
-    '<div style="margin-bottom:12px;display:flex;gap:10px">'+
+    /* Prix normal (service/produit) */
+    '<div id="mk-price-wrap" style="margin-bottom:12px;display:flex;gap:10px">'+
       '<div style="flex:2">'+
         '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Prix (€)</label>'+
         '<input id="mk-price-inp" type="number" min="0" placeholder="0.00" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box">'+
@@ -24818,15 +25154,59 @@ function _mkOpenCreate() {
       '</div>'+
     '</div>'+
 
+    /* Mode Ebook : Gratuit / Payant */
+    '<div id="mk-ebook-price-wrap" style="display:none;margin-bottom:12px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Mode de vente</label>'+
+      '<div style="display:flex;gap:8px;margin-top:6px">'+
+        '<button id="mk-ebook-free-btn" onclick="_mkSetEbookMode(\'free\')" '+
+          'style="flex:1;padding:10px 8px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer">'+
+          '🎁 Gratuit</button>'+
+        '<button id="mk-ebook-paid-btn" onclick="_mkSetEbookMode(\'paid\')" '+
+          'style="flex:1;padding:10px 8px;background:#F1F5F9;color:#64748B;border:none;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer">'+
+          '💳 Payant</button>'+
+      '</div>'+
+      '<div id="mk-ebook-paid-fields" style="display:none;margin-top:10px">'+
+        '<input id="mk-ebook-price-inp" type="number" min="0.99" step="0.01" placeholder="Prix en € (ex: 9.99)" '+
+          'style="width:100%;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
+        '<div style="font-size:10.5px;color:#94A3B8;margin-top:4px"><i class="fas fa-info-circle"></i> 1% de commission Geniwork sur chaque vente</div>'+
+      '</div>'+
+    '</div>'+
+
     /* PayPal du vendeur */
-    '<div style="margin-bottom:12px">'+
+    '<div id="mk-paypal-wrap" style="margin-bottom:12px">'+
       '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Votre email PayPal</label>'+
       '<input id="mk-paypal-inp" type="email" placeholder="votre@paypal.com" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
       '<div style="font-size:10.5px;color:#94A3B8;margin-top:3px"><i class="fas fa-info-circle"></i> L\'acheteur vous paiera via PayPal (1% de commission Geniwork)</div>'+
     '</div>'+
 
-    /* Photos */
-    '<div style="margin-bottom:12px">'+
+    /* Photo de couverture Ebook */
+    '<div id="mk-ebook-cover-wrap" style="display:none;margin-bottom:12px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Photo de couverture</label>'+
+      '<div style="margin-top:6px;display:flex;align-items:center;gap:10px">'+
+        '<div id="mk-ebook-cover-preview" style="width:64px;height:90px;border:2px dashed #CBD5E1;border-radius:10px;background:#F8FAFC;display:flex;align-items:center;justify-content:center;color:#94A3B8;font-size:22px;cursor:pointer;flex-shrink:0;overflow:hidden" onclick="document.getElementById(\'mk-cover-inp\').click()">'+
+          '<i class="fas fa-image"></i>'+
+        '</div>'+
+        '<div>'+
+          '<button onclick="document.getElementById(\'mk-cover-inp\').click()" style="padding:8px 14px;background:#EEF2FF;color:#6366F1;border:none;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-upload" style="margin-right:5px"></i>Choisir une image</button>'+
+          '<div style="font-size:10.5px;color:#94A3B8;margin-top:4px">JPG, PNG · 1:1.4 recommandé</div>'+
+        '</div>'+
+      '</div>'+
+      '<input type="file" id="mk-cover-inp" accept="image/*" style="display:none" onchange="_mkPickEbookCover(this)">'+
+    '</div>'+
+
+    /* Fichier Ebook */
+    '<div id="mk-ebook-file-wrap" style="display:none;margin-bottom:12px">'+
+      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Fichier Ebook (PDF ou EPUB)</label>'+
+      '<div style="margin-top:6px">'+
+        '<button onclick="document.getElementById(\'mk-ebook-inp\').click()" id="mk-ebook-file-btn" style="width:100%;padding:12px;border:2px dashed #CBD5E1;border-radius:12px;background:#F8FAFC;color:#64748B;font-size:13px;cursor:pointer;text-align:center">'+
+          '<i class="fas fa-file-pdf" style="color:#EF4444;margin-right:6px"></i>Sélectionner le fichier'+
+        '</button>'+
+        '<input type="file" id="mk-ebook-inp" accept=".pdf,.epub,application/pdf" style="display:none" onchange="_mkPickEbookFile(this)">'+
+      '</div>'+
+    '</div>'+
+
+    /* Photos (service/produit) */
+    '<div id="mk-photos-wrap" style="margin-bottom:12px">'+
       '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Photos (max 5)</label>'+
       '<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap" id="mk-img-previews">'+
         '<button onclick="document.getElementById(\'mk-img-inp\').click()" style="width:64px;height:64px;border:2px dashed #CBD5E1;border-radius:12px;background:#F8FAFC;color:#94A3B8;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-plus"></i></button>'+
@@ -24882,17 +25262,102 @@ function _mkOpenCreate() {
 
 function _mkSetType(type) {
   _mkCurrentType = type;
-  var svcBtn  = document.getElementById('mk-type-svc');
-  var prodBtn = document.getElementById('mk-type-prod');
-  var catSel  = document.getElementById('mk-cat-sel');
   var grad = 'background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none';
+  var gradG= 'background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none';
   var flat = 'background:#F1F5F9;color:#64748B;border:none';
-  if (svcBtn)  svcBtn.style.cssText  = (type==='service' ? grad : flat) + ';flex:1;padding:10px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer';
-  if (prodBtn) prodBtn.style.cssText = (type==='product' ? grad : flat) + ';flex:1;padding:10px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer';
+  var base = ';flex:1;padding:10px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer';
+  var svcBtn   = document.getElementById('mk-type-svc');
+  var prodBtn  = document.getElementById('mk-type-prod');
+  var ebookBtn = document.getElementById('mk-type-ebook');
+  var catSel   = document.getElementById('mk-cat-sel');
+  if (svcBtn)   svcBtn.style.cssText   = (type==='service' ? grad : flat) + base;
+  if (prodBtn)  prodBtn.style.cssText  = (type==='product' ? grad : flat) + base;
+  if (ebookBtn) ebookBtn.style.cssText = (type==='ebook'   ? gradG: flat) + base;
+
+  /* Catégories */
   if (catSel) {
-    var cats = type === 'service' ? _MK_SVC_CATS : _MK_PROD_CATS;
+    var cats = type==='ebook' ? _MK_EBOOK_CATS : (type==='service' ? _MK_SVC_CATS : _MK_PROD_CATS);
     catSel.innerHTML = Object.keys(cats).map(function(k){ return '<option value="'+k+'">'+cats[k]+'</option>'; }).join('');
   }
+
+  /* Affichage conditionnel des champs */
+  var isEbook = type === 'ebook';
+  _mkToggleEl('mk-author-wrap',      isEbook  ? 'block' : 'none');
+  _mkToggleEl('mk-ebook-price-wrap', isEbook  ? 'block' : 'none');
+  _mkToggleEl('mk-ebook-cover-wrap', isEbook  ? 'block' : 'none');
+  _mkToggleEl('mk-ebook-file-wrap',  isEbook  ? 'block' : 'none');
+  _mkToggleEl('mk-price-wrap',       isEbook  ? 'none'  : 'flex');
+  _mkToggleEl('mk-photos-wrap',      isEbook  ? 'none'  : 'block');
+  /* PayPal : caché pour ebook gratuit, visible pour ebook payant (géré par _mkSetEbookMode) */
+  if (isEbook) {
+    _mkToggleEl('mk-paypal-wrap', 'none');
+    _mkSetEbookMode('free'); /* ebook gratuit par défaut */
+  } else {
+    _mkToggleEl('mk-paypal-wrap', 'block');
+  }
+}
+
+function _mkToggleEl(id, display) {
+  var el = document.getElementById(id);
+  if (el) el.style.display = display;
+}
+
+function _mkSetEbookMode(mode) {
+  var freeBtn   = document.getElementById('mk-ebook-free-btn');
+  var paidBtn   = document.getElementById('mk-ebook-paid-btn');
+  var paidFields= document.getElementById('mk-ebook-paid-fields');
+  var grad  = 'background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;flex:1;padding:10px 8px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer';
+  var gradP = 'background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;flex:1;padding:10px 8px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer';
+  var flat  = 'background:#F1F5F9;color:#64748B;border:none;flex:1;padding:10px 8px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer';
+  if (freeBtn) freeBtn.style.cssText = mode==='free' ? grad : flat;
+  if (paidBtn) paidBtn.style.cssText = mode==='paid' ? gradP : flat;
+  if (paidFields) paidFields.style.display = mode==='paid' ? 'block' : 'none';
+  /* PayPal requis seulement en mode payant */
+  _mkToggleEl('mk-paypal-wrap', mode==='paid' ? 'block' : 'none');
+}
+
+function _mkPickEbookCover(input) {
+  var file = input && input.files && input.files[0];
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) { showToast('Image trop lourde (max 10 Mo)', 'err'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    /* ── Redimensionner à max 600px et compresser en JPEG 0.75 ── */
+    var img = new Image();
+    img.onload = function() {
+      var MAX = 600;
+      var w = img.width, h = img.height;
+      if (w > MAX || h > MAX) {
+        if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+        else       { w = Math.round(w * MAX / h); h = MAX; }
+      }
+      var canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      var compressed = canvas.toDataURL('image/jpeg', 0.75);
+      _mkEbookCover = compressed;
+      var prev = document.getElementById('mk-ebook-cover-preview');
+      if (prev) prev.innerHTML = '<img src="'+compressed+'" style="width:100%;height:100%;object-fit:cover">';
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function _mkPickEbookFile(input) {
+  var file = input && input.files && input.files[0];
+  if (!file) return;
+  if (file.size > 20 * 1024 * 1024) {
+    showToast('Fichier trop lourd — maximum 20 Mo', 'err');
+    input.value = '';
+    return;
+  }
+  _mkEbookFile = file;
+  var sizeMo = (file.size / 1024 / 1024).toFixed(1);
+  var btn = document.getElementById('mk-ebook-file-btn');
+  if (btn) btn.innerHTML =
+    '<i class="fas fa-file-pdf" style="color:#EF4444;margin-right:6px"></i>' +
+    escHtml(file.name) + ' (' + sizeMo + ' Mo) <span style="color:#10B981">✓</span>';
 }
 
 function _mkPickImages(input) {
@@ -24968,6 +25433,13 @@ function _fldNum(id)  { return parseFloat(_fldVal(id)) || 0; }
 function _fldInt(id, def) { return parseInt(_fldVal(id), 10) || (def !== undefined ? def : 50); }
 
 function _mkPublishListing() {
+  var isEbook = _mkCurrentType === 'ebook';
+
+  /* ── Ebook : upload du fichier vers Firebase Storage, puis publish ── */
+  if (isEbook) {
+    _mkPublishEbook();
+    return;
+  }
 
   var title      = _fldVal('mk-title-inp');
   var desc       = _fldVal('mk-desc-inp');
@@ -25033,6 +25505,134 @@ function _mkPublishListing() {
   try { _mkRenderSystemListings();       } catch(e) {}
 }
 
+/* ── Publication d'un Ebook ── */
+function _mkPublishEbook() {
+  var title   = _fldVal('mk-title-inp');
+  var desc    = _fldVal('mk-desc-inp');
+  var author  = _fldVal('mk-author-inp') || (_currentUser ? _currentUser.nom : '');
+  var cat     = _fldVal('mk-cat-sel');
+  var paypal  = _fldVal('mk-paypal-inp');
+  var city    = _fldVal('mk-city-inp');
+  var country = _fldVal('mk-country-inp');
+
+  /* Mode payant */
+  var paidBtn = document.getElementById('mk-ebook-paid-btn');
+  var isPaid  = paidBtn && paidBtn.style.background.indexOf('6366') !== -1;
+  var price   = isPaid ? (_fldNum('mk-ebook-price-inp') || 0) : 0;
+
+  if (!title)   { showToast('Ajoutez un titre', 'err'); return; }
+  if (!_mkEbookFile) { showToast('Sélectionnez un fichier ebook (PDF/EPUB)', 'err'); return; }
+  if (isPaid && price <= 0) { showToast('Entrez un prix valide', 'err'); return; }
+  if (isPaid && !paypal)    { showToast('Ajoutez votre email PayPal', 'err'); return; }
+
+  /* Bouton → spinner */
+  var pubBtn = document.querySelector('[onclick="_mkPublishListing()"]');
+  if (pubBtn) { pubBtn.disabled = true; pubBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Publication…'; }
+
+  var plan    = _mkGetUserPlanKey(_currentUser.email);
+  var limits  = _MK_PLAN_LIMITS[plan] || _MK_PLAN_LIMITS.free;
+  var profile = loadUserProfile(_currentUser.email) || {};
+
+  function _resetPubBtn() {
+    if (pubBtn) {
+      pubBtn.disabled = false;
+      pubBtn.innerHTML = '<i class="fas fa-check" style="margin-right:6px"></i>Publier l\'ebook';
+    }
+  }
+
+  function _saveListing(ebookUrl) {
+    var listing = {
+      id:            'lst_' + Date.now(),
+      type:          'ebook',
+      category:      cat,
+      title:         title,
+      description:   desc,
+      author:        author,
+      price:         isPaid ? price : 0,
+      isFree:        !isPaid,
+      currency:      'EUR',
+      coverImage:    _mkEbookCover || '',
+      ebookUrl:      ebookUrl,
+      images:        _mkEbookCover ? [_mkEbookCover] : [],
+      location:      { city: city || '', country: country || '' },
+      radius:        9999,
+      sellerEmail:   _currentUser.email,
+      sellerNom:     _currentUser.nom || profile.nom || 'Membre',
+      sellerPaypal:  paypal || '',
+      sellerVerified: !!(profile.badgeType),
+      sellerPlan:    plan,
+      status:        'active',
+      createdAt:     new Date().toISOString(),
+      expiresAt:     new Date(Date.now() + (limits.durationDays||30)*24*3600*1000).toISOString(),
+      views:         0, downloads: 0,
+      isPriority:    plan === 'business',
+      canAd:         limits.canAd
+    };
+
+    try {
+      var listings = _mkGetListings();
+      listings.unshift(listing);
+      _mkSaveListings(listings);
+    } catch(saveErr) {
+      console.error('[Ebook save]', saveErr);
+      showToast('Erreur sauvegarde — espace local insuffisant.', 'err');
+      _resetPubBtn();
+      return;
+    }
+
+    _mkEbookFile = null; _mkEbookCover = null; _mkPickedImages = [];
+
+    var bg   = document.getElementById('mk-create-bg');
+    var card = document.getElementById('mk-create-card');
+    if (bg)   bg.remove();
+    if (card) card.remove();
+
+    showToast('Ebook publié ✓ Visible dans le Marketplace !', 'ok');
+    try { renderMarketplaceUserServices(); } catch(e) {}
+    try { _mkRenderSystemListings(); } catch(e) {}
+  }
+
+  function _doStorageUpload() {
+    if (!_gwFbStorage) {
+      showToast('Firebase Storage non initialisé. Vérifiez la configuration.', 'err');
+      _resetPubBtn();
+      return;
+    }
+    var ext  = (_mkEbookFile.name || 'ebook.pdf').split('.').pop().toLowerCase() || 'pdf';
+    var path = 'gw_ebooks/' + _gwFbKey(_currentUser.email) + '_' + Date.now() + '.' + ext;
+
+    _uploadBlobToStorage(
+      path,
+      _mkEbookFile,
+      function(url) {
+        /* Succès Firebase Storage */
+        _saveListing(url);
+      },
+      function(err) {
+        /* Échec Firebase Storage */
+        var code = (err && (err.code || err.message || '')) + '';
+        console.warn('[Ebook upload Storage]', code);
+        var msg = 'Échec upload ebook.';
+        if (code.indexOf('unauthorized') !== -1 || code.indexOf('permission') !== -1 || code.indexOf('UNAUTHORIZED') !== -1) {
+          msg = 'Règles Firebase Storage non configurées. Allez dans la console Firebase → Storage → Règles et autorisez gw_ebooks/.';
+        } else if (code.indexOf('canceled') !== -1) {
+          msg = 'Upload annulé.';
+        } else if (code.indexOf('quota') !== -1) {
+          msg = 'Quota Firebase Storage dépassé.';
+        }
+        showToast(msg, 'err');
+        _resetPubBtn();
+      },
+      function(pct) {
+        /* Progression */
+        if (pubBtn) pubBtn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right:6px"></i>Upload ' + pct + '%…';
+      }
+    );
+  }
+
+  _doStorageUpload();
+}
+
 /* ── Détail d'une annonce + PayPal ── */
 function _mkOpenDetail(listingId) {
   var listings = _mkGetListings();
@@ -25047,6 +25647,9 @@ function _mkOpenDetail(listingId) {
   if (existing) existing.remove();
   var existingCard = document.getElementById('mk-detail-card');
   if (existingCard) existingCard.remove();
+
+  /* Ebook : détail spécifique */
+  if (listing.type === 'ebook') { _mkOpenEbookDetail(listing); return; }
 
   var cats = listing.type === 'service' ? _MK_SVC_CATS : _MK_PROD_CATS;
   var catLabel = cats[listing.category] || listing.category;
@@ -25133,6 +25736,175 @@ function _mkOpenDetail(listingId) {
   if (!isMine && listing.status === 'active') {
     _mkLoadPayPal(listing);
   }
+}
+
+/* ── Détail Ebook ── */
+function _mkOpenEbookDetail(listing) {
+  var isMine   = _currentUser && listing.sellerEmail === _currentUser.email;
+  var cats     = _MK_EBOOK_CATS;
+  var catLabel = cats[listing.category] || listing.category;
+  var isFree   = listing.isFree || listing.price === 0;
+
+  /* Vérifier si l'utilisateur a déjà acheté cet ebook */
+  var hasBought = !isFree && _currentUser && _mkGetTxns().some(function(t) {
+    return t.listingId === listing.id && t.buyerEmail === _currentUser.email && t.status === 'completed';
+  });
+
+  var bg = document.createElement('div');
+  bg.id = 'mk-detail-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+  bg.onclick = function(e){ if(e.target===bg){ bg.remove(); card.remove(); } };
+
+  var card = document.createElement('div');
+  card.id = 'mk-detail-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  /* Couverture */
+  var coverHtml = listing.coverImage
+    ? '<div style="width:100%;height:200px;overflow:hidden;border-radius:24px 24px 0 0;position:relative">' +
+        '<img src="'+listing.coverImage+'" style="width:100%;height:200px;object-fit:cover">' +
+        '<div style="position:absolute;inset:0;background:linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.5))"></div>' +
+        '<span style="position:absolute;top:12px;left:12px;background:rgba(0,0,0,.5);color:#fff;font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;backdrop-filter:blur(4px)">📖 Ebook</span>' +
+      '</div>'
+    : '<div style="width:100%;height:120px;border-radius:24px 24px 0 0;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;font-size:48px">📖</div>';
+
+  card.innerHTML =
+    coverHtml +
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>'+
+    '<div style="padding:14px 20px 90px">'+
+
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'+
+      '<span style="font-size:11px;font-weight:700;background:#EEF2FF;color:#4F46E5;padding:3px 10px;border-radius:20px">'+escHtml(catLabel)+'</span>'+
+      '<span style="font-size:11px;font-weight:700;background:'+(isFree?'#DCFCE7':'#FEF3C7')+';color:'+(isFree?'#16A34A':'#D97706')+';padding:3px 10px;border-radius:20px">'+(isFree?'🎁 Gratuit':'💳 Payant')+'</span>'+
+      (listing.sellerVerified ? '<span style="font-size:11px;font-weight:700;background:#DCFCE7;color:#16A34A;padding:3px 10px;border-radius:20px">✅ Vérifié</span>' : '')+
+    '</div>'+
+
+    '<div style="font-size:18px;font-weight:800;color:#0F172A;line-height:1.3;margin-bottom:4px">'+escHtml(listing.title)+'</div>'+
+    (listing.author ? '<div style="font-size:13px;color:#6366F1;font-weight:600;margin-bottom:8px"><i class="fas fa-pen-fancy" style="margin-right:5px"></i>'+escHtml(listing.author)+'</div>' : '')+
+
+    (!isFree ? '<div style="font-size:22px;font-weight:900;color:#6366F1;margin-bottom:12px">'+listing.price.toFixed(2)+' €'+
+      '<span style="font-size:11px;color:#94A3B8;font-weight:400;margin-left:8px">1% commission Geniwork</span>'+
+    '</div>' : '')+
+
+    (listing.description ? '<div style="font-size:13.5px;color:#374151;line-height:1.7;margin-bottom:14px;white-space:pre-wrap">'+escHtml(listing.description)+'</div>' : '')+
+
+    '<div style="display:flex;align-items:center;gap:10px;background:#F8FAFC;border-radius:12px;padding:10px 12px;margin-bottom:14px">'+
+      '<div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:700;flex-shrink:0">'+
+        escHtml(listing.sellerNom.slice(0,2).toUpperCase())+
+      '</div>'+
+      '<div style="flex:1">'+
+        '<div style="font-size:13px;font-weight:700;color:#0F172A">'+escHtml(listing.sellerNom)+'</div>'+
+        '<div style="font-size:11px;color:#64748B">'+escHtml(listing.sellerPlan||'free')+' · '+listing.views+' vue(s) · '+(listing.downloads||0)+' téléchargement(s)</div>'+
+      '</div>'+
+    '</div>'+
+
+    '<div id="mk-ebook-action-wrap"></div>'+
+
+    (isMine ? '<div style="margin-top:8px;display:flex;flex-direction:column;gap:8px">'+
+      '<button onclick="_mkDeleteListing(\''+listing.id+'\')" style="padding:12px;background:#FEF2F2;color:#EF4444;border:none;border-radius:14px;font-size:13px;font-weight:700;cursor:pointer"><i class="fas fa-trash" style="margin-right:6px"></i>Supprimer l\'ebook</button>'+
+    '</div>' : '')+
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function(){ requestAnimationFrame(function(){ card.style.transition='transform .35s cubic-bezier(.22,1,.36,1)'; }); });
+
+  /* Zone action */
+  var actionWrap = document.getElementById('mk-ebook-action-wrap');
+  if (actionWrap && !isMine) {
+    if (isFree) {
+      actionWrap.innerHTML =
+        '<a href="'+escHtml(listing.ebookUrl)+'" download target="_blank" '+
+        'onclick="_mkEbookCountDownload(\''+listing.id+'\')" '+
+        'style="display:block;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;margin-bottom:8px">'+
+        '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger gratuitement</a>';
+    } else if (hasBought) {
+      actionWrap.innerHTML =
+        '<a href="'+escHtml(listing.ebookUrl)+'" download target="_blank" '+
+        'onclick="_mkEbookCountDownload(\''+listing.id+'\')" '+
+        'style="display:block;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;margin-bottom:8px">'+
+        '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger (déjà acheté)</a>';
+    } else {
+      /* Bouton PayPal achat ebook */
+      actionWrap.innerHTML =
+        '<div id="mk-ebook-paypal-wrap" style="margin-bottom:8px"></div>'+
+        '<div style="font-size:10.5px;color:#94A3B8;text-align:center"><i class="fas fa-lock" style="margin-right:3px"></i>Paiement sécurisé PayPal · lien de téléchargement envoyé après achat</div>';
+      _mkLoadEbookPayPal(listing);
+    }
+  }
+}
+
+function _mkEbookCountDownload(listingId) {
+  var listings = _mkGetListings();
+  var l = listings.find(function(x){ return x.id === listingId; });
+  if (l) { l.downloads = (l.downloads || 0) + 1; _mkSaveListings(listings); }
+}
+
+function _mkLoadEbookPayPal(listing) {
+  var wrap = document.getElementById('mk-ebook-paypal-wrap');
+  if (!wrap) return;
+  var existing = document.getElementById('paypal-sdk');
+  if (!existing) {
+    var script = document.createElement('script');
+    script.id  = 'paypal-sdk';
+    script.src = 'https://www.paypal.com/sdk/js?client-id='+_GW_PAYPAL_CLIENT_ID+'&currency=EUR&intent=capture';
+    script.onload  = function() { _mkRenderEbookPayPalBtn(listing); };
+    script.onerror = function() { wrap.innerHTML = '<div style="font-size:12px;color:#EF4444;text-align:center">PayPal indisponible. Contactez le vendeur.</div>'; };
+    document.head.appendChild(script);
+  } else {
+    _mkRenderEbookPayPalBtn(listing);
+  }
+}
+
+function _mkRenderEbookPayPalBtn(listing) {
+  var wrap = document.getElementById('mk-ebook-paypal-wrap');
+  if (!wrap || typeof paypal === 'undefined') return;
+  wrap.innerHTML = '<div id="paypal-ebook-container"></div>';
+  var commission   = parseFloat((listing.price * _GW_COMMISSION_RATE).toFixed(2));
+  var sellerAmount = parseFloat((listing.price - commission).toFixed(2));
+  paypal.Buttons({
+    createOrder: function(data, actions) {
+      return actions.order.create({
+        purchase_units: [{ description: listing.title,
+          amount: { value: listing.price.toFixed(2), currency_code: 'EUR' },
+          payee: { email_address: listing.sellerPaypal }
+        }]
+      });
+    },
+    onApprove: function(data, actions) {
+      return actions.order.capture().then(function(details) {
+        var txns = _mkGetTxns();
+        txns.unshift({
+          id: 'txn_'+Date.now(), listingId: listing.id, listingTitle: listing.title,
+          listingType: 'ebook', ebookUrl: listing.ebookUrl,
+          amount: listing.price, commission: commission, sellerNet: sellerAmount,
+          sellerEmail: listing.sellerEmail,
+          buyerEmail:  _currentUser ? _currentUser.email : '',
+          paypalOrderId: details.id, status: 'completed', date: new Date().toISOString()
+        });
+        _mkSaveTxns(txns);
+        _mkEbookCountDownload(listing.id);
+        /* Notif vendeur */
+        pushNotif(listing.sellerEmail, {
+          id: genNotifId(), type:'system',
+          title: '📖 Ebook vendu !',
+          message: (_currentUser?_currentUser.nom:'Quelqu\'un')+' a acheté "'+listing.title+'" pour '+listing.price+'€. Vous recevrez '+sellerAmount+'€ (1% commission Geniwork).',
+          date: new Date().toISOString(), read: false
+        });
+        /* Fermer et afficher bouton téléchargement */
+        var wrap2 = document.getElementById('mk-ebook-action-wrap');
+        if (wrap2) {
+          wrap2.innerHTML = '<a href="'+escHtml(listing.ebookUrl)+'" download target="_blank" '+
+            'style="display:block;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;margin-bottom:8px">'+
+            '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger votre ebook ✓</a>'+
+            '<div style="font-size:11px;color:#10B981;text-align:center;font-weight:600"><i class="fas fa-check-circle" style="margin-right:4px"></i>Paiement confirmé ! Merci.</div>';
+        }
+        showToast('Achat réussi ! Téléchargez votre ebook ✓', 'ok');
+      });
+    },
+    onError: function() { showToast('Erreur PayPal. Réessayez.', 'err'); },
+    style: { layout:'vertical', color:'blue', shape:'pill', label:'pay', height:44 }
+  }).render('#paypal-ebook-container');
 }
 
 function _mkLoadPayPal(listing) {
@@ -25273,31 +26045,29 @@ function _mkContactSeller(email, listingId) {
   if (listing) {
     var now = new Date();
     var timeStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2,'0');
-    /* Éviter les doublons : ne pas re-envoyer si la même annonce est déjà la dernière carte */
-    var alreadySent = conv.messages.length && conv.messages[conv.messages.length-1].listingId === listingId;
-    if (!alreadySent) {
-      var cardMsg = {
-        id:        Date.now(),
-        from:      _currentUser.email,
-        time:      timeStr,
-        at:        Date.now(),
-        type:      'listing_card',
-        listingId: listing.id,
-        listingTitle: listing.title,
-        listingPrice: listing.price,
-        listingImg:   listing.images && listing.images.length ? listing.images[0] : null,
-        listingCat:   listing.category,
-        listingType:  listing.type,
-        text:         '📦 ' + listing.title + ' — ' + listing.price.toFixed(2) + ' €'
-      };
-      conv.messages.push(cardMsg);
-      conv.lastMsg = '📦 ' + listing.title;
-      conv.lastAt  = Date.now();
-      /* Sauvegarder la conversation + notifier le vendeur */
-      _saveDMConv(conv);
-      _writeDMInbox(email, _currentUser.email, _currentUser.nom || _currentUser.email,
-                    _currentUser.role || 'Membre Geniwork', conv.lastMsg);
-    }
+    var cardMsg = {
+      id:        Date.now(),
+      from:      _currentUser.email,
+      time:      timeStr,
+      at:        Date.now(),
+      type:      'listing_card',
+      listingId: listing.id,
+      listingTitle: listing.title,
+      listingPrice: listing.price,
+      listingImg:   listing.images && listing.images.length ? listing.images[0] : null,
+      listingCat:   listing.category,
+      listingType:  listing.type,
+      text:         '📦 ' + listing.title + ' — ' + listing.price.toFixed(2) + ' €'
+    };
+    conv.messages.push(cardMsg);
+    conv.lastMsg = '📦 ' + listing.title;
+    conv.lastAt  = Date.now();
+    /* Écriture Firebase → carte visible dans le chat + notification inbox vendeur */
+    _dmWriteMsg(conv, cardMsg);
+  } else {
+    /* Annonce introuvable localement — notifier quand même le vendeur */
+    _writeDMInbox(email, _currentUser.email, _currentUser.nom || _currentUser.email,
+                  _currentUser.role || 'Membre Geniwork', 'Nouveau message');
   }
 
   /* Aller sur Messages et ouvrir le chat */
@@ -25471,6 +26241,48 @@ function _mkRenderSystemListings() {
   mkListings.sort(function(a, b) { return (b.isPriority ? 1 : 0) - (a.isPriority ? 1 : 0); });
 
   mkListings.forEach(function(listing) {
+    /* ── Carte spéciale Ebook ── */
+    if (listing.type === 'ebook') {
+      var isMineE = _currentUser && listing.sellerEmail === _currentUser.email;
+      var isFreeE = listing.isFree || listing.price === 0;
+      var catLblE = (_MK_EBOOK_CATS[listing.category] || listing.category || '').replace(/^[^ ]+ /,'');
+      var cardE   = document.createElement('div');
+      cardE.id        = 'mk-lst-'+listing.id;
+      cardE.className = 'mk-service-card mk-listing-card';
+      cardE.style.cssText = 'cursor:pointer;overflow:hidden;position:relative';
+      cardE.onclick   = function(){ _mkOpenDetail(listing.id); };
+      var coverStyle  = listing.coverImage
+        ? 'background:url(\''+listing.coverImage+'\') center/cover no-repeat'
+        : 'background:linear-gradient(135deg,#6366F1,#8B5CF6)';
+      cardE.innerHTML =
+        '<div class="mk-service-img" style="'+coverStyle+';position:relative;aspect-ratio:3/4;min-height:130px">'+
+          '<span class="mk-service-badge" style="background:'+(isFreeE?'#10B981':'#6366F1')+'">'+
+            (isFreeE ? '🎁 Gratuit' : '💳 '+listing.price.toFixed(2)+'€')+'</span>'+
+          '<span style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.5);color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:10px">📖 Ebook</span>'+
+        '</div>'+
+        '<div class="mk-service-body">'+
+          '<div class="mk-service-seller">'+
+            '<div class="mk-seller-av" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:700">'+
+              escHtml(listing.sellerNom.slice(0,2).toUpperCase())+
+            '</div>'+
+            '<span>'+escHtml(listing.sellerNom)+'</span>'+
+            (listing.sellerVerified ? '<i class="fas fa-circle-check mk-verified"></i>' : '')+
+            (isMineE ? '<span style="font-size:10px;padding:2px 7px;background:#EEF2FF;color:#6366F1;border-radius:20px;font-weight:700;margin-left:4px">Mon ebook</span>' : '')+
+          '</div>'+
+          '<p class="mk-service-title">'+escHtml(listing.title)+'</p>'+
+          (listing.author ? '<p style="font-size:11px;color:#6366F1;margin:0 0 2px;font-weight:600"><i class="fas fa-pen-fancy" style="margin-right:3px"></i>'+escHtml(listing.author)+'</p>' : '')+
+          '<p class="mk-service-desc" style="color:#64748B;font-size:12px;margin:2px 0 4px">'+escHtml(catLblE)+'</p>'+
+          '<div style="display:flex;align-items:center;justify-content:space-between">'+
+            (isFreeE
+              ? '<span style="font-size:11px;color:#10B981;font-weight:700"><i class="fas fa-download" style="margin-right:3px"></i>Gratuit</span>'
+              : '<p class="mk-service-price" style="margin:0"><strong>'+listing.price.toFixed(2)+'€</strong></p>')+
+            '<span style="font-size:10px;color:#64748B"><i class="fas fa-download" style="margin-right:2px"></i>'+(listing.downloads||0)+'</span>'+
+          '</div>'+
+        '</div>';
+      mkList.appendChild(cardE);
+      return;
+    }
+
     var cats      = listing.type === 'service' ? _MK_SVC_CATS : _MK_PROD_CATS;
     var catLabel  = cats[listing.category] || listing.category;
     var isMine    = _currentUser && listing.sellerEmail === _currentUser.email;
@@ -26235,33 +27047,44 @@ function _collabApply(id) {
       };
       DEMO_CONVERSATIONS.unshift(_existConv);
     }
-    /* Message de candidature (partagé via DM storage) */
+    /* Message de candidature — carte visuelle écrite dans Firebase */
     var _cTs = Date.now();
     var _collabMsg = {
-      id:   _cTs,
-      from: _currentUser.email,
-      text: '🤝 Bonjour ' + _posterNom.split(' ')[0] + ', j\'ai postulé à votre demande de collaboration :\n\n"' + c.title + '"\n\nJe suis disponible pour en discuter !',
-      type: 'text',
-      time: _nowTime(),
-      at:   _cTs
+      id:          _cTs,
+      from:        _currentUser.email,
+      type:        'collab_apply_card',
+      collabId:    c.id,
+      collabTitle: c.title,
+      collabDomain: c.domain || '',
+      text:        '🤝 Candidature pour : "' + c.title + '"',
+      time:        _nowTime(),
+      at:          _cTs
     };
     _existConv.messages.push(_collabMsg);
-    _existConv.lastMsg = '🤝 Candidature : ' + c.title;
+    _existConv.lastMsg = _collabMsg.text;
     _existConv.lastAt  = _cTs;
-    _saveDMConv(_existConv);
-    _writeDMInbox(c.postedBy, _currentUser.email, _currentUser.nom || _currentUser.email,
-                  _currentUser.role || 'Membre Geniwork', _existConv.lastMsg);
     _saveDMConvList();
+    /* Écriture Firebase → message visible + notification inbox posteur */
+    _dmWriteMsg(_existConv, _collabMsg);
   }
 
-  /* Fermer et rafraîchir */
+  /* Fermer le panel */
   var bg   = document.getElementById('collab-detail-bg');
   var card = document.getElementById('collab-detail-card');
   if (bg)   bg.remove();
   if (card) card.remove();
 
-  showToast('Candidature envoyée ✓ Un message a été envoyé au posteur !', 'ok');
-  _collabRender();
+  showToast('Candidature envoyée ✓', 'ok');
+
+  /* Naviguer vers messages et ouvrir la conversation */
+  if (_existConv) {
+    var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+    if (msgsBtn) navTo(msgsBtn, 'p-messages');
+    renderConversations();
+    setTimeout(function() { openChat(_existConv.id); }, 220);
+  } else {
+    _collabRender();
+  }
 }
 
 /* ── Clôturer sa propre demande ── */
@@ -26483,4 +27306,381 @@ function _mkCloseAllScreen() {
 
 /* ══════════════════════════════════════════
    FIN MODULE COLLABORATION
+══════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════════
+   MODULE SÉCURITÉ — Détection des intrusions & monitoring temps réel
+   Firebase path : gw/security_events/{key}
+══════════════════════════════════════════════════════════════════ */
+
+/* ── Compteurs de rate-limiting en mémoire ── */
+var _secRateMap   = {};   /* { email: { action: [timestamps] } } */
+var _secBruteMap  = {};   /* { identifier: [timestamps] } */
+var _secEvtListener = null;
+
+/* ── Écrire un événement de sécurité dans Firebase ── */
+function _logSecurityEvent(type, severity, detail, email) {
+  if (!_gwFbReady || !_gwFbDB) return;
+  var key = Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  var ua  = (navigator.userAgent || '').slice(0, 120);
+  var evt = {
+    type:      type,
+    severity:  severity,   /* 'low' | 'medium' | 'high' | 'critical' */
+    detail:    detail,
+    email:     email || null,
+    ua:        ua,
+    at:        Date.now()
+  };
+  _gwFbDB.ref('gw/security_events/' + key).set(evt).catch(function(){});
+
+  /* Badge en temps réel dans la sidebar admin */
+  _secUpdateBadge();
+}
+
+/* ── Détection brute-force (N tentatives en T secondes) ── */
+function _secCheckBrute(identifier, action, maxAttempts, windowMs) {
+  var now = Date.now();
+  var k   = identifier + ':' + action;
+  if (!_secBruteMap[k]) _secBruteMap[k] = [];
+  _secBruteMap[k] = _secBruteMap[k].filter(function(t) { return now - t < windowMs; });
+  _secBruteMap[k].push(now);
+  return _secBruteMap[k].length >= maxAttempts;
+}
+
+/* ── Détection rate-limit (trop d'actions en peu de temps) ── */
+function _secCheckRate(email, action, maxPerMin) {
+  var now = Date.now();
+  var k   = (email || 'anon') + ':' + action;
+  if (!_secRateMap[k]) _secRateMap[k] = [];
+  _secRateMap[k] = _secRateMap[k].filter(function(t) { return now - t < 60000; });
+  _secRateMap[k].push(now);
+  if (_secRateMap[k].length > maxPerMin) {
+    _logSecurityEvent('rate_limit', 'medium',
+      'Rate limit dépassé : ' + action + ' (' + _secRateMap[k].length + '/min)', email);
+    return true;
+  }
+  return false;
+}
+
+/* ── Détection injection XSS / SQL dans les inputs ── */
+function _secScanInput(text, email) {
+  if (!text) return false;
+  var patterns = [
+    /<script[\s>]/i, /javascript:/i, /on\w+\s*=/i,
+    /union\s+select/i, /drop\s+table/i, /exec\s*\(/i,
+    /eval\s*\(/i, /document\.cookie/i, /window\.location/i,
+    /base64_decode/i, /<iframe/i, /data:text\/html/i
+  ];
+  for (var i = 0; i < patterns.length; i++) {
+    if (patterns[i].test(text)) {
+      _logSecurityEvent('injection', 'high',
+        'Pattern d\'injection détecté : ' + text.slice(0, 80), email);
+      return true;
+    }
+  }
+  return false;
+}
+
+/* ── Vérifie que les fonctions critiques n'ont pas été altérées ── */
+function _secIntegrityCheck() {
+  var criticals = ['_gwFbKey', '_dmWriteMsg', '_gwSetOnlinePresence', 'escHtml', '_logSecurityEvent'];
+  var ok = criticals.every(function(fn) { return typeof window[fn] === 'function'; });
+  if (!ok) {
+    _logSecurityEvent('integrity', 'critical',
+      'Altération détectée : une fonction critique a été supprimée ou modifiée', null);
+  }
+  return ok;
+}
+
+/* ── Alerter si quelqu'un ouvre les DevTools (heuristique window size) ── */
+(function _secDevToolsWatch() {
+  var threshold = 160;
+  var check = function() {
+    var wOuter = window.outerWidth  - window.innerWidth;
+    var hOuter = window.outerHeight - window.innerHeight;
+    if (wOuter > threshold || hOuter > threshold) {
+      if (!_secDevToolsWatch._alerted) {
+        _secDevToolsWatch._alerted = true;
+        _logSecurityEvent('devtools', 'low',
+          'DevTools détectés — possible tentative d\'inspection du code',
+          _currentUser ? _currentUser.email : null);
+        setTimeout(function() { _secDevToolsWatch._alerted = false; }, 300000);
+      }
+    }
+  };
+  setInterval(check, 5000);
+})();
+
+/* Appelé à chaque tentative de connexion échouée */
+function _secOnLoginFail(emailOrId) {
+  var isBrute = _secCheckBrute(emailOrId || 'anon', 'login', 5, 300000); /* 5 échecs / 5min */
+  if (isBrute) {
+    _logSecurityEvent('brute_force', 'critical',
+      'Tentative de brute-force login : ' + (emailOrId || 'inconnu'), emailOrId);
+  } else {
+    _logSecurityEvent('login_fail', 'low',
+      'Échec de connexion : ' + (emailOrId || 'inconnu'), emailOrId);
+  }
+}
+
+/* Appelé quand Firebase refuse un accès (permission denied) */
+function _secOnFirebaseDenied(path, email) {
+  _logSecurityEvent('access_denied', 'high',
+    'Accès Firebase refusé : ' + path, email);
+}
+
+/* Appelé lors d'une tentative d'accès admin non autorisée */
+function _secOnAdminFail(email) {
+  var isBrute = _secCheckBrute(email || 'anon', 'admin_access', 3, 120000); /* 3 essais / 2min */
+  _logSecurityEvent('admin_access', isBrute ? 'critical' : 'high',
+    'Tentative d\'accès admin non autorisée' + (isBrute ? ' (répétée)' : ''), email);
+}
+
+/* ── Vérifie l'intégrité au démarrage puis toutes les 10 minutes ── */
+setTimeout(function() { try { _secIntegrityCheck(); } catch(e){} }, 3000);
+setInterval(function() { try { _secIntegrityCheck(); } catch(e){} }, 600000);
+
+/* ── Mise à jour du badge sécurité dans la sidebar ── */
+function _secUpdateBadge() {
+  if (!_gwFbReady || !_gwFbDB || !_adminUser) return;
+  var since = Date.now() - 86400000; /* dernières 24h */
+  _gwFbDB.ref('gw/security_events').orderByChild('at').startAt(since).once('value', function(snap) {
+    var evts = snap.val() ? Object.values(snap.val()) : [];
+    var highs = evts.filter(function(e) { return e.severity === 'high' || e.severity === 'critical'; });
+    var badge = document.getElementById('adm-badge-security');
+    if (badge) {
+      if (highs.length > 0) {
+        badge.textContent = highs.length;
+        badge.classList.remove('hidden');
+      } else {
+        badge.classList.add('hidden');
+      }
+    }
+  }).catch(function(){});
+}
+
+/* ── Listener Firebase temps réel dans le panel sécurité ── */
+function _admSecurityListen() {
+  /* Affiche immédiatement l'état "aucun événement" sans attendre Firebase */
+  _admSecurityUpdateDOM([]);
+
+  if (!_gwFbReady || !_gwFbDB) return;
+
+  /* Détache l'ancien listener si présent */
+  if (_secEvtListener) {
+    try { _gwFbDB.ref('gw/security_events').off('value', _secEvtListener); } catch(e){}
+  }
+
+  var _secRef = _gwFbDB.ref('gw/security_events').orderByChild('at').limitToLast(100);
+
+  _secEvtListener = _secRef.on('value', function(snap) {
+    if (_adminTab !== 'security') return;
+    var raw  = snap.val() || {};
+    var evts = Object.values(raw).sort(function(a,b){ return b.at - a.at; });
+    _admSecurityUpdateDOM(evts);
+    _secUpdateBadge();
+  }, function(err) {
+    /* Erreur Firebase (permissions non configurées) — affiche un état lisible */
+    var stEl = document.getElementById('sec-threat-level');
+    if (stEl) {
+      stEl.style.background = '#FFF7ED';
+      stEl.style.color      = '#EA580C';
+      stEl.innerHTML = '<i class="fas fa-triangle-exclamation" style="margin-right:6px"></i>' +
+        'Règles Firebase à configurer — <b>gw/security_events</b> nécessite <code>auth != null</code>';
+    }
+    var logEl = document.getElementById('sec-event-log');
+    if (logEl) {
+      logEl.innerHTML = '<div style="text-align:center;padding:24px;color:#EA580C;font-size:13px">' +
+        '<i class="fas fa-lock" style="font-size:24px;display:block;margin-bottom:8px"></i>' +
+        'Accès refusé par Firebase.<br>Ajoutez la règle <b>security_events</b> dans la console Firebase.' +
+        '</div>';
+    }
+    console.warn('[GW Security] Firebase règle manquante pour gw/security_events :', err.code);
+  });
+}
+
+/* ── Met à jour le DOM du panel sécurité sans tout reconstruire ── */
+function _admSecurityUpdateDOM(evts) {
+  var logEl = document.getElementById('sec-event-log');
+  if (!logEl) return;
+
+  var now    = Date.now();
+  var last1h = evts.filter(function(e){ return now - e.at < 3600000; });
+  var last24h= evts.filter(function(e){ return now - e.at < 86400000; });
+  var crits  = last24h.filter(function(e){ return e.severity === 'critical'; });
+  var highs  = last24h.filter(function(e){ return e.severity === 'high'; });
+
+  /* Niveau de menace */
+  var threat, tColor, tBg, tIcon;
+  if (crits.length > 0) {
+    threat = 'CRITIQUE'; tColor = '#DC2626'; tBg = '#FEF2F2'; tIcon = 'fa-skull-crossbones';
+  } else if (highs.length >= 3 || last1h.length >= 10) {
+    threat = 'ÉLEVÉ'; tColor = '#EA580C'; tBg = '#FFF7ED'; tIcon = 'fa-triangle-exclamation';
+  } else if (last24h.length >= 5) {
+    threat = 'MODÉRÉ'; tColor = '#CA8A04'; tBg = '#FEFCE8'; tIcon = 'fa-circle-exclamation';
+  } else {
+    threat = 'FAIBLE'; tColor = '#16A34A'; tBg = '#F0FDF4'; tIcon = 'fa-shield-check';
+  }
+
+  /* Mise à jour statut */
+  var stEl = document.getElementById('sec-threat-level');
+  if (stEl) {
+    stEl.style.background = tBg;
+    stEl.style.color      = tColor;
+    stEl.innerHTML = '<i class="fas ' + tIcon + '" style="margin-right:6px"></i>Niveau de menace : <b>' + threat + '</b>';
+  }
+
+  /* Stats */
+  var statEl = document.getElementById('sec-stats');
+  if (statEl) {
+    var byType = {};
+    last24h.forEach(function(e){ byType[e.type] = (byType[e.type]||0)+1; });
+    statEl.innerHTML =
+      '<div class="sec-stat-item"><span class="sec-stat-num">' + last24h.length + '</span><span class="sec-stat-lab">Événements 24h</span></div>' +
+      '<div class="sec-stat-item"><span class="sec-stat-num" style="color:#DC2626">' + crits.length + '</span><span class="sec-stat-lab">Critiques</span></div>' +
+      '<div class="sec-stat-item"><span class="sec-stat-num" style="color:#EA580C">' + highs.length + '</span><span class="sec-stat-lab">Élevés</span></div>' +
+      '<div class="sec-stat-item"><span class="sec-stat-num" style="color:#6366F1">' + last1h.length + '</span><span class="sec-stat-lab">Dernière heure</span></div>';
+  }
+
+  /* Journal */
+  logEl.innerHTML = evts.length === 0
+    ? '<div style="text-align:center;padding:32px;color:#94A3B8"><i class="fas fa-shield-check" style="font-size:28px;display:block;margin-bottom:8px"></i>Aucun événement enregistré</div>'
+    : evts.map(function(e) {
+        var sColor = {critical:'#DC2626', high:'#EA580C', medium:'#CA8A04', low:'#6B7280'}[e.severity] || '#6B7280';
+        var sBg    = {critical:'#FEF2F2', high:'#FFF7ED', medium:'#FEFCE8', low:'#F8FAFC'}[e.severity] || '#F8FAFC';
+        var sIcon  = {
+          brute_force:'fa-lock', login_fail:'fa-key', rate_limit:'fa-gauge-high',
+          injection:'fa-code',   access_denied:'fa-ban', admin_access:'fa-user-shield',
+          devtools:'fa-wrench',  integrity:'fa-triangle-exclamation'
+        }[e.type] || 'fa-circle-dot';
+        var dt = new Date(e.at);
+        var ts = ('0'+dt.getDate()).slice(-2)+'/'+('0'+(dt.getMonth()+1)).slice(-2)+
+                 ' '+('0'+dt.getHours()).slice(-2)+':'+('0'+dt.getMinutes()).slice(-2);
+        return '<div class="sec-event-row" style="border-left:3px solid '+sColor+';background:'+sBg+'">' +
+          '<div class="sec-event-icon" style="color:'+sColor+'"><i class="fas '+sIcon+'"></i></div>' +
+          '<div class="sec-event-body">' +
+            '<div class="sec-event-title">' + escHtml(_secTypeLabel(e.type)) +
+              '<span class="sec-sev-badge" style="background:'+sColor+'">'+escHtml(e.severity.toUpperCase())+'</span>' +
+            '</div>' +
+            '<div class="sec-event-detail">' + escHtml(e.detail || '') + '</div>' +
+            (e.email ? '<div class="sec-event-meta"><i class="fas fa-user" style="margin-right:3px"></i>' + escHtml(e.email) + '</div>' : '') +
+          '</div>' +
+          '<div class="sec-event-time">' + ts + '</div>' +
+        '</div>';
+      }).join('');
+}
+
+function _secTypeLabel(type) {
+  return {
+    brute_force:   'Brute Force',
+    login_fail:    'Échec de connexion',
+    rate_limit:    'Dépassement de limite',
+    injection:     'Tentative d\'injection',
+    access_denied: 'Accès refusé Firebase',
+    admin_access:  'Accès admin non autorisé',
+    devtools:      'Inspection DevTools',
+    integrity:     'Intégrité compromise'
+  }[type] || type;
+}
+
+/* ── Construire le panel Sécurité ── */
+function _admBuildSecurity() {
+  return '<div style="padding:18px 16px 32px">' +
+
+    /* En-tête */
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">' +
+      '<div style="width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#6366F1,#7C3AED);display:flex;align-items:center;justify-content:center">' +
+        '<i class="fas fa-shield-halved" style="color:#fff;font-size:18px"></i>' +
+      '</div>' +
+      '<div>' +
+        '<div style="font-size:17px;font-weight:800;color:#0F172A">Sécurité & Monitoring</div>' +
+        '<div style="font-size:12px;color:#64748B">Surveillance temps réel de l\'application</div>' +
+      '</div>' +
+    '</div>' +
+
+    /* Statut niveau de menace */
+    '<div id="sec-threat-level" style="padding:14px 16px;border-radius:12px;font-size:14px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;background:#F0FDF4;color:#16A34A">' +
+      '<i class="fas fa-spinner fa-spin" style="margin-right:6px"></i>Analyse en cours…' +
+    '</div>' +
+
+    /* État de l\'app */
+    '<div style="background:#fff;border:1.5px solid #E2E8F0;border-radius:14px;padding:14px;margin-bottom:14px">' +
+      '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">État de l\'application</div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">' +
+        '<div style="padding:10px;background:#F0FDF4;border-radius:10px;display:flex;align-items:center;gap:8px">' +
+          '<i class="fas fa-database" style="color:#16A34A;font-size:14px"></i>' +
+          '<div><div style="font-size:11px;font-weight:700;color:#0F172A">Firebase</div><div style="font-size:10px;color:#16A34A">Connecté</div></div>' +
+        '</div>' +
+        '<div style="padding:10px;background:' + (_gwFbStorage ? '#F0FDF4' : '#FEF2F2') + ';border-radius:10px;display:flex;align-items:center;gap:8px">' +
+          '<i class="fas fa-hard-drive" style="color:' + (_gwFbStorage ? '#16A34A' : '#DC2626') + ';font-size:14px"></i>' +
+          '<div><div style="font-size:11px;font-weight:700;color:#0F172A">Storage</div><div style="font-size:10px;color:' + (_gwFbStorage ? '#16A34A' : '#DC2626') + '">' + (_gwFbStorage ? 'Actif' : 'Inactif') + '</div></div>' +
+        '</div>' +
+        '<div style="padding:10px;background:#F0FDF4;border-radius:10px;display:flex;align-items:center;gap:8px">' +
+          '<i class="fas fa-globe" style="color:#16A34A;font-size:14px"></i>' +
+          '<div><div style="font-size:11px;font-weight:700;color:#0F172A">Vercel</div><div style="font-size:10px;color:#16A34A">En ligne</div></div>' +
+        '</div>' +
+        '<div style="padding:10px;background:#F0FDF4;border-radius:10px;display:flex;align-items:center;gap:8px">' +
+          '<i class="fas fa-lock" style="color:#16A34A;font-size:14px"></i>' +
+          '<div><div style="font-size:11px;font-weight:700;color:#0F172A">Intégrité</div><div id="sec-integrity-status" style="font-size:10px;color:#16A34A">OK</div></div>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+
+    /* Statistiques */
+    '<div style="background:#fff;border:1.5px solid #E2E8F0;border-radius:14px;padding:14px;margin-bottom:14px">' +
+      '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Statistiques (24h)</div>' +
+      '<div id="sec-stats" class="sec-stats-grid">' +
+        '<div style="text-align:center;padding:8px;color:#94A3B8"><i class="fas fa-spinner fa-spin"></i></div>' +
+      '</div>' +
+    '</div>' +
+
+    /* Actions */
+    '<div style="background:#fff;border:1.5px solid #E2E8F0;border-radius:14px;padding:14px;margin-bottom:14px">' +
+      '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Actions</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+        '<button onclick="_secIntegrityCheck();showToast(\'Vérification terminée\',\'ok\')" style="padding:9px 14px;background:#EEF2FF;color:#6366F1;border:none;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer">' +
+          '<i class="fas fa-shield-halved" style="margin-right:5px"></i>Vérifier intégrité' +
+        '</button>' +
+        '<button onclick="_secClearOldEvents()" style="padding:9px 14px;background:#FEF2F2;color:#DC2626;border:none;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer">' +
+          '<i class="fas fa-trash" style="margin-right:5px"></i>Effacer anciens logs' +
+        '</button>' +
+        '<button onclick="_admSecurityListen();showToast(\'Actualisation…\',\'ok\')" style="padding:9px 14px;background:#F0FDF4;color:#16A34A;border:none;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer">' +
+          '<i class="fas fa-rotate" style="margin-right:5px"></i>Actualiser' +
+        '</button>' +
+      '</div>' +
+    '</div>' +
+
+    /* Journal d\'événements */
+    '<div style="background:#fff;border:1.5px solid #E2E8F0;border-radius:14px;padding:14px">' +
+      '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">' +
+        '<i class="fas fa-list" style="margin-right:5px"></i>Journal d\'événements temps réel' +
+      '</div>' +
+      '<div id="sec-event-log">' +
+        '<div style="text-align:center;padding:24px;color:#94A3B8"><i class="fas fa-spinner fa-spin" style="font-size:20px"></i></div>' +
+      '</div>' +
+    '</div>' +
+
+  '</div>';
+}
+
+/* ── Effacer événements de plus de 7 jours ── */
+function _secClearOldEvents() {
+  if (!_gwFbReady || !_gwFbDB) return;
+  var cutoff = Date.now() - 7 * 86400000;
+  _gwFbDB.ref('gw/security_events').orderByChild('at').endAt(cutoff).once('value', function(snap) {
+    var updates = {};
+    snap.forEach(function(child) { updates[child.key] = null; });
+    if (Object.keys(updates).length > 0) {
+      _gwFbDB.ref('gw/security_events').update(updates).then(function() {
+        showToast('Anciens logs effacés ✓', 'ok');
+        _admSecurityListen();
+      }).catch(function(){ showToast('Erreur', 'err'); });
+    } else {
+      showToast('Aucun log à effacer', 'ok');
+    }
+  });
+}
+
+/* ══════════════════════════════════════════
+   FIN MODULE SÉCURITÉ
 ══════════════════════════════════════════ */
