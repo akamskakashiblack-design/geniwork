@@ -2994,6 +2994,9 @@ function _onProfileSaved() {
   renderProfilePage();
   _refreshCurrentUserAvatars(); /* inclut déjà _refreshSidebar() */
   if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e) {} }
+  /* Rafraîchir les cartes Marketplace avec la nouvelle photo/nom/badge */
+  try { renderMarketplaceUserServices(); } catch(e) {}
+  try { _mkRenderSystemListings(); } catch(e) {}
 }
 
 /* ── Refresh global déclenché par changement de profil (n'importe quel user) ──
@@ -17467,6 +17470,16 @@ function renderMarketplaceUserServices() {
 /* ══════════════════════════════════════════
    MARKETPLACE
 ══════════════════════════════════════════ */
+/* ── Cache les .mk-cards-row qui n'ont plus aucune carte visible ── */
+function _mkHideEmptyRows() {
+  document.querySelectorAll('.mk-cards-row').forEach(function(row) {
+    var hasVisible = Array.prototype.some.call(row.children, function(c) {
+      return c.style.display !== 'none';
+    });
+    row.style.display = hasVisible ? '' : 'none';
+  });
+}
+
 function setMkCat(btn, cat) {
   document.querySelectorAll('.mk-cat').forEach(function(b) { b.classList.remove('active'); });
   btn.classList.add('active');
@@ -17475,14 +17488,11 @@ function setMkCat(btn, cat) {
   document.querySelectorAll('.mk-service-card').forEach(function(c) {
     if (cat === 'all') { c.style.display = ''; return; }
 
-    /* type stocké dans data-type ou data-listing-type par les cartes */
     var cardType = (c.dataset.type || c.dataset.listingType || '').toLowerCase();
-
-    /* Collaboration : les cartes de collaboration ont data-type="collab" ou la classe mk-collab-card */
     var isCollab  = cardType === 'collab' || c.classList.contains('mk-collab-card');
     var isEbook   = cardType === 'ebook';
     var isProduct = cardType === 'product' || cardType === 'produit';
-    var isService = !isCollab && !isEbook && !isProduct; /* service = tout le reste */
+    var isService = !isCollab && !isEbook && !isProduct;
 
     var show = false;
     if (cat === 'service')  show = isService;
@@ -17493,7 +17503,11 @@ function setMkCat(btn, cat) {
     c.style.display = show ? '' : 'none';
   });
 
-  /* Afficher/masquer aussi la section "Offres de collaboration" */
+  /* Cache les lignes vides après filtrage */
+  if (cat !== 'all') _mkHideEmptyRows();
+  else document.querySelectorAll('.mk-cards-row').forEach(function(r){ r.style.display = ''; });
+
+  /* Afficher/masquer la section "Offres de collaboration" */
   var collabSection = document.getElementById('mk-collab-section');
   if (collabSection) {
     collabSection.style.display = (cat === 'all' || cat === 'collab') ? '' : 'none';
@@ -17506,6 +17520,9 @@ function filterMarketplace(q) {
     var text = c.textContent.toLowerCase();
     c.style.display = (!query || text.indexOf(query) !== -1) ? '' : 'none';
   });
+  /* Cache les lignes vides après recherche */
+  if (query) _mkHideEmptyRows();
+  else document.querySelectorAll('.mk-cards-row').forEach(function(r){ r.style.display = ''; });
 }
 
 function toggleMkWish(btn) {
@@ -26533,7 +26550,7 @@ function _collabRender() {
         : '') +
       '<div class="collab-card-footer">' +
         '<div class="collab-card-poster">' +
-          '<div class="collab-poster-av">' + escHtml(c.postedByNom.slice(0,2).toUpperCase()) + '</div>' +
+          '<div class="collab-poster-av">' + escHtml((c.postedByNom || '?').slice(0,2).toUpperCase()) + '</div>' +
           '<span>' + escHtml(c.postedByNom) + '</span>' +
         '</div>' +
         '<div class="collab-card-right">' +
@@ -27020,7 +27037,7 @@ function _collabOpenDetail(id) {
 
     /* Poster */
     '<div style="display:flex;align-items:center;gap:10px;padding:12px;background:#F8FAFC;border-radius:12px;margin:14px 0">' +
-      '<div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px">' + escHtml(c.postedByNom.slice(0,2).toUpperCase()) + '</div>' +
+      '<div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px">' + escHtml((c.postedByNom || '?').slice(0,2).toUpperCase()) + '</div>' +
       '<div>' +
         '<div style="font-size:13px;font-weight:700;color:#0F172A">' + escHtml(c.postedByNom) + '</div>' +
         '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(c.date) + ' · ' + (c.applicants || []).length + ' candidat(s)</div>' +
@@ -27363,6 +27380,7 @@ function _mkCloseAllScreen() {
 var _secRateMap   = {};   /* { email: { action: [timestamps] } } */
 var _secBruteMap  = {};   /* { identifier: [timestamps] } */
 var _secEvtListener = null;
+var _secEvtRef      = null;  /* Stocke la Query Firebase pour détacher correctement le listener */
 
 /* ── Écrire un événement de sécurité dans Firebase ── */
 function _logSecurityEvent(type, severity, detail, email) {
@@ -27512,14 +27530,14 @@ function _admSecurityListen() {
 
   if (!_gwFbReady || !_gwFbDB) return;
 
-  /* Détache l'ancien listener si présent */
-  if (_secEvtListener) {
-    try { _gwFbDB.ref('gw/security_events').off('value', _secEvtListener); } catch(e){}
+  /* Détache l'ancien listener sur la MÊME référence Query (sinon .off() n'a aucun effet) */
+  if (_secEvtListener && _secEvtRef) {
+    try { _secEvtRef.off('value', _secEvtListener); } catch(e){}
   }
 
-  var _secRef = _gwFbDB.ref('gw/security_events').orderByChild('at').limitToLast(100);
+  _secEvtRef = _gwFbDB.ref('gw/security_events').orderByChild('at').limitToLast(100);
 
-  _secEvtListener = _secRef.on('value', function(snap) {
+  _secEvtListener = _secEvtRef.on('value', function(snap) {
     if (_adminTab !== 'security') return;
     var raw  = snap.val() || {};
     var evts = Object.values(raw).sort(function(a,b){ return b.at - a.at; });
