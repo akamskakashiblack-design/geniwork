@@ -17391,7 +17391,8 @@ function renderMarketplaceUserServices() {
   }
 
   section.style.display = '';
-  listEl.innerHTML = '';
+
+  var _svcCards = [];
 
   filtered.forEach(function(svc) {
     var ownerEmail = svc.ownerEmail || '';
@@ -17450,8 +17451,11 @@ function renderMarketplaceUserServices() {
         (svc.description ? '<p class="mk-service-desc">' + escHtml(svc.description.slice(0, 60)) + (svc.description.length > 60 ? '…' : '') + '</p>' : '') +
         '<p class="mk-service-price">' + escHtml(_formatSvcPrice(svc)) + '</p>' +
       '</div>';
-    listEl.appendChild(card);
+    _svcCards.push(card);
   });
+
+  /* ── Grouper en 8 lignes de 4 cartes, chaque ligne scrolle indépendamment ── */
+  _mkGroupCardsIntoRows(listEl, _svcCards, 4, 8);
 
   /* Injecter les annonces du système Marketplace */
   try { _mkRenderSystemListings(); } catch(e){}
@@ -26223,6 +26227,24 @@ function _mkAddListingToCart(listingId) {
   _updateCartBadge();
 }
 
+/* ── Regroupe les cartes en lignes indépendantes (scroll horizontal par ligne) ── */
+function _mkGroupCardsIntoRows(container, cards, perRow, maxRows) {
+  perRow  = perRow  || 4;
+  maxRows = maxRows || 8;
+  container.innerHTML = '';
+  var limit = Math.min(cards.length, perRow * maxRows);
+  for (var r = 0; r < Math.ceil(limit / perRow); r++) {
+    var row = document.createElement('div');
+    row.className = 'mk-cards-row';
+    var start = r * perRow;
+    var end   = Math.min(start + perRow, limit);
+    for (var i = start; i < end; i++) {
+      row.appendChild(cards[i]);
+    }
+    container.appendChild(row);
+  }
+}
+
 function _mkRenderSystemListings() {
   _mkCheckExpired();
   var mkListings = _mkGetListings().filter(function(l){ return l.status==='active'; });
@@ -26255,10 +26277,11 @@ function _mkRenderSystemListings() {
   }
 
   mkSection.style.display = '';
-  mkList.innerHTML = ''; /* vider avant re-rendu complet */
 
   /* Business en premier (priorité) puis le reste */
   mkListings.sort(function(a, b) { return (b.isPriority ? 1 : 0) - (a.isPriority ? 1 : 0); });
+
+  var _allCards = [];
 
   mkListings.forEach(function(listing) {
     /* ── Carte spéciale Ebook ── */
@@ -26300,7 +26323,7 @@ function _mkRenderSystemListings() {
             '<span style="font-size:10px;color:#64748B"><i class="fas fa-download" style="margin-right:2px"></i>'+(listing.downloads||0)+'</span>'+
           '</div>'+
         '</div>';
-      mkList.appendChild(cardE);
+      _allCards.push(cardE);
       return;
     }
 
@@ -26359,8 +26382,11 @@ function _mkRenderSystemListings() {
         '</div>'+
       '</div>';
 
-    mkList.appendChild(card);
+    _allCards.push(card);
   });
+
+  /* ── Grouper en 8 lignes de 4 cartes, chaque ligne scrolle indépendamment ── */
+  _mkGroupCardsIntoRows(mkList, _allCards, 4, 8);
 }
 
 /* ── Section commissions Marketplace dans l'admin ── */
