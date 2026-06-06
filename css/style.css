@@ -2656,6 +2656,9 @@ mark.srch-mark {
   width: 100%;
   max-height: 380px;
   display: block;
+  will-change: transform;
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .post-video-wrap.ratio-45  video { aspect-ratio: 4/5;  object-fit: cover; }
@@ -4469,8 +4472,9 @@ mark.srch-mark {
 .conv-online-dot {
   position: absolute; bottom: 2px; right: 2px;
   width: 13px; height: 13px; border-radius: 50%;
-  background: #22C55E; border: 2px solid #fff;
+  background: #94A3B8; border: 2px solid #fff;
 }
+.conv-online-dot.online { background: #22C55E; }
 
 /* Corps */
 .conv-body { flex: 1; min-width: 0; }
@@ -13107,3 +13111,361 @@ body:not(.dark-mode) .vm-close-btn { background: #F1F5F9; color: #475569; }
 /* ══════════════════════════════════════════
    FIN MODE CLAIR VIDÉO
 ══════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════
+   MODULE SÉCURITÉ — Panel Admin
+══════════════════════════════════════════ */
+.sec-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.sec-stat-item {
+  display: flex; flex-direction: column; align-items: center;
+  padding: 10px 8px;
+  background: #F8FAFC; border-radius: 10px;
+}
+.sec-stat-num {
+  font-size: 22px; font-weight: 800; color: #0F172A; line-height: 1;
+}
+.sec-stat-lab {
+  font-size: 10px; color: #64748B; font-weight: 600; margin-top: 3px;
+  text-align: center;
+}
+.sec-event-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 11px 12px; border-radius: 10px; margin-bottom: 6px;
+}
+.sec-event-icon {
+  width: 30px; height: 30px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.06); flex-shrink: 0; font-size: 13px;
+}
+.sec-event-body { flex: 1; min-width: 0; }
+.sec-event-title {
+  font-size: 12px; font-weight: 700; color: #0F172A;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.sec-sev-badge {
+  font-size: 9px; font-weight: 800; color: #fff;
+  padding: 1px 6px; border-radius: 20px; letter-spacing: .3px;
+}
+.sec-event-detail {
+  font-size: 11px; color: #475569; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sec-event-meta {
+  font-size: 10px; color: #94A3B8; margin-top: 2px;
+}
+.sec-event-time {
+  font-size: 10px; color: #94A3B8; white-space: nowrap; flex-shrink: 0;
+}
+/* ══════════════════════════════════════════
+   FIN MODULE SÉCURITÉ
+══════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════
+   DESKTOP SIDEBAR NAV — éléments desktop only (cachés sur mobile)
+══════════════════════════════════════════ */
+.sdb-desktop-header,
+.sdb-desktop-mainnav,
+.sdb-desktop-divider { display: none; }
+
+.sdb-desktop-header {
+  align-items: center;
+  gap: 10px;
+  padding: 22px 18px 16px;
+  flex-shrink: 0;
+}
+.sdb-desk-logo { width: 32px; height: 32px; object-fit: contain; }
+.sdb-desk-brand {
+  font-size: 20px;
+  color: #0F172A;
+  letter-spacing: -0.3px;
+}
+.sdb-desk-brand strong { color: #2563EB; }
+
+.sdb-desktop-mainnav {
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px;
+}
+
+.sdb-main-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  background: none;
+  border-radius: 12px;
+  cursor: pointer;
+  color: #374151;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  transition: background .15s, color .15s;
+  position: relative;
+}
+.sdb-main-item:hover { background: #F1F5F9; color: #1E293B; }
+.sdb-main-item.active {
+  background: #EFF6FF;
+  color: #2563EB;
+}
+.sdb-main-item.active .sdb-main-icon { color: #2563EB; }
+.sdb-main-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: #F1F5F9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+  transition: background .15s, color .15s;
+}
+.sdb-main-item.active .sdb-main-icon { background: #DBEAFE; }
+.sdb-main-label { flex: 1; }
+
+.sdb-publish-btn .sdb-main-icon {
+  background: linear-gradient(135deg, #2563EB, #7C3AED);
+  color: #fff;
+}
+.sdb-publish-btn { color: #2563EB; }
+.sdb-publish-btn:hover { background: #EFF6FF; }
+
+/* ══════════════════════════════════════════
+   RESPONSIVE DESKTOP (≥ 768 px)
+══════════════════════════════════════════ */
+@media (min-width: 768px) {
+
+  /* ── Corps : fond propre ── */
+  body {
+    background: #EEF2F7;
+    align-items: stretch;
+  }
+
+  /* ── Screens : pleine largeur ── */
+  .screen { justify-content: flex-start; }
+
+  /* ── Auth / Landing : restent centrés, style carte ── */
+  #screen-landing,
+  #screen-login,
+  #screen-register,
+  #screen-verify,
+  #screen-forgot,
+  #screen-reset-verify,
+  #screen-new-pwd,
+  #screen-cgu {
+    justify-content: center;
+    background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%);
+  }
+  #screen-landing .phone-frame,
+  #screen-login .phone-frame,
+  #screen-register .phone-frame,
+  #screen-verify .phone-frame,
+  #screen-forgot .phone-frame,
+  #screen-reset-verify .phone-frame,
+  #screen-new-pwd .phone-frame,
+  #screen-cgu .phone-frame {
+    max-width: 440px;
+    border-radius: 20px;
+    overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0,0,0,.5);
+    margin: auto;
+    height: 90vh;
+    max-height: 820px;
+  }
+
+  /* ── App screen : pleine largeur ── */
+  #screen-app .phone-frame {
+    max-width: none;
+  }
+
+  /* ── App frame : contenu décalé à droite de la sidebar ── */
+  .app-frame {
+    padding-left: 260px;
+    background: #EEF2F7;
+    overflow: hidden;
+  }
+
+  /* ── SIDEBAR PERMANENTE ── */
+  #app-sidebar {
+    position: fixed;
+    left: 0; top: 0; bottom: 0;
+    width: 260px;
+    transform: translateX(0) !important;
+    border-radius: 0;
+    border-right: 1px solid #E2E8F0;
+    box-shadow: none;
+    background: #fff;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+  }
+  #app-sidebar::-webkit-scrollbar { display: none; }
+  #sidebar-overlay { display: none !important; }
+
+  /* ── TOPBAR desktop : minimaliste ── */
+  .app-topbar {
+    background: #fff;
+    border-bottom: 1px solid #E2E8F0;
+    padding: 0 20px;
+    height: 60px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+  /* Cache hamburger + brand (logo déjà dans sidebar) */
+  .app-topbar > .app-topbar-btn:first-child,
+  .app-brand { display: none; }
+  /* Pousse les icônes à droite */
+  .topbar-right { margin-left: auto; }
+  .app-topbar-btn {
+    width: 42px; height: 42px;
+    background: #F8FAFC;
+    border-radius: 12px;
+  }
+  .app-topbar-btn:hover { background: #F1F5F9; }
+
+  /* ── BOTTOM NAV : caché sur desktop ── */
+  .app-bottom-nav { display: none !important; }
+
+  /* ── Sidebar user header ── */
+  .sidebar-user-header { padding-top: 12px; }
+
+  /* ── Éléments desktop-only ── */
+  .sdb-desktop-header { display: flex; }
+  .sdb-desktop-mainnav { display: flex; }
+  .sdb-desktop-divider { display: block; }
+
+  /* ── CONTENU : max-width centré, meilleure lisibilité ── */
+  #feed-scroll {
+    max-width: 700px;
+    margin: 0 auto;
+    padding: 12px 16px 24px;
+  }
+
+  /* ── Post cards sur desktop ── */
+  .post-card {
+    border-radius: 16px;
+    margin-bottom: 14px;
+    box-shadow: 0 1px 6px rgba(0,0,0,.07);
+    border: 1px solid #E9EDF3;
+  }
+
+  /* ── Page Messages ── */
+  .msg-topbar { padding: 16px 20px 8px; }
+  .msg-search-row { margin: 0 12px; }
+  #conv-list { padding: 0 8px; }
+  .conv-item { border-radius: 14px; margin-bottom: 4px; }
+
+  /* ── Page Profil ── */
+  #profil-scroll {
+    max-width: 700px;
+    margin: 0 auto;
+  }
+
+  /* ── Page Notifications ── */
+  #p-notifs .page-scroll {
+    max-width: 700px;
+    margin: 0 auto;
+    padding: 12px 16px;
+  }
+
+  /* ── Page Marketplace ── */
+  #p-marketplace .page-scroll {
+    padding: 12px 16px;
+  }
+
+  /* ── Page Publier ── */
+  #p-publish .page-scroll {
+    max-width: 620px;
+    margin: 0 auto;
+    padding: 16px;
+  }
+
+  /* ── Scrollbars desktop discrètes ── */
+  .page-scroll::-webkit-scrollbar { width: 5px; }
+  .page-scroll::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+  .page-scroll::-webkit-scrollbar-track { background: transparent; }
+  .page-scroll { scrollbar-width: thin; scrollbar-color: #CBD5E1 transparent; }
+
+  /* ── Shorts / vidéo scroll : pleine hauteur ── */
+  .vs-item { height: 100vh; }
+
+  /* ── Overlays : décalés de la sidebar ── */
+  .comments-overlay { left: 260px; }
+  .sheet-overlay    { left: 260px; }
+
+  /* Sheets bottom : partent du bord droit de la sidebar */
+  .generic-sheet,
+  .post-detail-sheet,
+  .pub-sheet {
+    left: 260px !important;
+    border-radius: 20px 20px 0 0;
+  }
+
+  /* Player vidéo plein écran : décalé de la sidebar */
+  #video-player-modal { left: 260px; }
+
+  /* ═══════════════════════════════════════════════════════════
+     SHORTS — Layout TikTok Desktop
+     Modal plein écran (fond noir). Feed portrait centré à 420px.
+     Pas de flexbox sur le modal pour éviter les bugs GPU Chrome.
+  ═══════════════════════════════════════════════════════════ */
+  #vs-modal {
+    background: #000 !important;
+    /* NB: display géré par JS (block/flex). On n'override pas display ici. */
+  }
+
+  /* Feed portrait centré par margin auto (pas de flex → pas de bugs GPU) */
+  #vs-feed {
+    width: 420px !important;
+    max-width: calc(100vw - 0px) !important;
+    height: 100% !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    position: relative;
+    box-shadow: 0 0 80px rgba(0,0,0,.6);
+  }
+
+  /* Chaque item adapte sa largeur au feed */
+  .vs-item {
+    width: 100%;
+    height: 100vh;
+  }
+
+  /* ── CORRECTIF GPU : supprime le layer GPU qui blackscreen la vidéo ── */
+  .vs-video {
+    will-change: auto !important;
+    transform: none !important;
+    backface-visibility: visible !important;
+    -webkit-transform: none !important;
+    isolation: auto !important;
+  }
+
+  /* ── Chat : occupe toute la zone contenu (après sidebar) ── */
+  .chat-screen,
+  .chat-screen.hidden,
+  .chat-screen.open {
+    left: 260px !important;
+    right: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+  }
+  /* Off-screen → glisse vers la droite */
+  .chat-screen         { transform: translateX(100%) !important; }
+  .chat-screen.hidden  { display: none !important; transform: translateX(100%) !important; }
+  /* On-screen → aucun décalage (pas de translateX(-50%) du mobile) */
+  .chat-screen.open    { transform: translateX(0) !important; display: flex !important; }
+
+  /* ── Panneau profil : limiter la largeur pour rester visible ── */
+  .chat-profile-panel {
+    max-width: 340px;
+    width: 320px;
+  }
+}

@@ -258,6 +258,10 @@
       "sadmin": {
         ".read":  "auth != null",
         ".write": "auth != null"
+      },
+      "security_events": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
       }
     }
   }

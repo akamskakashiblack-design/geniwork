@@ -2,9 +2,10 @@
   "buildCommand": "node build.js",
   "outputDirectory": ".",
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/p/:id",                    "destination": "/api/post?id=:id" },
+    { "source": "/api/(.*)",                 "destination": "/api/$1" },
     { "source": "/firebase-messaging-sw.js", "destination": "/firebase-messaging-sw.js" },
-    { "source": "/(.*)", "destination": "/index.html" }
+    { "source": "/(.*)",                     "destination": "/index.html" }
   ],
   "headers": [
     {
