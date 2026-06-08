@@ -668,15 +668,12 @@ function _gwFbSyncStart() {
       var postId = snap.key;
       var count  = snap.val();
       if (typeof count !== 'number') return;
-      var local = parseInt(localStorage.getItem('gw_fav_count_' + postId) || '0', 10);
-      if (count !== local) {
-        localStorage.setItem('gw_fav_count_' + postId, count);
-        /* Met à jour tous les affichages dans le DOM */
-        document.querySelectorAll('[data-fav-cnt="' + postId + '"]').forEach(function(el) {
-          el.textContent = count > 0 ? _fmtViews(count) : '0';
-          el.style.display = count > 0 ? '' : 'none';
-        });
-      }
+      /* Toujours mettre à jour localStorage ET le DOM, sans condition locale */
+      localStorage.setItem('gw_fav_count_' + postId, count);
+      document.querySelectorAll('[data-fav-cnt="' + postId + '"]').forEach(function(el) {
+        el.textContent = count > 0 ? _fmtViews(count) : '0';
+        el.style.display = count > 0 ? '' : 'none';
+      });
     } catch(e){}
   }
   _gwFbDB.ref('gw/favcounts').on('child_added',   function(snap) { _gwMergeFavCount(snap); });
@@ -7508,17 +7505,31 @@ function _getFavCount(postId) {
   return parseInt(localStorage.getItem('gw_fav_count_' + postId) || '0', 10);
 }
 function _changeFavCount(postId, delta) {
-  var n = Math.max(0, _getFavCount(postId) + delta);
-  localStorage.setItem('gw_fav_count_' + postId, n);
-  /* Sync Firebase — chemin dédié pour éviter conflit avec gw/rcounts (reposts) */
-  if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/favcounts/' + postId).set(n).catch(function(){});
-  }
-  /* Met à jour tous les affichages dans le DOM */
+  /* Mise à jour optimiste locale immédiate */
+  var nLocal = Math.max(0, _getFavCount(postId) + delta);
+  localStorage.setItem('gw_fav_count_' + postId, nLocal);
   document.querySelectorAll('[data-fav-cnt="' + postId + '"]').forEach(function(el) {
-    el.textContent = _fmtViews(n);
-    el.style.display = n > 0 ? '' : 'none';
+    el.textContent = nLocal > 0 ? _fmtViews(nLocal) : '0';
+    el.style.display = nLocal > 0 ? '' : 'none';
   });
+  /* Sync Firebase via transaction atomique pour éviter les conflits entre appareils */
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/favcounts/' + postId).transaction(function(current) {
+      var cur = typeof current === 'number' ? current : 0;
+      return Math.max(0, cur + delta);
+    }, function(err, committed, snap) {
+      if (!err && committed && snap) {
+        var serverVal = snap.val();
+        if (typeof serverVal === 'number') {
+          localStorage.setItem('gw_fav_count_' + postId, serverVal);
+          document.querySelectorAll('[data-fav-cnt="' + postId + '"]').forEach(function(el) {
+            el.textContent = serverVal > 0 ? _fmtViews(serverVal) : '0';
+            el.style.display = serverVal > 0 ? '' : 'none';
+          });
+        }
+      }
+    });
+  }
 }
 
 function toggleFavorite(postId) {
@@ -9401,6 +9412,23 @@ function openVideoScroll(startPostId) {
 
   /* Observer pour auto-play au scroll */
   _vsSetupObserver();
+
+  /* ── Rafraîchit les compteurs de favoris depuis Firebase dès l'ouverture ──
+     Nécessaire car child_added peut avoir tiré avant que le DOM VS soit prêt  */
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/favcounts').once('value', function(snap) {
+      snap.forEach(function(child) {
+        var pid = child.key;
+        var cnt = child.val();
+        if (typeof cnt !== 'number') return;
+        localStorage.setItem('gw_fav_count_' + pid, cnt);
+        document.querySelectorAll('[data-fav-cnt="' + pid + '"]').forEach(function(el) {
+          el.textContent = cnt > 0 ? _fmtViews(cnt) : '0';
+          el.style.display = cnt > 0 ? '' : 'none';
+        });
+      });
+    });
+  }
 }
 
 /* ── Crée un élément DOM pour un post vidéo ── */
