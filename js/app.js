@@ -662,6 +662,26 @@ function _gwFbSyncStart() {
   _gwFbDB.ref('gw/rcounts').on('child_added',   function(snap) { _gwMergeRcount(snap); });
   _gwFbDB.ref('gw/rcounts').on('child_changed', function(snap) { _gwMergeRcount(snap); });
 
+  /* ── Compteur de sauvegardes/favoris (temps réel) ── */
+  function _gwMergeFavCount(snap) {
+    try {
+      var postId = snap.key;
+      var count  = snap.val();
+      if (typeof count !== 'number') return;
+      var local = parseInt(localStorage.getItem('gw_fav_count_' + postId) || '0', 10);
+      if (count !== local) {
+        localStorage.setItem('gw_fav_count_' + postId, count);
+        /* Met à jour tous les affichages dans le DOM */
+        document.querySelectorAll('[data-fav-cnt="' + postId + '"]').forEach(function(el) {
+          el.textContent = count > 0 ? _fmtViews(count) : '0';
+          el.style.display = count > 0 ? '' : 'none';
+        });
+      }
+    } catch(e){}
+  }
+  _gwFbDB.ref('gw/favcounts').on('child_added',   function(snap) { _gwMergeFavCount(snap); });
+  _gwFbDB.ref('gw/favcounts').on('child_changed', function(snap) { _gwMergeFavCount(snap); });
+
   /* ── Vues vidéo (compteur temps réel) ── */
   function _gwMergeVidViews(snap) {
     try {
@@ -707,6 +727,9 @@ function _gwFbSyncStart() {
       document.querySelectorAll('[id="ccount-' + postId + '"]').forEach(function(el) {
         el.textContent = comments.length || '';
       });
+      /* Met à jour aussi le compteur dans la vue scroll (VS) */
+      var _vsComEl = document.getElementById('vs-coms-' + postId);
+      if (_vsComEl) _vsComEl.textContent = comments.length > 0 ? _fmtViews(comments.length) : '0';
     } catch(e){}
   }
   _gwFbDB.ref('gw/comments').on('child_added',   function(snap) { _gwMergeComments(snap); });
@@ -7456,6 +7479,9 @@ function updatePostCommentCount(postId) {
   document.querySelectorAll('#ccount-' + postId).forEach(function(span) {
     span.textContent = total > 0 ? total : '';
   });
+  /* Met à jour aussi le compteur dans la vue scroll (VS) */
+  var vsEl = document.getElementById('vs-coms-' + postId);
+  if (vsEl) vsEl.textContent = total > 0 ? _fmtViews(total) : '0';
   var countEl = document.getElementById('comments-count');
   if (countEl && _currentPostId === postId) countEl.textContent = total > 0 ? '(' + total + ')' : '';
 }
@@ -7484,9 +7510,9 @@ function _getFavCount(postId) {
 function _changeFavCount(postId, delta) {
   var n = Math.max(0, _getFavCount(postId) + delta);
   localStorage.setItem('gw_fav_count_' + postId, n);
-  /* Sync Firebase */
+  /* Sync Firebase — chemin dédié pour éviter conflit avec gw/rcounts (reposts) */
   if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/rcounts/' + postId + '/favs').set(n).catch(function(){});
+    _gwFbDB.ref('gw/favcounts/' + postId).set(n).catch(function(){});
   }
   /* Met à jour tous les affichages dans le DOM */
   document.querySelectorAll('[data-fav-cnt="' + postId + '"]').forEach(function(el) {
