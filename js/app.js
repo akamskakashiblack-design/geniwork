@@ -11308,44 +11308,105 @@ function _openNotifDetail(notif) {
 function _nddGoPost(postId) {
   _closeGenericSheet('notif-detail');
 
-  /* Cherche d'abord le post dans le cache pour savoir son type AVANT de naviguer */
+  /* Cherche le post dans le cache */
   var _targetPost = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
 
-  if (_targetPost && _targetPost.video) {
-    /* ── Post vidéo : ouvrir directement le lecteur (pas dans le feed DOM) ── */
+  if (!_targetPost) {
+    /* Pas encore chargé → attend 1,2s (Firebase sync) puis réessaie */
+    showToast('Chargement de la publication…', 'info');
+    setTimeout(function() {
+      var p2 = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+      if (p2) { _openPostQuickView(p2); }
+      else { showToast('Publication introuvable', 'warn'); }
+    }, 1200);
+    return;
+  }
+
+  if (_targetPost.video) {
+    /* Vidéo → lecteur dédié */
     try { _openVideoFromPost(String(postId), _targetPost.video.duration || 0); } catch(e) {}
     return;
   }
 
-  /* ── Post texte/photo : naviguer vers feed et surligner ── */
-  var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
-  navTo(homeBtn, 'p-home');
+  /* Image / texte → bottom-sheet rapide */
+  _openPostQuickView(_targetPost);
+}
 
-  /* Essai 1 après 400ms (feed standard) */
+/* ── Affiche un post dans un overlay bottom-sheet ── */
+function _openPostQuickView(post) {
+  /* Ferme un éventuel quickview déjà ouvert */
+  var _old = document.getElementById('gw-post-qv-bg');
+  if (_old) _old.remove();
+  var _oldC = document.getElementById('gw-post-qv-modal');
+  if (_oldC) _oldC.remove();
+
+  /* Construit la carte du post */
+  var cardEl;
+  try { cardEl = buildPostCard(post); } catch(e) { showToast('Impossible d\'afficher la publication', 'warn'); return; }
+
+  /* Fond semi-transparent */
+  var bg = document.createElement('div');
+  bg.id = 'gw-post-qv-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:850;background:rgba(0,0,0,.55);transition:opacity .25s';
+  bg.style.opacity = '0';
+  bg.onclick = function() { _closePostQuickView(); };
+
+  /* Bottom-sheet */
+  var modal = document.createElement('div');
+  modal.id = 'gw-post-qv-modal';
+  modal.style.cssText = [
+    'position:fixed;bottom:0;left:0;right:0;z-index:851',
+    'background:#F8FAFC;border-radius:22px 22px 0 0',
+    'max-height:88vh;overflow-y:auto',
+    'padding:0 0 28px',
+    'transform:translateY(100%);transition:transform .3s cubic-bezier(.32,.72,0,1)',
+    'max-width:640px;margin:0 auto'
+  ].join(';');
+
+  /* En-tête avec poignée + titre + bouton fermer */
+  var header = document.createElement('div');
+  header.style.cssText = 'position:sticky;top:0;background:#F8FAFC;z-index:1;padding:10px 16px 8px;border-bottom:1px solid #F1F5F9';
+  header.innerHTML =
+    '<div style="width:36px;height:4px;background:#CBD5E1;border-radius:4px;margin:0 auto 10px"></div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between">' +
+      '<span style="font-size:14px;font-weight:700;color:#0F172A">Publication</span>' +
+      '<button onclick="_closePostQuickView()" style="background:#F1F5F9;border:none;width:30px;height:30px;border-radius:50%;font-size:15px;color:#64748B;cursor:pointer;display:flex;align-items:center;justify-content:center">' +
+        '<i class="fas fa-times"></i>' +
+      '</button>' +
+    '</div>';
+
+  /* Wrapper de la carte — désactive l'ID pour éviter les doublons avec le feed */
+  cardEl.style.margin = '0';
+  cardEl.style.borderRadius = '0';
+  cardEl.style.boxShadow = 'none';
+
+  modal.appendChild(header);
+  modal.appendChild(cardEl);
+
+  document.body.appendChild(bg);
+  document.body.appendChild(modal);
+
+  /* Animation d'entrée */
+  requestAnimationFrame(function() {
+    requestAnimationFrame(function() {
+      bg.style.opacity = '1';
+      modal.style.transform = 'translateY(0)';
+    });
+  });
+
+  /* Initialise les vidéos dans la carte si présentes */
+  try { _initFeedVideoObserver(); } catch(e){}
+}
+
+function _closePostQuickView() {
+  var bg    = document.getElementById('gw-post-qv-bg');
+  var modal = document.getElementById('gw-post-qv-modal');
+  if (bg)    bg.style.opacity = '0';
+  if (modal) modal.style.transform = 'translateY(100%)';
   setTimeout(function() {
-    var card = document.getElementById('post-' + postId);
-    if (card) {
-      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      card.classList.remove('post-highlight');
-      void card.offsetWidth;
-      card.classList.add('post-highlight');
-      setTimeout(function() { card.classList.remove('post-highlight'); }, 2200);
-    } else {
-      /* Essai 2 après 800ms supplémentaires (feed lent à rendre) */
-      setTimeout(function() {
-        var card2 = document.getElementById('post-' + postId);
-        if (card2) {
-          card2.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          card2.classList.remove('post-highlight');
-          void card2.offsetWidth;
-          card2.classList.add('post-highlight');
-          setTimeout(function() { card2.classList.remove('post-highlight'); }, 2200);
-        } else {
-          showToast('Publication introuvable', 'warn');
-        }
-      }, 800);
-    }
-  }, 400);
+    if (bg)    bg.remove();
+    if (modal) modal.remove();
+  }, 320);
 }
 function _nddGoProfile(email, nom, role) {
   _closeGenericSheet('notif-detail');
