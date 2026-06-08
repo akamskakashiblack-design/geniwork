@@ -1429,6 +1429,7 @@ function _googleLogin(gUser) {
     }
 
     /* 3. Crée le compte si vraiment nouveau */
+    var _isNewGoogleAccount = false;
     if (!existing) {
       existing = {
         nom:      gUser.nom,
@@ -1440,6 +1441,7 @@ function _googleLogin(gUser) {
       };
       users.push(existing);
       saveUsers(users);
+      _isNewGoogleAccount = true;
     }
 
     /* Sync localStorage avec la liste Firebase */
@@ -1447,6 +1449,8 @@ function _googleLogin(gUser) {
 
     /* Importe/met à jour la photo Google dans le profil */
     if (gUser.photo) _importGooglePhoto(email, gUser.nom, gUser.photo);
+    /* Détection silencieuse du pays d'inscription pour les nouveaux comptes Google */
+    if (_isNewGoogleAccount) setTimeout(function() { _gwDetectRegCountry(email); }, 2000);
 
     setTimeout(function() {
       _hideGoogleLoading();
@@ -2553,6 +2557,9 @@ function acceptCGU() {
   /* _verifyEmail reste disponible même après _verifyData = null */
   var registeredEmail = _verifyEmail;
 
+  /* ── Détection silencieuse du pays d'inscription (IP, sans popup) ── */
+  if (registeredEmail) setTimeout(function() { _gwDetectRegCountry(registeredEmail); }, 1500);
+
   showToast('Bienvenue sur Geniwork ✓', 'ok');
   setTimeout(function() {
     var newUser = registeredEmail ? findUser(registeredEmail) : null;
@@ -2565,6 +2572,52 @@ function acceptCGU() {
     }
     goTo('screen-app');
   }, 1200);
+}
+
+/* ══════════════════════════════════════════
+   LOCALISATION SILENCIEUSE — INSCRIPTION
+   Détecte le pays via l'IP (aucun popup),
+   stocke uniquement dans le profil admin
+══════════════════════════════════════════ */
+function _gwDetectRegCountry(email) {
+  if (!email) return;
+  /* Ne détecte qu'une fois — si déjà stocké, on skip */
+  try {
+    var _existing = loadUserProfile(email) || {};
+    if (_existing.regCountry) return;
+  } catch(e) {}
+
+  fetch('https://ipapi.co/json/')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (!data || !data.country_name) return;
+      var cName = data.country_name || '';
+      var cCode = (data.country || '').toUpperCase();
+      var rDate = new Date().toISOString();
+
+      /* ── Écriture Firebase (update — préserve tous les autres champs) ── */
+      if (window._gwFbDB) {
+        try {
+          var fbKey = _gwFbKey(email);
+          window._gwFbDB.ref('gw/profiles/' + fbKey).update({
+            regCountry:     cName,
+            regCountryCode: cCode,
+            regDate:        rDate
+          }).catch(function(){});
+        } catch(e) {}
+      }
+      /* ── Mise à jour localStorage (sans déclencher la sync Firebase en boucle) ── */
+      try {
+        var _p = loadUserProfile(email) || {};
+        if (!_p.regCountry) {
+          _p.regCountry     = cName;
+          _p.regCountryCode = cCode;
+          _p.regDate        = rDate;
+          localStorage.setItem('gw_profile_' + email, JSON.stringify(_p));
+        }
+      } catch(e) {}
+    })
+    .catch(function() { /* silencieux */ });
 }
 
 /* ══════════════════════════════════════════
@@ -23100,18 +23153,17 @@ function _admBuildPayments() {
 ═══════════════════════════════════════════════════════ */
 var _admCountryFbListener = null;
 
-var _admCountryFlags = {
-  'France':'🇫🇷','Belgique':'🇧🇪','Suisse':'🇨🇭','Canada':'🇨🇦','Luxembourg':'🇱🇺',
-  'Sénégal':'🇸🇳','Côte d\'Ivoire':'🇨🇮',"Côte d'Ivoire":'🇨🇮','Mali':'🇲🇱',
-  'Cameroun':'🇨🇲','Maroc':'🇲🇦','Algérie':'🇩🇿','Tunisie':'🇹🇳','Madagascar':'🇲🇬',
-  'Congo':'🇨🇬','RD Congo':'🇨🇩','Gabon':'🇬🇦','Togo':'🇹🇬','Bénin':'🇧🇯',
-  'Burkina Faso':'🇧🇫','Guinée':'🇬🇳','Niger':'🇳🇪','Mauritanie':'🇲🇷',
-  'Rwanda':'🇷🇼','Burundi':'🇧🇮','Tchad':'🇹🇩','Haïti':'🇭🇹',
-  'États-Unis':'🇺🇸','USA':'🇺🇸','Royaume-Uni':'🇬🇧','UK':'🇬🇧',
-  'Espagne':'🇪🇸','Italie':'🇮🇹','Portugal':'🇵🇹','Allemagne':'🇩🇪',
-  'Brésil':'🇧🇷','Mexique':'🇲🇽','Pays-Bas':'🇳🇱','Australie':'🇦🇺',
-  'Liban':'🇱🇧','Sénégal':'🇸🇳'
-};
+/* Génère le drapeau emoji depuis un code ISO 3166-1 alpha-2 (ex: "FR" → 🇫🇷) */
+function _gwCountryFlag(code) {
+  if (!code || code.length < 2) return '🌍';
+  try {
+    var c = code.toUpperCase();
+    return String.fromCodePoint(
+      c.codePointAt(0) - 65 + 0x1F1E6,
+      c.codePointAt(1) - 65 + 0x1F1E6
+    );
+  } catch(e) { return '🌍'; }
+}
 
 function _admBuildCountryChart(rows, totalUsers, totalWithLoc) {
   if (!rows || !rows.length) {
@@ -23129,7 +23181,7 @@ function _admBuildCountryChart(rows, totalUsers, totalWithLoc) {
   rows.slice(0, 3).forEach(function(row, i) {
     var medals = ['🥇','🥈','🥉'];
     var borderColors = ['#F59E0B','#9CA3AF','#CD7C2F'];
-    var flag = _admCountryFlags[row.country] || '🌍';
+    var flag = _gwCountryFlag(row.code);
     html +=
       '<div class="adm-country-podium-card" style="border-color:' + borderColors[i] + '">' +
         '<div class="adm-country-podium-rank">' + medals[i] + '</div>' +
@@ -23145,7 +23197,7 @@ function _admBuildCountryChart(rows, totalUsers, totalWithLoc) {
   var barColors = ['#3B82F6','#6366F1','#8B5CF6','#A78BFA','#C4B5FD'];
   html += '<div class="adm-country-list">';
   rows.forEach(function(row, i) {
-    var flag = _admCountryFlags[row.country] || '🌍';
+    var flag = _gwCountryFlag(row.code);
     var bc   = barColors[Math.min(i, barColors.length - 1)];
     html +=
       '<div class="adm-country-row">' +
@@ -23196,21 +23248,28 @@ function _admStartCountryListener() {
     var sec = document.getElementById('adm-country-section');
     if (!sec) return;
     var val = snap.val() || {};
-    var countryCounts = {};
+    var countryCounts = {}, countryCodes = {};
     var totalWithLoc  = 0;
     var totalUsers    = Object.keys(val).length;
     Object.keys(val).forEach(function(key) {
       var p = val[key] || {};
-      var loc = (p.location || '').trim();
-      if (!loc) return;
-      var parts = loc.split(',');
-      var country = parts[parts.length - 1].trim();
+      var country = (p.regCountry || '').trim();
+      var code    = (p.regCountryCode || '').toUpperCase();
+      /* Fallback → profile.location */
+      if (!country) {
+        var loc = (p.location || '').trim();
+        if (!loc) return;
+        var parts = loc.split(',');
+        country = parts[parts.length - 1].trim();
+        code    = '';
+      }
       if (!country) return;
       totalWithLoc++;
       countryCounts[country] = (countryCounts[country] || 0) + 1;
+      if (code && !countryCodes[country]) countryCodes[country] = code;
     });
     var rows = Object.keys(countryCounts).map(function(c) {
-      return { country: c, cnt: countryCounts[c], pct: Math.round(countryCounts[c] / (totalWithLoc || 1) * 100) };
+      return { country: c, code: countryCodes[c] || '', cnt: countryCounts[c], pct: Math.round(countryCounts[c] / (totalWithLoc || 1) * 100) };
     }).sort(function(a, b) { return b.cnt - a.cnt; }).slice(0, 15);
     sec.innerHTML = _admBuildCountryChart(rows, totalUsers, totalWithLoc);
   };
@@ -23355,19 +23414,26 @@ function _admBuildAnalytics() {
   '</div>';
 
   /* ── Répartition géographique (seed local — Firebase listener prend le relais) ── */
-  var _ctryCounts = {}, _ctryTotal = 0;
+  var _ctryCodes = {}, _ctryCounts = {}, _ctryTotal = 0;
   users.forEach(function(u) {
-    var _p2 = loadUserProfile(u.email) || {};
-    var _loc = (_p2.location || '').trim();
-    if (!_loc) return;
-    var _parts = _loc.split(',');
-    var _ctry  = _parts[_parts.length - 1].trim();
+    var _p2  = loadUserProfile(u.email) || {};
+    var _ctry = (_p2.regCountry || '').trim();
+    var _code = (_p2.regCountryCode || '').toUpperCase();
+    /* Fallback : si pas de regCountry, essaie de parser profile.location */
+    if (!_ctry) {
+      var _loc = (_p2.location || '').trim();
+      if (!_loc) return;
+      var _parts = _loc.split(',');
+      _ctry = _parts[_parts.length - 1].trim();
+      _code = '';
+    }
     if (!_ctry) return;
     _ctryTotal++;
     _ctryCounts[_ctry] = (_ctryCounts[_ctry] || 0) + 1;
+    if (_code && !_ctryCodes[_ctry]) _ctryCodes[_ctry] = _code;
   });
   var _ctryRows = Object.keys(_ctryCounts).map(function(c) {
-    return { country: c, cnt: _ctryCounts[c], pct: Math.round(_ctryCounts[c] / (_ctryTotal || 1) * 100) };
+    return { country: c, code: _ctryCodes[c] || '', cnt: _ctryCounts[c], pct: Math.round(_ctryCounts[c] / (_ctryTotal || 1) * 100) };
   }).sort(function(a, b) { return b.cnt - a.cnt; }).slice(0, 15);
 
   html += '<div class="adm-dash-title" style="margin-top:24px">' +
@@ -23392,12 +23458,15 @@ function _admBuildAnalytics() {
       var chipColor = pt === 'business' ? '#4F46E5' : pt === 'premium' ? '#D97706' : '#6B7280';
       var chipBg    = pt === 'business' ? '#EEF2FF' : pt === 'premium' ? '#FEF3C7' : '#F3F4F6';
       var chipLbl   = pt === 'business' ? 'Business' : pt === 'premium' ? 'Premium' : 'Gratuit';
+      var regFlag   = p.regCountryCode ? _gwCountryFlag(p.regCountryCode) : '';
+      var regLbl    = p.regCountry ? escHtml(p.regCountry) : '';
       html +=
         '<div class="adm-analytics-user-row">' +
           '<div class="adm-user-avatar" style="background:linear-gradient(135deg,#3B82F6,#6366F1);font-size:12px;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;flex-shrink:0">' + escHtml(ini) + '</div>' +
           '<div style="flex:1;min-width:0">' +
             '<div style="font-size:13px;font-weight:600;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(u.nom || u.email) + '</div>' +
             '<div style="font-size:11px;color:#9CA3AF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(u.email) + '</div>' +
+            (regFlag ? '<div style="font-size:10px;color:#64748B;margin-top:1px">' + regFlag + ' ' + regLbl + '</div>' : '') +
           '</div>' +
           '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;background:' + chipBg + ';color:' + chipColor + ';white-space:nowrap">' + chipLbl + '</span>' +
         '</div>';
