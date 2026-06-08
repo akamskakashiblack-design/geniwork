@@ -90,7 +90,8 @@ body {
   display: flex;
   flex-direction: column;
   padding: 56px 26px 40px;
-  overflow: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* ── Logo landing (texte blanc sur fond sombre) */
@@ -2692,12 +2693,15 @@ mark.srch-mark {
 .post-video-muted-badge {
   position: absolute; bottom: 8px; left: 10px;
   background: rgba(0,0,0,.65); color: #fff; font-size: 13px;
-  width: 28px; height: 28px; border-radius: 50%;
+  width: 34px; height: 34px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   opacity: 0;
-  transition: opacity 0.25s ease;
-  pointer-events: none;
+  transition: opacity 0.25s ease, background 0.15s ease;
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 10;
 }
+.post-video-muted-badge:active { background: rgba(99,102,241,.75); }
 /* Badge vues vidéo — haut gauche */
 .post-video-views-badge {
   position: absolute; top: 8px; left: 10px;
@@ -4659,6 +4663,10 @@ mark.srch-mark {
   justify-content: flex-end;
 }
 .bubble-read { font-size: 10px; }
+/* 1 coche grise = envoyé, pas encore lu */
+.bubble-read-sent  { color: rgba(255,255,255,.45); }
+/* 2 coches bleues = lu par le destinataire */
+.bubble-read-seen  { color: #60C6FF; }
 .bubble-sent .bubble-time  { color: rgba(255,255,255,.8); }
 .bubble-recv .bubble-time  { color: #9CA3AF; }
 
@@ -5715,10 +5723,15 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   background: linear-gradient(135deg, #F59E0B, #D97706);
   color: #fff;
 }
+.badge-inline-green {
+  background: linear-gradient(135deg, #16A34A, #15803D);
+  color: #fff;
+}
 
 /* Badge dans les post-cards */
 .post-badge-blue  { color: #2563EB; font-size: 13px; margin-left: 3px; }
 .post-badge-gold  { color: #F59E0B; font-size: 13px; margin-left: 3px; }
+.post-badge-green { color: #16A34A; font-size: 13px; margin-left: 3px; }
 
 /* Badge dans la recherche */
 .srch-badge { font-size: 12px; margin-left: 3px; }
@@ -8395,6 +8408,61 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   padding: 2px 8px; border-radius: 20px;
   display: inline-flex; align-items: center; gap: 3px;
 }
+.adm-tag-green {
+  background: linear-gradient(135deg,#16A34A,#15803D);
+  color: #fff; font-size: 9px; font-weight: 800;
+  padding: 2px 8px; border-radius: 20px;
+  display: inline-flex; align-items: center; gap: 3px;
+}
+.adm-btn-certify {
+  background: linear-gradient(135deg,#16A34A,#15803D) !important;
+  color: #fff !important;
+  border: none !important;
+}
+
+/* ── Restriction banner ── */
+#restriction-banner { display: none; }
+#restriction-banner.active { display: flex !important; }
+
+/* ── Restriction appeal modal ── */
+.restriction-appeal-overlay {
+  position: absolute; inset: 0; background: rgba(0,0,0,.55);
+  z-index: 2000; display: flex; align-items: flex-end;
+  justify-content: center;
+}
+.restriction-appeal-sheet {
+  background: #fff; border-radius: 20px 20px 0 0;
+  padding: 20px 20px 32px; width: 100%; max-height: 80%;
+  overflow-y: auto; box-sizing: border-box;
+}
+.adm-tag-restricted {
+  background: linear-gradient(135deg,#EA580C,#C2410C);
+  color: #fff; font-size: 9px; font-weight: 800;
+  padding: 2px 8px; border-radius: 20px;
+  display: inline-flex; align-items: center; gap: 3px;
+}
+.adm-btn-lift {
+  background: linear-gradient(135deg,#16A34A,#15803D) !important;
+  color: #fff !important; border: none !important;
+}
+.restriction-card {
+  background: #FFF7ED; border: 1.5px solid #FED7AA;
+  border-radius: 14px; padding: 14px 16px; margin-bottom: 12px;
+}
+.restriction-card-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 10px; margin-bottom: 8px;
+}
+.restriction-card-title {
+  font-size: 13px; font-weight: 800; color: #EA580C;
+}
+.restriction-card-reason {
+  font-size: 12px; color: #374151; line-height: 1.5;
+  margin-bottom: 8px;
+}
+.restriction-card-actions {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+}
 
 /* ══════════════════════════════════════════
    PAGE ABONNEMENTS  (contenu dans le cadre téléphone)
@@ -9199,6 +9267,31 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   background: #F1F5F9; color: #64748B;
   font-size: 14px; font-weight: 700; cursor: pointer;
 }
+/* ── Cartes d'options dans le modal limite de plan ── */
+.plm-option-card {
+  border-radius: 14px; padding: 16px; margin-bottom: 12px; text-align: left;
+}
+.plm-option-upgrade {
+  background: linear-gradient(135deg,#F5F3FF,#EEF2FF);
+  border: 1.5px solid #C4B5FD;
+}
+.plm-option-wait {
+  background: #F0F9FF;
+  border: 1.5px solid #BAE6FD;
+}
+.plm-option-header {
+  font-size: 13px; font-weight: 800; color: #1E293B;
+  margin-bottom: 6px; display: flex; align-items: center;
+}
+.plm-option-sub {
+  font-size: 12px; color: #64748B; margin: 0 0 10px; line-height: 1.5;
+}
+.plm-benefits {
+  list-style: none; padding: 0; margin: 0 0 12px; font-size: 12px; color: #374151;
+}
+.plm-benefits li { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+.plm-benefits li i { color: #7C3AED; font-size: 11px; flex-shrink: 0; }
+.plm-sheet { max-height: 88vh; overflow-y: auto; }
 
 /* ══════════════════════════════════════════
    BANNIÈRE D'USAGE DU PLAN (profil utilisateur)
@@ -9391,6 +9484,42 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   display: flex; align-items: center; gap: 10px;
   background: #F8FAFC; border: 1px solid #E2E8F0;
   border-radius: 10px; padding: 10px 12px;
+}
+
+/* ── Analytics — Répartition géographique ── */
+.adm-country-podium {
+  display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 14px;
+}
+.adm-country-podium-card {
+  background: #F8FAFC; border: 1.5px solid #E2E8F0; border-radius: 12px;
+  padding: 12px 8px; text-align: center;
+}
+.adm-country-podium-rank { font-size: 20px; line-height: 1; }
+.adm-country-podium-flag { font-size: 24px; margin: 4px 0; }
+.adm-country-podium-name { font-size: 11px; font-weight: 700; color: #0F172A; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adm-country-podium-cnt { font-size: 10px; color: #6B7280; }
+.adm-country-podium-pct { font-size: 14px; font-weight: 800; color: #3B82F6; margin-top: 4px; }
+.adm-country-list { display: flex; flex-direction: column; gap: 7px; }
+.adm-country-row {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px;
+}
+.adm-country-rank { font-size: 10px; font-weight: 700; color: #9CA3AF; min-width: 16px; text-align: center; }
+.adm-country-flag-name { display: flex; align-items: center; gap: 6px; min-width: 110px; }
+.adm-country-name { font-size: 12px; font-weight: 600; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.adm-country-bar-wrap { flex: 1; background: #F3F4F6; border-radius: 20px; height: 7px; overflow: hidden; }
+.adm-country-bar { height: 100%; border-radius: 20px; transition: width .5s ease; min-width: 4px; }
+.adm-country-stats { display: flex; flex-direction: column; align-items: flex-end; min-width: 46px; }
+.adm-country-cnt { font-size: 11px; font-weight: 700; color: #1E293B; }
+.adm-country-pct { font-size: 10px; color: #9CA3AF; }
+.adm-country-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 12px; background: #F0F9FF; border: 1px solid #BAE6FD; border-radius: 10px;
+  margin-top: 10px; font-size: 11px; color: #0369A1; flex-wrap: wrap;
+}
+@keyframes adm-pulse {
+  0%,100% { opacity:1; transform:scale(1); }
+  50%      { opacity:.4; transform:scale(.75); }
 }
 
 /* ═══════════════════════════════════════════
@@ -11316,14 +11445,54 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+/* Conteneur images de repost */
+.rp-orig-imgs {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
 .rp-orig-img {
+  flex: 1;
   width: 100%;
-  max-height: 160px;
+  max-height: 180px;
   object-fit: cover;
   border-radius: 8px;
   display: block;
-  margin-top: 4px;
+  cursor: pointer;
+  transition: opacity .15s;
 }
+.rp-orig-img:active { opacity: .8; }
+.rp-orig-img-multi {
+  max-height: 130px;
+  border-radius: 6px;
+}
+
+/* Conteneur vidéo de repost — cliquable */
+.rp-orig-vid-wrap {
+  position: relative;
+  margin-top: 6px;
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+}
+.rp-orig-vid-wrap:active .rp-vid-play-btn { transform: translate(-50%,-50%) scale(.9); }
+.rp-vid-play-btn {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%,-50%);
+  width: 52px; height: 52px;
+  background: rgba(0,0,0,.55);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff;
+  font-size: 20px;
+  pointer-events: none;
+  transition: transform .15s, background .15s;
+  padding-left: 4px; /* optique play */
+}
+.rp-orig-vid-wrap:hover .rp-vid-play-btn { background: rgba(99,102,241,.75); }
+
 .rp-orig-vid-ico {
   width: 100%;
   height: 80px;
@@ -11341,9 +11510,9 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   max-height: 220px;
   border-radius: 8px;
   display: block;
-  margin-top: 6px;
   background: #000;
   object-fit: contain;
+  pointer-events: none; /* le clic va au wrapper */
 }
 .rp-orig-doc {
   display: flex;

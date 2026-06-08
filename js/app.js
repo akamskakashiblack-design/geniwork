@@ -30,7 +30,7 @@ var _GW_PAYPAL_EMAIL     = 'geniwork.admin@gmail.com';
 var _GW_COMMISSION_RATE  = 0.01;
 
 var _MK_PLAN_LIMITS = {
-  free:     { maxListings: Infinity, canAd: false, priority: false, durationDays: 30 },
+  free:     { maxListings: 3,        canAd: false, priority: false, durationDays: 30 },
   premium:  { maxListings: Infinity, canAd: true,  priority: false, durationDays: 60 },
   business: { maxListings: Infinity, canAd: true,  priority: true,  durationDays: 60 }
 };
@@ -59,7 +59,8 @@ var _gwFbDB      = null;   /* Instance Realtime Database */
 var _gwFbAuth    = null;   /* Instance Firebase Auth */
 var _gwFbStorage = null;   /* Instance Firebase Storage (photos/vidéos) */
 var _gwFbReady   = false;  /* true quand Firebase est connecté */
-var _gwFbSkip  = false;  /* Pause les listeners pour éviter les boucles */
+var _gwFbSkip    = false;  /* Pause les listeners pour éviter les boucles */
+var _gwAppStarted = false; /* true si l'app a déjà été lancée (fast-path ou normal) */
 
 /* ══════════════════════════════════════════
    INDEXEDDB — STOCKAGE VIDÉO PERSISTANT
@@ -811,6 +812,20 @@ function _gwFbSyncStart() {
 
   /* ── Demandes d'accès admin ── */
   _listen('admin_requests', 'gw_admin_requests', function() { _admSync('team'); });
+
+  /* ── Restrictions de contenu ── */
+  _listen('restrictions', 'gw_restrictions', function() {
+    /* Vérifie si l'utilisateur connecté vient d'être restreint/libéré */
+    if (_currentUser) {
+      try { _gwCheckRestrictionBanner(); } catch(e){}
+    }
+    if (_adminUser) { _admSync('reports'); }
+  });
+
+  /* ── Recours de restriction ── */
+  _listen('restriction_appeals', 'gw_restriction_appeals', function() {
+    if (_adminUser) { _admSync('reports'); }
+  });
 
   /* ── Permissions déléguées (admin_extra_perms) ── */
   _listen('admin_extra_perms', 'gw_admin_extra_perms', function() {
@@ -1700,12 +1715,38 @@ function _gwPreloadUserData(user, callback) {
 /* Lance l'app après que Firebase a chargé les données critiques */
 function _gwStartApp() {
   var session = _gwLoadSession();
+
+  if (_gwAppStarted) {
+    /* ── App déjà lancée via fast-path localStorage ──
+       Firebase vient de charger → sync silencieuse en arrière-plan.
+       On vérifie si le compte est banni / supprimé depuis la dernière visite,
+       puis on rafraîchit les données utilisateur sans re-lancer l'app. */
+    if (!session) return;
+    var bgUser = findUser(session.email);
+    if (!bgUser || _admIsBanned(session.email)) {
+      /* Compte banni/supprimé → déconnexion forcée */
+      _gwAppStarted = false;
+      localStorage.removeItem('gw_session');
+      _currentUser = null;
+      try { goTo('screen-login'); } catch(e) {}
+      return;
+    }
+    /* Sync silencieuse : met à jour inbox, notifs, profil, DMs, etc. */
+    _gwPreloadUserData(bgUser, function() {
+      /* Rafraîchit les badges et compteurs sans tout re-rendre */
+      try { _gwSilentRefresh(bgUser); } catch(e) {}
+    });
+    return;
+  }
+
+  /* ── Chemin normal (premier lancement sans fast-path) ── */
   if (session) {
     var storedUser = findUser(session.email);
     if (storedUser && !_admIsBanned(session.email)) {
       _currentUser = { nom: storedUser.nom, email: storedUser.email, loginMethod: storedUser.loginMethod || 'email' };
       _gwCreateSession(_currentUser);
       _gwPreloadUserData(_currentUser, function() {
+        _gwAppStarted = true;
         initApp(_currentUser);
         scheduleNewPosts();
         goTo('screen-app');
@@ -1716,6 +1757,62 @@ function _gwStartApp() {
       localStorage.removeItem('gw_session');
     }
   }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   AUTO-LOGIN INSTANTANÉ (zéro attente Firebase)
+   Vérifie la session en localStorage et lance l'app immédiatement.
+   Utilisé par : fast-path au chargement + clic "Se connecter" landing
+   Retourne true si redirigé vers screen-app, false sinon.
+══════════════════════════════════════════════════════════════ */
+function _gwInstantAutoLogin() {
+  if (_gwAppStarted) return true;                          /* app déjà lancée */
+  try {
+    var ses = _gwLoadSession();
+    if (!ses || !ses.email) return false;
+    var user = findUser(ses.email);
+    if (!user) return false;
+    if (_admIsBanned(ses.email)) {
+      localStorage.removeItem('gw_session');
+      return false;
+    }
+    _gwAppStarted = true;
+    _currentUser = { nom: user.nom, email: user.email, loginMethod: user.loginMethod || 'email' };
+    _gwCreateSession(_currentUser);
+    initApp(_currentUser);
+    scheduleNewPosts();
+    /* Retire la classe splash AVANT goTo pour éviter le flash du splash après navigation */
+    try { document.documentElement.classList.remove('gw-has-session'); } catch(e2){}
+    goTo('screen-app');
+    setTimeout(_gwHandleDeepLink, 800);
+    console.log('[GW] ⚡ Auto-login instantané pour', user.email);
+    return true;
+  } catch(e) {
+    console.warn('[GW] Auto-login instantané échoué :', e);
+    _gwAppStarted = false;
+    /* En cas d'échec : retire splash et montre la landing normalement */
+    try { document.documentElement.classList.remove('gw-has-session'); } catch(e2){}
+    return false;
+  }
+}
+
+/* Rafraîchit discrètement les compteurs/badges après sync Firebase en arrière-plan */
+function _gwSilentRefresh(user) {
+  if (!user) return;
+  try {
+    /* Badge notifs */
+    var notifEl = document.getElementById('notif-badge');
+    var notifs  = JSON.parse(localStorage.getItem('gw_notifs_' + user.email) || '[]');
+    var unread  = Array.isArray(notifs) ? notifs.filter(function(n){ return !n.read; }).length : 0;
+    if (notifEl) { notifEl.textContent = unread > 0 ? unread : ''; notifEl.style.display = unread > 0 ? 'flex' : 'none'; }
+  } catch(e) {}
+  try {
+    /* Badge messages (inbox DM) */
+    var dmBadgeEl = document.getElementById('dm-badge');
+    var inbox     = JSON.parse(localStorage.getItem('gw_dm_inbox_' + user.email) || '[]');
+    var unreadDm  = Array.isArray(inbox) ? inbox.filter(function(m){ return !m.read && m.from !== user.email; }).length : 0;
+    if (dmBadgeEl) { dmBadgeEl.textContent = unreadDm > 0 ? unreadDm : ''; dmBadgeEl.style.display = unreadDm > 0 ? 'flex' : 'none'; }
+  } catch(e) {}
 }
 
 function _gwHandleDeepLink() {
@@ -1790,7 +1887,9 @@ function _gwFbPreloadAndStart() {
     _gwFbDB.ref('gw/official_posts').once('value'),
     _gwFbDB.ref('gw/mk_listings').once('value'),
     _gwFbDB.ref('gw/collab_requests').once('value'),
-    _gwFbDB.ref('gw/profiles').once('value')
+    _gwFbDB.ref('gw/profiles').once('value'),
+    _gwFbDB.ref('gw/restrictions').once('value'),
+    _gwFbDB.ref('gw/restriction_appeals').once('value')
   ]).then(function(snaps) {
 
     /* ── Utilisateurs ── */
@@ -1845,6 +1944,23 @@ function _gwFbPreloadAndStart() {
       } catch(e){}
     });
 
+    /* ── Restrictions de contenu ── */
+    var rstVal = snaps[7] ? snaps[7].val() : null;
+    if (rstVal) {
+      try {
+        var rstArr = Array.isArray(rstVal) ? rstVal : Object.values(rstVal);
+        localStorage.setItem('gw_restrictions', JSON.stringify(rstArr));
+      } catch(e){}
+    }
+    /* ── Recours de restriction ── */
+    var rstAppVal = snaps[8] ? snaps[8].val() : null;
+    if (rstAppVal) {
+      try {
+        var rstAppArr = Array.isArray(rstAppVal) ? rstAppVal : Object.values(rstAppVal);
+        localStorage.setItem('gw_restriction_appeals', JSON.stringify(rstAppArr));
+      } catch(e){}
+    }
+
     _gwStartApp();
   }).catch(function() {
     /* En cas d'erreur réseau, démarre quand même avec le cache local */
@@ -1856,7 +1972,15 @@ function _gwFbPreloadAndStart() {
 window.addEventListener('load', function() {
   /* ── IndexedDB vidéo ── */
   _gwInitVideoDB();
-  /* ── Firebase : init + auth + sync + preload (tout enchaîné dans _gwInitFirebase) ── */
+
+  /* ══════════════════════════════════════════════════════════════
+     FAST-PATH : utilisateur de retour avec session valide en cache
+     → Lance l'app IMMÉDIATEMENT depuis localStorage (< 200 ms)
+     → Firebase s'init en arrière-plan pour sync uniquement
+  ══════════════════════════════════════════════════════════════ */
+  _gwInstantAutoLogin();
+
+  /* ── Firebase : init + auth + sync + preload (arrière-plan si fast-path actif) ── */
   _gwInitFirebase();
 
   /* GIS se charge de manière async — on attend qu'il soit dispo */
@@ -1874,6 +1998,13 @@ window.addEventListener('load', function() {
    NAVIGATION
 ══════════════════════════════════════════ */
 function goTo(screenId) {
+  /* ── Auto-login instantané : si l'utilisateur tente d'aller sur screen-login
+     alors qu'il a encore une session valide en localStorage, on le redirige
+     directement vers screen-app sans attendre Firebase (< 100 ms) ── */
+  if (screenId === 'screen-login' && !_gwAppStarted) {
+    if (_gwInstantAutoLogin()) return;
+  }
+
   /* ── Vérification ban en temps réel (si ban appliqué pendant session) ── */
   if (_currentUser && screenId === 'screen-app') {
     var activeBan = _admGetBanInfo(_currentUser.email);
@@ -1891,6 +2022,11 @@ function goTo(screenId) {
     s.classList.remove('active');
   });
   document.getElementById(screenId).classList.add('active');
+  /* ── Bannières système ── */
+  if (screenId === 'screen-app') {
+    try { _secCheckMaintenanceBanner(); } catch(e){}
+    try { _gwCheckRestrictionBanner(); } catch(e){}
+  }
 }
 
 /* ══════════════════════════════════════════
@@ -2755,6 +2891,15 @@ function initApp(user) {
         } else {
           merged2 = Object.assign({}, existing2, data);
         }
+        /* ── Badge : Firebase est toujours autoritaire.
+           Si un champ badge a été supprimé côté admin, il doit disparaître ici aussi.
+           Object.assign ne supprime pas les clés absentes de `data` — on le fait manuellement. */
+        var _badgeKeys = ['badgeType','badgeStatus','badgeApprovedAt','badgeCertifiedBy',
+                          'badgeCertifiedAt','badgeRevokedAt','badgeRevokedMotif','badgeRevokedBy'];
+        _badgeKeys.forEach(function(k) {
+          if (k in data) { merged2[k] = data[k]; }
+          else           { delete merged2[k]; }
+        });
         try { localStorage.setItem('gw_profile_' + email2, JSON.stringify(merged2)); _invalidateProfileCache(email2); } catch(e2){}
         /* Si c'est l'utilisateur courant → synchronise les limites en temps réel */
         if (_currentUser && email2 === _currentUser.email) {
@@ -3332,7 +3477,7 @@ function openFavorisPage() {
 ══════════════════════════════════════════ */
 
 /* Clés localStorage */
-// profile.badgeType    : null | 'verified' | 'premium'
+// profile.badgeType    : null | 'verified' | 'premium' | 'certified'
 // profile.badgeStatus  : null | 'pending' | 'approved' | 'rejected'
 // profile.identityVerified : bool
 // profile.phoneVerified    : bool
@@ -3363,6 +3508,9 @@ function getBadgeHtml(email) {
   }
   if (p.badgeType === 'verified') {
     return '<span class="badge-inline badge-inline-blue" title="Profil vérifié"><i class="fas fa-circle-check"></i></span>';
+  }
+  if (p.badgeType === 'certified') {
+    return '<span class="badge-inline badge-inline-green" title="Compte certifié Geniwork"><i class="fas fa-circle-check"></i></span>';
   }
   return '';
 }
@@ -4511,6 +4659,10 @@ function _toggleFaq(el) {
 ══════════════════════════════════════════ */
 function openBadgePage() {
   if (!_currentUser) return;
+  /* ── Système de badges désactivé par le fondateur ── */
+  if (!_admGetPlansConfig().badgeEnabled) {
+    showToast('Le système de badges est temporairement indisponible', 'err'); return;
+  }
   var screen = document.getElementById('badge-screen');
   if (!screen) return;
   screen.classList.remove('hidden');
@@ -4933,6 +5085,18 @@ function getPostsByAuthor(email, nom) {
 ══════════════════════════════════════════ */
 var _feedVideoObserver = null;
 
+/* ── Toggle mute/unmute d'une vidéo dans le feed (sans ouvrir le lecteur) ── */
+function _gwFeedToggleMute(postId, vidPrefix, badgePrefix) {
+  var vid   = document.getElementById(vidPrefix + postId);
+  var badge = document.getElementById(badgePrefix + postId);
+  if (!vid) return;
+  vid.muted = !vid.muted;
+  if (badge) {
+    var ico = badge.querySelector('i');
+    if (ico) ico.className = vid.muted ? 'fas fa-volume-mute' : 'fas fa-volume-up';
+  }
+}
+
 function _initFeedVideoObserver() {
   if (!('IntersectionObserver' in window)) return;
 
@@ -4981,7 +5145,12 @@ function _initFeedVideoObserver() {
             });
           }
           if (overlay)    overlay.style.opacity    = '0';
-          if (mutedBadge) mutedBadge.style.opacity = '1';
+          if (mutedBadge) {
+            mutedBadge.style.opacity = '1';
+            /* Met l'icône à jour selon l'état mute actuel */
+            var _mIco = mutedBadge.querySelector('i');
+            if (_mIco) _mIco.className = video.muted ? 'fas fa-volume-mute' : 'fas fa-volume-up';
+          }
           /* Preload la vidéo adjacente suivante pour éviter le buffering */
           var nextSib = video.closest('.post-card, .feed-card, [data-post-id]');
           if (nextSib) {
@@ -5403,7 +5572,7 @@ function buildPostCard(post) {
         '<div class="post-video-thumb-overlay" id="fvo-' + post.id + '">' +
           '<div class="post-video-play-ico"><i class="fas fa-play"></i></div>' +
         '</div>' +
-        '<div class="post-video-muted-badge" id="fvm-' + post.id + '">' +
+        '<div class="post-video-muted-badge" id="fvm-' + post.id + '" onclick="event.stopPropagation();_gwFeedToggleMute(\'' + post.id + '\',\'fv-\',\'fvm-\')">' +
           '<i class="fas fa-volume-mute"></i>' +
         '</div>' +
         typeBadge +
@@ -5503,12 +5672,30 @@ function buildPostCard(post) {
     /* Média original */
     var roMedia = '';
     if (ro.images && ro.images[0]) {
-      roMedia = '<img class="rp-orig-img" src="' + escHtml(ro.images[0]) + '" alt=""/>';
+      /* Image cliquable → ouvre un viewer plein écran.
+         ⚠️ On NE met PAS les base64 dans l'attribut onclick (trop long, le navigateur refuse).
+         On passe uniquement le postId + index, et on retrouve les images depuis DEMO_POSTS. */
+      var rpImgCount = Math.min(ro.images.length, 3);
+      roMedia = '<div class="rp-orig-imgs" id="rpimgs-' + post.id + '">';
+      for (var _rpi = 0; _rpi < rpImgCount; _rpi++) {
+        roMedia += '<img class="rp-orig-img' + (rpImgCount > 1 ? ' rp-orig-img-multi' : '') + '"' +
+          ' src="' + escHtml(ro.images[_rpi]) + '" alt=""' +
+          ' onclick="event.stopPropagation();_gwOpenRpImgByPost(' + post.id + ',' + _rpi + ')"/>';
+      }
+      roMedia += '</div>';
     } else if (ro.video) {
       var roVidSrc = typeof ro.video === 'string' ? ro.video : (ro.video.url || ro.video.src || '');
-      /* Affiche toujours le lecteur — le src sera rempli par l'IDB si vide */
-      roMedia = '<video id="rp-fv-' + post.id + '" class="rp-orig-video" muted loop playsinline preload="metadata"' +
-                (roVidSrc ? ' src="' + escHtml(roVidSrc) + '"' : '') + '></video>';
+      var roVidDur = (typeof ro.video === 'object' && ro.video.duration) ? ro.video.duration : 0;
+      var roVidOrigId = ro.id ? String(ro.id) : '';
+      /* Vidéo cliquable → ouvre le lecteur plein écran */
+      roMedia = '<div class="rp-orig-vid-wrap"' +
+        ' data-orig-id="' + escHtml(roVidOrigId) + '"' +
+        ' data-orig-dur="' + roVidDur + '"' +
+        ' onclick="event.stopPropagation();_gwOpenRpVid(this)">' +
+        '<video id="rp-fv-' + post.id + '" class="rp-orig-video" muted playsinline preload="metadata"' +
+        (roVidSrc ? ' src="' + escHtml(roVidSrc) + '"' : '') + '></video>' +
+        '<div class="rp-vid-play-btn"><i class="fas fa-play"></i></div>' +
+        '</div>';
     }
     var roDoc = ro.doc
       ? '<div class="rp-orig-doc"><i class="fas fa-file"></i> ' + escHtml(ro.doc.name || 'Document') + '</div>'
@@ -5538,14 +5725,22 @@ function buildPostCard(post) {
     } else {
       roAvatarHtml = getAvatarHtml(roEmail, ro.author, 'xs');
     }
+    /* Prépare l'appel openUserProfileView pour le header de l'auteur original */
+    var _roNomSafe  = (ro.author  || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    var _roRoleSafe = (ro.role    || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    var _roEmSafe   = (roEmail    || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    var _roProfileCall = roEmail && ro.author === 'Geniwork'
+      ? "openUserProfileView({nom:'Geniwork',email:null,role:'Compte officiel certifié',_isOfficial:true})"
+      : "openUserProfileView({nom:'" + _roNomSafe + "',email:'" + _roEmSafe + "',role:'" + _roRoleSafe + "'})";
     repostCardHtml =
       '<div class="post-repost-orig">' +
-        '<div class="rp-orig-header">' +
+        '<div class="rp-orig-header" onclick="event.stopPropagation();' + _roProfileCall + '" style="cursor:pointer">' +
           roAvatarHtml +
           '<div class="rp-orig-meta">' +
             '<strong>' + escHtml(ro.author) + '</strong>' +
             (ro.role ? '<small>' + escHtml(ro.role) + '</small>' : '') +
           '</div>' +
+          '<i class="fas fa-chevron-right" style="margin-left:auto;color:#CBD5E1;font-size:11px"></i>' +
         '</div>' +
         (ro.text ? '<p class="rp-orig-text">' + escHtml(ro.text.slice(0, 200)) + (ro.text.length > 200 ? '…' : '') + '</p>' : '') +
         roMedia + roDoc +
@@ -7025,6 +7220,20 @@ function submitComment() {
   var parentId = document.getElementById('reply-parent-id').value || null;
   if (!text || !_currentPostId || !_currentUser) return;
 
+  /* ── Vérification restriction ── */
+  if (_gwIsRestricted(_currentUser.email)) {
+    if (_gwShowRestrictionAlert('comment')) return;
+  }
+
+  /* ── Analyse du contenu ── */
+  var _cc = _gwCheckContent(text);
+  if (_cc.flagged) {
+    showToast('🚫 Commentaire bloqué — ' + _cc.reason, 'err');
+    _gwApplyRestriction(_currentUser.email, _currentUser.nom, _cc.type, _cc.reason, 'auto');
+    input.value = '';
+    return;
+  }
+
   var newC = {
     id:          'c_' + genNotifId(),
     postId:      _currentPostId,
@@ -7735,6 +7944,222 @@ function _clearQuoteRef() {
 ══════════════════════════════════════════ */
 var _viewerPhotos = [];
 var _viewerIdx    = 0;
+
+/* ── Ouvre image republiée plein écran (viewer simple autonome) ── */
+/* Retrouve les images d'un post republié par postId et ouvre le viewer.
+   Utilisé dans l'onclick des images pour éviter d'embarquer les base64 dans le HTML. */
+function _gwOpenRpImgByPost(postId, idx) {
+  /* Cherche d'abord dans le feed actif */
+  var found = null;
+  for (var _i = 0; _i < DEMO_POSTS.length; _i++) {
+    if (String(DEMO_POSTS[_i].id) === String(postId)) { found = DEMO_POSTS[_i]; break; }
+  }
+  /* Fallback : localStorage */
+  if (!found && typeof getAllPosts === 'function') {
+    var _all = getAllPosts();
+    for (var _j = 0; _j < _all.length; _j++) {
+      if (String(_all[_j].id) === String(postId)) { found = _all[_j]; break; }
+    }
+  }
+  if (!found || !found.repostOf || !found.repostOf.images || !found.repostOf.images.length) {
+    showToast('Image non disponible', 'warn'); return;
+  }
+  _gwOpenRpImg(found.repostOf.images, idx || 0);
+}
+
+function _gwOpenRpImg(urlsJsonOrArray, idx) {
+  try {
+    var photos = Array.isArray(urlsJsonOrArray)
+      ? urlsJsonOrArray
+      : JSON.parse(urlsJsonOrArray);
+    if (!photos || !photos.length) return;
+    /* Supprime un éventuel viewer déjà ouvert */
+    var old = document.getElementById('gw-rp-img-viewer');
+    if (old) old.remove();
+    var ov = document.createElement('div');
+    ov.id = 'gw-rp-img-viewer';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.95);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;';
+    /* Fermeture au clic sur le fond */
+    ov.onclick = function(e) { if (e.target === ov) ov.remove(); };
+    /* Barre haute */
+    var bar = document.createElement('div');
+    bar.style.cssText = 'position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;padding:14px 16px;';
+    bar.innerHTML =
+      '<span style="color:rgba(255,255,255,.6);font-size:13px">' + (idx + 1) + ' / ' + photos.length + '</span>' +
+      '<button style="background:rgba(255,255,255,.15);border:none;color:#fff;width:38px;height:38px;border-radius:50%;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;" onclick="document.getElementById(\'gw-rp-img-viewer\').remove()">' +
+        '<i class="fas fa-times"></i>' +
+      '</button>';
+    /* Image */
+    var img = document.createElement('img');
+    img.src = photos[idx] || photos[0];
+    img.style.cssText = 'max-width:95vw;max-height:78vh;object-fit:contain;border-radius:10px;';
+    /* Bouton télécharger */
+    var dlBtn = document.createElement('a');
+    dlBtn.href = img.src;
+    dlBtn.download = 'geniwork-photo.jpg';
+    dlBtn.style.cssText = 'color:#fff;background:#6366F1;padding:10px 28px;border-radius:30px;font-size:13px;font-weight:700;text-decoration:none;display:inline-flex;align-items:center;gap:8px;';
+    dlBtn.innerHTML = '<i class="fas fa-download"></i> Télécharger';
+    /* Flèches si plusieurs images */
+    if (photos.length > 1) {
+      var cur = idx;
+      var prev = document.createElement('button');
+      prev.style.cssText = 'position:absolute;left:12px;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.2);border:none;color:#fff;width:44px;height:44px;border-radius:50%;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;';
+      prev.innerHTML = '<i class="fas fa-chevron-left"></i>';
+      var next = document.createElement('button');
+      next.style.cssText = 'position:absolute;right:12px;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.2);border:none;color:#fff;width:44px;height:44px;border-radius:50%;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;';
+      next.innerHTML = '<i class="fas fa-chevron-right"></i>';
+      function _rpNav(n) {
+        cur = (cur + n + photos.length) % photos.length;
+        img.src = photos[cur];
+        dlBtn.href = photos[cur];
+        bar.querySelector('span').textContent = (cur + 1) + ' / ' + photos.length;
+      }
+      prev.onclick = function(e) { e.stopPropagation(); _rpNav(-1); };
+      next.onclick = function(e) { e.stopPropagation(); _rpNav(1); };
+      ov.appendChild(prev);
+      ov.appendChild(next);
+    }
+    ov.appendChild(bar);
+    ov.appendChild(img);
+    ov.appendChild(dlBtn);
+    document.body.appendChild(ov);
+    document.body.style.overflow = 'hidden';
+    /* Rétablit le scroll à la fermeture */
+    var _origClose = function() { document.body.style.overflow = ''; };
+    bar.querySelector('button').addEventListener('click', _origClose);
+    ov.addEventListener('click', function(e) { if (e.target === ov) _origClose(); });
+  } catch(e) { console.error('[GW] _gwOpenRpImg error', e); }
+}
+
+/* ── Ouvre vidéo republiée dans le lecteur plein écran ── */
+function _gwOpenRpVid(wrapEl) {
+  try {
+    var origId = wrapEl.getAttribute('data-orig-id') || '';
+    var dur    = parseFloat(wrapEl.getAttribute('data-orig-dur')) || 0;
+    /* 1. Cherche le post original dans DEMO_POSTS par ID */
+    if (origId) {
+      var origPost = DEMO_POSTS.find(function(p) { return String(p.id) === origId; });
+      if (origPost && origPost.video) {
+        _openVideoFromPost(origId, dur);
+        return;
+      }
+    }
+    /* 2. Fallback : lit le src de la balise <video> déjà dans le DOM */
+    var vidEl = wrapEl.querySelector('video');
+    var url = (vidEl && vidEl.currentSrc) ? vidEl.currentSrc
+            : (vidEl && vidEl.src && vidEl.src !== window.location.href) ? vidEl.src : '';
+    if (url) { openVideoPlayer(url, dur); return; }
+    /* 3. Dernier recours : charge via IDB si origId connu */
+    if (origId) { _openVideoFromPost(origId, dur); return; }
+    showToast('Vidéo non disponible', 'warn');
+  } catch(e) { console.error('[GW] _gwOpenRpVid error', e); showToast('Vidéo non disponible', 'warn'); }
+}
+
+/* ── Clic sur image de repost : collecte les srcs depuis le DOM → viewer plein écran ── */
+function _gwRpImgClick(imgEl, idx) {
+  try {
+    /* Collecte toutes les images du même groupe */
+    var container = imgEl.parentNode;
+    var imgs = container ? container.querySelectorAll('.rp-orig-img') : [imgEl];
+    var urls = [];
+    for (var _i = 0; _i < imgs.length; _i++) { urls.push(imgs[_i].src); }
+    if (!urls.length) { showToast('Image introuvable', 'warn'); return; }
+    _viewerPhotos = urls;
+    _viewerIdx    = Math.min(idx || 0, urls.length - 1);
+    if (!document.getElementById('photo-viewer')) {
+      var _pvD = document.createElement('div');
+      _pvD.id = 'photo-viewer'; _pvD.className = 'photo-viewer hidden';
+      _pvD.innerHTML =
+        '<div class="pv-counter-top" id="pv-counter"></div>' +
+        '<button class="pv-close" onclick="closePhotoViewer()"><i class="fas fa-times"></i></button>' +
+        '<button class="pv-prev hidden" id="pv-prev" onclick="prevPhoto()"><i class="fas fa-chevron-left"></i></button>' +
+        '<div class="pv-img-wrap"><img id="pv-img" src="" alt=""/></div>' +
+        '<button class="pv-next hidden" id="pv-next" onclick="nextPhoto()"><i class="fas fa-chevron-right"></i></button>' +
+        '<div class="pv-dots" id="pv-dots"></div>' +
+        '<div class="pv-footer"><span class="pv-footer-left">Geniwork</span>' +
+          '<button class="pv-dl" onclick="downloadCurrentPhoto()"><i class="fas fa-download"></i> Télécharger</button></div>';
+      document.body.appendChild(_pvD);
+      var _pvTx = 0;
+      _pvD.addEventListener('touchstart', function(e){ _pvTx=e.touches[0].clientX; },{passive:true});
+      _pvD.addEventListener('touchend',   function(e){ var dx=e.changedTouches[0].clientX-_pvTx; if(dx<-50)nextPhoto();else if(dx>50)prevPhoto(); },{passive:true});
+    }
+    updateViewer();
+    document.getElementById('photo-viewer').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  } catch(e) { console.warn('[GW] _gwRpImgClick error', e); }
+}
+
+/* ── Clic sur vidéo de repost : essaie par ID d'abord, puis URL directe ── */
+function _gwRpVidClick(wrapEl) {
+  try {
+    var origId = wrapEl.getAttribute('data-vid-orig') || '';
+    var dur    = parseFloat(wrapEl.getAttribute('data-vid-dur')) || 0;
+    /* 1. Essaie avec l'ID du post original (cherche dans DEMO_POSTS) */
+    if (origId) {
+      var origPost = DEMO_POSTS.find(function(p){ return String(p.id) === origId; });
+      if (origPost && origPost.video) {
+        _openVideoFromPost(origId, dur);
+        return;
+      }
+    }
+    /* 2. Fallback : ouvre directement l'URL stockée dans la balise <video> */
+    var vidEl = wrapEl.querySelector('video');
+    var url   = (vidEl && vidEl.src) ? vidEl.src : '';
+    if (url && url !== window.location.href) {
+      openVideoPlayer(url, dur);
+      return;
+    }
+    /* 3. Dernier recours : essaie via _openVideoFromPost (chargement IDB) */
+    if (origId) { _openVideoFromPost(origId, dur); return; }
+    showToast('Vidéo non disponible', 'warn');
+  } catch(e) { console.warn('[GW] _gwRpVidClick error', e); showToast('Vidéo non disponible', 'warn'); }
+}
+
+/* ── Ouvre le viewer photo depuis un repost (fallback sur repostOf si post introuvable) ── */
+function _openRepostImg(origPostId, idx) {
+  /* Cherche d'abord le post original dans le feed */
+  var orig = getAllPosts().find(function(p) { return String(p.id) === String(origPostId); });
+  if (orig && orig.images && orig.images.length > 0) {
+    openPhotoViewer(orig.id, idx || 0);
+    return;
+  }
+  /* Fallback : cherche l'image dans les repostOf de tous les reposts */
+  var roPost = getAllPosts().find(function(p) {
+    return p.type === 'repost' && p.repostOf && String(p.repostOf.id) === String(origPostId);
+  });
+  var photos = roPost && roPost.repostOf && roPost.repostOf.images
+    ? roPost.repostOf.images
+    : [];
+  if (!photos.length) { showToast('Image introuvable', 'warn'); return; }
+  _viewerPhotos = photos.slice(0, 6);
+  _viewerIdx    = idx || 0;
+  if (!document.getElementById('photo-viewer')) {
+    var _pvDiv = document.createElement('div');
+    _pvDiv.id        = 'photo-viewer';
+    _pvDiv.className = 'photo-viewer hidden';
+    _pvDiv.innerHTML =
+      '<div class="pv-counter-top" id="pv-counter"></div>' +
+      '<button class="pv-close" onclick="closePhotoViewer()"><i class="fas fa-times"></i></button>' +
+      '<button class="pv-prev hidden" id="pv-prev" onclick="prevPhoto()"><i class="fas fa-chevron-left"></i></button>' +
+      '<div class="pv-img-wrap"><img id="pv-img" src="" alt=""/></div>' +
+      '<button class="pv-next hidden" id="pv-next" onclick="nextPhoto()"><i class="fas fa-chevron-right"></i></button>' +
+      '<div class="pv-dots" id="pv-dots"></div>' +
+      '<div class="pv-footer">' +
+        '<span class="pv-footer-left">Geniwork</span>' +
+        '<button class="pv-dl" onclick="downloadCurrentPhoto()"><i class="fas fa-download"></i> Télécharger</button>' +
+      '</div>';
+    document.body.appendChild(_pvDiv);
+    var _pvTx = 0;
+    _pvDiv.addEventListener('touchstart', function(e) { _pvTx = e.touches[0].clientX; }, { passive: true });
+    _pvDiv.addEventListener('touchend',   function(e) {
+      var dx = e.changedTouches[0].clientX - _pvTx;
+      if (dx < -50) nextPhoto(); else if (dx > 50) prevPhoto();
+    }, { passive: true });
+  }
+  updateViewer();
+  document.getElementById('photo-viewer').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
 
 function openPhotoViewer(postId, idx) {
   var post = getAllPosts().find(function(p) { return p.id === postId; });
@@ -8621,7 +9046,11 @@ function _vmConfirm() {
     setTimeout(function() {
       var ov = document.getElementById('vid-meta-sheet');
       if (ov) ov.remove();
-    }, 280);
+      /* ── Lance automatiquement la publication après confirmation ── */
+      publierPost();
+    }, 300);
+  } else {
+    publierPost();
   }
   renderVideoPreview();
 }
@@ -10030,7 +10459,6 @@ function _nextMonthReset() {
 
 /* Affiche un modal de blocage + envoie une notification à l'utilisateur */
 function _showPlanLimitModal(title, desc, featureName) {
-  /* Ferme si déjà ouvert */
   var existing = document.getElementById('plan-limit-modal');
   if (existing) existing.remove();
 
@@ -10039,23 +10467,37 @@ function _showPlanLimitModal(title, desc, featureName) {
   var isPrem    = plan === 'premium';
   var upgTarget = isPrem ? 'Business Pro 💼' : 'Premium 👑';
   var iconPlan  = isPrem ? 'fas fa-briefcase' : 'fas fa-crown';
+  var planLabel = plan === 'free' ? 'Gratuit' : plan === 'premium' ? 'Premium 👑' : 'Business Pro 💼';
 
-  /* ── Notification dans le centre de notifications ── */
+  /* Heure de reset = minuit cette nuit */
+  var now       = new Date();
+  var tomorrow  = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0);
+  var diffMs    = tomorrow - now;
+  var diffH     = Math.floor(diffMs / 3600000);
+  var diffM     = Math.floor((diffMs % 3600000) / 60000);
+  var resetMsg  = diffH > 0
+    ? 'Réinitialisation dans <strong>' + diffH + 'h ' + diffM + 'min</strong> (minuit)'
+    : 'Réinitialisation dans <strong>' + diffM + ' minutes</strong>';
+
+  /* ── Avantages plan suivant ── */
+  var benefitsHtml = isPrem
+    ? '<ul class="plm-benefits"><li><i class="fas fa-check-circle"></i> Publications illimitées</li>' +
+      '<li><i class="fas fa-check-circle"></i> Messages illimités</li>' +
+      '<li><i class="fas fa-check-circle"></i> 20 services au lieu de 10</li>' +
+      '<li><i class="fas fa-check-circle"></i> Priorité dans les résultats</li></ul>'
+    : '<ul class="plm-benefits"><li><i class="fas fa-check-circle"></i> Publications illimitées</li>' +
+      '<li><i class="fas fa-check-circle"></i> Messages illimités</li>' +
+      '<li><i class="fas fa-check-circle"></i> 10 services au lieu de 3</li>' +
+      '<li><i class="fas fa-check-circle"></i> 6 photos par publication</li></ul>';
+
+  /* ── Notification centre de notifs (une seule fois par jour) ── */
   var notifKey = 'plmlimit_' + featureName + '_' + new Date().toISOString().slice(0,10);
   var notifs   = getNotifs(_currentUser.email);
-  /* Évite de dupliquer la même notif le même jour */
-  var alreadySent = notifs.some(function(n) { return n.id === notifKey; });
-  if (!alreadySent) {
-    var planLabel = plan === 'free' ? 'Gratuit' : plan === 'premium' ? 'Premium 👑' : 'Business Pro 💼';
-    var limitNotif = {
-      id       : notifKey,
-      type     : 'plan_limit',
-      at       : Date.now(),
-      msg      : '⚠️ Limite atteinte — ' + title + '. Votre plan ' + planLabel + ' ne permet pas d\'aller plus loin. Passez à ' + upgTarget + ' pour continuer.',
-      unread   : true,
-      fromUser : null
-    };
-    notifs.unshift(limitNotif);
+  if (!notifs.some(function(n) { return n.id === notifKey; })) {
+    notifs.unshift({
+      id: notifKey, type: 'plan_limit', at: Date.now(), unread: true, fromUser: null,
+      msg: '⚠️ Limite atteinte — ' + title + '. Plan ' + planLabel + '. Passez à ' + upgTarget + ' ou attendez minuit.'
+    });
     saveNotifs(_currentUser.email, notifs);
     try { renderNotifs(); updateNotifBadge(); } catch(e) {}
   }
@@ -10067,13 +10509,30 @@ function _showPlanLimitModal(title, desc, featureName) {
   modal.innerHTML =
     '<div class="plm-sheet">' +
       '<div class="plm-icon-wrap"><i class="fas fa-lock plm-lock-icon"></i></div>' +
-      '<div class="plm-title">' + escHtml(title) + '</div>' +
-      '<div class="plm-desc">' + escHtml(desc) + '</div>' +
-      '<div class="plm-current-plan">Plan actuel : <strong>' + (plan === 'free' ? 'Gratuit' : plan === 'premium' ? 'Premium 👑' : 'Business Pro 💼') + '</strong></div>' +
-      '<button class="plm-upgrade-btn" onclick="document.getElementById(\'plan-limit-modal\').remove();openSubPage()">' +
-        '<i class="' + iconPlan + '"></i> Passer ' + upgTarget +
-      '</button>' +
-      '<button class="plm-close-btn" onclick="document.getElementById(\'plan-limit-modal\').remove()">Fermer</button>' +
+      '<h3 class="plm-title">Limite atteinte 🚫</h3>' +
+      '<p class="plm-desc">' + escHtml(desc) + '</p>' +
+      '<div class="plm-current-plan">Plan actuel : <strong>' + planLabel + '</strong></div>' +
+
+      /* Option 1 : upgrade */
+      '<div class="plm-option-card plm-option-upgrade">' +
+        '<div class="plm-option-header"><i class="' + iconPlan + '" style="color:#7C3AED;margin-right:8px"></i>' +
+          '<strong>Option 1 — Passer ' + upgTarget + '</strong></div>' +
+        '<p class="plm-option-sub">Publiez sans aucune limite dès maintenant.</p>' +
+        benefitsHtml +
+        '<button class="plm-upgrade-btn" onclick="document.getElementById(\'plan-limit-modal\').remove();openSubPage()">' +
+          '<i class="' + iconPlan + '"></i> Voir les offres' +
+        '</button>' +
+      '</div>' +
+
+      /* Option 2 : attendre */
+      '<div class="plm-option-card plm-option-wait">' +
+        '<div class="plm-option-header"><i class="fas fa-clock" style="color:#0EA5E9;margin-right:8px"></i>' +
+          '<strong>Option 2 — Attendre demain</strong></div>' +
+        '<p class="plm-option-sub">' + resetMsg + '. Votre limite sera remise à zéro à minuit automatiquement.</p>' +
+        '<button class="plm-close-btn" onclick="document.getElementById(\'plan-limit-modal\').remove()">' +
+          '<i class="fas fa-times" style="margin-right:5px"></i>D\'accord, j\'attends' +
+        '</button>' +
+      '</div>' +
     '</div>';
 
   var frame = document.querySelector('.phone-frame') || document.body;
@@ -10084,6 +10543,9 @@ function _showPlanLimitModal(title, desc, featureName) {
 function _renderPlanUsageBanner() {
   var el = document.getElementById('profil-plan-usage');
   if (!el || !_currentUser) return;
+  /* ── Désactivée par le fondateur → on masque ── */
+  if (!_admGetPlansConfig().bannersEnabled) { el.style.display = 'none'; return; }
+  el.style.display = '';
   var profile = loadUserProfile(_currentUser.email) || {};
   var plan    = profile.planType || 'free';
   var lim     = _PLAN_LIMITS[plan] || _PLAN_LIMITS.free;
@@ -10141,20 +10603,49 @@ function _renderPlanUsageBanner() {
 }
 
 /* ── Publication ── */
+var _pubInProgress = false; /* verrou anti-double-clic */
+
 function publierPost() {
+  /* ── Anti double-clic : ignore si déjà en cours ── */
+  if (_pubInProgress) return;
+
   var text = document.getElementById('pub-text').value.trim();
 
   if (!text && _pickedImages.length === 0 && !_pickedVideo && !_pickedDoc && !_quotePostRef) {
     showToast('Écrivez quelque chose ou ajoutez un média', 'err'); return;
   }
 
+  /* ── Vérification restriction de compte ── */
+  if (_currentUser && _gwIsRestricted(_currentUser.email)) {
+    _pubInProgress = false;
+    var _rb = document.getElementById('pub-send');
+    if (_rb) { _rb.disabled = false; _rb.innerHTML = 'Publier'; }
+    if (_gwShowRestrictionAlert('post')) return;
+  }
+
+  /* ── Analyse du contenu (texte) ── */
+  if (_currentUser && text) {
+    var _contentCheck = _gwCheckContent(text);
+    if (_contentCheck.flagged) {
+      showToast('🚫 Publication bloquée — ' + _contentCheck.reason, 'err');
+      _gwApplyRestriction(_currentUser.email, _currentUser.nom, _contentCheck.type, _contentCheck.reason, 'auto');
+      try { document.getElementById('pub-text').value = ''; } catch(e) {}
+      _pubInProgress = false;
+      var _rb2 = document.getElementById('pub-send');
+      if (_rb2) { _rb2.disabled = false; _rb2.innerHTML = 'Publier'; }
+      return;
+    }
+  }
+
   /* ── Vérification limite du plan ── */
   if (_currentUser) {
     var _pLim = _getCurrentPlanLimits();
-    /* Limite posts/jour */
     if (_pLim.postsPerDay !== Infinity) {
       var _todayPosts = _getDailyCount('posts', _currentUser.email);
       if (_todayPosts >= _pLim.postsPerDay) {
+        _pubInProgress = false;
+        var _rb3 = document.getElementById('pub-send');
+        if (_rb3) { _rb3.disabled = false; _rb3.innerHTML = 'Publier'; }
         _showPlanLimitModal(
           'Limite de publications atteinte',
           'Le plan Gratuit est limité à ' + _pLim.postsPerDay + ' publications par jour. Passez Premium pour publier sans limite.',
@@ -10163,11 +10654,26 @@ function publierPost() {
         return;
       }
     }
-    /* Limite photos/post */
     if (_pickedImages.length > _pLim.photosPerPost) {
       showToast('Limite atteinte : ' + _pLim.photosPerPost + ' photo(s) max avec votre plan', 'err');
+      _pubInProgress = false;
+      var _rb4 = document.getElementById('pub-send');
+      if (_rb4) { _rb4.disabled = false; _rb4.innerHTML = 'Publier'; }
       return;
     }
+  }
+
+  /* ── Verrouille le bouton + feedback visuel ── */
+  _pubInProgress = true;
+  var _pubSendBtn = document.getElementById('pub-send');
+  if (_pubSendBtn) {
+    _pubSendBtn.disabled = true;
+    _pubSendBtn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right:5px"></i>Publication…';
+  }
+  function _unlockPubBtn() {
+    _pubInProgress = false;
+    var btn = document.getElementById('pub-send');
+    if (btn) { btn.disabled = false; btn.innerHTML = 'Publier'; }
   }
 
   var postId      = Date.now();
@@ -10178,6 +10684,7 @@ function publierPost() {
 
   /* Pour les vidéos régulières : type et catégorie obligatoires */
   if (_pickedVideo && (_pickedVideo.videoType || 'video') === 'video' && !_pubVidMeta) {
+    _unlockPubBtn();
     _showVidMetaSheet();
     return;
   }
@@ -10236,6 +10743,21 @@ function publierPost() {
   if (videoBlob && videoIdbId) { _gwSaveVideoBlob(videoIdbId, videoBlob, function() {}); }
   if (docBlob   && docIdbId)   { _gwSaveDocBlob(docIdbId, docBlob, function() {}); }
 
+  /* ── Scan NSFW sur données LOCALES (base64/blob) — avant tout upload ──
+     On scanne _imagesSnapshot (base64) + vidéo locale pour éviter les
+     problèmes CORS des URLs Firebase Storage.                            */
+  if (_imagesSnapshot.length > 0 || (_pickedVideo && _pickedVideo.url)) {
+    var _nsfw_pid   = postId;
+    var _nsfw_imgs  = _imagesSnapshot.slice();
+    var _nsfw_vid   = (_pickedVideo && _pickedVideo.url) ? _pickedVideo.url : '';
+    showToast('🔍 Analyse du contenu en cours…', 'info');
+    _gwScanPostMedia(_nsfw_imgs, _nsfw_vid).then(function(result) {
+      if (result && result.flagged) {
+        _gwHandleNsfwDetection(result, String(_nsfw_pid));
+      }
+    }).catch(function(e) { console.warn('[GW] NSFW scan error', e); });
+  }
+
   /* Affichage immédiat local avec les base64 */
   DEMO_POSTS.unshift(newPost);
   if (_currentUser) _incDailyCount('posts', _currentUser.email);
@@ -10243,6 +10765,11 @@ function publierPost() {
 
   /* ── Upload médias vers Firebase Storage puis sauvegarde définitive ── */
   function _finalizePost(finalImages, finalVideoUrl, finalDocUrl) {
+    /* ── Sécurité NSFW : si ce post a été bloqué par le scan, ne JAMAIS l'écrire dans Firebase ── */
+    if (_gwNsfwBlockedPosts[String(newPost.id)]) {
+      console.warn('[GW-NSFW] _finalizePost ignoré — post bloqué pour nudité', newPost.id);
+      return;
+    }
     newPost.images = finalImages;
     var postToStore = JSON.parse(JSON.stringify(newPost));
     if (postToStore.video) {
@@ -10348,6 +10875,9 @@ function publierPost() {
   if (dp) dp.value = '';
 
   showToast('Publication partagée ✓', 'ok');
+
+  /* ── Libère le bouton Publier ── */
+  _unlockPubBtn();
 
   var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
   navTo(homeBtn, 'p-home');
@@ -10672,9 +11202,14 @@ function _openNotifDetail(notif) {
             '<i class="fas fa-arrow-right"></i> Voir la publication' +
           '</button>'
         : (notif.fromUser
-            ? '<button class="ndd-btn-primary" onclick="_nddGoProfile(' + JSON.stringify(notif.fromUser) + ')">' +
-                '<i class="fas fa-user"></i> Voir le profil' +
-              '</button>'
+            ? (function(){
+                var _nEmail = (notif.fromUser.email||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+                var _nNom   = (notif.fromUser.nom  ||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+                var _nRole  = (notif.fromUser.role ||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+                return '<button class="ndd-btn-primary" onclick="_nddGoProfile(\'' + _nEmail + '\',\'' + _nNom + '\',\'' + _nRole + '\')">' +
+                  '<i class="fas fa-user"></i> Voir le profil' +
+                '</button>';
+              })()
             : '')) +
       '<button class="ndd-btn-secondary" onclick="_closeGenericSheet(\'notif-detail\')">Fermer</button>' +
     '</div>';
@@ -10693,19 +11228,55 @@ function _openNotifDetail(notif) {
 
 function _nddGoPost(postId) {
   _closeGenericSheet('notif-detail');
+
+  /* Cherche d'abord le post dans le cache pour savoir son type AVANT de naviguer */
+  var _targetPost = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+
+  if (_targetPost && _targetPost.video) {
+    /* ── Post vidéo : ouvrir directement le lecteur (pas dans le feed DOM) ── */
+    try { _openVideoFromPost(String(postId), _targetPost.video.duration || 0); } catch(e) {}
+    return;
+  }
+
+  /* ── Post texte/photo : naviguer vers feed et surligner ── */
   var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
   navTo(homeBtn, 'p-home');
-  setTimeout(function() { highlightPost(postId); }, 350);
+
+  /* Essai 1 après 400ms (feed standard) */
+  setTimeout(function() {
+    var card = document.getElementById('post-' + postId);
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.remove('post-highlight');
+      void card.offsetWidth;
+      card.classList.add('post-highlight');
+      setTimeout(function() { card.classList.remove('post-highlight'); }, 2200);
+    } else {
+      /* Essai 2 après 800ms supplémentaires (feed lent à rendre) */
+      setTimeout(function() {
+        var card2 = document.getElementById('post-' + postId);
+        if (card2) {
+          card2.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          card2.classList.remove('post-highlight');
+          void card2.offsetWidth;
+          card2.classList.add('post-highlight');
+          setTimeout(function() { card2.classList.remove('post-highlight'); }, 2200);
+        } else {
+          showToast('Publication introuvable', 'warn');
+        }
+      }, 800);
+    }
+  }, 400);
 }
-function _nddGoProfile(fromUser) {
+function _nddGoProfile(email, nom, role) {
   _closeGenericSheet('notif-detail');
-  openUserProfile(fromUser);
+  openUserProfile({ email: email || null, nom: nom || '', role: role || '' });
 }
 
 /* Flash d'un post dans le feed */
 function highlightPost(postId) {
   var card = document.getElementById('post-' + postId);
-  if (!card) { showToast('Publication introuvable', ''); return; }
+  if (!card) { showToast('Publication introuvable', 'warn'); return; }
   card.scrollIntoView({ behavior: 'smooth', block: 'center' });
   card.classList.remove('post-highlight');
   void card.offsetWidth; /* reflow pour relancer l'animation */
@@ -10876,18 +11447,29 @@ function renderProfilePage() {
   /* Bouton badge CTA sous le nom */
   var badgeCta = document.getElementById('profil-badge-cta');
   if (badgeCta) {
-    if (profile.badgeType === 'verified') {
+    if (profile.badgeType === 'certified') {
+      badgeCta.style.display = 'inline-flex';
+      badgeCta.innerHTML = '<i class="fas fa-circle-check"></i> Compte certifié';
+      badgeCta.className = 'profil-badge-cta';
+      badgeCta.style.background = 'linear-gradient(135deg,#16A34A,#15803D)';
+      badgeCta.style.color = '#fff';
+      badgeCta.style.cursor = 'default';
+      badgeCta.onclick = null;
+    } else if (profile.badgeType === 'verified') {
       badgeCta.style.display = 'inline-flex';
       badgeCta.innerHTML = '<i class="fas fa-circle-check"></i> Badge Vérifié';
       badgeCta.className = 'profil-badge-cta profil-badge-cta-blue';
+      badgeCta.style.background = ''; badgeCta.style.color = ''; badgeCta.style.cursor = '';
     } else if (profile.badgeType === 'premium') {
       badgeCta.style.display = 'inline-flex';
       badgeCta.innerHTML = '<i class="fas fa-crown"></i> Badge Premium';
       badgeCta.className = 'profil-badge-cta profil-badge-cta-gold';
+      badgeCta.style.background = ''; badgeCta.style.color = ''; badgeCta.style.cursor = '';
     } else if (profile.badgeStatus === 'pending') {
       badgeCta.style.display = 'inline-flex';
       badgeCta.innerHTML = '<i class="fas fa-hourglass-half"></i> Vérification en cours…';
       badgeCta.className = 'profil-badge-cta profil-badge-cta-pending';
+      badgeCta.style.background = ''; badgeCta.style.color = ''; badgeCta.style.cursor = '';
     } else {
       badgeCta.style.display = 'inline-flex';
       badgeCta.innerHTML = '<i class="fas fa-shield-halved"></i> Obtenir le badge';
@@ -11393,29 +11975,156 @@ function openEditBio() {
   }, 320);
 }
 
-/* ── Édition localisation ── */
+/* ── Édition localisation — GPS automatique ou saisie manuelle ── */
 function openEditLocation() {
-  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
-  _openEditSheet(
-    'Localisation',
-    '<div class="edit-field-group">' +
-      '<label>Ville, Pays</label>' +
+  var profile  = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+  var curLoc   = profile.location || '';
+  /* Sépare ville et pays depuis la valeur actuelle ex: "Paris, France" */
+  var _curParts   = curLoc.split(',').map(function(s){ return s.trim(); });
+  var _curCity    = _curParts[0] || '';
+  var _curCountry = _curParts.slice(1).join(', ') || '';
+
+  var html =
+    /* ── Bouton GPS ── */
+    '<div id="loc-gps-row" style="margin-bottom:16px">' +
+      '<button type="button" id="loc-gps-btn" onclick="_locDetectGPS()" ' +
+        'style="width:100%;display:flex;align-items:center;justify-content:center;gap:10px;' +
+               'padding:13px;border-radius:14px;border:2px solid #6366F1;' +
+               'background:linear-gradient(135deg,#EEF2FF,#F5F3FF);color:#4F46E5;' +
+               'font-size:14px;font-weight:700;cursor:pointer;">' +
+        '<i class="fas fa-location-arrow" style="font-size:16px"></i>' +
+        'Détecter ma position automatiquement (GPS)' +
+      '</button>' +
+      '<p style="text-align:center;font-size:12px;color:#94A3B8;margin:8px 0 0">Détecte ton pays et ta ville via GPS</p>' +
+    '</div>' +
+
+    /* ── Résultat GPS ── */
+    '<div id="loc-gps-result" style="display:none;background:#F0FDF4;border:1.5px solid #86EFAC;' +
+         'border-radius:12px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:#166534;">' +
+      '<i class="fas fa-check-circle" style="margin-right:6px;color:#16A34A"></i>' +
+      '<span id="loc-gps-text"></span>' +
+    '</div>' +
+
+    /* ── Séparateur ── */
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">' +
+      '<div style="flex:1;height:1px;background:#E2E8F0"></div>' +
+      '<span style="font-size:12px;color:#94A3B8;white-space:nowrap">ou saisir manuellement</span>' +
+      '<div style="flex:1;height:1px;background:#E2E8F0"></div>' +
+    '</div>' +
+
+    /* ── Pays (prioritaire) ── */
+    '<div class="edit-field-group" style="margin-bottom:12px">' +
+      '<label style="display:flex;align-items:center;gap:6px">' +
+        '<i class="fas fa-globe" style="color:#6366F1;font-size:13px"></i> Pays <span style="color:#EF4444;margin-left:2px">*</span>' +
+      '</label>' +
       '<div class="edit-field-box">' +
-        '<input type="text" id="edit-location-input" value="' + escHtml(profile.location || '') +
-        '" placeholder="Ex : Paris, France" maxlength="80"/>' +
+        '<input type="text" id="loc-country-inp" value="' + escHtml(_curCountry) + '" ' +
+               'placeholder="Ex : France, Cameroun, Canada…" maxlength="60" ' +
+               'style="font-weight:600"/>' +
       '</div>' +
-    '</div>',
+    '</div>' +
+
+    /* ── Ville ── */
+    '<div class="edit-field-group">' +
+      '<label style="display:flex;align-items:center;gap:6px">' +
+        '<i class="fas fa-map-marker-alt" style="color:#6366F1;font-size:13px"></i> Ville' +
+      '</label>' +
+      '<div class="edit-field-box">' +
+        '<input type="text" id="loc-city-inp" value="' + escHtml(_curCity) + '" ' +
+               'placeholder="Ex : Paris, Douala, Montréal…" maxlength="60"/>' +
+      '</div>' +
+    '</div>';
+
+  _openEditSheet(
+    '📍 Localisation',
+    html,
     function() {
-      var val = (document.getElementById('edit-location-input').value || '').trim();
+      var city    = (document.getElementById('loc-city-inp')    ? document.getElementById('loc-city-inp').value    : '').trim();
+      var country = (document.getElementById('loc-country-inp') ? document.getElementById('loc-country-inp').value : '').trim();
+      if (!country) { showToast('Le pays est requis', 'err'); return false; }
+      var loc = city ? city + ', ' + country : country;
       var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
-      p.location = val;
+      p.location = loc;
       saveUserProfile(_currentUser.email, p);
       renderProfilePage();
-      showToast('Localisation mise à jour', 'ok');
+      showToast('📍 Localisation mise à jour : ' + loc, 'ok');
       return true;
     }
   );
-  setTimeout(function() { var i = document.getElementById('edit-location-input'); if (i) { i.focus(); i.select(); } }, 320);
+
+  /* Focus sur le champ pays après ouverture */
+  setTimeout(function() {
+    var ci = document.getElementById('loc-country-inp');
+    if (ci) ci.focus();
+  }, 350);
+}
+
+/* Détecte la position GPS et remplit les champs ville + pays */
+function _locDetectGPS() {
+  var btn = document.getElementById('loc-gps-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:16px"></i> Détection en cours…';
+  }
+
+  if (!navigator.geolocation) {
+    _locGPSError('GPS non supporté par votre navigateur');
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    function(pos) {
+      var lat = pos.coords.latitude;
+      var lng = pos.coords.longitude;
+      fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&accept-language=fr')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          var addr    = data.address || {};
+          var city    = addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
+          var country = addr.country || '';
+          /* Remplit les champs */
+          var ci = document.getElementById('loc-city-inp');
+          var co = document.getElementById('loc-country-inp');
+          if (ci) ci.value = city;
+          if (co) { co.value = country; co.style.background = '#F0FDF4'; }
+          /* Affiche le résultat */
+          var resBox  = document.getElementById('loc-gps-result');
+          var resTxt  = document.getElementById('loc-gps-text');
+          if (resBox && resTxt) {
+            resTxt.textContent = (city ? city + ', ' : '') + country;
+            resBox.style.display = 'block';
+          }
+          /* Remet le bouton en état normal */
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-check" style="font-size:16px;color:#16A34A"></i> Position détectée !';
+            btn.style.borderColor = '#16A34A';
+            btn.style.background  = 'linear-gradient(135deg,#F0FDF4,#DCFCE7)';
+            btn.style.color       = '#166534';
+          }
+        })
+        .catch(function() { _locGPSError('Impossible de récupérer l\'adresse — saisissez manuellement'); });
+    },
+    function(err) {
+      var msg = err.code === 1
+        ? 'Permission GPS refusée — saisissez manuellement'
+        : 'GPS indisponible — saisissez manuellement';
+      _locGPSError(msg);
+    },
+    { timeout: 10000, maximumAge: 60000 }
+  );
+}
+
+function _locGPSError(msg) {
+  var btn = document.getElementById('loc-gps-btn');
+  if (btn) {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-location-arrow" style="font-size:16px"></i> Réessayer le GPS';
+    btn.style.borderColor = '#F87171';
+    btn.style.background  = '#FFF5F5';
+    btn.style.color       = '#DC2626';
+  }
+  showToast(msg, 'err');
 }
 
 /* ── Édition téléphone ── */
@@ -12474,19 +13183,22 @@ function _doFollowToggle(userInfo) {
       notifs = notifs.filter(function(n) {
         return !(n.type === 'follow' && n.fromUser && n.fromUser.email === _currentUser.email);
       });
-      notifs.unshift({
-        id:        'follow_' + Date.now(),
-        type:      'follow',
-        fromUser:  { nom: _currentUser.nom, email: _currentUser.email },
-        postId:    null,
+      var _followNotif = {
+        id:          'follow_' + Date.now(),
+        type:        'follow',
+        title:       '👤 Nouvel abonné',
+        body:        _currentUser.nom + ' a commencé à vous suivre.',
+        fromUser:    { nom: _currentUser.nom, email: _currentUser.email },
+        postId:      null,
         postPreview: null,
-        msg:       'a commencé à vous suivre.',
-        at: Date.now(), time:      'À l\'instant',
-        unread:    true
-      });
+        msg:         'a commencé à vous suivre.',
+        at:          Date.now(),
+        time:        'À l\'instant',
+        unread:      true
+      };
+      /* Réinjecte notifs filtrés puis pousse avec push notification */
       saveNotifs(userInfo.email, notifs);
-      /* Si c'est notre propre compte connecté, actualise le badge */
-      if (userInfo.email === _currentUser.email) updateNotifBadge();
+      pushNotif(userInfo.email, _followNotif);
     }
     showToast('Vous suivez maintenant ' + escHtml(userInfo.nom) + ' 👍', 'ok');
   }
@@ -14436,6 +15148,7 @@ function _admReplyThread(threadId) {
 
 /* ── Admin : fermer / rouvrir un ticket ── */
 function _admCloseThread(threadId) {
+  if (!_adminUser || !_admHasAction('dismiss_report')) { showToast('Accès non autorisé', 'err'); return; }
   var threads = _getSupportThreads();
   var thread  = threads.find(function(t) { return t.id === threadId; });
   if (!thread) return;
@@ -14447,6 +15160,7 @@ function _admCloseThread(threadId) {
 
 /* ── Admin : supprimer un ticket ── */
 function _admDeleteThread(threadId) {
+  if (!_adminUser || !_admIsSA()) { showToast('Réservé au Super Admin', 'err'); return; }
   var threads = _getSupportThreads().filter(function(t) { return t.id !== threadId; });
   _saveSupportThreads(threads);
   if (typeof _admRender === 'function') _admRender();
@@ -14870,6 +15584,29 @@ function _dmOpen(conv) {
       'Impossible de charger les messages.<br><small>' + (err && err.code || '') + '</small></div>';
   });
 
+  /* ── child_changed : met à jour les ticks en temps réel quand le destinataire lit ── */
+  ref.on('child_changed', function(snap) {
+    if (_dmRef !== ref || _dmRefKey !== fbKey) return;
+    var msg = snap.val();
+    if (!msg || !msg.id) return;
+    var idStr  = String(msg.id);
+    var isMine = _currentUser && msg.from === _currentUser.email;
+    if (!isMine) return; /* seul l'expéditeur a besoin de mettre à jour son tick */
+    var box2 = document.getElementById('chat-messages');
+    if (!box2) return;
+    var row = box2.querySelector('[data-msg-id="' + idStr + '"]');
+    if (!row) return;
+    /* Met à jour le tick sans re-rendre toute la bulle */
+    var tickEl = row.querySelector('i.bubble-read');
+    if (tickEl) {
+      if (msg.read === true) {
+        tickEl.className = 'fas fa-check-double bubble-read bubble-read-seen';
+      } else {
+        tickEl.className = 'fas fa-check bubble-read bubble-read-sent';
+      }
+    }
+  });
+
   /* Rendu groupé du premier lot (messages historiques) */
   setTimeout(function() {
     if (_dmRef !== ref || _dmRefKey !== fbKey) return;
@@ -14885,10 +15622,47 @@ function _dmOpen(conv) {
 
     setTimeout(_scrollChatToBottom, 60);
 
-    /* Marque les messages comme lus */
+    /* ── Marque comme lus tous les messages reçus (from ≠ moi) ──
+       Persisté dans Firebase → survit aux reconnexions */
+    batchBuffer.forEach(function() {}); /* reset (déjà vidé) */
+    var msgsToMarkRead = [];
+    var b2 = document.getElementById('chat-messages');
+    if (b2) {
+      b2.querySelectorAll('.chat-msg-row.theirs[data-msg-id]').forEach(function(row2) {
+        msgsToMarkRead.push(row2.getAttribute('data-msg-id'));
+      });
+    }
+    /* Lecture des messages reçus → mark read dans Firebase */
+    if (msgsToMarkRead.length && _gwFbDB) {
+      msgsToMarkRead.forEach(function(mid) {
+        _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + mid + '/read').set(true).catch(function(){});
+      });
+    }
+
+    /* Marque la conv comme lue dans la liste */
     var activeConv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
     if (activeConv) { activeConv.unread = 0; }
     renderConversations();
+
+    /* ── Supprime l'entrée inbox Firebase + localStorage pour cet expéditeur ──
+       Sans ça, _checkDMInbox() re-crée le badge "non lu" à chaque poll/restart */
+    try {
+      if (_gwFbDB) {
+        _gwFbDB.ref('gw/inboxes/' + _gwFbKey(_currentUser.email) + '/' + _gwFbKey(conv.email))
+          .remove().catch(function(){});
+      }
+      var _inboxKey = 'gw_dm_inbox_' + _currentUser.email;
+      var _inbox    = JSON.parse(localStorage.getItem(_inboxKey) || '[]');
+      _inbox        = _inbox.filter(function(e) { return e.fromEmail !== conv.email; });
+      localStorage.setItem(_inboxKey, JSON.stringify(_inbox));
+      /* ── Sauvegarde un timestamp "lu" local par conversation ──
+         Fallback si Firebase delete ne se sync pas avant fermeture app :
+         _checkDMInbox ignorera toute entrée plus ancienne que ce timestamp */
+      localStorage.setItem(
+        'gw_dmread_' + _currentUser.email + '_' + _gwFbKey(conv.email),
+        String(Date.now())
+      );
+    } catch(e) {}
   }, 200);
 }
 
@@ -14911,6 +15685,12 @@ function _dmRenderMsg(msg, ref, fbKey) {
   row.innerHTML = _buildBubbleHtml(msg, isMine);
   box.appendChild(row);
   _scrollChatToBottom();
+
+  /* ── Si message reçu (pas de moi) → marquer immédiatement comme lu dans Firebase ──
+     La conversation est ouverte, donc le destinataire voit le message instantanément. */
+  if (!isMine && msg.read !== true && _gwFbDB) {
+    _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + idStr + '/read').set(true).catch(function(){});
+  }
 
   /* Met à jour la conv dans DEMO_CONVERSATIONS */
   var conv2 = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
@@ -15082,8 +15862,18 @@ function _buildBubbleHtml(m, isMine) {
   }
 
   var _bubbleTimeStr = m.at ? _msgTimeDisplay(m.at) : (m.time || '');
-  var timeHtml = '<span class="bubble-time">' + escHtml(_bubbleTimeStr) +
-    (isMine ? ' <i class="fas fa-check-double bubble-read"></i>' : '') + '</span>';
+  /* ── Ticks de lecture ──
+     1 coche grise  = envoyé, pas encore lu  (read === false)
+     2 coches bleues = lu par le destinataire (read === true ou ancien msg sans champ read) */
+  var _tickHtml = '';
+  if (isMine) {
+    if (m.read === false) {
+      _tickHtml = ' <i class="fas fa-check bubble-read bubble-read-sent"></i>';
+    } else {
+      _tickHtml = ' <i class="fas fa-check-double bubble-read bubble-read-seen"></i>';
+    }
+  }
+  var timeHtml = '<span class="bubble-time">' + escHtml(_bubbleTimeStr) + _tickHtml + '</span>';
 
   /* Bouton Répondre (apparaît au survol/tap) */
   var replyBtn = '<button class="bubble-reply-btn" onclick="chatReplyTo(\'' + m.id + '\')" title="Répondre">' +
@@ -15414,7 +16204,8 @@ function handleChatAttach(input) {
       fileName: file.name,
       fileSize: _formatFileSize(file.size),
       time:     _nowTime(),
-      at:       Date.now()
+      at:       Date.now(),
+      read:     false   /* ← sera mis à true quand le destinataire ouvre la conv */
     };
     if (isStorageUrl) { msg.data_url = dataOrUrl; }
     else              { msg.data     = dataOrUrl; }
@@ -15497,6 +16288,20 @@ function sendChatMessage() {
   if (!_currentUser) { showToast('Reconnectez-vous pour envoyer des messages', 'err'); return; }
   if (!_chatConvId)  { showToast('Conversation introuvable — réouvrez la discussion', 'err'); return; }
 
+  /* ── Vérification restriction ── */
+  if (_gwIsRestricted(_currentUser.email)) {
+    if (_gwShowRestrictionAlert('message')) return;
+  }
+
+  /* ── Analyse du contenu ── */
+  var _chatCC = _gwCheckContent(text);
+  if (_chatCC.flagged) {
+    showToast('🚫 Message bloqué — ' + _chatCC.reason, 'err');
+    _gwApplyRestriction(_currentUser.email, _currentUser.nom, _chatCC.type, _chatCC.reason, 'auto');
+    if (inp) inp.value = '';
+    return;
+  }
+
   /* ── Vérification limite messages/jour ── */
   var _mLim = _getCurrentPlanLimits();
   if (_mLim.msgsPerDay !== Infinity) {
@@ -15524,7 +16329,8 @@ function sendChatMessage() {
     to:   conv.email,
     text: text,
     type: 'text',
-    at:   ts
+    at:   ts,
+    read: false   /* ← sera mis à true par le destinataire quand il ouvre la conv */
   };
   /* Ajoute replyTo seulement si présent (Firebase n'accepte pas undefined) */
   if (_chatReplyRef) newMsg.replyTo = _chatReplyRef;
@@ -20129,6 +20935,673 @@ function _dashExport() {
 }
 
 /* ══════════════════════════════════════════════════════════════
+   MODULE MODÉRATION AUTOMATIQUE DU CONTENU
+   ──────────────────────────────────────────
+   • Détecte le contenu sexuel / haineux dans les posts, commentaires, messages
+   • Bloque la publication + restreint le compte automatiquement
+   • Notification immédiate + bannière orange dans l'app
+   • Système de recours : l'utilisateur peut soumettre un message → admin décide
+   localStorage keys :
+     gw_restrictions         → [{ id, email, nom, type, reason, at, status, restrictedBy }]
+     gw_restriction_appeals  → [{ id, email, nom, message, type, reason, at, status, resolvedBy }]
+══════════════════════════════════════════════════════════════ */
+
+/* ── Mots-clés détectés automatiquement ── */
+var _GW_SEXUAL_WORDS = [
+  'nude','naked','nudity','nudité','nudite','sexuel','sexuelle','sexual',
+  'pornographie','pornographic','pornographique','porno','porn','xxx',
+  'seins','nichons','tétons','tetons','bite','chatte','vagin','penis','phallus',
+  'orgasme','masturbation','éjaculation','ejaculation','fellation',
+  'cul','fesses','intimité','erotique','érotique','erotic','sexe',
+  'fuck','pussy','dick','cock','ass','boobs','tits','boner','hentai',
+  'onlyfans','nsfw','18+','adulte seulement'
+];
+var _GW_HATE_WORDS = [
+  /* ── Menaces / violence directe ── */
+  'je vais te tuer','je vais te tué','je vais vous tuer','on va te tuer',
+  'je te tue','je te tuerai','je te tuerait','tu vas mourir','tu mourras',
+  'je vais te buter','je vais te niquer','je vais te défoncer',
+  'je vais te crever','crève','creve','va crever','va mourir',
+  'va te faire tuer','je vais te tuer','vais te tuer','vas te tuer',
+  'je vais te suicider','kill yourself','kill you','i will kill',
+  'i am going to kill','gonna kill you','dead man','you are dead',
+  'tu es mort','tu es morte','t es mort','t es morte',
+  'je te bute','je te crève','te buter','te crever','te flinguer',
+  'je vais te flinguer','je vais te descendre','descendre','lingue toi',
+  'assassiner','assassinat','meurtre','egorgement','égorger','egorger',
+  /* ── Incitation à la violence / harcèlement ── */
+  'mort à','gaz les','pendez','tuer les','massacrer','éliminer','eliminer',
+  'exterminer','extermination','lapider','torture','torturer',
+  'violer','viol','je vais te violer','on va te violer',
+  'brûler','bruler','incendier','mettre le feu',
+  /* ── Racisme / discrimination ── */
+  'nazi','hitler','génocide','genocide',
+  'sale arabe','sale juif','sale noir','sale blanc','sale chinois',
+  'sale africain','sale immigrant','sale immigré','sale immigre',
+  'bougnoule','négro','négre','nègre','youpin','bicot','raton','bamboula',
+  'antisémite','antisemite','islamophobie','racisme','raciste',
+  'terroriste','jihadiste','attentat','djihad','jihad',
+  'go kill yourself','kys','death to','white power','heil',
+  'vermin','parasite racial','inférieurs','inférieures',
+  /* ── Insultes graves ── */
+  'fils de pute','fils de putain','va te faire foutre','va te faire enc',
+  'enculé','encule','connard','connasse','salope','ordure','déchet',
+  'sous-homme','sous-humain','sous humain','chien','chienne'
+];
+
+/* ── Helpers restrictions ── */
+function _gwGetRestrictions()       { try { return JSON.parse(localStorage.getItem('gw_restrictions') || '[]'); } catch(e){ return []; } }
+function _gwSaveRestrictions(list)  { localStorage.setItem('gw_restrictions', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('restrictions', list); }
+function _gwGetRestrictionAppeals()      { try { return JSON.parse(localStorage.getItem('gw_restriction_appeals') || '[]'); } catch(e){ return []; } }
+function _gwSaveRestrictionAppeals(list) { localStorage.setItem('gw_restriction_appeals', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('restriction_appeals', list); }
+
+/* Retourne la restriction ACTIVE d'un utilisateur (ou null) */
+function _gwGetActiveRestriction(email) {
+  if (!email) return null;
+  var list = _gwGetRestrictions();
+  return list.find(function(r) {
+    return r.email.toLowerCase() === email.toLowerCase() && r.status === 'active';
+  }) || null;
+}
+
+/* Vrai si l'utilisateur est restreint */
+function _gwIsRestricted(email) {
+  return !!_gwGetActiveRestriction(email);
+}
+
+/* ── Analyser un texte — retourne { flagged, type, reason } ── */
+function _gwCheckContent(text) {
+  if (!text) return { flagged: false, type: null, reason: null };
+  var lower = text.toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')  /* retire accents pour comparaison */
+    .replace(/[^a-z0-9\s\+]/g, ' ');                   /* normalise ponctuation */
+  var words = lower.split(/\s+/);
+  var wordSet = new Set(words);
+
+  /* Contenu sexuel */
+  for (var i = 0; i < _GW_SEXUAL_WORDS.length; i++) {
+    var sw = _GW_SEXUAL_WORDS[i].toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '');
+    if (wordSet.has(sw) || lower.indexOf(sw) !== -1) {
+      return { flagged: true, type: 'sexual', reason: 'Contenu à caractère sexuel ou nudité détecté' };
+    }
+  }
+  /* Discours haineux */
+  for (var j = 0; j < _GW_HATE_WORDS.length; j++) {
+    var hw = _GW_HATE_WORDS[j].toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '');
+    if (lower.indexOf(hw) !== -1) {
+      return { flagged: true, type: 'hate', reason: 'Discours haineux ou contenu discriminatoire détecté' };
+    }
+  }
+  return { flagged: false, type: null, reason: null };
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MODÉRATION VISUELLE — Détection nudité IA (Sightengine)
+   + fallback canvas multi-zones si API indisponible.
+
+   ► COMMENT CONFIGURER :
+     1. Créer un compte GRATUIT sur https://sightengine.com
+     2. Copier ton "API User" et "API Secret" dans le dashboard
+     3. Remplacer les valeurs ci-dessous
+     Plan gratuit = 100 analyses/jour (suffisant pour démarrer)
+══════════════════════════════════════════════════════════════ */
+
+/* ── Clés API Sightengine (nudité IA — proche Facebook/Instagram) ── */
+var _GW_SE_USER   = '144706806';
+var _GW_SE_SECRET = 'SqCCXpTaR8oBSEbsPhrhoTzFLzGkygad';
+
+/* Posts NSFW bloqués — empêche _finalizePost de les écrire dans Firebase */
+var _gwNsfwBlockedPosts = {};
+
+/* ─────────────────────────────────────────────────────────────
+   COUCHE 1 — IA SIGHTENGINE (précision proche de Facebook)
+   Entraîné sur des millions d'images, détecte :
+   seins, pénis, fesses, vagin, actes sexuels explicites.
+───────────────────────────────────────────────────────────── */
+
+/* Convertit un data-URL base64 en Blob */
+function _gwBase64ToBlob(dataUrl) {
+  try {
+    var parts = dataUrl.split(',');
+    var mime  = (parts[0].match(/:(.*?);/) || ['','image/jpeg'])[1];
+    var raw   = atob(parts[1]);
+    var arr   = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return new Blob([arr], { type: mime });
+  } catch(e) { return null; }
+}
+
+/* Envoie un Blob à Sightengine et retourne la décision
+   Résultat : { flagged, score, source:'sightengine', detail } | null si erreur */
+function _gwSightengineCheck(blob) {
+  return new Promise(function(resolve) {
+    if (!_GW_SE_USER || !_GW_SE_SECRET || !blob) { resolve(null); return; }
+    try {
+      var fd = new FormData();
+      fd.append('media',      blob, 'media.jpg');
+      fd.append('models',     'nudity');
+      fd.append('api_user',   _GW_SE_USER);
+      fd.append('api_secret', _GW_SE_SECRET);
+
+      var done = false;
+      fetch('https://api.sightengine.com/1.0/check.json', { method:'POST', body:fd })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (done) return; done = true;
+          if (!data || data.status !== 'success') { resolve(null); return; }
+          var n = data.nudity || {};
+          /* raw = nudité explicite (pénis, vagin, seins nus, fesses nues, acte sexuel)
+             partial = semi-nudité (seins partiellement couverts, lingerie explicite) */
+          var rawScore     = n.raw     || 0;
+          var partialScore = n.partial || 0;
+          /* Seuils : raw > 25% OU partial > 50% → bloqué */
+          var flagged = rawScore > 0.25 || partialScore > 0.50;
+          var score   = Math.max(rawScore, partialScore * 0.7);
+          resolve({
+            flagged: flagged,
+            score:   score,
+            source:  'sightengine',
+            detail:  n
+          });
+        })
+        .catch(function() { if (!done) { done=true; resolve(null); } });
+
+      /* Timeout 12s → fallback canvas */
+      setTimeout(function() { if (!done) { done=true; resolve(null); } }, 12000);
+    } catch(e) { resolve(null); }
+  });
+}
+
+/* ─────────────────────────────────────────────────────────────
+   COUCHE 2 — CANVAS MULTI-ZONES (fallback sans API)
+   Moins précis mais fonctionne hors-ligne et sans limite.
+───────────────────────────────────────────────────────────── */
+
+function _gwIsSkinPixel(r, g, b) {
+  if (r < 25 && g < 25 && b < 25)   return false; /* noir pur */
+  if (r > 235 && g > 235 && b > 235) return false; /* blanc pur */
+  var s1 = r > 60  && g > 25 && b > 10 && r > b && (r-b) > 8  && r < 250;
+  var s2 = r > 40  && g > 20 && b > 5  && r > g && r > b && (r-b) > 5 && r < 180 && g < 140;
+  var s3 = r > 100 && g > 70 && b > 30 && r > b && (r-g) < 80 && (g-b) > 10 && r < 240;
+  var s4 = r > 80  && g > 40 && b > 20 && (r-b) > 20 && r > g && r < 200 && g < 160 && b < 120;
+  var s5 = r > 180 && g > 140 && b > 100 && r > g && g > b && (r-b) > 30 && r < 255;
+  return s1 || s2 || s3 || s4 || s5;
+}
+
+/* Retourne { full, center, lower, mid, score, flagged } */
+function _gwSkinRatio(drawable) {
+  try {
+    var W = 160, H = 160;
+    var cvs = document.createElement('canvas');
+    cvs.width = W; cvs.height = H;
+    cvs.getContext('2d').drawImage(drawable, 0, 0, W, H);
+    var data = cvs.getContext('2d').getImageData(0, 0, W, H).data;
+    var tA=0,sA=0, tC=0,sC=0, tL=0,sL=0, tM=0,sM=0;
+    for (var y=0; y<H; y++) {
+      for (var x=0; x<W; x++) {
+        var i=(y*W+x)*4;
+        var r=data[i],g=data[i+1],b=data[i+2],a=data[i+3];
+        if (a<100) continue;
+        var sk = _gwIsSkinPixel(r,g,b);
+        tA++; if(sk)sA++;
+        if (x>=W*.25&&x<=W*.75&&y>=H*.15&&y<=H*.85) { tC++; if(sk)sC++; }
+        if (x>=W*.15&&x<=W*.85&&y>=H*.40)            { tL++; if(sk)sL++; }
+        if (x>=W*.20&&x<=W*.80&&y>=H*.30&&y<=H*.70)  { tM++; if(sk)sM++; }
+      }
+    }
+    var rF=tA>0?sA/tA:0, rC=tC>0?sC/tC:0, rL=tL>0?sL/tL:0, rM=tM>0?sM/tM:0;
+    var score = rF*.20 + rC*.35 + rL*.25 + rM*.20;
+    var flagged = score>0.42 || (rF>0.50&&rC>0.45) || rC>0.60 || rL>0.65 || rM>0.62
+               || (rF>0.45&&rM>0.50) || (rL>0.55&&rC>0.50);
+    return { full:rF, center:rC, lower:rL, mid:rM, score:score, flagged:flagged };
+  } catch(e) {
+    return { full:0, center:0, lower:0, mid:0, score:0, flagged:false };
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ANALYSE UNIFIÉE — essaie Sightengine, sinon canvas
+───────────────────────────────────────────────────────────── */
+
+/* Charge une image depuis une URL */
+function _gwLoadImgEl(url) {
+  return new Promise(function(resolve) {
+    var img = new Image();
+    img.onload  = function() { resolve(img); };
+    img.onerror = function() { resolve(null); };
+    if (url && url.indexOf('data:')!==0 && url.indexOf('blob:')!==0) img.crossOrigin='anonymous';
+    img.src = url;
+    setTimeout(function() { if (!img.complete) resolve(null); }, 12000);
+  });
+}
+
+/* Analyse une image : Sightengine UNIQUEMENT si les clés sont configurées.
+   Sans clés → pas de blocage automatique (évite les faux positifs sur visages/sport). */
+function _gwAnalyzeImageUrl(url) {
+  /* Sans clés Sightengine → on ne bloque pas (impossible de distinguer visage de nudité) */
+  if (!_GW_SE_USER || !_GW_SE_SECRET) {
+    return Promise.resolve({ flagged:false, score:0, source:'no_api', category:'neutral' });
+  }
+
+  var blob = null;
+  if (url && url.indexOf('data:') === 0) blob = _gwBase64ToBlob(url);
+
+  return _gwSightengineCheck(blob).then(function(seResult) {
+    if (seResult !== null) {
+      return { flagged:seResult.flagged, score:seResult.score,
+               detail:seResult.detail, source:'sightengine',
+               category: seResult.flagged ? 'Nudity' : 'neutral' };
+    }
+    /* API appelée mais erreur réseau → on ne bloque pas par sécurité */
+    return { flagged:false, score:0, source:'api_error', category:'neutral' };
+  });
+}
+
+/* Extrait une frame vidéo en Blob JPEG à une position donnée */
+function _gwExtractVideoFrameBlob(vid) {
+  try {
+    var W=320, H=320;
+    var cvs=document.createElement('canvas'); cvs.width=W; cvs.height=H;
+    cvs.getContext('2d').drawImage(vid,0,0,W,H);
+    /* toBlob async si disponible, sinon toDataURL */
+    return cvs.toDataURL('image/jpeg', 0.85);
+  } catch(e) { return null; }
+}
+
+/* Analyse une vidéo : extrait des frames et les envoie à Sightengine.
+   Sans clés Sightengine → pas de blocage automatique (évite les faux positifs). */
+function _gwAnalyzeVideoFrame(videoUrl) {
+  return new Promise(function(resolve) {
+    if (!videoUrl) { resolve({ flagged:false, score:0, category:'neutral' }); return; }
+
+    /* Sans clés → on ne bloque pas */
+    if (!_GW_SE_USER || !_GW_SE_SECRET) {
+      resolve({ flagged:false, score:0, source:'no_api', category:'neutral' }); return;
+    }
+
+    try {
+      var vid=document.createElement('video');
+      vid.muted=true; vid.playsInline=true; vid.preload='auto';
+      if (videoUrl.indexOf('data:')!==0 && videoUrl.indexOf('blob:')!==0)
+        vid.crossOrigin='anonymous';
+
+      var _done=false, _results=[], _seekTimes=[], _seekIdx=0;
+      var _sePending=0; /* compteur de requêtes Sightengine en attente */
+
+      function _analyzeCurrentFrame() {
+        /* Extrait la frame et envoie à Sightengine */
+        var frameData = _gwExtractVideoFrameBlob(vid);
+        if (frameData) {
+          var frameBlob = _gwBase64ToBlob(frameData);
+          _sePending++;
+          _gwSightengineCheck(frameBlob).then(function(seRes) {
+            if (seRes) _results.push({ source:'sightengine', flagged:seRes.flagged, score:seRes.score, detail:seRes.detail });
+            _sePending--;
+            _nextFrame();
+          }).catch(function() { _sePending--; _nextFrame(); });
+        } else {
+          _nextFrame();
+        }
+      }
+
+      function _nextFrame() {
+        _seekIdx++;
+        if (_seekIdx < _seekTimes.length && !_done) {
+          vid.currentTime = _seekTimes[_seekIdx];
+        } else if (_sePending === 0) {
+          _finalize();
+        }
+        /* Si _sePending > 0, on attend que les requêtes terminent */
+      }
+
+      function _finalize() {
+        if (_done) return; _done=true;
+        if (_results.length===0) { resolve({ flagged:false, score:0, category:'neutral' }); return; }
+        var worst = _results.reduce(function(a,b){ return b.score>a.score?b:a; });
+        resolve({ flagged:worst.flagged, score:worst.score, detail:worst.detail,
+                  source:worst.source, category:worst.flagged?'Nudity':'neutral' });
+      }
+
+      vid.addEventListener('loadedmetadata', function() {
+        var dur=vid.duration||10;
+        _seekTimes=[0.5, Math.min(dur*0.25,dur-0.1), Math.min(dur*0.50,dur-0.1), Math.min(dur*0.75,dur-0.1)].filter(function(t){return t>=0;});
+        vid.currentTime=_seekTimes[0]||0.5;
+      });
+      vid.addEventListener('seeked', _analyzeCurrentFrame);
+      vid.addEventListener('error',  function(){ _finalize(); });
+      setTimeout(function(){ if(!_done)_finalize(); }, 30000);
+      vid.src=videoUrl; vid.load();
+    } catch(e){ resolve({ flagged:false, score:0, category:'neutral' }); }
+  });
+}
+
+/* ── Point d'entrée principal ── */
+function _gwScanPostMedia(images, videoUrl) {
+  var promises = [];
+  (images||[]).forEach(function(url){ if(url) promises.push(_gwAnalyzeImageUrl(url)); });
+  if (videoUrl) promises.push(_gwAnalyzeVideoFrame(videoUrl));
+  if (!promises.length) return Promise.resolve({ flagged:false });
+
+  return Promise.all(promises).then(function(results) {
+    var worst=null;
+    results.forEach(function(r){ if(r.flagged&&(!worst||r.score>worst.score)) worst=r; });
+    if (worst) {
+      var src  = worst.source==='sightengine' ? 'IA Sightengine' : 'Analyse canvas';
+      var pct  = Math.round((worst.detail&&worst.detail.full!==undefined?worst.detail.full:worst.score)*100);
+      return {
+        flagged: true,
+        type:    'sexual',
+        reason:  'Nudité / contenu adulte détecté [' + src + '] — score ' + pct + '%',
+        evidence: worst
+      };
+    }
+    return { flagged:false };
+  });
+}
+
+/* ── Notifie les admins d'un contenu flaggé ── */
+function _gwNotifyAdminNsfw(email, nom, postId, evidence) {
+  try {
+    var report = {
+      id:'nsfw_'+Date.now(), type:'nsfw_auto', postId:postId,
+      reporter:'système', reported:email, reportedNom:nom||email,
+      reason: evidence.reason||'Contenu visuel sensible détecté automatiquement',
+      evidence:evidence, at:Date.now(), status:'pending'
+    };
+    try {
+      var rpts=JSON.parse(localStorage.getItem('gw_reports')||'[]');
+      rpts.unshift(report); localStorage.setItem('gw_reports',JSON.stringify(rpts));
+    } catch(e){}
+    if (_gwFbDB) {
+      _gwFbDB.ref('gw/reports/'+_gwFbKey('nsfw_'+Date.now())).set(report).catch(function(){});
+    }
+  } catch(e){}
+}
+
+/* ── Supprime un post NSFW de Firebase (nœud utilisateur uniquement) ── */
+function _gwRemoveNsfwPostFromFirebase(postId) {
+  if (!_gwFbDB||!_currentUser) return;
+  var fbKey=_gwFbKey(_currentUser.email);
+  _gwFbDB.ref('gw/posts/'+fbKey).once('value').then(function(snap){
+    var val=snap.val(); if(!val) return;
+    var arr=Array.isArray(val)?val:Object.values(val);
+    var filtered=arr.filter(function(p){ return p&&String(p.id)!==String(postId); });
+    _gwFbDB.ref('gw/posts/'+fbKey).set(filtered).catch(function(){});
+  }).catch(function(){});
+}
+
+/* ── Bloque et restreint automatiquement après détection visuelle ── */
+function _gwHandleNsfwDetection(result, postId) {
+  if (!_currentUser) return;
+
+  /* 0. Marque → empêche _finalizePost de persister ce post */
+  _gwNsfwBlockedPosts[String(postId)] = true;
+
+  /* 1. Retire du feed local */
+  try {
+    DEMO_POSTS=DEMO_POSTS.filter(function(p){return String(p.id)!==String(postId);});
+    renderFeed(DEMO_POSTS);
+  } catch(e){}
+
+  /* 2. Retire du localStorage */
+  try {
+    var lsP=JSON.parse(localStorage.getItem('gw_posts')||'[]');
+    lsP=lsP.filter(function(p){return String(p.id)!==String(postId);});
+    localStorage.setItem('gw_posts',JSON.stringify(lsP));
+  } catch(e){}
+
+  /* 3. Retire des posts persistés */
+  try {
+    var pers=loadPersistedUserPosts(_currentUser.email)||[];
+    pers=pers.filter(function(p){return String(p.id)!==String(postId);});
+    savePersistedUserPosts(_currentUser.email,pers);
+  } catch(e){}
+
+  /* 4. Supprime de Firebase */
+  _gwRemoveNsfwPostFromFirebase(postId);
+
+  /* 5. Notifie admins */
+  _gwNotifyAdminNsfw(_currentUser.email,_currentUser.nom,postId,result);
+
+  /* 6. Restreint le compte */
+  _gwApplyRestriction(_currentUser.email,_currentUser.nom,result.type,result.reason,'auto_nsfw');
+
+  /* 7. Alerte visible */
+  showToast('🚫 Publication bloquée — nudité / contenu adulte détecté. Votre compte est restreint.','err');
+
+  console.warn('[GW-NSFW] Bloqué →',_currentUser.email,'| post:',postId,'| source:',result.evidence&&result.evidence.source,'| score:',result.evidence&&result.evidence.score);
+}
+
+/* ── Appliquer une restriction (auto ou manuelle) ── */
+function _gwApplyRestriction(email, nom, type, reason, source) {
+  var list = _gwGetRestrictions();
+  /* Évite les doublons actifs */
+  var existing = list.find(function(r) { return r.email.toLowerCase() === email.toLowerCase() && r.status === 'active'; });
+  if (existing) return existing;
+
+  var restriction = {
+    id:           'rst_' + Date.now(),
+    email:        email,
+    nom:          nom || email.split('@')[0],
+    type:         type,          /* 'sexual' | 'hate' | 'manual' */
+    reason:       reason,
+    at:           Date.now(),
+    status:       'active',
+    restrictedBy: source || 'auto'
+  };
+  list.push(restriction);
+  _gwSaveRestrictions(list);
+
+  /* ── Notification à l'utilisateur ── */
+  var typeLabel = type === 'sexual' ? 'contenu à caractère sexuel ou nudité'
+                : type === 'hate'   ? 'discours haineux ou contenu discriminatoire'
+                : 'violation des règles communautaires';
+  try {
+    var notif = {
+      id: 'rst_notif_' + Date.now(), type: 'restriction', at: Date.now(),
+      unread: true,
+      msg: '⚠️ Votre compte a été restreint pour ' + typeLabel + '.\n\nVous ne pouvez plus publier, commenter ou envoyer de messages. Vous pouvez faire un recours depuis votre profil.',
+      fromUser: null,
+      restrictionId: restriction.id
+    };
+    var notifs = getNotifs(email);
+    notifs.unshift(notif);
+    saveNotifs(email, notifs);
+  } catch(e) {}
+
+  /* ── Affiche la bannière si c'est l'utilisateur connecté ── */
+  if (_currentUser && _currentUser.email.toLowerCase() === email.toLowerCase()) {
+    _gwApplyRestrictionBanner(restriction);
+  }
+
+  /* ── Log admin ── */
+  try { _admLog('AUTO_RESTRICT', email + ' · ' + typeLabel); } catch(e) {}
+
+  return restriction;
+}
+
+/* ── Lever une restriction ── */
+function _gwLiftRestriction(email, liftedBy) {
+  var list = _gwGetRestrictions();
+  var found = false;
+  list = list.map(function(r) {
+    if (r.email.toLowerCase() === email.toLowerCase() && r.status === 'active') {
+      found = true;
+      return Object.assign({}, r, { status: 'lifted', liftedAt: Date.now(), liftedBy: liftedBy || 'admin' });
+    }
+    return r;
+  });
+  if (!found) return;
+  _gwSaveRestrictions(list);
+
+  /* Notification levée */
+  try {
+    var notif = {
+      id: 'rst_lift_' + Date.now(), type: 'restriction_lifted', at: Date.now(), unread: true,
+      msg: '✅ Votre restriction a été levée. Vous pouvez à nouveau publier, commenter et envoyer des messages.',
+      fromUser: null
+    };
+    var notifs = getNotifs(email);
+    notifs.unshift(notif);
+    saveNotifs(email, notifs);
+  } catch(e) {}
+
+  /* Cache la bannière si c'est l'utilisateur courant */
+  if (_currentUser && _currentUser.email.toLowerCase() === email.toLowerCase()) {
+    var banner = document.getElementById('restriction-banner');
+    if (banner) { banner.classList.remove('active'); banner.style.display = 'none'; }
+  }
+}
+
+/* ── Affiche / met à jour la bannière de restriction ── */
+function _gwApplyRestrictionBanner(restriction) {
+  var banner = document.getElementById('restriction-banner');
+  var msgEl  = document.getElementById('restriction-banner-msg');
+  if (!banner) return;
+  if (!restriction) {
+    banner.classList.remove('active'); banner.style.display = 'none'; return;
+  }
+  var typeLabel = restriction.type === 'sexual' ? 'contenu à caractère sexuel ou nudité'
+                : restriction.type === 'hate'   ? 'discours haineux'
+                : 'violation des règles';
+  if (msgEl) msgEl.textContent = 'Compte restreint — ' + typeLabel + '. Publications et commentaires désactivés.';
+  banner.style.display = 'flex';
+  banner.classList.add('active');
+}
+
+/* ── Vérification banniière au démarrage de l'app ── */
+function _gwCheckRestrictionBanner() {
+  if (!_currentUser) return;
+  var r = _gwGetActiveRestriction(_currentUser.email);
+  _gwApplyRestrictionBanner(r || null);
+}
+
+/* ── Modal de recours restriction ── */
+function _gwShowRestrictionAppealModal() {
+  if (!_currentUser) return;
+  var restriction = _gwGetActiveRestriction(_currentUser.email);
+  if (!restriction) { showToast('Aucune restriction active sur votre compte', 'ok'); return; }
+
+  /* Vérifie s'il y a déjà un recours en attente */
+  var existing = _gwGetRestrictionAppeals().find(function(a) {
+    return a.email.toLowerCase() === _currentUser.email.toLowerCase() && a.status === 'pending';
+  });
+
+  var existing2 = document.getElementById('restriction-appeal-overlay');
+  if (existing2) existing2.remove();
+
+  var typeLabel = restriction.type === 'sexual' ? 'Contenu à caractère sexuel / nudité'
+                : restriction.type === 'hate'   ? 'Discours haineux / discrimination'
+                : 'Violation des règles communautaires';
+
+  var overlay = document.createElement('div');
+  overlay.id = 'restriction-appeal-overlay';
+  overlay.className = 'restriction-appeal-overlay';
+  overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML =
+    '<div class="restriction-appeal-sheet">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
+        '<div>' +
+          '<div style="font-size:16px;font-weight:800;color:#EA580C"><i class="fas fa-gavel" style="margin-right:8px"></i>Faire un recours</div>' +
+          '<div style="font-size:12px;color:#6B7280;margin-top:2px">Contestez la restriction de votre compte</div>' +
+        '</div>' +
+        '<button onclick="document.getElementById(\'restriction-appeal-overlay\').remove()" ' +
+          'style="border:none;background:none;font-size:20px;color:#9CA3AF;cursor:pointer"><i class="fas fa-times"></i></button>' +
+      '</div>' +
+
+      /* Motif de la restriction */
+      '<div style="background:#FFF7ED;border:1.5px solid #FED7AA;border-radius:10px;padding:12px;margin-bottom:14px">' +
+        '<div style="font-size:11px;font-weight:700;color:#EA580C;margin-bottom:4px">' +
+          '<i class="fas fa-ban" style="margin-right:5px"></i>Raison de la restriction' +
+        '</div>' +
+        '<div style="font-size:12px;color:#374151;font-weight:600">' + escHtml(typeLabel) + '</div>' +
+        '<div style="font-size:11px;color:#6B7280;margin-top:2px">' + escHtml(restriction.reason) + '</div>' +
+      '</div>' +
+
+      (existing
+        ? '<div style="background:#F0FDF4;border:1.5px solid #BBF7D0;border-radius:10px;padding:12px;text-align:center">' +
+            '<i class="fas fa-clock" style="color:#16A34A;font-size:20px;margin-bottom:6px;display:block"></i>' +
+            '<div style="font-size:13px;font-weight:700;color:#15803D">Recours en cours d\'examen</div>' +
+            '<div style="font-size:12px;color:#374151;margin-top:4px">Votre demande a été transmise à l\'équipe de modération. Vous serez notifié de la décision.</div>' +
+          '</div>'
+        : '<div style="font-size:13px;font-weight:700;color:#0F172A;margin-bottom:8px">Votre message de recours</div>' +
+          '<textarea id="restriction-appeal-text" placeholder="Expliquez pourquoi vous contestez cette restriction. Décrivez le contexte de votre publication et pourquoi elle ne viole pas les règles…" ' +
+            'rows="5" style="width:100%;padding:12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:13px;resize:none;font-family:inherit;outline:none;box-sizing:border-box;line-height:1.5"></textarea>' +
+          '<div style="font-size:11px;color:#9CA3AF;margin-bottom:14px">Minimum 20 caractères · Soyez précis et respectueux</div>' +
+          '<button onclick="_gwSubmitRestrictionAppeal()" ' +
+            'style="width:100%;padding:13px;background:linear-gradient(135deg,#EA580C,#C2410C);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer">' +
+            '<i class="fas fa-paper-plane" style="margin-right:8px"></i>Envoyer le recours' +
+          '</button>'
+      ) +
+
+      '<div style="font-size:11px;color:#9CA3AF;text-align:center;margin-top:10px">L\'équipe de modération examinera votre recours dans les plus brefs délais.</div>' +
+    '</div>';
+
+  var frame = document.querySelector('.phone-frame.app-frame') || document.body;
+  frame.appendChild(overlay);
+}
+
+/* ── Soumettre un recours restriction ── */
+function _gwSubmitRestrictionAppeal() {
+  if (!_currentUser) return;
+  var inp = document.getElementById('restriction-appeal-text');
+  var msg = inp ? inp.value.trim() : '';
+  if (!msg || msg.length < 20) { showToast('Veuillez écrire au moins 20 caractères', 'err'); return; }
+
+  var restriction = _gwGetActiveRestriction(_currentUser.email);
+  if (!restriction) { showToast('Aucune restriction active', 'err'); return; }
+
+  var appeal = {
+    id:             'rstapp_' + Date.now(),
+    email:          _currentUser.email,
+    nom:            _currentUser.nom,
+    message:        msg,
+    restrictionId:  restriction.id,
+    restrictionType: restriction.type,
+    reason:         restriction.reason,
+    at:             Date.now(),
+    status:         'pending'
+  };
+
+  var appeals = _gwGetRestrictionAppeals();
+  appeals.unshift(appeal);
+  _gwSaveRestrictionAppeals(appeals);
+
+  /* Notifie les admins */
+  try {
+    var adminNotif = {
+      id: 'rst_appeal_adm_' + Date.now(), type: 'restriction_appeal', at: Date.now(), unread: true,
+      msg: '⚖️ ' + (_currentUser.nom || _currentUser.email) + ' a soumis un recours de restriction.',
+      fromUser: { nom: _currentUser.nom, email: _currentUser.email }
+    };
+    var sa = _admGetSuperAdmin();
+    if (sa) { var saN = getNotifs(sa.email); saN.unshift(adminNotif); saveNotifs(sa.email, saN); }
+    _admGetAdmins().forEach(function(a) {
+      var aN = getNotifs(a.email); aN.unshift(adminNotif); saveNotifs(a.email, aN);
+    });
+  } catch(e) {}
+
+  showToast('Recours envoyé ! L\'équipe examinera votre demande.', 'ok');
+  var overlay = document.getElementById('restriction-appeal-overlay');
+  if (overlay) overlay.remove();
+}
+
+/* ── Affiche une alerte de blocage quand l'utilisateur est restreint ── */
+function _gwShowRestrictionAlert(action) {
+  var restriction = _gwGetActiveRestriction(_currentUser ? _currentUser.email : null);
+  if (!restriction) return false;
+  var actionLabel = action === 'post'    ? 'publier du contenu'
+                  : action === 'comment' ? 'commenter'
+                  : action === 'message' ? 'envoyer des messages'
+                  : 'effectuer cette action';
+  showToast('🚫 Vous ne pouvez pas ' + actionLabel + ' — votre compte est restreint. Consultez votre profil pour faire un recours.', 'err');
+  return true;
+}
+
+/* ══════════════════════════════════════════════════════════════
    SUPER ADMIN — MODULE COMPLET
    Accès : bouton discret "●●●" sur l'écran de connexion (5 taps)
    LocalStorage keys :
@@ -20142,8 +21615,12 @@ function _dashExport() {
 
 /* ── Helpers : configuration globale des plans ── */
 function _admGetPlansConfig() {
-  try { return JSON.parse(localStorage.getItem('gw_plans_config') || '{"premiumEnabled":true,"businessEnabled":true}'); }
-  catch(e) { return { premiumEnabled: true, businessEnabled: true }; }
+  try {
+    var defaults = { premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true };
+    var stored   = JSON.parse(localStorage.getItem('gw_plans_config') || '{}');
+    return Object.assign(defaults, stored);
+  }
+  catch(e) { return { premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true }; }
 }
 function _admSavePlansConfig(cfg) {
   localStorage.setItem('gw_plans_config', JSON.stringify(cfg));
@@ -20166,14 +21643,15 @@ function _admSavePayments(list) {
 
 /* Active/désactive un plan (Premium ou Business) */
 function _admTogglePlan(plan) {
+  if (!_adminUser || !_admHasAction('change_settings')) { showToast('Réservé au Super Admin', 'err'); return; }
   var cfg = _admGetPlansConfig();
   var key = plan + 'Enabled';
   cfg[key] = !cfg[key];
   _admSavePlansConfig(cfg);
   var state = cfg[key] ? 'activé ✅' : 'désactivé ⛔';
-  var labels = { premium: 'Premium', business: 'Business Pro' };
+  var labels = { premium: 'Premium', business: 'Business Pro', badge: 'Système de badges', banners: 'Bannières' };
   _admLog('PLAN_TOGGLE', (labels[plan] || plan) + ' → ' + state);
-  showToast('Plan ' + (labels[plan] || plan) + ' ' + state, cfg[key] ? 'ok' : 'err');
+  showToast((labels[plan] || plan) + ' ' + state, cfg[key] ? 'ok' : 'err');
   _admRender();
   /* Rafraîchit la page abonnements si ouverte */
   try {
@@ -20653,7 +22131,7 @@ function _admApplySidebarPerms() {
     ['publi','marketplace','reports'],
     ['payments'],
     ['notifs'],
-    ['team','settings']
+    ['team','settings','security']
   ];
   var labels = document.querySelectorAll('.adm-sidebar-nav-label');
   sectionMap.forEach(function(tabs, idx) {
@@ -20835,7 +22313,8 @@ function _admSwitchTab(tab) {
     publi       : 'Publications officielles',
     marketplace : 'Marketplace',
     notifs      : 'Notifications & Communication',
-    settings    : 'Paramètres système'
+    settings    : 'Paramètres système',
+    security    : 'Sécurité & Maintenance'
   };
   var titleEl = document.getElementById('adm-topbar-title');
   if (titleEl) titleEl.textContent = titles[tab] || tab;
@@ -20865,11 +22344,13 @@ function _admRefreshAll(btn) {
       ['gw/bans',            'gw_bans'],
       ['gw/badge_requests',  'gw_badge_requests'],
       ['gw/admin_tasks',     'gw_admin_tasks'],
-      ['gw/admins',          'gw_admins'],
-      ['gw/mk_txns',         'gw_mk_txns'],
-      ['gw/mk_listings',     'gw_mk_listings'],
-      ['gw/collab_requests', 'gw_collab_requests'],
-      ['gw/online',          null]
+      ['gw/admins',               'gw_admins'],
+      ['gw/mk_txns',              'gw_mk_txns'],
+      ['gw/mk_listings',          'gw_mk_listings'],
+      ['gw/collab_requests',      'gw_collab_requests'],
+      ['gw/restrictions',         'gw_restrictions'],
+      ['gw/restriction_appeals',  'gw_restriction_appeals'],
+      ['gw/online',               null]
     ];
     var pending = paths.length;
     paths.forEach(function(pair) {
@@ -20908,9 +22389,10 @@ function _admRefreshAll(btn) {
 }
 
 function _admUpdateNavBadges() {
-  var appeals   = _gwGetAppeals().filter(function(a){ return a.status === 'pending'; }).length;
-  var unreadThr = _getSupportThreads().reduce(function(s,t){ return s + (t.unreadAdmin||0); }, 0);
-  var reports   = _admGetAllReports().length + appeals + unreadThr;
+  var appeals      = _gwGetAppeals().filter(function(a){ return a.status === 'pending'; }).length;
+  var rstAppeals   = _gwGetRestrictionAppeals().filter(function(a){ return a.status === 'pending'; }).length;
+  var unreadThr    = _getSupportThreads().reduce(function(s,t){ return s + (t.unreadAdmin||0); }, 0);
+  var reports      = _admGetAllReports().length + appeals + rstAppeals + unreadThr;
   var badges   = _admGetBadgeReqs().filter(function(r){ return r.status === 'pending'; }).length;
   var publis   = _offGetPosts().length;
   var pays     = _admGetPayments().length;
@@ -20932,7 +22414,7 @@ function _admRender() {
   var content = document.getElementById('adm-panel-content');
   if (!content) return;
   if (_adminTab === 'dashboard')   content.innerHTML = _admBuildDashboard();
-  else if (_adminTab === 'analytics')   content.innerHTML = _admBuildAnalytics();
+  else if (_adminTab === 'analytics') { content.innerHTML = _admBuildAnalytics(); setTimeout(_admStartCountryListener, 100); }
   else if (_adminTab === 'payments')    content.innerHTML = _admBuildPayments();
   else if (_adminTab === 'reports')     content.innerHTML = _admBuildReports();
   else if (_adminTab === 'users')       content.innerHTML = _admBuildUsers('');
@@ -21613,6 +23095,128 @@ function _admBuildPayments() {
 /* ══════════════════════════════════════════
    ONGLET ANALYTICS
 ══════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════
+   ANALYTICS — PAYS : helper + listener temps réel
+═══════════════════════════════════════════════════════ */
+var _admCountryFbListener = null;
+
+var _admCountryFlags = {
+  'France':'🇫🇷','Belgique':'🇧🇪','Suisse':'🇨🇭','Canada':'🇨🇦','Luxembourg':'🇱🇺',
+  'Sénégal':'🇸🇳','Côte d\'Ivoire':'🇨🇮',"Côte d'Ivoire":'🇨🇮','Mali':'🇲🇱',
+  'Cameroun':'🇨🇲','Maroc':'🇲🇦','Algérie':'🇩🇿','Tunisie':'🇹🇳','Madagascar':'🇲🇬',
+  'Congo':'🇨🇬','RD Congo':'🇨🇩','Gabon':'🇬🇦','Togo':'🇹🇬','Bénin':'🇧🇯',
+  'Burkina Faso':'🇧🇫','Guinée':'🇬🇳','Niger':'🇳🇪','Mauritanie':'🇲🇷',
+  'Rwanda':'🇷🇼','Burundi':'🇧🇮','Tchad':'🇹🇩','Haïti':'🇭🇹',
+  'États-Unis':'🇺🇸','USA':'🇺🇸','Royaume-Uni':'🇬🇧','UK':'🇬🇧',
+  'Espagne':'🇪🇸','Italie':'🇮🇹','Portugal':'🇵🇹','Allemagne':'🇩🇪',
+  'Brésil':'🇧🇷','Mexique':'🇲🇽','Pays-Bas':'🇳🇱','Australie':'🇦🇺',
+  'Liban':'🇱🇧','Sénégal':'🇸🇳'
+};
+
+function _admBuildCountryChart(rows, totalUsers, totalWithLoc) {
+  if (!rows || !rows.length) {
+    return '<div style="text-align:center;padding:28px;color:#9CA3AF;font-size:13px">' +
+      '<i class="fas fa-globe" style="font-size:30px;margin-bottom:10px;display:block;opacity:.35"></i>' +
+      'Aucune donnée de localisation pour l\'instant.<br>' +
+      '<small style="color:#CBD5E1">Les pays apparaîtront automatiquement quand les utilisateurs<br>renseigneront leur localisation dans leur profil.</small>' +
+    '</div>';
+  }
+  var noLocCnt = Math.max(0, totalUsers - totalWithLoc);
+  var html = '';
+
+  /* ── Top 3 podium ── */
+  html += '<div class="adm-country-podium">';
+  rows.slice(0, 3).forEach(function(row, i) {
+    var medals = ['🥇','🥈','🥉'];
+    var borderColors = ['#F59E0B','#9CA3AF','#CD7C2F'];
+    var flag = _admCountryFlags[row.country] || '🌍';
+    html +=
+      '<div class="adm-country-podium-card" style="border-color:' + borderColors[i] + '">' +
+        '<div class="adm-country-podium-rank">' + medals[i] + '</div>' +
+        '<div class="adm-country-podium-flag">' + flag + '</div>' +
+        '<div class="adm-country-podium-name" title="' + escHtml(row.country) + '">' + escHtml(row.country) + '</div>' +
+        '<div class="adm-country-podium-cnt">' + row.cnt + ' utilisateur' + (row.cnt > 1 ? 's' : '') + '</div>' +
+        '<div class="adm-country-podium-pct">' + row.pct + '%</div>' +
+      '</div>';
+  });
+  html += '</div>';
+
+  /* ── Barre horizontale pour tous les pays ── */
+  var barColors = ['#3B82F6','#6366F1','#8B5CF6','#A78BFA','#C4B5FD'];
+  html += '<div class="adm-country-list">';
+  rows.forEach(function(row, i) {
+    var flag = _admCountryFlags[row.country] || '🌍';
+    var bc   = barColors[Math.min(i, barColors.length - 1)];
+    html +=
+      '<div class="adm-country-row">' +
+        '<div class="adm-country-rank">' + (i + 1) + '</div>' +
+        '<div class="adm-country-flag-name">' +
+          '<span style="font-size:15px;line-height:1">' + flag + '</span>' +
+          '<span class="adm-country-name">' + escHtml(row.country) + '</span>' +
+        '</div>' +
+        '<div class="adm-country-bar-wrap">' +
+          '<div class="adm-country-bar" style="width:' + row.pct + '%;background:' + bc + '"></div>' +
+        '</div>' +
+        '<div class="adm-country-stats">' +
+          '<span class="adm-country-cnt">' + row.cnt + '</span>' +
+          '<span class="adm-country-pct">' + row.pct + '%</span>' +
+        '</div>' +
+      '</div>';
+  });
+  html += '</div>';
+
+  /* ── Pied de section ── */
+  html +=
+    '<div class="adm-country-footer">' +
+      '<span><i class="fas fa-map-marker-alt" style="margin-right:4px"></i>' + totalWithLoc + ' localisé' + (totalWithLoc > 1 ? 's' : '') + '</span>' +
+      (noLocCnt > 0 ? '<span style="color:#94A3B8">' + noLocCnt + ' sans localisation</span>' : '') +
+      '<span style="color:#10B981;display:flex;align-items:center;gap:4px">' +
+        '<span style="width:6px;height:6px;border-radius:50%;background:#10B981;display:inline-block;animation:adm-pulse 2s infinite"></span>' +
+        'Temps réel' +
+      '</span>' +
+    '</div>';
+
+  return html;
+}
+
+function _admStartCountryListener() {
+  if (!window._gwFbDB) return;
+  /* Détacher l'éventuel listener précédent */
+  if (_admCountryFbListener) {
+    try { window._gwFbDB.ref('gw/profiles').off('value', _admCountryFbListener); } catch(e) {}
+    _admCountryFbListener = null;
+  }
+  _admCountryFbListener = function(snap) {
+    /* Auto-détachement si on a quitté l'onglet analytics */
+    if (_adminTab !== 'analytics') {
+      try { window._gwFbDB.ref('gw/profiles').off('value', _admCountryFbListener); } catch(e) {}
+      _admCountryFbListener = null;
+      return;
+    }
+    var sec = document.getElementById('adm-country-section');
+    if (!sec) return;
+    var val = snap.val() || {};
+    var countryCounts = {};
+    var totalWithLoc  = 0;
+    var totalUsers    = Object.keys(val).length;
+    Object.keys(val).forEach(function(key) {
+      var p = val[key] || {};
+      var loc = (p.location || '').trim();
+      if (!loc) return;
+      var parts = loc.split(',');
+      var country = parts[parts.length - 1].trim();
+      if (!country) return;
+      totalWithLoc++;
+      countryCounts[country] = (countryCounts[country] || 0) + 1;
+    });
+    var rows = Object.keys(countryCounts).map(function(c) {
+      return { country: c, cnt: countryCounts[c], pct: Math.round(countryCounts[c] / (totalWithLoc || 1) * 100) };
+    }).sort(function(a, b) { return b.cnt - a.cnt; }).slice(0, 15);
+    sec.innerHTML = _admBuildCountryChart(rows, totalUsers, totalWithLoc);
+  };
+  window._gwFbDB.ref('gw/profiles').on('value', _admCountryFbListener);
+}
+
 function _admBuildAnalytics() {
   var users    = getUsers();
   var payments = _admGetPayments();
@@ -21749,6 +23353,30 @@ function _admBuildAnalytics() {
       '<div class="adm-analytics-metric-lbl">Comptes bannis<br><small>total</small></div>' +
     '</div>' +
   '</div>';
+
+  /* ── Répartition géographique (seed local — Firebase listener prend le relais) ── */
+  var _ctryCounts = {}, _ctryTotal = 0;
+  users.forEach(function(u) {
+    var _p2 = loadUserProfile(u.email) || {};
+    var _loc = (_p2.location || '').trim();
+    if (!_loc) return;
+    var _parts = _loc.split(',');
+    var _ctry  = _parts[_parts.length - 1].trim();
+    if (!_ctry) return;
+    _ctryTotal++;
+    _ctryCounts[_ctry] = (_ctryCounts[_ctry] || 0) + 1;
+  });
+  var _ctryRows = Object.keys(_ctryCounts).map(function(c) {
+    return { country: c, cnt: _ctryCounts[c], pct: Math.round(_ctryCounts[c] / (_ctryTotal || 1) * 100) };
+  }).sort(function(a, b) { return b.cnt - a.cnt; }).slice(0, 15);
+
+  html += '<div class="adm-dash-title" style="margin-top:24px">' +
+    '<i class="fas fa-globe" style="color:#3B82F6;margin-right:6px"></i>' +
+    'Répartition géographique' +
+    '<span style="font-size:10px;font-weight:500;color:#9CA3AF;margin-left:8px">· temps réel</span>' +
+    '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#10B981;margin-left:6px;vertical-align:middle;animation:adm-pulse 2s infinite"></span>' +
+  '</div>';
+  html += '<div id="adm-country-section">' + _admBuildCountryChart(_ctryRows, users.length, _ctryTotal) + '</div>';
 
   /* ── Dernières inscriptions ── */
   html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-user-plus" style="color:#2563EB;margin-right:6px"></i>Dernières inscriptions</div>';
@@ -21925,7 +23553,10 @@ function _admBuildNotifs() {
     '</div>';
 
   /* ── Historique des envois ── */
-  html += '<div class="adm-dash-title"><i class="fas fa-clock-rotate-left" style="color:#6366F1;margin-right:6px"></i>Historique des notifications envoyées</div>';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px">' +
+    '<div class="adm-dash-title" style="margin-bottom:0"><i class="fas fa-clock-rotate-left" style="color:#6366F1;margin-right:6px"></i>Historique des notifications envoyées</div>' +
+    (log.length ? '<button onclick="_admClearNotifHistory()" style="background:linear-gradient(135deg,#EF4444,#DC2626);color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;flex-shrink:0"><i class="fas fa-trash"></i> Vider l\'historique</button>' : '') +
+  '</div>';
   if (!log.length) {
     html += '<div class="adm-empty"><i class="fas fa-bell-slash"></i>Aucune notification envoyée pour le moment</div>';
   } else {
@@ -21947,7 +23578,6 @@ function _admBuildNotifs() {
   }
 
   /* ── Notifs non lues par utilisateur ── */
-  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-inbox" style="color:#EF4444;margin-right:6px"></i>Boîte de réception utilisateurs</div>';
   var usersWithNotifs = users
     .map(function(u) {
       var notifs  = getNotifs(u.email) || [];
@@ -21957,20 +23587,34 @@ function _admBuildNotifs() {
     .filter(function(x){ return x.total > 0; })
     .sort(function(a,b){ return b.unread - a.unread; });
 
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:20px;margin-bottom:4px">' +
+    '<div class="adm-dash-title" style="margin-bottom:0"><i class="fas fa-inbox" style="color:#EF4444;margin-right:6px"></i>Boîte de réception utilisateurs</div>' +
+    (_admIsSA() && usersWithNotifs.length ? '<button onclick="_admClearAllInboxes()" style="background:linear-gradient(135deg,#EF4444,#DC2626);color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;flex-shrink:0"><i class="fas fa-trash-can"></i> Tout vider</button>' : '') +
+  '</div>';
+
   if (!usersWithNotifs.length) {
     html += '<div class="adm-empty"><i class="fas fa-inbox"></i>Aucune notification dans les boîtes utilisateurs</div>';
   } else {
     html += '<div class="adm-analytics-user-list">';
-    usersWithNotifs.slice(0, 15).forEach(function(item) {
-      var ini = (item.u.nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+    usersWithNotifs.slice(0, 30).forEach(function(item) {
+      var profile = loadUserProfile(item.u.email);
+      var photo   = profile && profile.photo ? profile.photo : null;
+      var ini     = (item.u.nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+      var safeEmail = escHtml(item.u.email);
+      var safeNom   = escHtml(item.u.nom || item.u.email);
+      /* Avatar : photo ou initiales */
+      var avatarHtml = photo
+        ? '<div style="width:38px;height:38px;border-radius:50%;overflow:hidden;flex-shrink:0;border:2px solid #E5E7EB"><img src="' + escHtml(photo) + '" style="width:100%;height:100%;object-fit:cover" alt=""/></div>'
+        : '<div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#4F46E5);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;flex-shrink:0">' + escHtml(ini) + '</div>';
       html +=
-        '<div class="adm-analytics-user-row">' +
-          '<div style="width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#4F46E5);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex-shrink:0">' + escHtml(ini) + '</div>' +
+        '<div class="adm-analytics-user-row" style="gap:10px;cursor:pointer" onclick="_admShowUserInbox(\'' + safeEmail + '\',\'' + safeNom + '\')" title="Voir les notifications de ' + safeNom + '">' +
+          avatarHtml +
           '<div style="flex:1;min-width:0">' +
-            '<div style="font-size:13px;font-weight:600;color:#0F172A">' + escHtml(item.u.nom || item.u.email) + '</div>' +
-            '<div style="font-size:11px;color:#9CA3AF">' + item.total + ' notif(s) · ' + item.unread + ' non lue(s)</div>' +
+            '<div style="font-size:13px;font-weight:600;color:#0F172A">' + safeNom + '</div>' +
+            '<div style="font-size:11px;color:#9CA3AF">' + safeEmail + ' · ' + item.total + ' notif(s) · <span style="color:' + (item.unread > 0 ? '#EF4444' : '#9CA3AF') + ';font-weight:' + (item.unread > 0 ? '700' : '400') + '">' + item.unread + ' non lue(s)</span></div>' +
           '</div>' +
-          (item.unread > 0 ? '<span style="background:#EF4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px">' + item.unread + '</span>' : '') +
+          (item.unread > 0 ? '<span style="background:#EF4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;flex-shrink:0">' + item.unread + '</span>' : '') +
+          '<button onclick="event.stopPropagation();_admClearUserInbox(\'' + safeEmail + '\')" style="background:linear-gradient(135deg,#F97316,#EA580C);color:#fff;border:none;border-radius:7px;padding:5px 11px;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;display:flex;align-items:center;gap:4px"><i class="fas fa-trash"></i> Vider</button>' +
         '</div>';
     });
     html += '</div>';
@@ -21978,6 +23622,118 @@ function _admBuildNotifs() {
 
   html += '</div>';
   return html;
+}
+
+/* ── Modale : lecture des notifications d'un utilisateur depuis le panel admin ── */
+function _admShowUserInbox(email, nom) {
+  var notifs  = getNotifs(email) || [];
+  var profile = loadUserProfile(email);
+  var photo   = profile && profile.photo ? profile.photo : null;
+  var ini     = (nom || '?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('').toUpperCase();
+
+  var avatarHtml = photo
+    ? '<div style="width:52px;height:52px;border-radius:50%;overflow:hidden;border:3px solid #6366F1;flex-shrink:0"><img src="' + escHtml(photo) + '" style="width:100%;height:100%;object-fit:cover" alt=""/></div>'
+    : '<div style="width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#4F46E5);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#fff;flex-shrink:0">' + escHtml(ini) + '</div>';
+
+  /* Icônes par type */
+  var typeIcons = { info:'fa-circle-info', system:'fa-gear', promo:'fa-gift', alert:'fa-triangle-exclamation', news:'fa-newspaper', ban_lifted:'fa-unlock', restriction:'fa-circle-exclamation', like:'fa-heart', follow:'fa-user-plus', comment:'fa-comment', message:'fa-envelope', badge:'fa-certificate' };
+  var typeColors = { info:'#3B82F6', system:'#6B7280', promo:'#F59E0B', alert:'#EF4444', news:'#8B5CF6', ban_lifted:'#10B981', restriction:'#EA580C', like:'#EC4899', follow:'#6366F1', comment:'#14B8A6', message:'#0EA5E9', badge:'#F59E0B' };
+
+  var notifsHtml = '';
+  if (!notifs.length) {
+    notifsHtml = '<div style="text-align:center;padding:40px;color:#9CA3AF;font-size:13px"><i class="fas fa-bell-slash" style="font-size:28px;display:block;margin-bottom:10px;opacity:.4"></i>Aucune notification</div>';
+  } else {
+    notifs.forEach(function(n) {
+      var t     = n.type || 'info';
+      var icon  = typeIcons[t]  || 'fa-bell';
+      var color = typeColors[t] || '#6366F1';
+      var title = n.title || n.label || 'Notification';
+      var body  = n.msg   || n.text  || n.body || '';
+      var dt    = n.at ? (new Date(n.at)).toLocaleDateString('fr-FR') + ' ' + (new Date(n.at)).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '';
+      var unread = n.unread;
+      notifsHtml +=
+        '<div style="display:flex;gap:12px;padding:12px 16px;border-bottom:1px solid #F1F5F9;background:' + (unread ? '#FFF7ED' : '#fff') + '">' +
+          '<div style="width:36px;height:36px;border-radius:50%;background:' + color + '22;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<i class="fas ' + icon + '" style="color:' + color + ';font-size:14px"></i>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:' + (unread ? '700' : '600') + ';color:#0F172A;margin-bottom:2px">' + escHtml(title) + (unread ? ' <span style="background:#EF4444;color:#fff;font-size:9px;padding:1px 5px;border-radius:10px;vertical-align:middle;margin-left:4px">NON LU</span>' : '') + '</div>' +
+            (body ? '<div style="font-size:12px;color:#6B7280;line-height:1.4;margin-bottom:3px">' + escHtml(body) + '</div>' : '') +
+            (dt   ? '<div style="font-size:10px;color:#9CA3AF">' + dt + '</div>' : '') +
+          '</div>' +
+        '</div>';
+    });
+  }
+
+  var unreadCount = notifs.filter(function(n){ return n.unread; }).length;
+
+  var overlay = document.createElement('div');
+  overlay.id  = 'adm-inbox-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px';
+  overlay.innerHTML =
+    '<div style="background:#fff;border-radius:16px;width:100%;max-width:520px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.2)">' +
+      /* Header */
+      '<div style="background:linear-gradient(135deg,#1E1B4B,#312E81);padding:18px 20px;display:flex;align-items:center;gap:14px;flex-shrink:0">' +
+        avatarHtml +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:16px;font-weight:700;color:#fff">' + escHtml(nom) + '</div>' +
+          '<div style="font-size:12px;color:#A5B4FC;margin-top:2px">' + escHtml(email) + '</div>' +
+          '<div style="font-size:11px;color:#C7D2FE;margin-top:3px">' + notifs.length + ' notification(s) · <span style="color:' + (unreadCount > 0 ? '#FCA5A5' : '#A5B4FC') + ';font-weight:' + (unreadCount > 0 ? '700' : '400') + '">' + unreadCount + ' non lue(s)</span></div>' +
+        '</div>' +
+        '<div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">' +
+          '<button onclick="_admClearUserInbox(\'' + escHtml(email) + '\')" style="background:linear-gradient(135deg,#EF4444,#DC2626);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px"><i class="fas fa-trash"></i> Vider</button>' +
+          '<button onclick="document.getElementById(\'adm-inbox-overlay\').remove()" style="background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer"><i class="fas fa-xmark"></i> Fermer</button>' +
+        '</div>' +
+      '</div>' +
+      /* Liste */
+      '<div style="overflow-y:auto;flex:1">' +
+        notifsHtml +
+      '</div>' +
+    '</div>';
+
+  /* Fermer en cliquant le fond */
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) overlay.remove();
+  });
+  document.body.appendChild(overlay);
+}
+
+/* ── Supprime les entrées NOTIF de l'historique admin log ── */
+function _admClearNotifHistory() {
+  if (!_admHasAction('send_notif')) return showToast('Permission refusée', 'error');
+  if (!confirm('Supprimer tout l\'historique des notifications envoyées ?')) return;
+  var log = _admGetLog().filter(function(e){ return !e.action || e.action.indexOf('NOTIF') === -1; });
+  localStorage.setItem('gw_admin_log', JSON.stringify(log));
+  if (!_gwFbSkip && _gwFbDB) _gwFbDB.ref('gw/admin_log').set(log).catch(function(){});
+  showToast('Historique supprimé', 'success');
+  _admSync('notifs');
+}
+
+/* ── Vide la boîte de réception d'un utilisateur spécifique ── */
+function _admClearUserInbox(email) {
+  if (!_admHasAction('send_notif')) return showToast('Permission refusée', 'error');
+  if (!confirm('Vider la boîte de réception de ' + email + ' ?')) return;
+  localStorage.removeItem('gw_notifs_' + email);
+  try {
+    if (!_gwFbSkip && _gwFbDB) _gwFbDB.ref('gw/notifs/' + _gwFbKey(email)).remove().catch(function(){});
+  } catch(e){}
+  showToast('Boîte de réception vidée', 'success');
+  _admSync('notifs');
+}
+
+/* ── Vide toutes les boîtes de réception (Super Admin uniquement) ── */
+function _admClearAllInboxes() {
+  if (!_admIsSA()) return showToast('Réservé au Super Admin', 'error');
+  if (!confirm('Vider TOUTES les boîtes de réception utilisateurs ?\nCette action est irréversible.')) return;
+  var users = getUsers();
+  users.forEach(function(u) {
+    localStorage.removeItem('gw_notifs_' + u.email);
+    try {
+      if (!_gwFbSkip && _gwFbDB) _gwFbDB.ref('gw/notifs/' + _gwFbKey(u.email)).remove().catch(function(){});
+    } catch(e){}
+  });
+  showToast('Toutes les boîtes ont été vidées', 'success');
+  _admSync('notifs');
 }
 
 /* ══════════════════════════════════════════
@@ -22049,6 +23805,13 @@ function _admBuildSettings() {
   }
   html += settingsToggleHtml('premium',  'Plan Premium 👑',      '👑', cfg.premiumEnabled);
   html += settingsToggleHtml('business', 'Plan Business Pro 💼', '💼', cfg.businessEnabled);
+  html += '</div>';
+
+  /* ── Contrôle des fonctionnalités ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-toggle-on" style="color:#16A34A;margin-right:6px"></i>Fonctionnalités</div>';
+  html += '<div class="adm-settings-section">';
+  html += settingsToggleHtml('badge',   'Système de badges ✅',   '🏅', cfg.badgeEnabled);
+  html += settingsToggleHtml('banners', 'Bannières d\'usage 📊',  '🪧', cfg.bannersEnabled);
   html += '</div>';
 
   /* ── Informations système ── */
@@ -22160,10 +23923,114 @@ function _admClearLog() {
 function _admBuildReports() {
   var reports = _admGetAllReports();
   var appeals = _gwGetAppeals();
-  var pendingAppeals = appeals.filter(function(a){ return a.status === 'pending'; });
+  var pendingAppeals      = appeals.filter(function(a){ return a.status === 'pending'; });
+  var rstAppeals          = _gwGetRestrictionAppeals();
+  var pendingRstAppeals   = rstAppeals.filter(function(a){ return a.status === 'pending'; });
+  var activeRestrictions  = _gwGetRestrictions().filter(function(r){ return r.status === 'active'; });
+
   var html =
-    '<div class="adm-tab-header"><h2>Signalements & Recours</h2><p>' + reports.length + ' signalement(s) · ' + pendingAppeals.length + ' recours en attente</p></div>' +
+    '<div class="adm-tab-header"><h2>Signalements & Modération</h2><p>' +
+      reports.length + ' signalement(s) · ' +
+      pendingAppeals.length + ' recours ban · ' +
+      pendingRstAppeals.length + ' recours restriction · ' +
+      activeRestrictions.length + ' compte(s) restreint(s)</p></div>' +
     '<div class="adm-dash">';
+
+  /* ══ SECTION COMPTES RESTREINTS (modération auto) ══ */
+  html += '<div class="adm-dash-title">' +
+    '<i class="fas fa-shield-exclamation" style="color:#EA580C;margin-right:6px"></i>Comptes restreints automatiquement' +
+    (activeRestrictions.length > 0 ? ' <span style="background:#EA580C;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;margin-left:6px">' + activeRestrictions.length + '</span>' : '') +
+  '</div>';
+
+  if (!activeRestrictions.length) {
+    html += '<div class="adm-empty" style="margin-bottom:20px"><i class="fas fa-shield-check"></i>Aucun compte restreint actuellement</div>';
+  } else {
+    html += '<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px">';
+    activeRestrictions.forEach(function(r) {
+      var typeIcon  = r.type === 'sexual' ? '🔞' : r.type === 'hate' ? '☠️' : '⚠️';
+      var typeLabel = r.type === 'sexual' ? 'Contenu sexuel / nudité' : r.type === 'hate' ? 'Discours haineux' : 'Violation des règles';
+      var typeColor = r.type === 'sexual' ? '#DC2626' : r.type === 'hate' ? '#7C3AED' : '#EA580C';
+      var d = new Date(r.at).toLocaleDateString('fr-FR') + ' ' + new Date(r.at).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+      var safeEmail = r.email.replace(/'/g, "\\'");
+      var hasPendingAppeal = rstAppeals.some(function(a){ return a.email.toLowerCase() === r.email.toLowerCase() && a.status === 'pending'; });
+      html +=
+        '<div class="restriction-card">' +
+          '<div class="restriction-card-head">' +
+            '<div>' +
+              '<div class="restriction-card-title">' + typeIcon + ' ' + escHtml(r.nom || r.email) + '</div>' +
+              '<div style="font-size:11px;color:#9CA3AF">' + escHtml(r.email) + ' · ' + d + '</div>' +
+            '</div>' +
+            '<span style="background:' + typeColor + '1A;color:' + typeColor + ';font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;white-space:nowrap">' + escHtml(typeLabel) + '</span>' +
+          '</div>' +
+          '<div class="restriction-card-reason">' + escHtml(r.reason) + '</div>' +
+          (r.restrictedBy && r.restrictedBy !== 'auto' ? '<div style="font-size:11px;color:#6B7280;margin-bottom:6px">Appliqué par : ' + escHtml(r.restrictedBy) + '</div>' : '<div style="font-size:11px;color:#6B7280;margin-bottom:6px">Détection automatique</div>') +
+          '<div class="restriction-card-actions">' +
+            (_admHasAction('unban') ?
+              '<button class="adm-btn-sm adm-btn-lift" onclick="_admLiftRestriction(\'' + safeEmail + '\')">' +
+                '<i class="fas fa-unlock"></i> Lever la restriction' +
+              '</button>' : '') +
+            (_admHasAction('ban') ?
+              '<button class="adm-btn-sm adm-btn-ban" onclick="_admBanUser(\'' + safeEmail + '\')">' +
+                '<i class="fas fa-ban"></i> Bannir le compte' +
+              '</button>' : '') +
+            (hasPendingAppeal ?
+              '<span style="font-size:11px;font-weight:700;color:#EA580C;display:flex;align-items:center;gap:5px">' +
+                '<i class="fas fa-gavel"></i> Recours en attente' +
+              '</span>' : '') +
+          '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* ══ SECTION RECOURS DE RESTRICTION ══ */
+  html += '<div class="adm-dash-title">' +
+    '<i class="fas fa-gavel" style="color:#EA580C;margin-right:6px"></i>Recours de restriction' +
+    (pendingRstAppeals.length > 0 ? ' <span style="background:#EA580C;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;margin-left:6px">' + pendingRstAppeals.length + ' en attente</span>' : '') +
+  '</div>';
+
+  if (!pendingRstAppeals.length) {
+    html += '<div class="adm-empty" style="margin-bottom:20px"><i class="fas fa-inbox"></i>Aucun recours de restriction en attente</div>';
+  } else {
+    html += '<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px">';
+    pendingRstAppeals.forEach(function(a) {
+      var d = new Date(a.at).toLocaleDateString('fr-FR') + ' ' + new Date(a.at).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+      var typeLabel = a.restrictionType === 'sexual' ? 'Contenu sexuel / nudité' : a.restrictionType === 'hate' ? 'Discours haineux' : 'Violation des règles';
+      var ini = (a.nom || a.email).slice(0, 2).toUpperCase();
+      var escId = a.id.replace(/'/g, "\\'");
+      var escEmail = a.email.replace(/'/g, "\\'");
+      html +=
+        '<div style="background:#fff;border:1.5px solid #FED7AA;border-radius:14px;padding:16px;box-shadow:0 0 0 3px #FFF7ED">' +
+          '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+            '<div style="width:36px;height:36px;border-radius:50%;background:#FED7AA;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#EA580C;flex-shrink:0">' + ini + '</div>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-weight:700;font-size:13px;color:#111">' + escHtml(a.nom || a.email) + '</div>' +
+              '<div style="font-size:11px;color:#9CA3AF">' + escHtml(a.email) + ' · ' + d + '</div>' +
+            '</div>' +
+            '<span style="background:#FEF3C7;color:#D97706;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap">⚖️ Recours restriction</span>' +
+          '</div>' +
+          '<div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:8px;padding:10px;font-size:13px;color:#374151;line-height:1.5;margin-bottom:10px">' +
+            '<div style="font-size:11px;font-weight:700;color:#D97706;margin-bottom:4px"><i class="fas fa-flag" style="margin-right:4px"></i>' + escHtml(typeLabel) + ' : ' + escHtml(a.reason) + '</div>' +
+            '<i class="fas fa-quote-left" style="color:#9CA3AF;margin-right:5px;font-size:10px"></i>' + escHtml(a.message) +
+          '</div>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+            (_admHasAction('unban') ?
+              '<button class="adm-btn-sm adm-btn-approve" onclick="_admResolveRstAppeal(\'' + escId + '\',\'accept\')">' +
+                '<i class="fas fa-check"></i> Accepter — Lever la restriction' +
+              '</button>' : '') +
+            (_admHasAction('dismiss_report') ?
+              '<button class="adm-btn-sm adm-btn-dismiss" onclick="_admResolveRstAppeal(\'' + escId + '\',\'reject\')">' +
+                '<i class="fas fa-times"></i> Rejeter' +
+              '</button>' : '') +
+            (_admHasAction('ban') ?
+              '<button class="adm-btn-sm adm-btn-ban" onclick="_admResolveRstAppeal(\'' + escId + '\',\'ban\')">' +
+                '<i class="fas fa-ban"></i> Rejeter & Bannir' +
+              '</button>' : '') +
+          '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
 
   /* ══ SECTION RECOURS ══ */
   html += '<div class="adm-dash-title"><i class="fas fa-gavel" style="color:#7C3AED;margin-right:6px"></i>Recours de comptes bannis <span style="background:#EDE9FE;color:#7C3AED;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;margin-left:6px">' + pendingAppeals.length + '</span></div>';
@@ -22196,7 +24063,7 @@ function _admBuildReports() {
             escHtml(a.message) +
           '</div>' +
           '<div class="adm-appeal-actions">' +
-            (_admHasAction('dismiss_report') || _admHasAction('unban') ?
+            (_admHasAction('unban') ?
               '<button class="adm-btn-sm adm-btn-approve" onclick="_admResolveAppeal(\'' + escId + '\',\'accept\')">' +
                 '<i class="fas fa-check"></i> Accepter le recours' +
               '</button>' : '') +
@@ -22316,9 +24183,10 @@ function _admBuildReports() {
                 '<i class="fas ' + (isOpen ? 'fa-check-circle' : 'fa-undo') + '"></i> ' + (isOpen ? 'Fermer le ticket' : 'Rouvrir') +
               '</button>'
             ) : '') +
-            '<button onclick="_admDeleteThread(\'' + escTid + '\')" class="adm-btn-sm adm-btn-del" style="margin-left:auto">' +
-              '<i class="fas fa-trash"></i> Supprimer' +
-            '</button>' +
+            (_admIsSA() ?
+              '<button onclick="_admDeleteThread(\'' + escTid + '\')" class="adm-btn-sm adm-btn-del" style="margin-left:auto">' +
+                '<i class="fas fa-trash"></i> Supprimer' +
+              '</button>' : '') +
             (_admHasAction('warn_user') ? (
               '<button onclick="_admWarnUser(\'' + escEmail + '\')" class="adm-btn-sm adm-btn-warn">' +
                 '<i class="fas fa-triangle-exclamation"></i> Avertir' +
@@ -22374,8 +24242,73 @@ function _admBuildReports() {
   return html;
 }
 
+/* ── Lever une restriction depuis le panel admin ── */
+function _admLiftRestriction(email) {
+  if (!_adminUser || !_admHasAction('unban')) { showToast('Accès non autorisé', 'err'); return; }
+  if (!confirm('Lever la restriction du compte ' + email + ' ?')) return;
+  _gwLiftRestriction(email, _adminUser.email);
+  _admLog('LIFT_RESTRICTION', email);
+  showToast('Restriction levée pour ' + email + ' ✓', 'ok');
+  _admRender();
+}
+
+/* ── Appliquer une restriction manuellement (admin) ── */
+function _admApplyManualRestriction(email, nom) {
+  if (!_adminUser || !_admHasAction('ban')) { showToast('Accès non autorisé', 'err'); return; }
+  var reason = prompt('Motif de la restriction manuelle pour ' + email + ' :');
+  if (!reason || !reason.trim()) return;
+  _gwApplyRestriction(email, nom || email.split('@')[0], 'manual', reason.trim(), _adminUser.email);
+  _admLog('MANUAL_RESTRICT', email + ' · ' + reason);
+  showToast('Restriction appliquée pour ' + email + ' ✓', 'ok');
+  _admRender();
+}
+
+/* ── Résoudre un recours de restriction ── */
+function _admResolveRstAppeal(id, action) {
+  if (!_adminUser) return;
+  if (action === 'accept' && !_admHasAction('unban'))          { showToast('Non autorisé', 'err'); return; }
+  if (action === 'reject' && !_admHasAction('dismiss_report')) { showToast('Non autorisé', 'err'); return; }
+  if (action === 'ban'    && !_admHasAction('ban'))            { showToast('Non autorisé', 'err'); return; }
+
+  var appeals = _gwGetRestrictionAppeals();
+  var appeal  = appeals.find(function(a){ return a.id === id; });
+  if (!appeal) return;
+
+  appeal.status     = (action === 'accept') ? 'accepted' : 'rejected';
+  appeal.resolvedAt = new Date().toISOString();
+  appeal.resolvedBy = _adminUser.email;
+  _gwSaveRestrictionAppeals(appeals);
+
+  if (action === 'accept') {
+    /* Lever la restriction */
+    _gwLiftRestriction(appeal.email, _adminUser.email);
+    _admLog('ACCEPT_RST_APPEAL', appeal.email);
+    showToast('Recours accepté — restriction levée ✓', 'ok');
+  } else if (action === 'ban') {
+    /* Maintenir la restriction + bannir */
+    _admLog('REJECT_RST_APPEAL_BAN', appeal.email);
+    _admBanUser(appeal.email);  /* ouvre modal de ban */
+  } else {
+    /* Rejeter — notifier l'utilisateur */
+    try {
+      var notif = {
+        id: 'rst_rej_' + Date.now(), type: 'restriction_rejected', at: Date.now(), unread: true,
+        msg: '❌ Votre recours de restriction a été examiné et rejeté. La restriction reste en vigueur. Veuillez respecter les règles de la communauté.',
+        fromUser: null
+      };
+      var notifs = getNotifs(appeal.email);
+      notifs.unshift(notif);
+      saveNotifs(appeal.email, notifs);
+    } catch(e) {}
+    _admLog('REJECT_RST_APPEAL', appeal.email);
+    showToast('Recours rejeté', 'ok');
+    _admRender();
+  }
+}
+
 /* ── Actions signalements ── */
 function _admDismissReport(rid, reporterEmail) {
+  if (!_adminUser || !_admHasAction('dismiss_report')) { showToast('Accès non autorisé', 'err'); return; }
   var key = 'gw_reports_' + reporterEmail;
   try {
     var reps = JSON.parse(localStorage.getItem(key) || '[]');
@@ -22398,9 +24331,21 @@ function _admDismissReport(rid, reporterEmail) {
 }
 
 function _admWarnUser(email) {
+  if (!_adminUser || !_admHasAction('warn_user')) { showToast('Accès non autorisé', 'err'); return; }
   /* En production : notification push / email. En démo : toast + log */
   _admLog('WARN', email);
-  showToast('Avertissement enregistré pour ' + email, 'ok');
+  /* Envoie une notification in-app à l'utilisateur */
+  try {
+    var warnNotif = {
+      id: 'warn_' + Date.now(), type: 'warning', at: Date.now(), unread: true,
+      msg: '⚠️ Un administrateur a émis un avertissement sur votre compte. Veuillez respecter les règles de la communauté.',
+      fromUser: { nom: 'Geniwork Admin', email: 'admin@geniwork.app' }
+    };
+    var notifs = getNotifs(email);
+    notifs.unshift(warnNotif);
+    saveNotifs(email, notifs);
+  } catch(e) {}
+  showToast('Avertissement envoyé à ' + email + ' ✓', 'ok');
 }
 
 /* ══════════════════════════════════════════
@@ -22441,7 +24386,10 @@ function _admBuildUsers(search) {
       /* Badge actif sur ce profil */
       var hasBadge   = profile && profile.badgeType;
       var badgeLabel = hasBadge
-        ? (profile.badgeType === 'premium' ? '👑 Premium' : '✅ Vérifié')
+        ? (profile.badgeType === 'premium' ? '👑 Premium' : profile.badgeType === 'certified' ? '🟢 Certifié' : '✅ Vérifié')
+        : '';
+      var badgeTagClass = hasBadge
+        ? (profile.badgeType === 'premium' ? 'adm-tag-gold' : profile.badgeType === 'certified' ? 'adm-tag-green' : 'adm-tag-blue')
         : '';
       var safeEmail  = u.email.replace(/'/g,"\\'");
 
@@ -22456,23 +24404,33 @@ function _admBuildUsers(search) {
           '</div>' +
           '<div class="adm-user-tags">' +
             (banned ? '<span class="adm-tag adm-tag-banned">Banni</span>' : '<span class="adm-tag adm-tag-active">Actif</span>') +
-            (hasBadge ? '<span class="adm-tag ' + (profile.badgeType === 'premium' ? 'adm-tag-gold' : 'adm-tag-blue') + '">' + badgeLabel + '</span>' : '') +
+            (hasBadge ? '<span class="adm-tag ' + badgeTagClass + '">' + badgeLabel + '</span>' : '') +
             (role === 'Super Admin' ? '<span class="adm-tag adm-tag-super">Super Admin</span>' : '') +
             (role && role !== 'Super Admin' ? '<span class="adm-tag adm-tag-admin">' + escHtml(role) + '</span>' : '') +
             (u.loginMethod === 'google' ? '<span class="adm-tag adm-tag-google"><i class="fab fa-google"></i> Google</span>' : '') +
             (u.verified ? '' : '<span class="adm-tag adm-tag-pending">Non vérifié</span>') +
+            (_gwIsRestricted(u.email) ? '<span class="adm-tag adm-tag-restricted">⚠️ Restreint</span>' : '') +
           '</div>' +
           '<div class="adm-user-actions">' +
             (banned
               ? (_admHasAction('unban') ? '<button class="adm-btn-sm adm-btn-unban" onclick="_admUnbanUser(\'' + safeEmail + '\')"><i class="fas fa-unlock"></i> Débannir</button>' : '')
               : (_admHasAction('ban')   ? '<button class="adm-btn-sm adm-btn-ban"   onclick="_admBanUser(\'' + safeEmail + '\')"><i class="fas fa-ban"></i> Bannir</button>' : '')) +
             (_admHasAction('delete_user') ? '<button class="adm-btn-sm adm-btn-del" onclick="_admDeleteUser(\'' + safeEmail + '\')"><i class="fas fa-trash"></i> Supprimer</button>' : '') +
+            (_admIsSA() && !hasBadge ? '<button class="adm-btn-sm adm-btn-certify" onclick="_admCertifyUser(\'' + safeEmail + '\')"><i class="fas fa-certificate"></i> Certifier</button>' : '') +
             (hasBadge && _admHasAction('approve_badge')
               ? '<button class="adm-btn-sm adm-btn-revoke-badge" onclick="_admRevokeBadge(\'' + safeEmail + '\')"><i class="fas fa-shield-xmark"></i> Retirer badge</button>'
               : '') +
             (_admIsSA() && !role ? '<button class="adm-btn-sm adm-btn-promote" onclick="_admOpenPromote(\'' + safeEmail + '\',\'' + escHtml(u.nom||'').replace(/'/g,"\\'") + '\')"><i class="fas fa-user-tie"></i> Nommer admin</button>' : '') +
             (_admIsSA() && role && role !== 'Super Admin' ? '<button class="adm-btn-sm adm-btn-revoke" onclick="_admRevokeAdmin(\'' + safeEmail + '\')"><i class="fas fa-user-xmark"></i> Retirer admin</button>' : '') +
+            (_admHasAction('ban') && !_gwIsRestricted(u.email) && !banned ?
+              '<button class="adm-btn-sm" style="background:#FFF7ED;color:#EA580C;border:1px solid #FED7AA" onclick="_admApplyManualRestriction(\'' + safeEmail + '\',\'' + escHtml(u.nom||'').replace(/'/g,"\\'") + '\')"><i class="fas fa-circle-minus"></i> Restreindre</button>' : '') +
+            (_admHasAction('unban') && _gwIsRestricted(u.email) ?
+              '<button class="adm-btn-sm adm-btn-lift" onclick="_admLiftRestriction(\'' + safeEmail + '\')"><i class="fas fa-unlock"></i> Lever restriction</button>' : '') +
           '</div>' +
+          (_gwIsRestricted(u.email) ?
+            '<div style="background:#FFF7ED;border-top:1px solid #FED7AA;padding:6px 12px;font-size:11px;font-weight:700;color:#EA580C">' +
+              '<i class="fas fa-circle-exclamation" style="margin-right:5px"></i>Compte restreint · ' + escHtml((_gwGetActiveRestriction(u.email) || {}).reason || '') +
+            '</div>' : '') +
         '</div>';
     });
   }
@@ -22493,6 +24451,7 @@ function _gwSaveAppeals(list) { localStorage.setItem('gw_ban_appeals', JSON.stri
 /* ── Ouvrir modal de sanction ── */
 var _admBanType = 'temp';
 function _admBanUser(email) {
+  if (!_adminUser || !_admHasAction('ban')) { showToast('Accès non autorisé', 'err'); return; }
   var users = getUsers();
   var u = users.find(function(x){ return x.email.toLowerCase() === email.toLowerCase(); });
   var nom = u ? (u.nom || email) : email;
@@ -22619,7 +24578,8 @@ function _admConfirmBan(email) {
 }
 
 /* ── Débannir ── */
-function _admUnbanUser(email) {
+function _admUnbanUser(email, _force) {
+  if (!_force && (!_adminUser || !_admHasAction('unban'))) { showToast('Accès non autorisé', 'err'); return; }
   var bans = _admGetBans().filter(function(b){ return b.email.toLowerCase() !== email.toLowerCase(); });
   _admSaveBans(bans);
   /* Notifier l'utilisateur */
@@ -22636,6 +24596,7 @@ function _admUnbanUser(email) {
 
 /* ── Supprimer un compte ── */
 function _admDeleteUser(email) {
+  if (!_adminUser || !_admHasAction('delete_user')) { showToast('Accès non autorisé', 'err'); return; }
   var sa = _admGetSuperAdmin();
   if (sa && sa.email.toLowerCase() === email.toLowerCase()) {
     showToast('Impossible de supprimer le Super Admin', 'err'); return;
@@ -22709,6 +24670,7 @@ function _admSavePromote(email, nom) {
 
 /* ── Approuver une demande d'accès ── */
 function _admApproveRequest(id) {
+  if (!_adminUser || !_admIsSA()) { showToast('Réservé au Super Admin', 'err'); return; }
   var reqs = _admGetRequests();
   var req  = reqs.find(function(r){ return r.id === id; });
   if (!req) return;
@@ -22741,6 +24703,7 @@ function _admApproveRequest(id) {
 
 /* ── Rejeter une demande d'accès ── */
 function _admRejectRequest(id) {
+  if (!_adminUser || !_admIsSA()) { showToast('Réservé au Super Admin', 'err'); return; }
   if (!confirm('Refuser cette demande d\'accès ?')) return;
   var reqs = _admGetRequests();
   var req  = reqs.find(function(r){ return r.id === id; });
@@ -22827,6 +24790,7 @@ function _admChangeRole(email) {
 
 /* ── Retirer le rôle admin ── */
 function _admRevokeAdmin(email) {
+  if (!_adminUser || !_admIsSA()) { showToast('Réservé au Super Admin', 'err'); return; }
   if (!confirm('Retirer les droits d\'administration à ' + email + ' ?')) return;
   _admSaveAdmins(_admGetAdmins().filter(function(a){ return a.email.toLowerCase() !== email.toLowerCase(); }));
   _admLog('REVOKE', email);
@@ -23035,6 +24999,7 @@ function _admViewBadgeProfile(email) {
 
 /* ── Approuver un badge ── */
 function _admApproveBadge(id) {
+  if (!_adminUser || !_admHasAction('approve_badge')) { showToast('Accès non autorisé', 'err'); return; }
   var reqs = _admGetBadgeReqs();
   var idx  = reqs.findIndex(function(r){ return r.id === id; });
   if (idx === -1) return;
@@ -23081,10 +25046,11 @@ function _admApproveBadge(id) {
 
 /* ── Retirer un badge d'un utilisateur (avec motif) ── */
 function _admRevokeBadge(email) {
+  if (!_adminUser || !_admHasAction('approve_badge')) { showToast('Accès non autorisé', 'err'); return; }
   var profile = loadUserProfile(email) || {};
   if (!profile.badgeType) { showToast('Cet utilisateur n\'a aucun badge actif', 'err'); return; }
 
-  var badgeLabel = profile.badgeType === 'premium' ? 'Premium 👑' : 'Vérifié ✅';
+  var badgeLabel = profile.badgeType === 'premium' ? 'Premium 👑' : profile.badgeType === 'certified' ? 'Certifié 🟢' : 'Vérifié ✅';
   var motif = prompt(
     'Retirer le badge ' + badgeLabel + ' de ' + email + '\n\nMotif du retrait (obligatoire) :'
   );
@@ -23147,8 +25113,58 @@ function _admRevokeBadge(email) {
   _admRender();
 }
 
+/* ══════════════════════════════════════════════════════════════
+   CERTIFICATION DIRECTE — Réservée au Fondateur / Super Admin
+   Attribue le badge vert "Certifié" sans demande préalable
+══════════════════════════════════════════════════════════════ */
+function _admCertifyUser(email) {
+  if (!_admIsSA()) { showToast('Action réservée au fondateur', 'err'); return; }
+
+  var profile = loadUserProfile(email) || {};
+  var u = getUsers().find(function(x){ return x.email === email; });
+  var nom = (u && u.nom) ? u.nom : email;
+
+  if (profile.badgeType === 'certified') {
+    showToast('Ce compte est déjà certifié', 'err'); return;
+  }
+
+  /* Confirmation */
+  if (!confirm('Certifier le compte de ' + nom + ' (' + email + ') ?\n\nUn badge vert Certifié sera affiché sur son profil.')) return;
+
+  /* Applique la certification */
+  profile.badgeType         = 'certified';
+  profile.badgeStatus       = 'approved';
+  profile.badgeCertifiedBy  = _adminUser ? _adminUser.email : 'founder';
+  profile.badgeCertifiedAt  = new Date().toISOString();
+  saveUserProfile(email, profile);
+
+  /* Notification à l'utilisateur */
+  var notif = {
+    id:       genNotifId(),
+    type:     'badge_approved',
+    msg:      '🟢 Félicitations ! Votre compte a été certifié par Geniwork. Un badge vert apparaît maintenant sur votre profil.',
+    at:       Date.now(),
+    time:     'À l\'instant',
+    unread:   true,
+    fromUser: null
+  };
+  try {
+    var notifs = getNotifs(email);
+    notifs.unshift(notif);
+    saveNotifs(email, notifs);
+    if (_currentUser && _currentUser.email === email) {
+      renderNotifs(); updateNotifBadge();
+    }
+  } catch(e) {}
+
+  _admLog('CERTIFY_USER', email);
+  showToast('🟢 ' + nom + ' est maintenant certifié !', 'ok');
+  _admRender();
+}
+
 /* ── Refuser un badge ── */
 function _admRejectBadge(id) {
+  if (!_adminUser || !_admHasAction('approve_badge')) { showToast('Accès non autorisé', 'err'); return; }
   var reqs = _admGetBadgeReqs();
   var idx  = reqs.findIndex(function(r){ return r.id === id; });
   if (idx === -1) return;
@@ -23246,8 +25262,12 @@ function _admBuildTeam() {
   if (!admins.length) {
     html += '<div class="adm-empty" style="padding:12px"><i class="fas fa-user-plus"></i>Aucun administrateur délégué</div>';
   } else {
+    var _memberRoleColors = { 'Admin':'#2563EB', 'Modérateur':'#0891B2', 'Éditeur':'#059669', 'Support':'#D97706' };
+    var _memberRoleIcons  = { 'Admin':'fa-user-tie', 'Modérateur':'fa-flag', 'Éditeur':'fa-pen-nib', 'Support':'fa-headset' };
     admins.forEach(function(a) {
-      html += _admMemberCard(a.email, a.nom, a.role, '#2563EB', 'fa-user-tie', isSuperAdmin, true);
+      var mc = _memberRoleColors[a.role] || '#2563EB';
+      var mi = _memberRoleIcons[a.role]  || 'fa-user-tie';
+      html += _admMemberCard(a.email, a.nom, a.role, mc, mi, isSuperAdmin, true);
     });
   }
   html += '</div>';
@@ -23813,6 +25833,9 @@ function _gwSubmitAppeal(email, source) {
 /* ── Résoudre un recours (admin) ── */
 function _admResolveAppeal(id, action) {
   /* action : 'accept' | 'reject' | 'extend' */
+  if (!_adminUser) { showToast('Non autorisé', 'err'); return; }
+  if (action === 'accept' && !_admHasAction('unban'))          { showToast('Action non autorisée pour votre rôle', 'err'); return; }
+  if (action === 'reject' && !_admHasAction('dismiss_report')) { showToast('Action non autorisée pour votre rôle', 'err'); return; }
   var appeals = _gwGetAppeals();
   var appeal  = appeals.find(function(a){ return a.id === id; });
   if (!appeal) return;
@@ -23821,8 +25844,8 @@ function _admResolveAppeal(id, action) {
   appeal.resolvedBy = _adminUser ? _adminUser.email : 'admin';
   _gwSaveAppeals(appeals);
   if (action === 'accept') {
-    /* Lever le ban */
-    _admUnbanUser(appeal.email);
+    /* Lever le ban (force=true car la permission a déjà été vérifiée ci-dessus) */
+    _admUnbanUser(appeal.email, true);
     showToast('Recours accepté — compte réactivé ✓', 'ok');
   } else {
     /* Notifier le refus */
@@ -24294,6 +26317,7 @@ function _admDeleteOfficialPost(id) {
 
 /* ── Envoyer une notification broadcast ── */
 function _admSendNotif() {
+  if (!_adminUser || !_admHasAction('send_notif')) { showToast('Accès non autorisé', 'err'); return; }
   var target = (document.getElementById('adm-notif-target') || {}).value || 'all';
   var title  = _gwSanitize((document.getElementById('adm-notif-title') || {}).value || '', 200).trim();
   var body   = _gwSanitize((document.getElementById('adm-notif-body') || {}).value || '', 500).trim();
@@ -24471,7 +26495,7 @@ function _buildOfficialCard(p) {
           '<div class="post-video-play-ico"><i class="fas fa-play"></i></div>' +
         '</div>' +
         /* Badge son coupé */
-        '<div class="post-video-muted-badge" id="off-fvm-' + p.id + '">' +
+        '<div class="post-video-muted-badge" id="off-fvm-' + p.id + '" onclick="event.stopPropagation();_gwFeedToggleMute(\'' + p.id + '\',\'off-fv-\',\'off-fvm-\')">' +
           '<i class="fas fa-volume-mute"></i>' +
         '</div>' +
         /* Badge vues */
@@ -24958,6 +26982,12 @@ function _checkDMInbox() {
     inbox.forEach(function(entry) {
       if (!entry.fromEmail) return;
 
+      /* ── Vérifie si cette conv a déjà été lue (timestamp local) ──
+         Évite le faux "non lu" quand Firebase restaure une ancienne entrée inbox */
+      var _readKey = 'gw_dmread_' + _currentUser.email + '_' + _gwFbKey(entry.fromEmail);
+      var _readTs  = parseInt(localStorage.getItem(_readKey) || '0');
+      if (_readTs && entry.at && entry.at <= _readTs) return; /* déjà lu → ignorer */
+
       var existing = DEMO_CONVERSATIONS.find(function(c) {
         return !c.isGroup && c.email === entry.fromEmail;
       });
@@ -25109,8 +27139,13 @@ function _mkCheckExpired() {
 function _mkOpenCreate() {
   if (!_currentUser) { showToast('Connectez-vous pour vendre', 'err'); return; }
   if (!_mkCanPublish(_currentUser.email)) {
-    var plan = _mkGetUserPlanKey(_currentUser.email);
-    showToast('Limite atteinte (' + (_MK_PLAN_LIMITS[plan]||_MK_PLAN_LIMITS.free).maxListings + ' annonces max). Passez Premium !', 'err');
+    var _mkPlan = _mkGetUserPlanKey(_currentUser.email);
+    var _mkMax  = (_MK_PLAN_LIMITS[_mkPlan] || _MK_PLAN_LIMITS.free).maxListings;
+    _showPlanLimitModal(
+      'Limite d\'annonces atteinte',
+      'Le plan Gratuit autorise ' + _mkMax + ' annonce(s) active(s) maximum dans le marketplace. Passez Premium pour publier sans limite.',
+      'mk_listings'
+    );
     return;
   }
   _mkPickedImages = [];
@@ -26550,7 +28585,7 @@ function _collabRender() {
         : '') +
       '<div class="collab-card-footer">' +
         '<div class="collab-card-poster">' +
-          '<div class="collab-poster-av">' + escHtml((c.postedByNom || '?').slice(0,2).toUpperCase()) + '</div>' +
+          getAvatarHtml(c.postedBy || null, c.postedByNom || '?', 'xs') +
           '<span>' + escHtml(c.postedByNom) + '</span>' +
         '</div>' +
         '<div class="collab-card-right">' +
@@ -27037,7 +29072,7 @@ function _collabOpenDetail(id) {
 
     /* Poster */
     '<div style="display:flex;align-items:center;gap:10px;padding:12px;background:#F8FAFC;border-radius:12px;margin:14px 0">' +
-      '<div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px">' + escHtml((c.postedByNom || '?').slice(0,2).toUpperCase()) + '</div>' +
+      getAvatarHtml(c.postedBy || null, c.postedByNom || '?', 'md') +
       '<div>' +
         '<div style="font-size:13px;font-weight:700;color:#0F172A">' + escHtml(c.postedByNom) + '</div>' +
         '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(c.date) + ' · ' + (c.applicants || []).length + ' candidat(s)</div>' +
@@ -27698,6 +29733,45 @@ function _admBuildSecurity() {
       '</div>' +
     '</div>' +
 
+    /* ══ ANALYSE ══ */
+    '<div style="background:#fff;border:1.5px solid #E2E8F0;border-radius:14px;padding:14px;margin-bottom:14px">' +
+      '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">' +
+        '<i class="fas fa-magnifying-glass" style="margin-right:5px;color:#6366F1"></i>Analyse de l\'application' +
+      '</div>' +
+      '<button onclick="_secRunAnalysis()" id="sec-analyse-btn" style="width:100%;padding:12px;background:linear-gradient(135deg,#6366F1,#7C3AED);color:#fff;border:none;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:10px">' +
+        '<i class="fas fa-search" style="margin-right:6px"></i>Lancer l\'analyse complète' +
+      '</button>' +
+      '<div id="sec-analysis-result"></div>' +
+    '</div>' +
+
+    /* ══ RÉPARATION AUTOMATIQUE ══ */
+    (function() {
+      var mCfg = _admGetPlansConfig();
+      var isOn = !!mCfg.maintenanceMode;
+      var mBtnStyle = isOn
+        ? 'flex:1;min-width:140px;padding:11px 14px;background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer'
+        : 'flex:1;min-width:140px;padding:11px 14px;background:#F1F5F9;color:#64748B;border:1.5px solid #CBD5E1;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer';
+      var mBtnLabel = isOn
+        ? '<i class="fas fa-circle-check" style="margin-right:6px"></i>Maintenance ACTIVE — Désactiver'
+        : '<i class="fas fa-triangle-exclamation" style="margin-right:6px"></i>Mode maintenance';
+      return '<div style="background:#fff;border:1.5px solid #E2E8F0;border-radius:14px;padding:14px;margin-bottom:14px">' +
+        '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">' +
+          '<i class="fas fa-wrench" style="margin-right:5px;color:#EA580C"></i>Réparation automatique' +
+        '</div>' +
+        (isOn ? '<div style="background:#DCFCE7;border-radius:8px;padding:8px 12px;font-size:12px;color:#15803D;font-weight:600;margin-bottom:10px"><i class="fas fa-circle-check" style="margin-right:5px"></i>Mode maintenance actif — bannière affichée aux utilisateurs</div>' : '') +
+        '<div id="sec-repair-status" style="font-size:12px;color:#64748B;margin-bottom:10px">Cliquez sur Réparer pour analyser et corriger automatiquement les problèmes détectés.</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+          '<button onclick="_secAutoRepair()" id="sec-repair-btn" style="flex:1;min-width:140px;padding:11px 14px;background:linear-gradient(135deg,#EA580C,#DC2626);color:#fff;border:none;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer">' +
+            '<i class="fas fa-screwdriver-wrench" style="margin-right:6px"></i>Réparer maintenant' +
+          '</button>' +
+          '<button onclick="_secMaintenanceMode()" style="' + mBtnStyle + '">' +
+            mBtnLabel +
+          '</button>' +
+        '</div>' +
+        '<div id="sec-repair-result" style="margin-top:10px"></div>' +
+      '</div>';
+    })() +
+
     /* Actions */
     '<div style="background:#fff;border:1.5px solid #E2E8F0;border-radius:14px;padding:14px;margin-bottom:14px">' +
       '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Actions</div>' +
@@ -27716,8 +29790,13 @@ function _admBuildSecurity() {
 
     /* Journal d\'événements */
     '<div style="background:#fff;border:1.5px solid #E2E8F0;border-radius:14px;padding:14px">' +
-      '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">' +
-        '<i class="fas fa-list" style="margin-right:5px"></i>Journal d\'événements temps réel' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">' +
+        '<div style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">' +
+          '<i class="fas fa-list" style="margin-right:5px"></i>Journal d\'événements temps réel' +
+        '</div>' +
+        '<button onclick="_secClearAllEvents()" style="padding:5px 11px;background:#FEF2F2;color:#DC2626;border:1px solid #FECACA;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer">' +
+          '<i class="fas fa-trash-can" style="margin-right:4px"></i>Tout effacer' +
+        '</button>' +
       '</div>' +
       '<div id="sec-event-log">' +
         '<div style="text-align:center;padding:24px;color:#94A3B8"><i class="fas fa-spinner fa-spin" style="font-size:20px"></i></div>' +
@@ -27725,6 +29804,263 @@ function _admBuildSecurity() {
     '</div>' +
 
   '</div>';
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ANALYSE COMPLÈTE DE L'APPLICATION
+══════════════════════════════════════════════════════════════ */
+function _secRunAnalysis() {
+  var btn = document.getElementById('sec-analyse-btn');
+  var res = document.getElementById('sec-analysis-result');
+  if (!res) return;
+
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right:6px"></i>Analyse en cours…'; }
+
+  setTimeout(function() {
+    var checks = [];
+
+    /* 1. Firebase */
+    checks.push({ label: 'Connexion Firebase',   ok: !!_gwFbReady,              detail: _gwFbReady ? 'Base de données connectée et synchronisée' : 'Firebase non connecté — données locales uniquement' });
+
+    /* 2. Storage */
+    checks.push({ label: 'Firebase Storage',     ok: !!_gwFbStorage,            detail: _gwFbStorage ? 'Storage actif — médias accessibles' : 'Storage inactif — uploads désactivés' });
+
+    /* 3. Utilisateurs */
+    var users    = getUsers();
+    var bans     = _admGetBans ? _admGetBans() : [];
+    var bannedPct = users.length > 0 ? Math.round(bans.length / users.length * 100) : 0;
+    var usersOk  = bannedPct < 20;
+    checks.push({ label: 'Base utilisateurs',    ok: usersOk,                   detail: users.length + ' inscrits · ' + bans.length + ' banni(s) (' + bannedPct + '%)' + (usersOk ? '' : ' — taux élevé') });
+
+    /* 4. Signalements en attente */
+    var reports  = _admGetAllReports ? _admGetAllReports().filter(function(r){ return r.status === 'pending'; }) : [];
+    var repsOk   = reports.length < 10;
+    checks.push({ label: 'Signalements en attente', ok: repsOk,                 detail: reports.length + ' signalement(s) non traité(s)' + (repsOk ? '' : ' — intervention requise') });
+
+    /* 5. Espace localStorage */
+    var totalBytes = 0;
+    try { for (var k in localStorage) { if (k.indexOf('gw_')===0) totalBytes += (localStorage.getItem(k)||'').length; } } catch(e){}
+    var totalKb  = totalBytes / 1024;
+    var storOk   = totalKb < 3000;
+    checks.push({ label: 'Espace données local',  ok: storOk,                   detail: totalKb.toFixed(0) + ' Ko utilisés' + (storOk ? ' — espace suffisant' : ' — stockage saturé, nettoyage recommandé') });
+
+    /* 6. Plans config */
+    var cfg      = _admGetPlansConfig();
+    var plansOk  = cfg.premiumEnabled || cfg.businessEnabled;
+    checks.push({ label: 'Plans d\'abonnement',   ok: plansOk,                  detail: (cfg.premiumEnabled ? 'Premium ✓' : 'Premium ✗') + ' · ' + (cfg.businessEnabled ? 'Business ✓' : 'Business ✗') });
+
+    /* 7. Badges */
+    checks.push({ label: 'Système de badges',    ok: !!cfg.badgeEnabled,        detail: cfg.badgeEnabled ? 'Système actif' : 'Désactivé par le fondateur' });
+
+    /* 8. Intégrité données critiques */
+    var intOk = true;
+    try {
+      var usersRaw = localStorage.getItem('gw_users');
+      if (usersRaw) JSON.parse(usersRaw);
+    } catch(e) { intOk = false; }
+    checks.push({ label: 'Intégrité données',    ok: intOk,                     detail: intOk ? 'Données JSON valides' : 'Corruption détectée dans gw_users' });
+
+    /* Rendu */
+    var passed = checks.filter(function(c){ return c.ok; }).length;
+    var failed = checks.length - passed;
+    var scoreColor = failed === 0 ? '#16A34A' : failed <= 2 ? '#CA8A04' : '#DC2626';
+    var scoreLabel = failed === 0 ? 'Aucun problème détecté' : failed + ' problème(s) détecté(s)';
+
+    var html =
+      '<div style="background:' + (failed===0?'#F0FDF4':failed<=2?'#FEFCE8':'#FEF2F2') + ';border-radius:10px;padding:12px;margin-bottom:10px;display:flex;align-items:center;gap:10px">' +
+        '<div style="font-size:24px;font-weight:900;color:' + scoreColor + '">' + passed + '/' + checks.length + '</div>' +
+        '<div>' +
+          '<div style="font-size:13px;font-weight:700;color:' + scoreColor + '">' + scoreLabel + '</div>' +
+          '<div style="font-size:11px;color:#64748B">' + new Date().toLocaleString('fr-FR') + '</div>' +
+        '</div>' +
+      '</div>' +
+      checks.map(function(c) {
+        return '<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px;border-bottom:1px solid #F1F5F9">' +
+          '<div style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:' + (c.ok?'#DCFCE7':'#FEE2E2') + ';display:flex;align-items:center;justify-content:center;margin-top:1px">' +
+            '<i class="fas ' + (c.ok?'fa-check':'fa-xmark') + '" style="font-size:10px;color:' + (c.ok?'#16A34A':'#DC2626') + '"></i>' +
+          '</div>' +
+          '<div style="flex:1">' +
+            '<div style="font-size:12.5px;font-weight:700;color:#0F172A">' + c.label + '</div>' +
+            '<div style="font-size:11px;color:#64748B">' + c.detail + '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+    res.innerHTML = html;
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-search" style="margin-right:6px"></i>Relancer l\'analyse'; }
+
+    /* Met à jour aussi le statut de réparation */
+    var repStatus = document.getElementById('sec-repair-status');
+    if (repStatus) {
+      repStatus.innerHTML = failed === 0
+        ? '<span style="color:#16A34A"><i class="fas fa-circle-check" style="margin-right:4px"></i>Aucun problème — système sain.</span>'
+        : '<span style="color:#EA580C"><i class="fas fa-triangle-exclamation" style="margin-right:4px"></i>' + failed + ' problème(s) détecté(s). Cliquez sur Réparer pour corriger automatiquement.</span>';
+    }
+  }, 800);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   RÉPARATION AUTOMATIQUE
+══════════════════════════════════════════════════════════════ */
+function _secAutoRepair() {
+  var btn = document.getElementById('sec-repair-btn');
+  var res = document.getElementById('sec-repair-result');
+  if (!res) return;
+
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right:6px"></i>Réparation…'; }
+
+  setTimeout(function() {
+    /* ── Évaluer le niveau de gravité ── */
+    var reports = _admGetAllReports ? _admGetAllReports().filter(function(r){ return r.status === 'pending'; }) : [];
+    var bans    = _admGetBans ? _admGetBans() : [];
+    var users   = getUsers();
+    var bannedPct = users.length > 0 ? Math.round(bans.length / users.length * 100) : 0;
+
+    /* Vérifier intégrité */
+    var intOk = true;
+    try { var raw = localStorage.getItem('gw_users'); if (raw) JSON.parse(raw); } catch(e) { intOk = false; }
+
+    /* Score de gravité */
+    var gravity = 0;
+    if (!_gwFbReady)        gravity += 3;
+    if (!intOk)             gravity += 4;
+    if (bannedPct >= 30)    gravity += 2;
+    if (reports.length > 20) gravity += 2;
+
+    /* ── SEUIL CRITIQUE → MODE MAINTENANCE REQUIS ── */
+    if (gravity >= 5) {
+      res.innerHTML =
+        '<div style="background:#FEF2F2;border:2px solid #FCA5A5;border-radius:12px;padding:14px;margin-top:8px">' +
+          '<div style="font-size:13px;font-weight:800;color:#DC2626;margin-bottom:6px">' +
+            '<i class="fas fa-triangle-exclamation" style="margin-right:6px"></i>MAINTENANCE REQUISE' +
+          '</div>' +
+          '<div style="font-size:12px;color:#7F1D1D;line-height:1.5">' +
+            'Les problèmes détectés dépassent le seuil de réparation automatique.<br>' +
+            'L\'application doit passer en <strong>mode maintenance</strong> pour intervention manuelle.' +
+          '</div>' +
+          '<button onclick="_secMaintenanceMode()" style="margin-top:10px;width:100%;padding:10px;background:#DC2626;color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">' +
+            '<i class="fas fa-power-off" style="margin-right:6px"></i>Activer le mode maintenance maintenant' +
+          '</button>' +
+        '</div>';
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-screwdriver-wrench" style="margin-right:6px"></i>Réparer maintenant'; }
+      return;
+    }
+
+    /* ── RÉPARATION AUTOMATIQUE ── */
+    var actions = [];
+
+    /* Nettoyer compteurs de rate-limit périmés */
+    var cleaned = 0;
+    try {
+      var today = new Date().toISOString().slice(0, 10);
+      for (var k in localStorage) {
+        if (k.indexOf('gw_daily_') === 0 && k.indexOf(today) === -1) {
+          localStorage.removeItem(k); cleaned++;
+        }
+      }
+      if (cleaned > 0) actions.push({ ok: true,  label: 'Compteurs périmés supprimés', detail: cleaned + ' entrée(s) nettoyée(s)' });
+    } catch(e) { actions.push({ ok: false, label: 'Nettoyage compteurs', detail: 'Erreur : ' + e.message }); }
+
+    /* Réparer JSON corrompu */
+    if (!intOk) {
+      try { localStorage.removeItem('gw_users'); actions.push({ ok: true, label: 'Données corrompues réinitialisées', detail: 'gw_users réinitialisé (utilisateurs déconnectés)' }); }
+      catch(e) { actions.push({ ok: false, label: 'Réinitialisation données', detail: 'Impossible : ' + e.message }); }
+    }
+
+    /* Vider les vieux événements de sécurité */
+    var cutoff = Date.now() - 3 * 86400000;
+    var oldEvtCount = 0;
+    try {
+      var evtsRaw = localStorage.getItem('gw_security_events');
+      if (evtsRaw) {
+        var evts = JSON.parse(evtsRaw);
+        var kept = evts.filter(function(e){ return e.at > cutoff; });
+        oldEvtCount = evts.length - kept.length;
+        if (oldEvtCount > 0) { localStorage.setItem('gw_security_events', JSON.stringify(kept)); }
+      }
+      actions.push({ ok: true, label: 'Anciens événements sécurité', detail: oldEvtCount > 0 ? oldEvtCount + ' événement(s) supprimé(s)' : 'Aucun événement à nettoyer' });
+    } catch(e) {}
+
+    /* Résultat */
+    if (actions.length === 0) {
+      actions.push({ ok: true, label: 'Système sain', detail: 'Aucune réparation nécessaire' });
+    }
+
+    res.innerHTML =
+      '<div style="background:#F0FDF4;border-radius:10px;padding:10px;margin-top:6px">' +
+        '<div style="font-size:12px;font-weight:700;color:#16A34A;margin-bottom:8px"><i class="fas fa-circle-check" style="margin-right:5px"></i>Réparation terminée — ' + actions.length + ' action(s)</div>' +
+        actions.map(function(a) {
+          return '<div style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid #DCFCE7">' +
+            '<i class="fas ' + (a.ok?'fa-check-circle':'fa-times-circle') + '" style="color:' + (a.ok?'#16A34A':'#DC2626') + ';margin-top:2px;flex-shrink:0"></i>' +
+            '<div><div style="font-size:12px;font-weight:700;color:#0F172A">' + a.label + '</div>' +
+                 '<div style="font-size:11px;color:#64748B">' + a.detail + '</div></div>' +
+          '</div>';
+        }).join('') +
+      '</div>';
+
+    _admLog('SEC_AUTO_REPAIR', actions.length + ' action(s)');
+    showToast('✅ Réparation terminée — ' + actions.length + ' action(s)', 'ok');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-screwdriver-wrench" style="margin-right:6px"></i>Réparer maintenant'; }
+  }, 1000);
+}
+
+/* ── Mode maintenance ── */
+function _secMaintenanceMode() {
+  var cfg = _admGetPlansConfig();
+  var willActivate = !cfg.maintenanceMode;
+
+  if (willActivate) {
+    if (!confirm('Activer le mode MAINTENANCE ?\n\nUne bannière rouge sera affichée à tous les utilisateurs connectés jusqu\'à désactivation.')) return;
+  }
+
+  cfg.maintenanceMode = willActivate;
+  _admSavePlansConfig(cfg);
+  _secApplyMaintenanceBanner(willActivate);
+
+  var state = willActivate ? 'activé' : 'désactivé';
+  _admLog('MAINTENANCE_MODE', state);
+  showToast('Mode maintenance ' + state + ' ✓', willActivate ? 'err' : 'ok');
+  _admRender();
+}
+
+/* ── Affiche / masque la bannière maintenance ── */
+function _secApplyMaintenanceBanner(active) {
+  var banner = document.getElementById('maintenance-banner');
+  if (!banner) return;
+  banner.style.display = active ? 'flex' : 'none';
+}
+
+/* ── Vérifie la bannière au chargement de l'app ── */
+function _secCheckMaintenanceBanner() {
+  var cfg = _admGetPlansConfig();
+  _secApplyMaintenanceBanner(!!cfg.maintenanceMode);
+}
+
+/* ── Effacer TOUS les événements du journal ── */
+function _secClearAllEvents() {
+  if (!confirm('Effacer tout le journal de sécurité ?\n\nTous les événements seront supprimés. Cette action est irréversible.')) return;
+
+  /* 1. Effacer local */
+  try { localStorage.removeItem('gw_security_events'); } catch(e) {}
+
+  /* 2. Effacer Firebase */
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/security_events').remove()
+      .then(function() {
+        showToast('Journal effacé ✓', 'ok');
+        _admLog('SEC_CLEAR_ALL_EVENTS', 'Journal complet supprimé');
+        _admSecurityListen();
+      })
+      .catch(function(err) {
+        showToast('Erreur Firebase : ' + err.message, 'err');
+      });
+  } else {
+    showToast('Journal local effacé ✓', 'ok');
+    _admLog('SEC_CLEAR_ALL_EVENTS', 'Journal local supprimé');
+    /* Met à jour le DOM directement */
+    var logEl = document.getElementById('sec-event-log');
+    if (logEl) logEl.innerHTML = '<div style="text-align:center;padding:32px;color:#94A3B8"><i class="fas fa-shield-check" style="font-size:28px;display:block;margin-bottom:8px"></i>Aucun événement enregistré</div>';
+  }
 }
 
 /* ── Effacer événements de plus de 7 jours ── */

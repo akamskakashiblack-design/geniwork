@@ -8,18 +8,62 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260579" />
+  <link rel="stylesheet" href="css/style.css?v=20260608y" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- Modération visuelle : détection canvas intégrée (sans CDN externe) -->
   <!-- Firebase SDK — Synchronisation temps réel multi-admin -->
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js"></script>
+
+  <!-- ⚡ PRÉ-CHECK SESSION — s'exécute AVANT le rendu du body
+       Si une session valide est en localStorage → masque screen-landing
+       et affiche screen-splash immédiatement (zéro flash landing page) -->
+  <script>
+  (function(){
+    try{
+      var s=JSON.parse(localStorage.getItem('gw_session')||'null');
+      if(s&&s.email&&s.expires&&Date.now()<s.expires){
+        var did=localStorage.getItem('gw_device_id');
+        if(!s.deviceId||s.deviceId===did){
+          document.documentElement.classList.add('gw-has-session');
+        }
+      }
+    }catch(e){}
+  })();
+  </script>
+  <style>
+  /* Masque la landing et affiche le splash AVANT le rendu si session valide */
+  html.gw-has-session #screen-landing { display:none!important; }
+  html.gw-has-session #screen-splash  { display:flex!important; }
+  /* Animation des points de chargement */
+  @keyframes _gwDot {
+    from { opacity:.15; transform:translateY(4px) scale(.8); }
+    to   { opacity:1;   transform:translateY(-4px) scale(1); }
+  }
+  </style>
 </head>
 <body>
+
+  <!-- ══════════════════════════════════════════
+       ÉCRAN 0 — SPLASH (session valide détectée)
+       Affiché uniquement si gw-has-session est sur <html>
+  ══════════════════════════════════════════ -->
+  <div id="screen-splash" class="screen" style="background:#060D1F;flex-direction:column;align-items:center;justify-content:center;gap:36px">
+    <div style="display:flex;flex-direction:column;align-items:center;gap:12px">
+      <img src="./img/logo princ.svg" alt="Geniwork" style="width:80px;filter:drop-shadow(0 0 24px rgba(99,102,241,.5))"/>
+      <span style="color:#fff;font-size:22px;font-weight:800;letter-spacing:1px">Geni<strong style="color:#818CF8">work</strong></span>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <div style="width:10px;height:10px;border-radius:50%;background:#6366F1;animation:_gwDot .7s ease-in-out infinite alternate"></div>
+      <div style="width:10px;height:10px;border-radius:50%;background:#818CF8;animation:_gwDot .7s .2s ease-in-out infinite alternate"></div>
+      <div style="width:10px;height:10px;border-radius:50%;background:#A5B4FC;animation:_gwDot .7s .4s ease-in-out infinite alternate"></div>
+    </div>
+  </div>
 
   <!-- ══════════════════════════════════════════
        ÉCRAN 1 — LANDING
@@ -549,6 +593,20 @@
   ══════════════════════════════════════════ -->
   <div id="screen-app" class="screen">
     <div class="phone-frame app-frame">
+
+      <!-- ── BANNIÈRE MAINTENANCE ── -->
+      <div id="maintenance-banner" style="display:none;background:linear-gradient(135deg,#DC2626,#B91C1C);color:#fff;padding:10px 16px;text-align:center;font-size:13px;font-weight:700;z-index:9999;flex-shrink:0;gap:8px;align-items:center;justify-content:center">
+        <i class="fas fa-triangle-exclamation" style="margin-right:6px"></i>
+        Maintenance en cours — L'application est temporairement limitée. Merci de votre patience.
+      </div>
+
+      <!-- ── BANNIÈRE RESTRICTION CONTENU ── -->
+      <div id="restriction-banner" style="display:none;background:linear-gradient(135deg,#EA580C,#C2410C);color:#fff;padding:10px 14px;font-size:12px;font-weight:700;z-index:9998;flex-shrink:0;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+        <span><i class="fas fa-circle-exclamation" style="margin-right:6px"></i><span id="restriction-banner-msg">Compte restreint — Publications et commentaires désactivés.</span></span>
+        <button onclick="_gwShowRestrictionAppealModal()" style="background:rgba(255,255,255,0.2);border:1.5px solid rgba(255,255,255,0.5);color:#fff;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0">
+          <i class="fas fa-gavel" style="margin-right:4px"></i>Faire un recours
+        </button>
+      </div>
 
       <!-- ── TOPBAR ── -->
       <header class="app-topbar">
@@ -1517,12 +1575,12 @@
               <div class="sub-plan-badge-current hidden" id="sub-current-free">Votre plan</div>
             </div>
             <ul class="sub-features">
-              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Publier des services</li>
-              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Acheter &amp; vendre</li>
               <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Profil basique</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Acheter &amp; vendre</li>
+              <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> Publications limitées (5/jour)</li>
               <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> Messages limités (10/jour)</li>
               <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> Photos limités (10/jour)</li>
-              <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> Documents limités (10/jour)</li>
+              <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> 3 services &amp; 3 annonces marketplace max</li>
               <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> Pas de badge vérifié</li>
               <li class="sub-feat sub-feat-no"><i class="fas fa-xmark"></i> Visibilité standard</li>
             </ul>
@@ -1548,10 +1606,10 @@
             </div>
             <ul class="sub-features">
               <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> <strong>Badge vérifié</strong> ✅</li>
-              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Plus de visibilité profil &amp; services</li>
-              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Publications mises en avant</li>
-              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Messages illimités</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Publications &amp; messages illimités</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Jusqu'à 10 services &amp; annonces illimitées</li>
               <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Photos &amp; documents illimités</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Plus de visibilité profil &amp; services</li>
               <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Statistiques avancées</li>
               <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Support prioritaire</li>
             </ul>
@@ -1576,11 +1634,11 @@
             </div>
             <ul class="sub-features">
               <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> <strong>Tout Premium inclus</strong></li>
-              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Multi-services (jusqu'à 20)</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Jusqu'à 20 services &amp; annonces illimitées</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Annonces prioritaires dans le marketplace</li>
               <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Analytics business avancés</li>
-              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Recrutement &amp; offres d'emploi</li>
               <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Publicités sponsorisées</li>
-              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Outils IA avancés</li>
+              <li class="sub-feat sub-feat-ok"><i class="fas fa-check"></i> Recrutement &amp; offres d'emploi</li>
             </ul>
             <button class="sub-cta-btn sub-cta-business" id="sub-btn-business" onclick="_subChoosePlan('business')">
               <i class="fas fa-briefcase"></i> Passer Business Pro
@@ -3414,7 +3472,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260579"></script>
+  <script src="js/app.js?v=20260608y"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">
