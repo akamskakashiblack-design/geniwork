@@ -5630,10 +5630,8 @@ function buildPostCard(post) {
     /* Style portrait (short 9:16) vs paysage (video 16:9) */
     var wrapStyle = isShrt
       ? 'position:relative;overflow:hidden;border-radius:10px;max-width:240px;margin:0 auto;aspect-ratio:9/16;background:#000'
-      : 'position:relative;overflow:hidden;border-radius:10px;background:#000';
-    var vidStyle = isShrt
-      ? 'width:100%;height:100%;object-fit:cover;display:block;pointer-events:none'
-      : 'width:100%;display:block;max-height:320px;pointer-events:none';
+      : 'position:relative;overflow:hidden;border-radius:10px;aspect-ratio:16/9;background:#000';
+    var vidStyle  = 'width:100%;height:100%;object-fit:cover;display:block;pointer-events:none';
     var typeBadge = isShrt
       ? '<span class="post-video-type-badge post-video-type-short"><i class="fas fa-mobile-screen-button"></i> SHORT</span>'
       : '<span class="post-video-type-badge post-video-type-video"><i class="fas fa-video"></i> VIDÉO</span>';
