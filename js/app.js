@@ -8754,7 +8754,7 @@ function _gwShowCameraUI() {
           '</div>' +
           /* Badge format en bas du cadre */
           '<div id="gw-cam-fmt-badge" style="position:absolute;bottom:110px;left:50%;transform:translateX(-50%);background:rgba(37,99,235,.85);color:#fff;font-size:11px;font-weight:700;padding:5px 14px;border-radius:20px;white-space:nowrap;display:flex;align-items:center;gap:6px">' +
-            '<i class="fas fa-video"></i> Vidéo 16:9 · YouTube' +
+            '<i class="fas fa-video"></i> Format Vidéo 16:9' +
           '</div>' +
           /* Conseil rotation si portrait */
           '<div id="gw-cam-rotate-hint" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.7);color:#fff;font-size:13px;font-weight:600;padding:10px 18px;border-radius:14px;white-space:nowrap;text-align:center;display:none;gap:8px;align-items:center">' +
@@ -9045,13 +9045,18 @@ function _gwOpenVideoEditor() {
   /* Init vidéo */
   var v = document.getElementById('gw-ved-vid');
   v.addEventListener('loadedmetadata', function() {
-    _ved.trim.end = v.duration;
-    var d = _vedFmt(v.duration);
-    var dl = document.getElementById('gw-ved-dur-lbl');
-    var el = document.getElementById('gw-ved-te-lbl');
-    if (dl) dl.textContent = d;
-    if (el) el.textContent = d;
+    /* Certains blobs WebM retournent Infinity — on force le seek à la fin pour obtenir la vraie durée */
+    if (!isFinite(v.duration)) {
+      v.currentTime = 1e10; /* provoque un seeked qui donne la vraie durée */
+    } else {
+      _gwVedSetDuration(v.duration);
+    }
   });
+  v.addEventListener('seeked', function() {
+    if (!isFinite(v.duration) || v.duration <= 0) return;
+    _gwVedSetDuration(v.duration);
+    v.currentTime = 0; /* rebobine au début */
+  }, { once: true });
   v.addEventListener('timeupdate', function() {
     if (!v.duration) return;
     var p = (v.currentTime / v.duration) * 100;
@@ -9209,9 +9214,22 @@ function _gwVedShowPanel(mode) {
 
 /* ── Helpers ── */
 function _vedFmt(s) {
-  if (!s || isNaN(s)) return '0:00';
-  var m = Math.floor(s/60), sec = Math.floor(s%60);
-  return m + ':' + (sec<10?'0':'') + sec;
+  if (!s || isNaN(s) || !isFinite(s) || s < 0) return '0:00';
+  var m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return m + ':' + (sec < 10 ? '0' : '') + sec;
+}
+function _gwVedSetDuration(dur) {
+  if (!dur || !isFinite(dur) || dur <= 0) return;
+  _ved.trim.end = dur;
+  var d = _vedFmt(dur);
+  var dl = document.getElementById('gw-ved-dur-lbl');
+  var el = document.getElementById('gw-ved-te-lbl');
+  if (dl) dl.textContent = d;
+  if (el) el.textContent = d;
+  /* Met aussi à jour la durée dans _pickedVideo si absente */
+  if (_pickedVideo && (!_pickedVideo.duration || _pickedVideo.duration <= 0)) {
+    _pickedVideo.duration = dur;
+  }
 }
 
 /* ── Play / Pause ── */
