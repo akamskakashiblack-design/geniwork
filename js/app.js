@@ -8449,13 +8449,112 @@ function triggerCameraVideo(type) {
 function pubOpenVideoType(type) {
   _pubVideoType = type || 'video';
   showPage('p-publish');
-  /* Surligne visuellement la ligne sélectionnée */
+  /* Surligne visuellement la ligne vidéo fusionnée */
   setTimeout(function() {
-    var rowShort = document.getElementById('pub-row-short');
     var rowVideo = document.getElementById('pub-row-video');
-    if (rowShort) rowShort.classList.toggle('pub-row-active', type === 'short');
-    if (rowVideo) rowVideo.classList.toggle('pub-row-active', type === 'video');
+    if (rowVideo) rowVideo.classList.add('pub-row-active');
   }, 100);
+}
+
+/* ── Sheet de sélection du type vidéo (Short ou Vidéo) ── */
+function _pubShowVideoTypeSheet(onChoose) {
+  var existing = document.getElementById('gw-vid-type-sheet');
+  if (existing) existing.remove();
+
+  var bg = document.createElement('div');
+  bg.id = 'gw-vid-type-sheet';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center';
+
+  bg.innerHTML =
+    '<div style="width:100%;max-width:480px;background:#fff;border-radius:24px 24px 0 0;padding:20px 20px 36px;box-shadow:0 -4px 32px rgba(0,0,0,.18)">' +
+      '<div style="width:40px;height:4px;background:#E2E8F0;border-radius:4px;margin:0 auto 20px"></div>' +
+      '<p style="font-size:15px;font-weight:700;color:#0F172A;text-align:center;margin:0 0 18px">Quel type de vidéo ?</p>' +
+      '<div style="display:flex;gap:12px">' +
+
+        /* Short */
+        '<button onclick="_pubVideoTypeChosen(\'short\')" ' +
+          'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 10px;background:#FFF1F2;border:2px solid #FECDD3;border-radius:16px;cursor:pointer">' +
+          '<div style="width:48px;height:48px;border-radius:14px;background:#E11D48;display:flex;align-items:center;justify-content:center">' +
+            '<i class="fas fa-mobile-screen-button" style="color:#fff;font-size:22px"></i>' +
+          '</div>' +
+          '<span style="font-size:14px;font-weight:700;color:#E11D48">Short</span>' +
+          '<span style="font-size:11px;color:#64748B;text-align:center;line-height:1.4">Vertical · max 3 min<br>9:16 (1080×1920)</span>' +
+        '</button>' +
+
+        /* Vidéo */
+        '<button onclick="_pubVideoTypeChosen(\'video\')" ' +
+          'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 10px;background:#EFF6FF;border:2px solid #BFDBFE;border-radius:16px;cursor:pointer">' +
+          '<div style="width:48px;height:48px;border-radius:14px;background:#2563EB;display:flex;align-items:center;justify-content:center">' +
+            '<i class="fas fa-video" style="color:#fff;font-size:20px"></i>' +
+          '</div>' +
+          '<span style="font-size:14px;font-weight:700;color:#2563EB">Vidéo</span>' +
+          '<span style="font-size:11px;color:#64748B;text-align:center;line-height:1.4">Paysage · max 10 min<br>16:9 (1920×1080)</span>' +
+        '</button>' +
+
+      '</div>' +
+      '<button onclick="document.getElementById(\'gw-vid-type-sheet\').remove()" ' +
+        'style="width:100%;margin-top:14px;padding:12px;background:none;border:none;color:#94A3B8;font-size:14px;cursor:pointer">Annuler</button>' +
+    '</div>';
+
+  /* Stocke le callback */
+  window._pubVidTypeCallback = onChoose;
+  document.body.appendChild(bg);
+
+  /* Animation entrée */
+  var sheet = bg.firstElementChild;
+  sheet.style.transform = 'translateY(100%)';
+  requestAnimationFrame(function() {
+    sheet.style.transition = 'transform .3s cubic-bezier(.32,1,.6,1)';
+    sheet.style.transform  = 'translateY(0)';
+  });
+
+  /* Ferme en cliquant le fond */
+  bg.addEventListener('click', function(e) {
+    if (e.target === bg) bg.remove();
+  });
+}
+
+function _pubVideoTypeChosen(type) {
+  var sheet = document.getElementById('gw-vid-type-sheet');
+  if (sheet) sheet.remove();
+  if (typeof window._pubVidTypeCallback === 'function') {
+    window._pubVidTypeCallback(type);
+    window._pubVidTypeCallback = null;
+  }
+}
+
+/* ── Galerie vidéo fusionnée : demande le type d'abord ── */
+function _pubPickVideoGallery() {
+  _pubShowVideoTypeSheet(function(type) {
+    triggerVideoGallery(type);
+  });
+}
+
+/* ── Caméra vidéo fusionnée : ouvre la caméra avec toggle Short/Vidéo ── */
+function _pubOpenVideoCamera() {
+  _pubVideoType = _pubVideoType === 'photo' ? 'short' : (_pubVideoType || 'short');
+  _camMode = 'video';
+  _gwOpenCamera();
+}
+
+/* ── Bascule le mode (Short ↔ Vidéo) depuis l'overlay caméra ── */
+function _gwCamSetMode(type) {
+  _pubVideoType = type;
+  /* Met à jour les boutons du toggle */
+  var btnShort = document.getElementById('gw-cam-mode-short');
+  var btnVideo = document.getElementById('gw-cam-mode-video');
+  if (btnShort) {
+    btnShort.style.background    = type === 'short' ? '#E11D48' : 'rgba(255,255,255,.18)';
+    btnShort.style.color         = '#fff';
+    btnShort.style.border        = type === 'short' ? '2px solid #E11D48' : '2px solid rgba(255,255,255,.3)';
+    btnShort.style.fontWeight    = type === 'short' ? '700' : '500';
+  }
+  if (btnVideo) {
+    btnVideo.style.background    = type === 'video' ? '#2563EB' : 'rgba(255,255,255,.18)';
+    btnVideo.style.color         = '#fff';
+    btnVideo.style.border        = type === 'video' ? '2px solid #2563EB' : '2px solid rgba(255,255,255,.3)';
+    btnVideo.style.fontWeight    = type === 'video' ? '700' : '500';
+  }
 }
 
 /* ══════════════════════════════════════════
@@ -8592,7 +8691,17 @@ function _gwShowCameraUI() {
     /* Barre top */
     '<div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:linear-gradient(to bottom,rgba(0,0,0,.6),transparent);z-index:1">' +
       '<button onclick="_gwCloseCamera()" style="width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.45);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>' +
-      '<div style="color:#fff;font-size:13px;font-weight:700;letter-spacing:.5px">' + (isVideo ? '🎥 VIDÉO' : '📷 PHOTO') + '</div>' +
+      /* Mode : photo → simple label | video → toggle Short / Vidéo */
+      (isVideo
+        ? '<div style="display:flex;gap:6px;background:rgba(0,0,0,.35);border-radius:30px;padding:4px">' +
+            '<button id="gw-cam-mode-short" onclick="_gwCamSetMode(\'short\')" ' +
+              'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_pubVideoType==='short'?'#E11D48':'rgba(255,255,255,.3)') + ';background:' + (_pubVideoType==='short'?'#E11D48':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_pubVideoType==='short'?'700':'500') + ';cursor:pointer">' +
+              '<i class="fas fa-mobile-screen-button"></i> Short</button>' +
+            '<button id="gw-cam-mode-video" onclick="_gwCamSetMode(\'video\')" ' +
+              'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_pubVideoType==='video'?'#2563EB':'rgba(255,255,255,.3)') + ';background:' + (_pubVideoType==='video'?'#2563EB':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_pubVideoType==='video'?'700':'500') + ';cursor:pointer">' +
+              '<i class="fas fa-video"></i> Vidéo</button>' +
+          '</div>'
+        : '<div style="color:#fff;font-size:13px;font-weight:700;letter-spacing:.5px">📷 PHOTO</div>') +
       '<button onclick="_gwFlipCamera()" style="width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.45);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-camera-rotate"></i></button>' +
     '</div>' +
 

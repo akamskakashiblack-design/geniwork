@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260609a" />
+  <link rel="stylesheet" href="css/style.css?v=20260609e" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -1069,33 +1069,17 @@
                 </div>
               </div>
 
-              <!-- Short (vertical / TikTok) -->
-              <div class="pub-media-row pub-media-row-short" id="pub-row-short">
-                <div class="pub-media-label">
-                  <i class="fas fa-mobile-screen-button" style="color:#E11D48"></i>
-                  <span style="color:#E11D48;font-weight:700">Short</span>
-                </div>
-                <div class="pub-media-btns">
-                  <button class="pub-type-btn" onclick="triggerVideoGallery('short')">
-                    <i class="fas fa-film"></i> Galerie
-                  </button>
-                  <button class="pub-type-btn" onclick="triggerCameraVideo('short')">
-                    <i class="fas fa-circle-dot"></i> Caméra
-                  </button>
-                </div>
-              </div>
-
-              <!-- Vidéo (paysage / YouTube) -->
+              <!-- Vidéo (Short + Vidéo fusionnés) -->
               <div class="pub-media-row pub-media-row-video" id="pub-row-video">
                 <div class="pub-media-label">
-                  <i class="fas fa-video" style="color:#2563EB"></i>
-                  <span style="color:#2563EB;font-weight:700">Vidéo</span>
+                  <i class="fas fa-video" style="color:#7C3AED"></i>
+                  <span style="color:#7C3AED;font-weight:700">Vidéo</span>
                 </div>
                 <div class="pub-media-btns">
-                  <button class="pub-type-btn" onclick="triggerVideoGallery('video')">
+                  <button class="pub-type-btn" onclick="_pubPickVideoGallery()">
                     <i class="fas fa-film"></i> Galerie
                   </button>
-                  <button class="pub-type-btn" onclick="triggerCameraVideo('video')">
+                  <button class="pub-type-btn" onclick="_pubOpenVideoCamera()">
                     <i class="fas fa-circle-dot"></i> Caméra
                   </button>
                 </div>
@@ -3472,7 +3456,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260609d"></script>
+  <script src="js/app.js?v=20260609e"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">

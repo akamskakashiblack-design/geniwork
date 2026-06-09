@@ -3264,10 +3264,14 @@ mark.srch-mark {
 
 /* Ligne active dans créer un post */
 .pub-row-active {
-  background: #F0FDF4;
+  background: #F5F3FF;
   border-radius: 10px;
-  outline: 2px solid #22C55E;
+  outline: 2px solid #7C3AED;
 }
+
+/* Ligne vidéo fusionnée (Short + Vidéo) */
+.pub-media-row-video .pub-media-label i { color: #7C3AED; }
+.pub-media-row-video .pub-media-label span { color: #7C3AED; font-weight: 700; }
 
 /* ── FEUILLE SÉLECTION CAMÉRA ── */
 .cam-sheet-bg {
