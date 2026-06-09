@@ -9244,14 +9244,16 @@ function _gwVedAdaptContainer() {
     wrap.style.height = dh + 'px';
     if (vidEl) vidEl.style.objectFit = 'cover';
   } else {
-    /* ── Vidéo : s'adapte aux vraies dimensions de la vidéo ──
-       (portrait enregistré → portrait affiché, paysage → paysage)          */
-    if (!v.videoWidth || !v.videoHeight) return;
-    var vw = v.videoWidth, vh = v.videoHeight;
-    var scale = Math.min(cw / vw, ch / vh);
-    wrap.style.width  = Math.round(vw * scale) + 'px';
-    wrap.style.height = Math.round(vh * scale) + 'px';
-    if (vidEl) vidEl.style.objectFit = 'fill';
+    /* ── Vidéo : toujours forcer 16:9 paysage ──
+       Android MediaRecorder ignore la rotation physique → dimensions raw
+       imprévisibles. On impose le cadre 16:9 + object-fit:cover pour que
+       la prévisualisation corresponde toujours au rendu final dans le feed. */
+    var dw2 = cw;
+    var dh2 = Math.round(dw2 * 9 / 16);
+    if (dh2 > ch) { dh2 = ch; dw2 = Math.round(dh2 * 16 / 9); }
+    wrap.style.width  = dw2 + 'px';
+    wrap.style.height = dh2 + 'px';
+    if (vidEl) vidEl.style.objectFit = 'cover';
   }
 }
 
