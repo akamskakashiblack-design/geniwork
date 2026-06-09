@@ -8978,6 +8978,9 @@ function _gwOpenVideoEditor() {
   _ved.layers=[]; _ved.layerId=0; _ved.filter='none'; _ved.effects={};
   _ved.trim={start:0,end:null}; _ved.mode='trim';
   _ved.textFont='sans-serif'; _ved.textColor='#FFFFFF'; _ved.textSize=28;
+  /* Nouveaux états */
+  _ved.cuts=[]; _ved.clips=[]; _ved.muted=true;
+  _ved.zoom=null; _ved.zoomDur=2; _ved.intro=null; _ved.outro=null;
 
   var old = document.getElementById('gw-ved-ov');
   if (old) old.remove();
@@ -9043,7 +9046,7 @@ function _gwOpenVideoEditor() {
     '</div>' +
 
     /* Panel contenu */
-    '<div id="gw-ved-panel" style="background:#0F172A;flex-shrink:0;overflow-y:auto;min-height:100px;max-height:210px"></div>';
+    '<div id="gw-ved-panel" style="background:#0F172A;flex-shrink:0;overflow-y:auto;min-height:110px;max-height:290px"></div>';
 
   document.body.appendChild(ov);
 
@@ -9066,12 +9069,31 @@ function _gwOpenVideoEditor() {
   }, { once: true });
   v.addEventListener('timeupdate', function() {
     if (!v.duration) return;
-    var p = (v.currentTime / v.duration) * 100;
+    var ct = v.currentTime;
+    /* Saute les portions marquées pour suppression */
+    for (var ci = 0; ci < _ved.cuts.length; ci++) {
+      if (ct >= _ved.cuts[ci].start && ct < _ved.cuts[ci].end) {
+        v.currentTime = _ved.cuts[ci].end;
+        return;
+      }
+    }
+    /* Boucle sur le trim */
+    if (_ved.trim.end && ct > _ved.trim.end) {
+      v.currentTime = _ved.trim.start || 0;
+    }
+    var p = (ct / v.duration) * 100;
     var bar = document.getElementById('gw-ved-prog');
     if (bar) bar.style.width = p + '%';
-    /* Boucle sur le trim */
-    if (_ved.trim.end && v.currentTime > _ved.trim.end) {
-      v.currentTime = _ved.trim.start || 0;
+    /* Effet intro (fondu/glissement sur les 0.8 premières secondes) */
+    var wrap = document.getElementById('gw-ved-wrap');
+    if (wrap && _ved.intro && ct < 0.8) {
+      wrap.style.animation = _gwVedIntroAnim(_ved.intro);
+    } else if (wrap && ct >= 0.8 && wrap.style.animation.indexOf('GwIntro') !== -1) {
+      wrap.style.animation = _ved.zoom ? _gwVedZoomAnim() : '';
+    }
+    /* Effet outro (fondu/glissement sur les dernières 0.8 secondes) */
+    if (wrap && _ved.outro && v.duration - ct < 0.8) {
+      wrap.style.animation = _gwVedOutroAnim(_ved.outro);
     }
   });
   v.play().catch(function(){});
@@ -9128,11 +9150,73 @@ function _gwVedShowPanel(mode) {
   if (!panel) return;
 
   if (mode === 'trim') {
+    /* ── Liste des portions supprimées ── */
+    var cutsHtml = '';
+    if (_ved.cuts.length) {
+      cutsHtml = '<div style="margin-top:8px">' +
+        '<p style="color:#64748B;font-size:10px;margin:0 0 5px;text-transform:uppercase;letter-spacing:.5px">Portions supprimées</p>';
+      _ved.cuts.forEach(function(cut, i) {
+        cutsHtml += '<div style="display:flex;align-items:center;justify-content:space-between;' +
+          'background:#1E293B;border-radius:8px;padding:6px 10px;margin-bottom:4px">' +
+          '<span style="color:#F87171;font-size:12px">✂ ' + _vedFmt(cut.start) + ' → ' + _vedFmt(cut.end) + '</span>' +
+          '<button onclick="_gwVedRemoveCut(' + i + ')" ' +
+            'style="background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);' +
+            'border-radius:6px;color:#F87171;font-size:11px;cursor:pointer;padding:2px 8px">Restaurer</button>' +
+        '</div>';
+      });
+      cutsHtml += '</div>';
+    }
+    /* ── Liste des clips ajoutés ── */
+    var clipsHtml = '';
+    if (_ved.clips.length) {
+      clipsHtml = '<div style="margin-top:8px">' +
+        '<p style="color:#64748B;font-size:10px;margin:0 0 5px;text-transform:uppercase;letter-spacing:.5px">Clips ajoutés</p>';
+      _ved.clips.forEach(function(cl, i) {
+        clipsHtml += '<div style="display:flex;align-items:center;justify-content:space-between;' +
+          'background:#1E293B;border-radius:8px;padding:6px 10px;margin-bottom:4px">' +
+          '<span style="color:#A78BFA;font-size:12px">📹 Clip ' + (i+1) + ' · ' + _vedFmt(cl.duration) + '</span>' +
+          '<button onclick="_gwVedRemoveClip(' + i + ')" ' +
+            'style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);' +
+            'border-radius:6px;color:#F87171;font-size:11px;cursor:pointer;padding:2px 8px">✕</button>' +
+        '</div>';
+      });
+      clipsHtml += '</div>';
+    }
     panel.innerHTML =
-      '<div style="padding:16px;text-align:center;color:#64748B;font-size:12px;line-height:1.7">' +
-        '<i class="fas fa-scissors" style="font-size:22px;color:#A78BFA;display:block;margin-bottom:8px"></i>' +
-        'Glissez le <span style="color:#A78BFA;font-weight:700">curseur gauche</span> pour définir le début<br>' +
-        'et le <span style="color:#A78BFA;font-weight:700">curseur droit</span> pour la fin.' +
+      '<div style="padding:12px 16px">' +
+        /* Son toggle */
+        '<div style="display:flex;align-items:center;justify-content:space-between;' +
+          'background:#1E293B;border-radius:10px;padding:9px 12px;margin-bottom:10px">' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<span style="font-size:15px">' + (_ved.muted ? '🔇' : '🔊') + '</span>' +
+            '<span style="color:#CBD5E1;font-size:12px;font-weight:600">Son</span>' +
+          '</div>' +
+          '<button onclick="_gwVedToggleSound()" ' +
+            'style="background:' + (_ved.muted ? '#334155' : '#7C3AED') + ';border:none;border-radius:16px;' +
+            'color:#fff;font-size:11px;font-weight:700;padding:5px 13px;cursor:pointer">' +
+            (_ved.muted ? '🔇 Désactivé' : '🔊 Activé') + '</button>' +
+        '</div>' +
+        /* Instructions */
+        '<p style="color:#64748B;font-size:11px;margin:0 0 8px;line-height:1.5">' +
+          'Réglez les <span style="color:#A78BFA">curseurs</span> sur la barre ci-dessus, ' +
+          'puis supprimez la portion ou gardez-la.' +
+        '</p>' +
+        /* Bouton supprimer */
+        '<button onclick="_gwVedMarkCut()" ' +
+          'style="width:100%;padding:9px;background:rgba(239,68,68,.12);' +
+          'border:1.5px solid rgba(239,68,68,.35);border-radius:10px;' +
+          'color:#F87171;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:4px">' +
+          '✂&nbsp; Supprimer la portion sélectionnée' +
+        '</button>' +
+        cutsHtml +
+        clipsHtml +
+        /* Bouton ajouter clip */
+        '<button onclick="_gwVedAddClip()" ' +
+          'style="width:100%;padding:9px;background:rgba(124,58,237,.08);' +
+          'border:1.5px dashed rgba(124,58,237,.5);border-radius:10px;' +
+          'color:#A78BFA;font-size:12px;font-weight:700;cursor:pointer;margin-top:8px">' +
+          '＋&nbsp; Ajouter un clip Short' +
+        '</button>' +
       '</div>';
   }
   else if (mode === 'filter') {
@@ -9201,22 +9285,205 @@ function _gwVedShowPanel(mode) {
     panel.innerHTML = eh;
   }
   else if (mode === 'effects') {
-    var xh = '<div style="display:flex;gap:10px;padding:14px 16px;overflow-x:auto;-webkit-overflow-scrolling:touch">';
+    /* ── Section : effets overlay ── */
+    var xh = '<div style="padding:12px 16px">';
+    xh += '<p style="color:#64748B;font-size:10px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.5px">Effets overlay</p>';
+    xh += '<div style="display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;margin-bottom:14px">';
     _VED_EFFECTS.forEach(function(ef) {
       var on = !!_ved.effects[ef.id];
       xh += '<button onclick="_gwVedToggleEffect(\'' + ef.id + '\')" id="gw-ved-eff-' + ef.id + '" ' +
-        'style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:6px;' +
-        'padding:12px 16px;border-radius:14px;min-width:80px;' +
+        'style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:5px;' +
+        'padding:9px 12px;border-radius:12px;min-width:72px;' +
         'border:2px solid ' + (on?'#7C3AED':'#1E293B') + ';' +
         'background:' + (on?'rgba(124,58,237,.15)':'#1E293B') + ';cursor:pointer">' +
-        '<span style="font-size:28px">' + ef.ico + '</span>' +
-        '<span style="font-size:11px;font-weight:700;color:' + (on?'#A78BFA':'#94A3B8') + '">' + ef.name + '</span>' +
-        '<span style="font-size:10px;color:#475569;text-align:center">' + ef.desc + '</span>' +
+        '<span style="font-size:22px">' + ef.ico + '</span>' +
+        '<span style="font-size:10px;font-weight:700;color:' + (on?'#A78BFA':'#94A3B8') + '">' + ef.name + '</span>' +
       '</button>';
     });
     xh += '</div>';
+
+    /* ── Section : Zoom ── */
+    xh += '<p style="color:#64748B;font-size:10px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.5px">Zoom</p>';
+    xh += '<div style="display:flex;gap:6px;margin-bottom:' + (_ved.zoom ? '8px' : '14px') + '">';
+    var zOpts = [{id:'in',ico:'🔍',name:'Avant'},{id:'out',ico:'🔎',name:'Arrière'},{id:'enter',ico:'⚡',name:'Entrée'},{id:null,ico:'⊘',name:'Aucun'}];
+    zOpts.forEach(function(z) {
+      var on = _ved.zoom === z.id;
+      xh += '<button onclick="_gwVedSetZoom(' + (z.id?'\''+z.id+'\'':'null') + ')" ' +
+        'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;' +
+        'padding:8px 4px;border-radius:10px;' +
+        'border:2px solid ' + (on?'#2563EB':'#1E293B') + ';' +
+        'background:' + (on?'rgba(37,99,235,.15)':'#1E293B') + ';cursor:pointer">' +
+        '<span style="font-size:18px">' + z.ico + '</span>' +
+        '<span style="font-size:9px;font-weight:700;color:' + (on?'#60A5FA':'#94A3B8') + '">' + z.name + '</span>' +
+      '</button>';
+    });
+    xh += '</div>';
+    /* Slider durée zoom */
+    if (_ved.zoom) {
+      xh += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">' +
+        '<span style="color:#64748B;font-size:11px;flex-shrink:0">Durée</span>' +
+        '<input type="range" min="1" max="10" value="' + (_ved.zoomDur||2) + '" ' +
+          'oninput="_gwVedSetZoomDur(this.value)" style="flex:1;accent-color:#2563EB;height:4px">' +
+        '<span id="gw-ved-zdur" style="color:#60A5FA;font-size:11px;min-width:22px;text-align:right">' + (_ved.zoomDur||2) + 's</span>' +
+      '</div>';
+    }
+
+    /* ── Section : Intro ── */
+    xh += '<p style="color:#64748B;font-size:10px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.5px">Intro</p>';
+    xh += '<div style="display:flex;gap:6px;margin-bottom:14px">';
+    var introOpts = [{id:'fade',ico:'🌅',name:'Fondu'},{id:'slide',ico:'➡️',name:'Glissement'},{id:'pop',ico:'💥',name:'Pop'}];
+    introOpts.forEach(function(x) {
+      var on = _ved.intro === x.id;
+      xh += '<button onclick="_gwVedSetIntro(\'' + x.id + '\')" ' +
+        'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;' +
+        'padding:8px 4px;border-radius:10px;' +
+        'border:2px solid ' + (on?'#10B981':'#1E293B') + ';' +
+        'background:' + (on?'rgba(16,185,129,.15)':'#1E293B') + ';cursor:pointer">' +
+        '<span style="font-size:18px">' + x.ico + '</span>' +
+        '<span style="font-size:9px;font-weight:700;color:' + (on?'#34D399':'#94A3B8') + '">' + x.name + '</span>' +
+      '</button>';
+    });
+    xh += '</div>';
+
+    /* ── Section : Outro ── */
+    xh += '<p style="color:#64748B;font-size:10px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.5px">Outro</p>';
+    xh += '<div style="display:flex;gap:6px;margin-bottom:4px">';
+    var outroOpts = [{id:'fade',ico:'🌇',name:'Fondu'},{id:'slide',ico:'⬅️',name:'Glissement'},{id:'blur',ico:'💫',name:'Flou'}];
+    outroOpts.forEach(function(x) {
+      var on = _ved.outro === x.id;
+      xh += '<button onclick="_gwVedSetOutro(\'' + x.id + '\')" ' +
+        'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;' +
+        'padding:8px 4px;border-radius:10px;' +
+        'border:2px solid ' + (on?'#F59E0B':'#1E293B') + ';' +
+        'background:' + (on?'rgba(245,158,11,.15)':'#1E293B') + ';cursor:pointer">' +
+        '<span style="font-size:18px">' + x.ico + '</span>' +
+        '<span style="font-size:9px;font-weight:700;color:' + (on?'#FCD34D':'#94A3B8') + '">' + x.name + '</span>' +
+      '</button>';
+    });
+    xh += '</div></div>';
     panel.innerHTML = xh;
   }
+}
+
+/* ══ NOUVELLES FONCTIONS ÉDITEUR ══════════════════════════════════════════ */
+
+/* ── Son ── */
+function _gwVedToggleSound() {
+  _ved.muted = !_ved.muted;
+  var v = document.getElementById('gw-ved-vid');
+  if (v) v.muted = _ved.muted;
+  _gwVedShowPanel('trim');
+}
+
+/* ── Découpe : marquer la portion sélectionnée pour suppression ── */
+function _gwVedMarkCut() {
+  var v = document.getElementById('gw-ved-vid');
+  if (!v || !v.duration) return;
+  var s = _ved.trim.start || 0;
+  var e = _ved.trim.end   || v.duration;
+  if (e - s < 0.3) { showToast('Sélectionnez une portion plus grande', 'err'); return; }
+  /* Vérifie que ce n'est pas toute la vidéo */
+  if (s <= 0.05 && e >= v.duration - 0.05) { showToast('Impossible de supprimer toute la vidéo', 'err'); return; }
+  _ved.cuts.push({ start: s, end: e });
+  /* Remet les curseurs à 0–100 */
+  _ved.trim.start = 0;
+  _ved.trim.end   = v.duration;
+  var sEl = document.getElementById('gw-ved-ts'), eEl = document.getElementById('gw-ved-te');
+  if (sEl) sEl.value = 0;
+  if (eEl) eEl.value = 100;
+  ['gw-ved-hs','gw-ved-trimzone'].forEach(function(id){
+    var el = document.getElementById(id); if (el) el.style.left = '0%';
+  });
+  var he = document.getElementById('gw-ved-he'), tz = document.getElementById('gw-ved-trimzone');
+  if (he) he.style.right = '0%';
+  if (tz) tz.style.right = '0%';
+  document.getElementById('gw-ved-ts-lbl') && (document.getElementById('gw-ved-ts-lbl').textContent = '0:00');
+  document.getElementById('gw-ved-te-lbl') && (document.getElementById('gw-ved-te-lbl').textContent = _vedFmt(v.duration));
+  showToast('Portion supprimée ✂', 'ok');
+  _gwVedShowPanel('trim');
+}
+
+function _gwVedRemoveCut(i) {
+  _ved.cuts.splice(i, 1);
+  _gwVedShowPanel('trim');
+}
+
+/* ── Clips supplémentaires ── */
+function _gwVedAddClip() {
+  var inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'video/*';
+  inp.onchange = function() {
+    var file = inp.files && inp.files[0];
+    if (!file) return;
+    var url = URL.createObjectURL(file);
+    var cl = { url: url, blob: file, name: file.name, duration: 0 };
+    _ved.clips.push(cl);
+    /* Récupère la durée */
+    var tmp = document.createElement('video');
+    tmp.src = url;
+    tmp.onloadedmetadata = function() {
+      cl.duration = tmp.duration;
+      if (_ved.mode === 'trim') _gwVedShowPanel('trim');
+    };
+    showToast('Clip ajouté ✓', 'ok');
+    _gwVedShowPanel('trim');
+  };
+  inp.click();
+}
+
+function _gwVedRemoveClip(i) {
+  _ved.clips.splice(i, 1);
+  _gwVedShowPanel('trim');
+}
+
+/* ── Zoom ── */
+function _gwVedSetZoom(type) {
+  _ved.zoom = type || null;
+  _gwVedApplyZoom();
+  _gwVedShowPanel('effects');
+}
+function _gwVedSetZoomDur(val) {
+  _ved.zoomDur = parseFloat(val) || 2;
+  var lbl = document.getElementById('gw-ved-zdur');
+  if (lbl) lbl.textContent = val + 's';
+  _gwVedApplyZoom();
+}
+function _gwVedZoomAnim() {
+  var dur = (_ved.zoomDur || 2) + 's';
+  if (_ved.zoom === 'in')    return 'gwZoomIn '    + dur + ' ease-in-out infinite alternate';
+  if (_ved.zoom === 'out')   return 'gwZoomOut '   + dur + ' ease-in-out infinite alternate';
+  if (_ved.zoom === 'enter') return 'gwZoomEnter ' + dur + ' ease-out forwards';
+  return '';
+}
+function _gwVedApplyZoom() {
+  var wrap = document.getElementById('gw-ved-wrap');
+  if (!wrap) return;
+  wrap.style.animation = _ved.zoom ? _gwVedZoomAnim() : '';
+}
+
+/* ── Intro / Outro ── */
+function _gwVedSetIntro(type) {
+  _ved.intro = _ved.intro === type ? null : type;
+  var wrap = document.getElementById('gw-ved-wrap');
+  if (wrap && _ved.intro) wrap.style.animation = _gwVedIntroAnim(_ved.intro);
+  else if (wrap) wrap.style.animation = _ved.zoom ? _gwVedZoomAnim() : '';
+  _gwVedShowPanel('effects');
+}
+function _gwVedSetOutro(type) {
+  _ved.outro = _ved.outro === type ? null : type;
+  _gwVedShowPanel('effects');
+}
+function _gwVedIntroAnim(type) {
+  if (type === 'fade')  return 'gwIntroFade  0.8s ease forwards';
+  if (type === 'slide') return 'gwIntroSlide 0.8s ease forwards';
+  if (type === 'pop')   return 'gwIntroPop   0.6s cubic-bezier(.34,1.56,.64,1) forwards';
+  return '';
+}
+function _gwVedOutroAnim(type) {
+  if (type === 'fade')  return 'gwOutroFade  0.8s ease forwards';
+  if (type === 'slide') return 'gwOutroSlide 0.8s ease forwards';
+  if (type === 'blur')  return 'gwOutroBlur  0.8s ease forwards';
+  return '';
 }
 
 /* ── Helpers ── */
