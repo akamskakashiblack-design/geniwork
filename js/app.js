@@ -8994,19 +8994,23 @@ function _gwOpenVideoEditor() {
       '<button onclick="_gwVedConfirm()" style="background:#7C3AED;border:none;color:#fff;font-size:13px;font-weight:700;padding:8px 16px;border-radius:20px;cursor:pointer">Utiliser ✓</button>' +
     '</div>' +
 
-    /* Zone vidéo + layers */
-    '<div id="gw-ved-mid" style="flex:1;display:flex;align-items:center;justify-content:center;background:#000;min-height:0;overflow:hidden">' +
-    '<div id="gw-ved-wrap" style="position:relative;flex:none;background:#000">' +
+    /* Zone vidéo + layers
+       Short  → flex:1 (portrait 9:16 remplit l'espace disponible)
+       Vidéo  → aspect-ratio:16/9 fixe sur toute la largeur (0 px de noir autour) */
+    '<div id="gw-ved-mid" style="' + (isShort
+        ? 'flex:1;display:flex;align-items:center;justify-content:center;background:#000;min-height:0;overflow:hidden'
+        : 'width:100%;aspect-ratio:16/9;flex:none;display:flex;align-items:stretch;justify-content:center;background:#000;overflow:hidden') + '">' +
+    '<div id="gw-ved-wrap" style="position:relative;' + (isShort ? 'flex:none' : 'flex:1') + ';background:#000">' +
       '<video id="gw-ved-vid" src="' + _pickedVideo.url + '" ' +
-        'style="width:100%;height:100%;object-fit:fill;display:block" playsinline loop muted></video>' +
+        'style="width:100%;height:100%;object-fit:cover;display:block" playsinline loop muted></video>' +
       /* Overlay effets */
       '<div id="gw-ved-fg-vignette" style="position:absolute;inset:0;pointer-events:none;display:none;background:radial-gradient(ellipse at center,transparent 45%,rgba(0,0,0,.75) 100%)"></div>' +
       '<div id="gw-ved-fg-glow"     style="position:absolute;inset:0;pointer-events:none;display:none;background:radial-gradient(ellipse at center,rgba(255,255,255,.1) 0%,transparent 65%)"></div>' +
       '<div id="gw-ved-fg-grain"    style="position:absolute;inset:0;pointer-events:none;display:none;opacity:.12;background-image:url(\'data:image/svg+xml,%3Csvg xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cfilter id%3D%22n%22%3E%3CfeTurbulence type%3D%22fractalNoise%22 baseFrequency%3D%220.9%22 numOctaves%3D%224%22/%3E%3C/filter%3E%3Crect width%3D%22100%25%22 height%3D%22100%25%22 filter%3D%22url(%23n)%22/%3E%3C/svg%3E\');background-size:160px"></div>' +
       /* Couche layers (texte/emoji) */
       '<div id="gw-ved-layers" style="position:absolute;inset:0;overflow:hidden"></div>' +
-      /* Bouton play/pause */
-      '<button id="gw-ved-playbtn" onclick="_gwVedTogglePlay()" style="position:absolute;bottom:14px;left:50%;transform:translateX(-50%);width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid rgba(255,255,255,.55);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:5">' +
+      /* Bouton play/pause — centré au milieu du wrap */
+      '<button id="gw-ved-playbtn" onclick="_gwVedTogglePlay()" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid rgba(255,255,255,.55);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:5">' +
         '<i id="gw-ved-playico" class="fas fa-pause"></i></button>' +
     '</div>' +   /* fin gw-ved-wrap */
     '</div>' +   /* fin gw-ved-mid  */
@@ -9244,15 +9248,11 @@ function _gwVedAdaptContainer() {
     wrap.style.height = dh + 'px';
     if (vidEl) vidEl.style.objectFit = 'cover';
   } else {
-    /* ── Vidéo : toujours forcer 16:9 paysage ──
-       Android MediaRecorder ignore la rotation physique → dimensions raw
-       imprévisibles. On impose le cadre 16:9 + object-fit:cover pour que
-       la prévisualisation corresponde toujours au rendu final dans le feed. */
-    var dw2 = cw;
-    var dh2 = Math.round(dw2 * 9 / 16);
-    if (dh2 > ch) { dh2 = ch; dw2 = Math.round(dh2 * 16 / 9); }
-    wrap.style.width  = dw2 + 'px';
-    wrap.style.height = dh2 + 'px';
+    /* ── Vidéo : le mid a déjà aspect-ratio:16/9 et le wrap est flex:1
+       → wrap remplit exactement le mid, pas besoin de forcer les px.
+       On s'assure juste que l'objet-fit est cover.                        */
+    wrap.style.width  = '100%';
+    wrap.style.height = '100%';
     if (vidEl) vidEl.style.objectFit = 'cover';
   }
 }
