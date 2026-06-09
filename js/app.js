@@ -9222,25 +9222,39 @@ function _vedFmt(s) {
   var m = Math.floor(s / 60), sec = Math.floor(s % 60);
   return m + ':' + (sec < 10 ? '0' : '') + sec;
 }
-/* ── Adapte le wrap aux vraies dimensions de la vidéo (pas de barres noires) ── */
+/* ── Adapte le wrap selon le type de contenu ── */
 function _gwVedAdaptContainer() {
   var v    = document.getElementById('gw-ved-vid');
   var wrap = document.getElementById('gw-ved-wrap');
   var mid  = document.getElementById('gw-ved-mid');
-  if (!v || !wrap || !mid || !v.videoWidth || !v.videoHeight) return;
+  if (!v || !wrap || !mid) return;
 
-  var vw = v.videoWidth;
-  var vh = v.videoHeight;
   var cw = mid.clientWidth  || window.innerWidth;
-  var ch = mid.clientHeight || Math.round(window.innerHeight * 0.45);
+  var ch = mid.clientHeight || Math.round(window.innerHeight * 0.42);
 
-  /* Calcule le plus grand affichage possible sans déformation */
-  var scale = Math.min(cw / vw, ch / vh);
-  var dw    = Math.round(vw * scale);
-  var dh    = Math.round(vh * scale);
+  var vidEl = document.getElementById('gw-ved-vid');
+  var isShort = _pubVideoType === 'short';
 
-  wrap.style.width  = dw + 'px';
-  wrap.style.height = dh + 'px';
+  if (isShort) {
+    /* ── Short : toujours afficher en portrait 9:16 ──
+       Le navigateur Android enregistre en paysage malgré les contraintes ;
+       on force le cadre 9:16 + object-fit:cover (recadrage TikTok-style)   */
+    var dh = ch;
+    var dw = Math.round(dh * 9 / 16);
+    if (dw > cw) { dw = cw; dh = Math.round(dw * 16 / 9); }
+    wrap.style.width  = dw + 'px';
+    wrap.style.height = dh + 'px';
+    if (vidEl) vidEl.style.objectFit = 'cover';
+  } else {
+    /* ── Vidéo : s'adapte aux vraies dimensions de la vidéo ──
+       (portrait enregistré → portrait affiché, paysage → paysage)          */
+    if (!v.videoWidth || !v.videoHeight) return;
+    var vw = v.videoWidth, vh = v.videoHeight;
+    var scale = Math.min(cw / vw, ch / vh);
+    wrap.style.width  = Math.round(vw * scale) + 'px';
+    wrap.style.height = Math.round(vh * scale) + 'px';
+    if (vidEl) vidEl.style.objectFit = 'fill';
+  }
 }
 
 function _gwVedSetDuration(dur) {
