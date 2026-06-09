@@ -8539,22 +8539,41 @@ function _pubOpenVideoCamera() {
 
 /* ── Bascule le mode (Short ↔ Vidéo) depuis l'overlay caméra ── */
 function _gwCamSetMode(type) {
+  if (_pubVideoType === type) return; /* déjà dans ce mode */
   _pubVideoType = type;
+
   /* Met à jour les boutons du toggle */
   var btnShort = document.getElementById('gw-cam-mode-short');
   var btnVideo = document.getElementById('gw-cam-mode-video');
   if (btnShort) {
-    btnShort.style.background    = type === 'short' ? '#E11D48' : 'rgba(255,255,255,.18)';
-    btnShort.style.color         = '#fff';
-    btnShort.style.border        = type === 'short' ? '2px solid #E11D48' : '2px solid rgba(255,255,255,.3)';
-    btnShort.style.fontWeight    = type === 'short' ? '700' : '500';
+    btnShort.style.background = type === 'short' ? '#E11D48' : 'rgba(255,255,255,.18)';
+    btnShort.style.border     = type === 'short' ? '2px solid #E11D48' : '2px solid rgba(255,255,255,.3)';
+    btnShort.style.fontWeight = type === 'short' ? '700' : '500';
   }
   if (btnVideo) {
-    btnVideo.style.background    = type === 'video' ? '#2563EB' : 'rgba(255,255,255,.18)';
-    btnVideo.style.color         = '#fff';
-    btnVideo.style.border        = type === 'video' ? '2px solid #2563EB' : '2px solid rgba(255,255,255,.3)';
-    btnVideo.style.fontWeight    = type === 'video' ? '700' : '500';
+    btnVideo.style.background = type === 'video' ? '#2563EB' : 'rgba(255,255,255,.18)';
+    btnVideo.style.border     = type === 'video' ? '2px solid #2563EB' : '2px solid rgba(255,255,255,.3)';
+    btnVideo.style.fontWeight = type === 'video' ? '700' : '500';
   }
+
+  /* Redémarre le stream caméra avec les constraints adaptées au nouveau mode */
+  if (_camStream) {
+    /* Stoppe les anciennes pistes */
+    _camStream.getTracks().forEach(function(t) { t.stop(); });
+    _camStream = null;
+  }
+  /* Nettoie les listeners orientation avant de recréer l'UI */
+  window.removeEventListener('orientationchange', _gwCamUpdateGuide);
+  screen.orientation && screen.orientation.removeEventListener('change', _gwCamUpdateGuide);
+
+  /* Redémarre avec les nouveaux constraints */
+  navigator.mediaDevices.getUserMedia(_gwCamConstraints()).then(function(stream) {
+    _camStream = stream;
+    /* Reconstruit l'UI complète (toggle, guide 16:9, etc.) */
+    _gwShowCameraUI();
+  }).catch(function() {
+    showToast('Impossible de changer le format caméra', 'err');
+  });
 }
 
 /* ══════════════════════════════════════════
@@ -8642,6 +8661,27 @@ var _camSeconds  = 0;
 function triggerCameraPhoto() { _camMode = 'photo'; _gwOpenCamera(); }
 /* triggerCameraVideo est définie plus haut avec le paramètre type */
 
+/* ── Contraintes vidéo selon le type de contenu ── */
+function _gwCamConstraints() {
+  var isShort = (_camMode === 'video' && _pubVideoType === 'short');
+  var isVid   = (_camMode === 'video' && _pubVideoType === 'video');
+  var base    = { facingMode: { ideal: _camFacing } };
+  if (isShort) {
+    /* Portrait 9:16 — Short TikTok */
+    base.width  = { ideal: 1080 };
+    base.height = { ideal: 1920 };
+  } else if (isVid) {
+    /* Paysage 16:9 — Vidéo YouTube */
+    base.width  = { ideal: 1920 };
+    base.height = { ideal: 1080 };
+  } else {
+    /* Photo */
+    base.width  = { ideal: 1280 };
+    base.height = { ideal: 720 };
+  }
+  return { video: base, audio: _camMode === 'video' };
+}
+
 /* ── Demande permission + ouvre la caméra ── */
 function _gwOpenCamera(facing) {
   if (facing) _camFacing = facing;
@@ -8652,13 +8692,7 @@ function _gwOpenCamera(facing) {
     _gwCamFallback(); return;
   }
 
-  var constraints = {
-    video: { facingMode: { ideal: _camFacing }, width: { ideal: 1280 }, height: { ideal: 720 } },
-    audio: _camMode === 'video'
-  };
-
-  /* Demande la permission */
-  navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
+  navigator.mediaDevices.getUserMedia(_gwCamConstraints()).then(function(stream) {
     _camStream = stream;
     _gwShowCameraUI();
   }).catch(function(err) {
@@ -8708,6 +8742,29 @@ function _gwShowCameraUI() {
     /* Timer enregistrement */
     (isVideo ? '<div id="gw-cam-timer" style="position:absolute;top:68px;left:50%;transform:translateX(-50%);background:rgba(220,38,38,.85);color:#fff;font-size:13px;font-weight:800;padding:4px 14px;border-radius:20px;display:none;z-index:1"><i class="fas fa-circle" style="font-size:8px;margin-right:5px;animation:blink 1s infinite"></i><span id="gw-cam-time">0:00</span></div>' : '') +
 
+    /* Guide format vidéo (16:9) — visible uniquement en mode Vidéo */
+    (isVideo && _pubVideoType === 'video'
+      ? '<!-- guide 16:9 -->' +
+        '<div id="gw-cam-guide" style="position:absolute;inset:0;z-index:2;pointer-events:none">' +
+          /* Bandes noires haut/bas (letterbox) pour matérialiser le cadre 16:9 */
+          '<div id="gw-cam-bars" style="position:absolute;inset:0;display:flex;flex-direction:column;pointer-events:none">' +
+            '<div id="gw-cam-bar-top"    style="background:rgba(0,0,0,.55);flex-shrink:0"></div>' +
+            '<div style="flex:1;border:2px solid rgba(255,255,255,.35);box-sizing:border-box"></div>' +
+            '<div id="gw-cam-bar-bottom" style="background:rgba(0,0,0,.55);flex-shrink:0"></div>' +
+          '</div>' +
+          /* Badge format en bas du cadre */
+          '<div id="gw-cam-fmt-badge" style="position:absolute;bottom:110px;left:50%;transform:translateX(-50%);background:rgba(37,99,235,.85);color:#fff;font-size:11px;font-weight:700;padding:5px 14px;border-radius:20px;white-space:nowrap;display:flex;align-items:center;gap:6px">' +
+            '<i class="fas fa-video"></i> Vidéo 16:9 · YouTube' +
+          '</div>' +
+          /* Conseil rotation si portrait */
+          '<div id="gw-cam-rotate-hint" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.7);color:#fff;font-size:13px;font-weight:600;padding:10px 18px;border-radius:14px;white-space:nowrap;text-align:center;display:none;gap:8px;align-items:center">' +
+            '<span style="font-size:22px">📱</span>' +
+            '<div><div style="font-size:14px;font-weight:700">Tournez votre téléphone</div><div style="font-size:11px;opacity:.8;margin-top:2px">Pour un format 16:9 optimal</div></div>' +
+            '<span style="font-size:22px">🖥️</span>' +
+          '</div>' +
+        '</div>'
+      : '') +
+
     /* Barre bas */
     '<div style="position:absolute;bottom:0;left:0;right:0;padding:28px 20px 40px;background:linear-gradient(to top,rgba(0,0,0,.65),transparent);display:flex;align-items:center;justify-content:center;gap:32px;z-index:1">' +
       /* Galerie */
@@ -8724,7 +8781,44 @@ function _gwShowCameraUI() {
 
   /* Branche le stream sur le <video> */
   var vid = document.getElementById('gw-cam-preview');
-  if (vid) vid.srcObject = _camStream;
+  if (vid) {
+    vid.srcObject = _camStream;
+    /* En mode Vidéo 16:9 : calcule les barres et détecte l'orientation */
+    if (_camMode === 'video' && _pubVideoType === 'video') {
+      vid.addEventListener('loadedmetadata', function() {
+        _gwCamUpdateGuide();
+      }, { once: true });
+      /* Détection orientation en temps réel */
+      window.addEventListener('orientationchange', _gwCamUpdateGuide);
+      screen.orientation && screen.orientation.addEventListener('change', _gwCamUpdateGuide);
+    }
+  }
+}
+
+/* ── Met à jour les barres 16:9 + conseil rotation ── */
+function _gwCamUpdateGuide() {
+  var barTop    = document.getElementById('gw-cam-bar-top');
+  var barBot    = document.getElementById('gw-cam-bar-bottom');
+  var hint      = document.getElementById('gw-cam-rotate-hint');
+  if (!barTop || !barBot || !hint) return;
+
+  var W = window.innerWidth;
+  var H = window.innerHeight;
+  var isLandscape = W > H;
+
+  if (isLandscape) {
+    /* Paysage → cadre 16:9 = pleine largeur, calculer la hauteur */
+    var frameH = Math.round(W * 9 / 16);
+    var bar    = Math.max(0, Math.round((H - frameH) / 2));
+    barTop.style.height    = bar + 'px';
+    barBot.style.height    = bar + 'px';
+    hint.style.display     = 'none';
+  } else {
+    /* Portrait → montrer le hint "Tournez" et barres symboliques */
+    barTop.style.height    = '80px';
+    barBot.style.height    = '80px';
+    hint.style.display     = 'flex';
+  }
 }
 
 /* ── Capture photo ── */
@@ -8858,6 +8952,9 @@ function _gwCamPickGallery() {
 function _gwCloseCamera() {
   if (_camRecording) _gwStopRecord();
   _gwStopCamera();
+  /* Nettoie les listeners orientation (guide 16:9) */
+  window.removeEventListener('orientationchange', _gwCamUpdateGuide);
+  try { screen.orientation && screen.orientation.removeEventListener('change', _gwCamUpdateGuide); } catch(e){}
   var ov = document.getElementById('gw-cam-overlay');
   if (ov) ov.remove();
 }
