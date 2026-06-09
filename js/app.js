@@ -8997,9 +8997,10 @@ function _gwOpenVideoEditor() {
     '</div>' +
 
     /* Zone vidéo + layers */
-    '<div id="gw-ved-wrap" style="flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000;min-height:0">' +
+    '<div id="gw-ved-mid" style="flex:1;display:flex;align-items:center;justify-content:center;background:#000;min-height:0;overflow:hidden">' +
+    '<div id="gw-ved-wrap" style="position:relative;flex:none;background:#000">' +
       '<video id="gw-ved-vid" src="' + _pickedVideo.url + '" ' +
-        'style="max-width:100%;max-height:100%;object-fit:contain;display:block" playsinline loop muted></video>' +
+        'style="width:100%;height:100%;object-fit:fill;display:block" playsinline loop muted></video>' +
       /* Overlay effets */
       '<div id="gw-ved-fg-vignette" style="position:absolute;inset:0;pointer-events:none;display:none;background:radial-gradient(ellipse at center,transparent 45%,rgba(0,0,0,.75) 100%)"></div>' +
       '<div id="gw-ved-fg-glow"     style="position:absolute;inset:0;pointer-events:none;display:none;background:radial-gradient(ellipse at center,rgba(255,255,255,.1) 0%,transparent 65%)"></div>' +
@@ -9009,7 +9010,8 @@ function _gwOpenVideoEditor() {
       /* Bouton play/pause */
       '<button id="gw-ved-playbtn" onclick="_gwVedTogglePlay()" style="position:absolute;bottom:14px;left:50%;transform:translateX(-50%);width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid rgba(255,255,255,.55);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:5">' +
         '<i id="gw-ved-playico" class="fas fa-pause"></i></button>' +
-    '</div>' +
+    '</div>' +   /* fin gw-ved-wrap */
+    '</div>' +   /* fin gw-ved-mid  */
 
     /* Barre de trim */
     '<div style="padding:10px 16px 6px;background:#111;flex-shrink:0">' +
@@ -9045,9 +9047,11 @@ function _gwOpenVideoEditor() {
   /* Init vidéo */
   var v = document.getElementById('gw-ved-vid');
   v.addEventListener('loadedmetadata', function() {
-    /* Certains blobs WebM retournent Infinity — on force le seek à la fin pour obtenir la vraie durée */
+    /* Adapte le conteneur aux vraies dimensions de la vidéo (élimine les barres noires) */
+    _gwVedAdaptContainer();
+    /* Certains blobs WebM retournent Infinity — force le seek à la fin pour obtenir la vraie durée */
     if (!isFinite(v.duration)) {
-      v.currentTime = 1e10; /* provoque un seeked qui donne la vraie durée */
+      v.currentTime = 1e10;
     } else {
       _gwVedSetDuration(v.duration);
     }
@@ -9055,7 +9059,7 @@ function _gwOpenVideoEditor() {
   v.addEventListener('seeked', function() {
     if (!isFinite(v.duration) || v.duration <= 0) return;
     _gwVedSetDuration(v.duration);
-    v.currentTime = 0; /* rebobine au début */
+    v.currentTime = 0;
   }, { once: true });
   v.addEventListener('timeupdate', function() {
     if (!v.duration) return;
@@ -9218,6 +9222,27 @@ function _vedFmt(s) {
   var m = Math.floor(s / 60), sec = Math.floor(s % 60);
   return m + ':' + (sec < 10 ? '0' : '') + sec;
 }
+/* ── Adapte le wrap aux vraies dimensions de la vidéo (pas de barres noires) ── */
+function _gwVedAdaptContainer() {
+  var v    = document.getElementById('gw-ved-vid');
+  var wrap = document.getElementById('gw-ved-wrap');
+  var mid  = document.getElementById('gw-ved-mid');
+  if (!v || !wrap || !mid || !v.videoWidth || !v.videoHeight) return;
+
+  var vw = v.videoWidth;
+  var vh = v.videoHeight;
+  var cw = mid.clientWidth  || window.innerWidth;
+  var ch = mid.clientHeight || Math.round(window.innerHeight * 0.45);
+
+  /* Calcule le plus grand affichage possible sans déformation */
+  var scale = Math.min(cw / vw, ch / vh);
+  var dw    = Math.round(vw * scale);
+  var dh    = Math.round(vh * scale);
+
+  wrap.style.width  = dw + 'px';
+  wrap.style.height = dh + 'px';
+}
+
 function _gwVedSetDuration(dur) {
   if (!dur || !isFinite(dur) || dur <= 0) return;
   _ved.trim.end = dur;
@@ -9317,7 +9342,7 @@ function _gwVedAddEmoji(e) {
 /* ── Créer un layer draggable ── */
 function _gwVedAddLayer(opts) {
   var id   = ++_ved.layerId;
-  var wrap = document.getElementById('gw-ved-wrap');
+  var wrap = document.getElementById('gw-ved-wrap');  /* conteneur vidéo dimensionné */
   var cont = document.getElementById('gw-ved-layers');
   if (!wrap || !cont) return;
 
