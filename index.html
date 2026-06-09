@@ -1054,33 +1054,30 @@
             <!-- Sélecteur de médias -->
             <div class="pub-media-section">
 
-              <!-- Photos -->
+              <!-- Photo / Short -->
               <div class="pub-media-row">
                 <div class="pub-media-label">
-                  <i class="fas fa-image"></i><span>Photo</span>
+                  <i class="fas fa-camera"></i><span>Photo / Short</span>
                 </div>
                 <div class="pub-media-btns">
-                  <button class="pub-type-btn" onclick="triggerImgPick()">
+                  <button class="pub-type-btn" onclick="_pubPickPhotoOrShort()">
                     <i class="fas fa-images"></i> Galerie
                   </button>
-                  <button class="pub-type-btn" onclick="triggerCameraPhoto()">
+                  <button class="pub-type-btn" onclick="_pubOpenCameraPhotoShort()">
                     <i class="fas fa-camera"></i> Caméra
                   </button>
                 </div>
               </div>
 
-              <!-- Vidéo (Short + Vidéo fusionnés) -->
+              <!-- Vidéo — galerie uniquement -->
               <div class="pub-media-row pub-media-row-video" id="pub-row-video">
                 <div class="pub-media-label">
                   <i class="fas fa-video" style="color:#7C3AED"></i>
                   <span style="color:#7C3AED;font-weight:700">Vidéo</span>
                 </div>
                 <div class="pub-media-btns">
-                  <button class="pub-type-btn" onclick="_pubPickVideoGallery()">
+                  <button class="pub-type-btn" onclick="_pubPickVideoOnly()">
                     <i class="fas fa-film"></i> Galerie
-                  </button>
-                  <button class="pub-type-btn" onclick="_pubOpenVideoCamera()">
-                    <i class="fas fa-circle-dot"></i> Caméra
                   </button>
                 </div>
               </div>
@@ -3456,7 +3453,7 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260609n"></script>
+  <script src="js/app.js?v=20260609o"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">

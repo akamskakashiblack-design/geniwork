@@ -8521,46 +8521,86 @@ function _pubVideoTypeChosen(type) {
   }
 }
 
-/* ── Galerie vidéo fusionnée : demande le type d'abord ── */
-function _pubPickVideoGallery() {
-  _pubShowVideoTypeSheet(function(type) {
-    triggerVideoGallery(type);
+/* ── Galerie Photo ou Short : demande le type ── */
+function _pubPickPhotoOrShort() {
+  var existing = document.getElementById('gw-photo-short-sheet');
+  if (existing) existing.remove();
+  var bg = document.createElement('div');
+  bg.id = 'gw-photo-short-sheet';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center';
+  bg.innerHTML =
+    '<div style="width:100%;max-width:480px;background:#fff;border-radius:24px 24px 0 0;padding:20px 20px 36px;box-shadow:0 -4px 32px rgba(0,0,0,.18)">' +
+      '<div style="width:40px;height:4px;background:#E2E8F0;border-radius:4px;margin:0 auto 20px"></div>' +
+      '<p style="font-size:15px;font-weight:700;color:#0F172A;text-align:center;margin:0 0 18px">Que souhaitez-vous importer ?</p>' +
+      '<div style="display:flex;gap:12px">' +
+        '<button onclick="document.getElementById(\'gw-photo-short-sheet\').remove();triggerImgPick()" ' +
+          'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 10px;background:#F0FDF4;border:2px solid #BBF7D0;border-radius:16px;cursor:pointer">' +
+          '<div style="width:48px;height:48px;border-radius:14px;background:#16A34A;display:flex;align-items:center;justify-content:center">' +
+            '<i class="fas fa-image" style="color:#fff;font-size:22px"></i>' +
+          '</div>' +
+          '<span style="font-size:14px;font-weight:700;color:#16A34A">Photo</span>' +
+          '<span style="font-size:11px;color:#64748B;text-align:center;line-height:1.4">Image depuis<br>la galerie</span>' +
+        '</button>' +
+        '<button onclick="document.getElementById(\'gw-photo-short-sheet\').remove();triggerVideoGallery(\'short\')" ' +
+          'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 10px;background:#FFF1F2;border:2px solid #FECDD3;border-radius:16px;cursor:pointer">' +
+          '<div style="width:48px;height:48px;border-radius:14px;background:#E11D48;display:flex;align-items:center;justify-content:center">' +
+            '<i class="fas fa-mobile-screen-button" style="color:#fff;font-size:22px"></i>' +
+          '</div>' +
+          '<span style="font-size:14px;font-weight:700;color:#E11D48">Short</span>' +
+          '<span style="font-size:11px;color:#64748B;text-align:center;line-height:1.4">Vertical · max 3 min<br>9:16</span>' +
+        '</button>' +
+      '</div>' +
+      '<button onclick="document.getElementById(\'gw-photo-short-sheet\').remove()" ' +
+        'style="width:100%;margin-top:14px;padding:12px;background:none;border:none;color:#94A3B8;font-size:14px;cursor:pointer">Annuler</button>' +
+    '</div>';
+  var sheet = bg.firstElementChild;
+  sheet.style.transform = 'translateY(100%)';
+  requestAnimationFrame(function() {
+    sheet.style.transition = 'transform .3s cubic-bezier(.32,1,.6,1)';
+    sheet.style.transform  = 'translateY(0)';
   });
+  bg.addEventListener('click', function(e) { if (e.target === bg) bg.remove(); });
+  document.body.appendChild(bg);
 }
 
-/* ── Caméra vidéo fusionnée : ouvre la caméra avec toggle Short/Vidéo ── */
-function _pubOpenVideoCamera() {
-  _pubVideoType = _pubVideoType === 'photo' ? 'short' : (_pubVideoType || 'short');
-  _camMode = 'video';
+/* ── Caméra Photo / Short : ouvre la caméra en mode Photo par défaut ── */
+function _pubOpenCameraPhotoShort() {
+  _camMode = 'photo';
   _gwOpenCamera();
 }
 
-/* ── Bascule le mode (Short ↔ Vidéo) depuis l'overlay caméra ── */
-function _gwCamSetMode(type) {
-  if (_pubVideoType === type) return; /* déjà dans ce mode */
-  _pubVideoType = type;
+/* ── Vidéo galerie uniquement (toujours type=video) ── */
+function _pubPickVideoOnly() {
+  _pubVideoType = 'video';
+  document.getElementById('video-picker').click();
+}
 
-  /* Met à jour les boutons du toggle */
-  var btnShort = document.getElementById('gw-cam-mode-short');
-  var btnVideo = document.getElementById('gw-cam-mode-video');
-  if (btnShort) {
-    btnShort.style.background = type === 'short' ? '#E11D48' : 'rgba(255,255,255,.18)';
-    btnShort.style.border     = type === 'short' ? '2px solid #E11D48' : '2px solid rgba(255,255,255,.3)';
-    btnShort.style.fontWeight = type === 'short' ? '700' : '500';
-  }
-  if (btnVideo) {
-    btnVideo.style.background = type === 'video' ? '#2563EB' : 'rgba(255,255,255,.18)';
-    btnVideo.style.border     = type === 'video' ? '2px solid #2563EB' : '2px solid rgba(255,255,255,.3)';
-    btnVideo.style.fontWeight = type === 'video' ? '700' : '500';
-  }
+/* ── Compat : garde l'ancienne galerie vidéo (Short uniquement maintenant) ── */
+function _pubPickVideoGallery() {
+  triggerVideoGallery('short');
+}
 
-  /* Redémarre le stream caméra avec les constraints adaptées au nouveau mode */
+/* ── Compat : plus utilisé depuis l'UI mais conservé pour liens externes ── */
+function _pubOpenVideoCamera() {
+  _pubOpenCameraPhotoShort();
+}
+
+/* ── Bascule Photo ↔ Short depuis le toggle de l'overlay caméra ── */
+function _gwCamSetModePS(type) {
+  var isPhoto = type === 'photo';
+  /* Pas de changement si déjà dans le bon mode */
+  if (isPhoto && _camMode === 'photo') return;
+  if (!isPhoto && _camMode === 'video' && _pubVideoType === 'short') return;
+
+  _camMode = isPhoto ? 'photo' : 'video';
+  if (!isPhoto) _pubVideoType = 'short';
+
+  /* Stoppe l'ancien stream */
   if (_camStream) {
-    /* Stoppe les anciennes pistes */
     _camStream.getTracks().forEach(function(t) { t.stop(); });
     _camStream = null;
   }
-  /* Nettoie les listeners orientation avant de recréer l'UI */
+  /* Nettoie les listeners */
   window.removeEventListener('orientationchange', _gwCamUpdateBars);
   window.removeEventListener('resize',            _gwCamUpdateBars);
   try { screen.orientation && screen.orientation.removeEventListener('change', _gwCamUpdateBars); } catch(e){}
@@ -8568,11 +8608,15 @@ function _gwCamSetMode(type) {
   /* Redémarre avec les nouveaux constraints */
   navigator.mediaDevices.getUserMedia(_gwCamConstraints()).then(function(stream) {
     _camStream = stream;
-    /* Reconstruit l'UI complète (toggle, guide 16:9, etc.) */
     _gwShowCameraUI();
   }).catch(function() {
-    showToast('Impossible de changer le format caméra', 'err');
+    showToast('Impossible de changer le mode caméra', 'err');
   });
+}
+
+/* ── Compat : ancienne fonction _gwCamSetMode (Short/Vidéo) redirigée ── */
+function _gwCamSetMode(type) {
+  _gwCamSetModePS(type === 'video' ? 'short' : 'photo');
 }
 
 /* ══════════════════════════════════════════
@@ -8716,50 +8760,28 @@ function _gwShowCameraUI() {
   overlay.style.cssText =
     'position:fixed;inset:0;z-index:3500;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center';
 
-  /* En mode Vidéo 16:9 : la preview est dans un cadre 16:9 centré.
-     En mode Short/Photo : la preview remplit tout l'écran.          */
-  var isVidMode = (isVideo && _pubVideoType === 'video');
-
   overlay.innerHTML =
-    /* ── Preview caméra ──
-       Vidéo 16:9 → wrapper centré avec aspect-ratio:16/9 (crop cover)
-       Short/Photo → plein écran classique                              */
-    (isVidMode
-      ? '<div id="gw-cam-frame" style="position:absolute;width:100%;aspect-ratio:16/9;top:50%;left:0;transform:translateY(-50%);overflow:hidden;background:#000">' +
-          '<video id="gw-cam-preview" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block"></video>' +
-        '</div>' +
-        /* Zones noires haut/bas en dehors du cadre 16:9 */
-        '<div id="gw-cam-bar-top"    style="position:absolute;top:0;left:0;right:0;background:#000;pointer-events:none" ></div>' +
-        '<div id="gw-cam-bar-bottom" style="position:absolute;bottom:0;left:0;right:0;background:#000;pointer-events:none"></div>'
-      : '<video id="gw-cam-preview" autoplay playsinline muted ' +
-          'style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0"></video>') +
+    /* Preview caméra plein écran (Photo ou Short) */
+    '<video id="gw-cam-preview" autoplay playsinline muted ' +
+      'style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0"></video>' +
 
-    /* Barre top */
+    /* Barre top — toggle Photo / Short toujours visible */
     '<div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:linear-gradient(to bottom,rgba(0,0,0,.6),transparent);z-index:3">' +
       '<button onclick="_gwCloseCamera()" style="width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.45);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>' +
-      /* Mode : photo → simple label | video → toggle Short / Vidéo */
-      (isVideo
-        ? '<div style="display:flex;gap:6px;background:rgba(0,0,0,.35);border-radius:30px;padding:4px">' +
-            '<button id="gw-cam-mode-short" onclick="_gwCamSetMode(\'short\')" ' +
-              'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_pubVideoType==='short'?'#E11D48':'rgba(255,255,255,.3)') + ';background:' + (_pubVideoType==='short'?'#E11D48':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_pubVideoType==='short'?'700':'500') + ';cursor:pointer">' +
-              '<i class="fas fa-mobile-screen-button"></i> Short</button>' +
-            '<button id="gw-cam-mode-video" onclick="_gwCamSetMode(\'video\')" ' +
-              'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_pubVideoType==='video'?'#2563EB':'rgba(255,255,255,.3)') + ';background:' + (_pubVideoType==='video'?'#2563EB':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_pubVideoType==='video'?'700':'500') + ';cursor:pointer">' +
-              '<i class="fas fa-video"></i> Vidéo</button>' +
-          '</div>'
-        : '<div style="color:#fff;font-size:13px;font-weight:700;letter-spacing:.5px">📷 PHOTO</div>') +
+      /* Toggle Photo ↔ Short */
+      '<div style="display:flex;gap:6px;background:rgba(0,0,0,.35);border-radius:30px;padding:4px">' +
+        '<button id="gw-cam-t-photo" onclick="_gwCamSetModePS(\'photo\')" ' +
+          'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_camMode==='photo'?'#16A34A':'rgba(255,255,255,.3)') + ';background:' + (_camMode==='photo'?'#16A34A':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_camMode==='photo'?'700':'500') + ';cursor:pointer">' +
+          '📷 Photo</button>' +
+        '<button id="gw-cam-t-short" onclick="_gwCamSetModePS(\'short\')" ' +
+          'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_camMode==='video'?'#E11D48':'rgba(255,255,255,.3)') + ';background:' + (_camMode==='video'?'#E11D48':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_camMode==='video'?'700':'500') + ';cursor:pointer">' +
+          '📹 Short</button>' +
+      '</div>' +
       '<button onclick="_gwFlipCamera()" style="width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.45);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-camera-rotate"></i></button>' +
     '</div>' +
 
-    /* Timer enregistrement */
+    /* Timer enregistrement (Short seulement) */
     (isVideo ? '<div id="gw-cam-timer" style="position:absolute;top:68px;left:50%;transform:translateX(-50%);background:rgba(220,38,38,.85);color:#fff;font-size:13px;font-weight:800;padding:4px 14px;border-radius:20px;display:none;z-index:4"><i class="fas fa-circle" style="font-size:8px;margin-right:5px;animation:blink 1s infinite"></i><span id="gw-cam-time">0:00</span></div>' : '') +
-
-    /* Badge format (Vidéo 16:9 uniquement) */
-    (isVidMode
-      ? '<div style="position:absolute;bottom:110px;left:50%;transform:translateX(-50%);background:rgba(37,99,235,.85);color:#fff;font-size:11px;font-weight:700;padding:5px 14px;border-radius:20px;white-space:nowrap;display:flex;align-items:center;gap:6px;z-index:4">' +
-          '<i class="fas fa-video"></i> Format Vidéo 16:9' +
-        '</div>'
-      : '') +
 
     /* Barre bas */
     '<div style="position:absolute;bottom:0;left:0;right:0;padding:28px 20px 40px;background:linear-gradient(to top,rgba(0,0,0,.65),transparent);display:flex;align-items:center;justify-content:center;gap:32px;z-index:3">' +
@@ -8777,17 +8799,7 @@ function _gwShowCameraUI() {
 
   /* Branche le stream sur le <video> */
   var vid = document.getElementById('gw-cam-preview');
-  if (vid) {
-    vid.srcObject = _camStream;
-    /* En mode Vidéo 16:9 : calcule la hauteur des barres noires haut/bas
-       dès que le stream a des métadonnées (et à chaque resize/orientation) */
-    if (_camMode === 'video' && _pubVideoType === 'video') {
-      _gwCamUpdateBars();
-      window.addEventListener('resize',            _gwCamUpdateBars);
-      window.addEventListener('orientationchange', _gwCamUpdateBars);
-      screen.orientation && screen.orientation.addEventListener('change', _gwCamUpdateBars);
-    }
-  }
+  if (vid) vid.srcObject = _camStream;
 }
 
 /* ── Calcule la hauteur des zones noires haut/bas autour du cadre 16:9 ── */
