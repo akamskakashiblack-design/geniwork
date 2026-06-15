@@ -14,7 +14,7 @@
    ══════════════════════════════════════════════════════════════ */
 var _GW_FIREBASE_CONFIG = {
   apiKey:            'AIzaSyBodK0Tg5BSIYfLfhT-1ggV2kWXONsR3Ow',
-  authDomain:        'geniwork.vercel.app',
+  authDomain:        'geniwork-be35c.firebaseapp.com',
   databaseURL:       'https://geniwork-be35c-default-rtdb.europe-west1.firebasedatabase.app',
   projectId:         'geniwork-be35c',
   storageBucket:     'geniwork-be35c.firebasestorage.app',
@@ -176,37 +176,24 @@ function _gwInitFirebase() {
     /* Test de connexion */
     _gwFbDB.ref('.info/connected').on('value', function(snap) {
       if (snap.val() === true) {
-        /* Reconnexion réseau → re-signaler la présence immédiatement */
-        if (_currentUser) {
-          try { _gwSetOnlinePresence(_currentUser); } catch(e){}
-        }
+        console.log('[GW Firebase] 🟢 CONNECTÉ à Firebase');
+      } else {
+        console.warn('[GW Firebase] 🔴 DÉCONNECTÉ de Firebase');
       }
     });
     /* Auth anonyme : DOIT être confirmée avant tout write Firebase
-       (règles auth != null).  On lance sync + preload dans le then().
-       Timeout 6s : si Firebase tarde (connexion internationale lente),
-       on démarre quand même en mode dégradé pour ne pas bloquer l'app. */
-    var _anonAuthDone = false;
-    function _afterAnonAuth() {
-      if (_anonAuthDone) return;
-      _anonAuthDone = true;
-      _gwFbSyncStart();
-      _gwFbPreloadAndStart();
-    }
-    var _anonAuthTimeout = setTimeout(function() {
-      console.warn('[GW Firebase] Auth anonyme timeout → démarrage dégradé');
-      _afterAnonAuth();
-    }, 6000);
+       (règles auth != null).  On lance sync + preload dans le then().  */
     _gwFbAuth.signInAnonymously()
       .then(function(cred) {
         console.log('[GW Firebase] 🔒 Auth anonyme OK —', cred.user.uid);
-        clearTimeout(_anonAuthTimeout);
-        _afterAnonAuth();
+        _gwFbSyncStart();
+        _gwFbPreloadAndStart();
       })
       .catch(function(e) {
         console.warn('[GW Firebase] Auth anonyme échouée :', e.code || e);
-        clearTimeout(_anonAuthTimeout);
-        _afterAnonAuth();
+        /* Démarrage quand même en mode dégradé (lectures publiques OK) */
+        _gwFbSyncStart();
+        _gwFbPreloadAndStart();
       });
   } catch(e) {
     console.error('[GW Firebase] ❌ Erreur init :', e);
@@ -313,7 +300,7 @@ function _gwUploadPendingVideos() {
             }
             /* 3. Met à jour le <video> déjà rendu dans le feed */
             var vEl = document.getElementById('fv-' + p.id);
-            if (vEl && !vEl.src) { vEl.src = url; _gwInitSingleVideoThumb(vEl); _gwReobserveFeedVid(vEl); }
+            if (vEl && !vEl.src) vEl.src = url;
           },
           function() {}  /* échec silencieux — réessayera au prochain démarrage */
         );
@@ -351,7 +338,7 @@ function _gwUploadPendingOfficialVideos() {
             if (idx !== -1) { all[idx].video.url = url; _offSavePosts(all); }
             /* Met à jour le <video> si déjà rendu */
             var vEl = document.getElementById('off-fv-' + p.id);
-            if (vEl && !vEl.src) { vEl.src = url; _gwInitSingleVideoThumb(vEl); _gwReobserveFeedVid(vEl); }
+            if (vEl && !vEl.src) vEl.src = url;
           },
           function() {}
         );
@@ -444,43 +431,17 @@ function _gwFbSet(path, data) {
 
 /* VAPID key (Web Push) — à récupérer dans Firebase Console
    Project Settings → Cloud Messaging → Web Push certificates */
-var _GW_VAPID_KEY = 'BMrd6xRP5sJXq67RAm9I-PW0bMijfmb45YzVSXl39ThIQoApXi_Cm7MpOJW1JJ48zJ5M0qX0ZLyVc59tZduOAFk';
+var _GW_VAPID_KEY = 'YOUR_VAPID_KEY_HERE';
 
 var _gwFcmToken = null;
 
 function _gwInitNotifications() {
   if (!_gwFbReady || !_gwFbDB || !_currentUser) return;
+  if (!('Notification' in window))               return; /* Navigateur non compatible */
+  if (!firebase.messaging)                        return; /* SDK messaging non chargé */
 
-  /* ── Android natif (Capacitor) ── */
-  if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
-    var Push = window.Capacitor.Plugins.PushNotifications;
-    if (!Push) return;
-    Push.requestPermissions().then(function(result) {
-      if (result.receive !== 'granted') return;
-      Push.register();
-    }).catch(function(){});
-    Push.addListener('registration', function(token) {
-      _gwFcmToken = token.value;
-      _gwFbDB.ref('gw/fcm_tokens/' + _gwFbKey(_currentUser.email)).set(token.value).catch(function(){});
-    });
-    Push.addListener('pushNotificationReceived', function(notif) {
-      /* Notification reçue au premier plan — on l'affiche via l'API native */
-    });
-    Push.addListener('pushNotificationActionPerformed', function(action) {
-      /* Clic sur la notification → déjà dans l'app */
-    });
-    return;
-  }
-
-  /* ── Web browser — FCM désactivé (401 FCM Registration) ── */
-  return;
-  if (!('Notification' in window))               return;
-  if (!firebase.messaging)                        return;
+  /* Enregistre le service worker Firebase Messaging */
   if (!('serviceWorker' in navigator)) return;
-  if (_GW_VAPID_KEY === 'YOUR_VAPID_KEY_HERE') {
-    console.warn('[GW Push] ❌ VAPID key non configurée — allez dans Firebase Console → Project Settings → Cloud Messaging → Web Push certificates');
-    return;
-  }
 
   navigator.serviceWorker.register('/firebase-messaging-sw.js').then(function(reg) {
     var messaging = firebase.messaging();
@@ -500,7 +461,7 @@ function _gwInitNotifications() {
           /* Sauvegarde dans Firebase pour que les autres utilisateurs puissent nous notifier */
           _gwFbDB.ref('gw/fcm_tokens/' + _gwFbKey(_currentUser.email)).set(token).catch(function(){});
         })
-        .catch(function(e) { /* push non disponible sur ce navigateur/projet */ });
+        .catch(function(e) { console.warn('[GW Push] getToken échoué :', e.message); });
 
       /* Notification quand l'app est au premier plan */
       messaging.onMessage(function(payload) {
@@ -523,24 +484,17 @@ function _gwInitNotifications() {
 /* Envoie une notification push à un utilisateur cible */
 function _gwSendPushNotif(toEmail, title, body, tag) {
   if (!toEmail || !_gwFbReady || !_gwFbDB) return;
-  /* Récupère le token FCM — timeout 5s pour ne pas bloquer */
-  var _pnDone = false;
-  var _pnTimeout = setTimeout(function() { _pnDone = true; }, 5000);
+  /* Récupère le token FCM du destinataire depuis Firebase */
   _gwFbDB.ref('gw/fcm_tokens/' + _gwFbKey(toEmail)).once('value').then(function(snap) {
-    clearTimeout(_pnTimeout);
-    if (_pnDone) return;
     var token = snap.val();
     if (!token || typeof token !== 'string') return;
-    /* Appelle la Vercel function qui relaie vers l'API FCM — timeout 10s */
-    var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    var timer = ctrl ? setTimeout(function() { ctrl.abort(); }, 10000) : null;
+    /* Appelle la Vercel function qui relaie vers l'API FCM */
     fetch('/api/notify', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ token: token, title: title, body: body, tag: tag || 'geniwork' }),
-      signal:  ctrl ? ctrl.signal : undefined
-    }).then(function() { if (timer) clearTimeout(timer); }).catch(function() { if (timer) clearTimeout(timer); });
-  }).catch(function() { clearTimeout(_pnTimeout); });
+      body:    JSON.stringify({ token: token, title: title, body: body, tag: tag || 'geniwork' })
+    }).catch(function(){});
+  }).catch(function(){});
 }
 
 /* ── Listeners temps réel Firebase → localStorage → UI ── */
@@ -597,63 +551,6 @@ function _gwFbSyncStart() {
   /* ── DM : les messages sont chargés directement depuis Firebase à l'ouverture
      de chaque conversation (_dmOpen). Pas de listener global gw/dm_msgs. ── */
 
-  /* ── Signal de réinitialisation globale (cross-appareils) ── */
-  _gwFbDB.ref('gw_system/reset_at').on('value', function(snap) {
-    try {
-      var resetAt = snap.val();
-      if (!resetAt) return;
-      var lastKnown = parseInt(localStorage.getItem('gw_last_reset') || '0', 10);
-      /* Si le signal est plus récent que ce qu'on connaît ET qu'on n'est pas l'admin qui l'a déclenché */
-      if (resetAt > lastKnown) {
-        localStorage.setItem('gw_last_reset', String(resetAt));
-        /* Vider TOUT le localStorage gw_* sauf gw_last_reset et gw_session */
-        var keep = ['gw_last_reset', 'gw_session', 'gw_lang', 'gw_dark_mode'];
-        var toClear = [];
-        for (var k in localStorage) {
-          if (k.indexOf('gw_') === 0 && keep.indexOf(k) === -1) toClear.push(k);
-        }
-        toClear.forEach(function(k) { try { localStorage.removeItem(k); } catch(e2){} });
-        /* Recharger la page pour repartir proprement */
-        setTimeout(function() { location.reload(); }, 800);
-      }
-    } catch(e){}
-  });
-
-  /* ── Services : sync temps réel (mises à jour et suppressions) ── */
-  _gwFbDB.ref('gw/services').on('child_changed', function(snap) {
-    try {
-      var email = snap.key.replace(/__d__/g, '.').replace(/__a__/g, '@');
-      var svcs  = snap.val();
-      if (svcs && Array.isArray(svcs) && svcs.length) {
-        localStorage.setItem('gw_services_' + email, JSON.stringify(svcs));
-      } else {
-        localStorage.removeItem('gw_services_' + email);
-      }
-      try { renderMarketplaceUserServices(); } catch(e2){}
-    } catch(e){}
-  });
-  _gwFbDB.ref('gw/services').on('child_removed', function(snap) {
-    try {
-      var email = snap.key.replace(/__d__/g, '.').replace(/__a__/g, '@');
-      localStorage.removeItem('gw_services_' + email);
-      try { renderMarketplaceUserServices(); } catch(e2){}
-    } catch(e){}
-  });
-
-  /* ── Tombstones : suppressions admin (sync temps réel cross-appareils) ── */
-  _gwFbDB.ref('gw/deleted_posts').on('child_added', function(snap) {
-    try {
-      var postId = snap.key;
-      _gwMarkDeleted(postId);
-      /* Retirer du feed immédiatement */
-      DEMO_POSTS    = DEMO_POSTS.filter(function(p)    { return String(p.id) !== postId; });
-      PENDING_POSTS = PENDING_POSTS.filter(function(p) { return String(p.id) !== postId; });
-      var card = document.getElementById('post-' + postId);
-      if (card) card.remove();
-      try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e2){}
-    } catch(e){}
-  });
-
   /* ── Posts utilisateurs (sync temps réel) ── */
   _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
   _gwFbDB.ref('gw/posts').on('child_changed', function(snap) { try { _gwMergePost(snap); } catch(e){} });
@@ -678,7 +575,7 @@ function _gwFbSyncStart() {
       if (post && post.video && !post.video.url) {
         post.video.url = data.url;
         var vEl = document.getElementById('fv-' + pid);
-        if (vEl && !vEl.src) { vEl.src = data.url; _gwInitSingleVideoThumb(vEl); _gwReobserveFeedVid(vEl); }
+        if (vEl && !vEl.src)  vEl.src = data.url;
         var wrap = document.getElementById('pvw-' + pid);
         if (wrap) {
           (function(u, d) {
@@ -694,7 +591,7 @@ function _gwFbSyncStart() {
           offPost.video.url = data.url;
           try { localStorage.setItem('gw_official_posts', JSON.stringify(offList)); } catch(e2){}
           var offVEl = document.getElementById('off-fv-' + pid);
-          if (offVEl && !offVEl.src) { offVEl.src = data.url; _gwInitSingleVideoThumb(offVEl); _gwReobserveFeedVid(offVEl); }
+          if (offVEl && !offVEl.src) offVEl.src = data.url;
         }
       }
     } catch(e){}
@@ -704,16 +601,8 @@ function _gwFbSyncStart() {
   function _gwMergeLikes(snap) {
     try {
       var postId = snap.key;
-      var _lval  = snap.val();
-      var likers;
-      if (Array.isArray(_lval)) {
-        likers = _lval;
-      } else if (_lval && typeof _lval === 'object') {
-        likers = Object.values(_lval);
-      } else {
-        return;
-      }
-      _likersCache[String(postId)] = likers;
+      var likers = snap.val();
+      if (!Array.isArray(likers)) return;
       localStorage.setItem('gw_likers_' + postId, JSON.stringify(likers));
       var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
       if (post) {
@@ -822,16 +711,9 @@ function _gwFbSyncStart() {
   /* ── Commentaires (temps réel entre appareils) ── */
   function _gwMergeComments(snap) {
     try {
-      var postId = snap.key;
-      var _cval  = snap.val();
-      var comments;
-      if (Array.isArray(_cval)) {
-        comments = _cval;
-      } else if (_cval && typeof _cval === 'object') {
-        comments = Object.values(_cval);
-      } else {
-        comments = [];
-      }
+      var postId   = snap.key;
+      var comments = snap.val();
+      if (!Array.isArray(comments)) return;
       localStorage.setItem('gw_comments_' + postId, JSON.stringify(comments));
       /* Rafraîchit le post ouvert si besoin */
       var openDetail = document.getElementById('post-detail-wrap');
@@ -904,16 +786,8 @@ function _gwFbSyncStart() {
 
   /* ── Publications officielles ── */
   _listen('official_posts', 'gw_official_posts', function(freshList) {
-    /* Sur l'appareil qui vient d'écrire, _offPublishPost a déjà appelé renderFeed.
-       On skip ici pour éviter un double-rendu qui provoque des doublons via le recyclage. */
-    var _justWrote = (Date.now() - _offLastPublishTs) < 5000;
-    if (!_justWrote) {
-      if (document.getElementById('feed-list')) {
-        try { renderFeed(getAllPosts()); } catch(e){}
-      } else {
-        /* Feed pas encore visible → marquer pour re-rendu au prochain affichage */
-        window._gwOffPostsPendingRender = true;
-      }
+    if (document.getElementById('feed-list')) {
+      try { _injectOfficialPosts(); } catch(e){}
     }
     /* Pour chaque post vidéo sans URL → query gw/post_videos/{id} en parallèle */
     if (!Array.isArray(freshList) || !_gwFbDB) return;
@@ -932,7 +806,7 @@ function _gwFbSyncStart() {
           try { localStorage.setItem('gw_official_posts', JSON.stringify(all)); } catch(e2){}
           /* Mettre à jour le <video> si déjà rendu */
           var vEl = document.getElementById('off-fv-' + p.id);
-          if (vEl && !vEl.src) { vEl.src = d.url; _gwInitSingleVideoThumb(vEl); _gwReobserveFeedVid(vEl); }
+          if (vEl && !vEl.src) vEl.src = d.url;
         }
       }).catch(function(){});
     });
@@ -1072,11 +946,19 @@ function _gwFbSyncStart() {
   /* ── Demandes de badge ── */
   _listen('badge_requests', 'gw_badge_requests', function() { _admSync('badges'); });
 
-  /* ── Milestones / Notifications : enregistrés via initApp après login ── */
+  /* ── Milestones de l'utilisateur connecté ── */
   if (_currentUser) {
-    _gwFbWatchMilestones(_currentUser.email);
-    _gwFbWatchUserNotifs(_currentUser.email);
+    _gwFbDB.ref('gw/milestones/' + _gwFbKey(_currentUser.email)).on('value', function(snap) {
+      if (_gwFbSkip) return;
+      var data = snap.val() || {};
+      Object.keys(data).forEach(function(k) {
+        if (data[k]) localStorage.setItem('gw_mile_' + k, '1');
+      });
+    });
   }
+
+  /* ── Notifications de l'utilisateur connecté ── */
+  if (_currentUser) _gwFbWatchUserNotifs(_currentUser.email);
 }
 
 /* ── Merge les posts d'un utilisateur reçus depuis Firebase ── */
@@ -1115,34 +997,22 @@ function _gwMergePost(snap) {
     return false;
   });
 
-  /* ── Ajoute/met à jour les posts (sauf supprimés par admin) ── */
+  /* ── Ajoute/met à jour les posts ── */
   var changed = removedAny;
   posts.forEach(function(p) {
     if (!p || !p.id) return;
-    if (_gwIsDeleted(p.id)) return; /* tombstone → ignorer */
     if (!p.images) p.images = [];
     var existing = DEMO_POSTS.find(function(d){ return d.id === p.id; });
     if (!existing) {
       p.likers = loadPostLikers(p.id);
       DEMO_POSTS.push(p);
       changed = true;
-    } else {
-      var _needsUpdate = false;
+    } else if (p.video && p.video.url && existing.video && !existing.video.url) {
       /* Met à jour l'URL vidéo si Firebase en a une mais pas la version locale */
-      if (p.video && p.video.url && existing.video && !existing.video.url) {
-        existing.video.url = p.video.url;
-        var _vEl = document.getElementById('fv-' + p.id);
-        if (_vEl && !_vEl.src) { _vEl.src = p.video.url; _gwInitSingleVideoThumb(_vEl); _gwReobserveFeedVid(_vEl); }
-        _needsUpdate = true;
-      }
-      /* Met à jour le texte si modifié */
-      if (p.text !== existing.text) { existing.text = p.text; _needsUpdate = true; }
-      /* Met à jour les images si le nombre a changé */
-      if ((p.images || []).length !== (existing.images || []).length) {
-        existing.images = p.images || [];
-        _needsUpdate = true;
-      }
-      if (_needsUpdate) changed = true;
+      existing.video.url = p.video.url;
+      var _vEl = document.getElementById('fv-' + p.id);
+      if (_vEl && !_vEl.src) _vEl.src = p.video.url;
+      changed = true;
     }
   });
   if (changed) {
@@ -1239,24 +1109,6 @@ function _gwMergeGroupMsg(snap) {
   } catch(e){}
 }
 
-/* ── Active le listener milestones pour un utilisateur ── */
-var _gwMilestoneWatchEmail = null;
-function _gwFbWatchMilestones(email) {
-  if (!_gwFbReady || !_gwFbDB || !email) return;
-  if (_gwMilestoneWatchEmail === email) return;
-  if (_gwMilestoneWatchEmail) {
-    try { _gwFbDB.ref('gw/milestones/' + _gwFbKey(_gwMilestoneWatchEmail)).off(); } catch(e){}
-  }
-  _gwMilestoneWatchEmail = email;
-  _gwFbDB.ref('gw/milestones/' + _gwFbKey(email)).on('value', function(snap) {
-    if (_gwFbSkip) return;
-    var data = snap.val() || {};
-    Object.keys(data).forEach(function(k) {
-      if (data[k]) localStorage.setItem('gw_mile_' + k, '1');
-    });
-  });
-}
-
 /* ── Active le listener notifs pour un utilisateur ── */
 /* ══════════════════════════════════════════
    PRÉSENCE EN LIGNE — Temps réel admin
@@ -1267,30 +1119,23 @@ function _gwSetOnlinePresence(user) {
   if (!_gwFbReady || !_gwFbDB || !user) return;
   var fbKey = _gwFbKey(user.email);
   var ref   = _gwFbDB.ref('gw/online/' + fbKey);
+  _gwOnlineRef = ref;
 
-  /* Ne recréer le ref que si c'est un nouvel utilisateur */
-  if (!_gwOnlineRef || _gwOnlineRef.key !== fbKey) {
-    /* Arrêter l'ancien heartbeat si on change d'utilisateur */
-    if (_gwOnlineRef && _gwOnlineRef._heartbeat) {
-      clearInterval(_gwOnlineRef._heartbeat);
-    }
-    _gwOnlineRef = ref;
-    /* Heartbeat toutes les 60s (réduit de 2 min → 1 min pour meilleure détection) */
-    _gwOnlineRef._heartbeat = setInterval(function() {
-      if (!_currentUser) return;
-      try { ref.update({ at: Date.now() }); } catch(e){}
-    }, 60000);
-  }
-
-  /* Écrit/met à jour la présence immédiatement */
+  /* Écrit la présence */
   ref.set({
     nom:   user.nom   || user.email,
     email: user.email,
     at:    Date.now()
   });
 
-  /* Enregistre la suppression automatique à la coupure réseau */
+  /* Supprime automatiquement à la déconnexion */
   ref.onDisconnect().remove();
+
+  /* Renouvelle la présence toutes les 2 minutes (keepalive) */
+  if (_gwOnlineRef._heartbeat) clearInterval(_gwOnlineRef._heartbeat);
+  _gwOnlineRef._heartbeat = setInterval(function() {
+    try { ref.update({ at: Date.now() }); } catch(e){}
+  }, 120000);
 }
 
 /* ── Listener présence en ligne — temps réel pour toute l'app ── */
@@ -1352,15 +1197,8 @@ function _gwGetOnlineCount() {
   return parseInt(localStorage.getItem('gw_online_count') || '0', 10);
 }
 
-var _gwNotifWatchEmail = null; /* email dont le listener notifs est actif — évite les doublons */
 function _gwFbWatchUserNotifs(email) {
   if (!_gwFbReady || !_gwFbDB || !email) return;
-  /* Détacher l'ancien listener si l'email a changé */
-  if (_gwNotifWatchEmail && _gwNotifWatchEmail !== email) {
-    try { _gwFbDB.ref('gw/notifs/' + _gwFbKey(_gwNotifWatchEmail)).off('value'); } catch(e){}
-  }
-  if (_gwNotifWatchEmail === email) return; /* déjà actif pour cet email */
-  _gwNotifWatchEmail = email;
   _gwFbDB.ref('gw/notifs/' + _gwFbKey(email)).on('value', function(snap) {
     if (_gwFbSkip) return;
     var data = snap.val();
@@ -1396,6 +1234,7 @@ function _gwFbWatchFollowers(email) {
 /* ── Upload initial : envoie le localStorage existant vers Firebase ── */
 function _gwFbUploadAll() {
   if (!_gwFbReady) { showToast('Firebase non connecté', 'err'); return; }
+  if (!confirm('Envoyer toutes les données locales vers Firebase ?')) return;
   var pairs = [
     ['users',          'gw_users'],
     ['bans',           'gw_bans'],
@@ -1413,12 +1252,12 @@ function _gwFbUploadAll() {
   /* Reports + Notifs par utilisateur */
   Object.keys(localStorage).forEach(function(k) {
     if (k.startsWith('gw_reports_')) {
-      var emRep = k.replace('gw_reports_', '');
-      try { _gwFbSet('reports/' + _gwFbKey(emRep), JSON.parse(localStorage.getItem(k))); } catch(e){}
+      var em = k.replace('gw_reports_', '');
+      try { _gwFbSet('reports/' + _gwFbKey(em), JSON.parse(localStorage.getItem(k))); } catch(e){}
     }
     if (k.startsWith('gw_notifs_')) {
-      var emNot = k.replace('gw_notifs_', '');
-      try { _gwFbSet('notifs/' + _gwFbKey(emNot), JSON.parse(localStorage.getItem(k))); } catch(e){}
+      var em = k.replace('gw_notifs_', '');
+      try { _gwFbSet('notifs/' + _gwFbKey(em), JSON.parse(localStorage.getItem(k))); } catch(e){}
     }
   });
   showToast('Données envoyées vers Firebase ✓', 'ok');
@@ -1538,6 +1377,39 @@ function startGoogleSignIn() {
     });
 }
 
+/* Récupère le profil via l'API userinfo Google */
+function _fetchGoogleUserProfile(accessToken) {
+  fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    headers: { Authorization: 'Bearer ' + accessToken }
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(info) {
+    if (!info || !info.email) {
+      _hideGoogleLoading();
+      showToast('Impossible de récupérer le profil Google', 'err');
+      return;
+    }
+    _googleLogin({
+      googleId : info.sub,
+      email    : info.email,
+      nom      : info.name    || info.email,
+      photo    : info.picture || null,
+      verified : info.email_verified
+    });
+  })
+  .catch(function() {
+    _hideGoogleLoading();
+    showToast('Erreur réseau. Réessayez.', 'err');
+  });
+}
+
+/* Callback GIS token (fallback) */
+function _handleGoogleToken(tokenResponse) {
+  if (!tokenResponse || tokenResponse.error) { _hideGoogleLoading(); return; }
+  _showGoogleLoading('Connexion en cours…');
+  _fetchGoogleUserProfile(tokenResponse.access_token);
+}
+
 /* Callback GIS One Tap : reçoit un credential JWT */
 function _handleGoogleCredential(response) {
   var payload = _decodeJWT(response.credential);
@@ -1615,20 +1487,12 @@ function _googleLogin(gUser) {
 
   /* Charge les utilisateurs depuis Firebase d'abord */
   if (_gwFbReady && _gwFbDB) {
-    var _googleLoginDone = false;
-    function _doGoogleLoginSafe(users) {
-      if (_googleLoginDone) return;
-      _googleLoginDone = true;
-      _doGoogleLogin(users || getUsers());
-    }
-    var _googleLoginTimeout = setTimeout(function() { _doGoogleLoginSafe(null); }, 6000);
     _gwFbDB.ref('gw/users').once('value').then(function(snap) {
-      clearTimeout(_googleLoginTimeout);
       var fbUsers = snap.val();
-      _doGoogleLoginSafe(Array.isArray(fbUsers) ? fbUsers : getUsers());
+      var users = Array.isArray(fbUsers) ? fbUsers : getUsers();
+      _doGoogleLogin(users);
     }).catch(function() {
-      clearTimeout(_googleLoginTimeout);
-      _doGoogleLoginSafe(null);
+      _doGoogleLogin(getUsers());
     });
   } else {
     _doGoogleLogin(getUsers());
@@ -1687,24 +1551,17 @@ function _gwPreloadUserData(user, callback) {
   if (!_gwFbReady || !_gwFbDB || !user || !user.email) {
     callback(); return;
   }
-  var _preloadDone = false;
-  function _safeCallback() {
-    if (_preloadDone) return;
-    _preloadDone = true;
-    callback();
-  }
-  var _preloadTimeout = setTimeout(_safeCallback, 8000);
   var fbKey = _gwFbKey(user.email);
   Promise.all([
     _gwFbDB.ref('gw/inboxes/' + fbKey).once('value'),         /* 0 */
     _gwFbDB.ref('gw/notifs/' + fbKey).once('value'),          /* 1 */
     _gwFbDB.ref('gw/profiles/' + fbKey).once('value'),        /* 2 */
-    Promise.resolve(null),                                    /* 3 — gw/dms obsolète, ignoré */
+    _gwFbDB.ref('gw/dms').once('value'),                      /* 3 */
     _gwFbDB.ref('gw/group_inboxes/' + fbKey).once('value'),   /* 4 */
     _gwFbDB.ref('gw/group_msgs').once('value'),               /* 5 */
     _gwFbDB.ref('gw/following/' + fbKey).once('value'),       /* 6 */
     _gwFbDB.ref('gw/follow_counts').once('value'),            /* 7 */
-    Promise.resolve(null),                                    /* 8 — chargé à l'ouverture de chaque conv */
+    _gwFbDB.ref('gw/dm_msgs').once('value'),                  /* 8 */
     _gwFbDB.ref('gw/projects/' + fbKey).once('value'),        /* 9 */
     _gwFbDB.ref('gw/services/' + fbKey).once('value'),        /* 10 */
     _gwFbDB.ref('gw/blocked/' + fbKey).once('value'),         /* 11 */
@@ -1837,9 +1694,6 @@ function _gwPreloadUserData(user, callback) {
     var servicesFb = snaps[10] ? snaps[10].val() : null;
     if (servicesFb && Array.isArray(servicesFb)) {
       try { localStorage.setItem('gw_services_' + user.email, JSON.stringify(servicesFb)); } catch(e){}
-    } else if (snaps[10]) {
-      /* Firebase explicitement null/vide = services supprimés par l'admin → vider le cache local */
-      try { localStorage.removeItem('gw_services_' + user.email); } catch(e){}
     }
 
     /* ── Utilisateurs bloqués ── */
@@ -1878,9 +1732,8 @@ function _gwPreloadUserData(user, callback) {
       try { localStorage.setItem('gw_viewed_vids_' + user.email, JSON.stringify(viewedFb)); } catch(e){}
     }
 
-    clearTimeout(_preloadTimeout);
-    _safeCallback();
-  }).catch(function() { clearTimeout(_preloadTimeout); _safeCallback(); });
+    callback();
+  }).catch(function() { callback(); });
 }
 
 /* Lance l'app après que Firebase a chargé les données critiques */
@@ -1897,13 +1750,9 @@ function _gwStartApp() {
     if (!bgUser || _admIsBanned(session.email)) {
       /* Compte banni/supprimé → déconnexion forcée */
       _gwAppStarted = false;
-      var _bgBanInfo = _admGetBanInfo(session.email);
       localStorage.removeItem('gw_session');
       _currentUser = null;
       try { goTo('screen-login'); } catch(e) {}
-      if (_bgBanInfo) {
-        setTimeout(function() { _gwShowLoginBanScreen(session.email, _bgBanInfo); }, 200);
-      }
       return;
     }
     /* Sync silencieuse : met à jour inbox, notifs, profil, DMs, etc. */
@@ -1990,208 +1839,9 @@ function _gwSilentRefresh(user) {
   } catch(e) {}
 }
 
-/* ═══════════════════════════════════════════════════════
-   BANNIÈRE contenu partagé sur login / register
-   ═══════════════════════════════════════════════════════ */
-function _gwRefreshShareBanner(screenId) {
-  try {
-    var _24h = 24 * 60 * 60 * 1000;
-    var pendingSong = localStorage.getItem('gw_pending_song');
-    var pendingPost = localStorage.getItem('gw_pending_post');
-
-    /* Expire les items trop anciens (> 24h) pour ne pas bloquer la page de login indéfiniment */
-    var songAt = parseInt(localStorage.getItem('gw_pending_song_at') || '0');
-    if (pendingSong && songAt && (Date.now() - songAt) > _24h) {
-      localStorage.removeItem('gw_pending_song'); localStorage.removeItem('gw_pending_song_at');
-      pendingSong = null;
-    }
-    var postAt = parseInt(localStorage.getItem('gw_pending_post_at') || '0');
-    if (pendingPost && postAt && (Date.now() - postAt) > _24h) {
-      localStorage.removeItem('gw_pending_post'); localStorage.removeItem('gw_pending_post_at');
-      localStorage.removeItem('gw_pending_post_data'); pendingPost = null;
-    }
-
-    var bannerId    = screenId === 'screen-login' ? 'login-song-banner' : 'register-song-banner';
-    var banner      = document.getElementById(bannerId);
-    if (!banner) return;
-
-    if (!pendingSong && !pendingPost) { banner.classList.add('hidden'); return; }
-
-    var icon = '', mainTitle = '', sub = '';
-    if (pendingSong) {
-      icon = '<div class="gw-share-banner-icon"><i class="fas fa-music" style="color:#fff;font-size:18px"></i></div>';
-      mainTitle = '🎵 Un son t\'attend !';
-      sub = screenId === 'screen-login' ? 'Connecte-toi pour écouter et télécharger' : 'Crée ton compte pour écouter et télécharger';
-    } else {
-      /* Post — essayer de charger depuis localStorage */
-      var cachedPost = null;
-      try { cachedPost = JSON.parse(localStorage.getItem('gw_pending_post_data') || 'null'); } catch(e2){}
-      var pType = (cachedPost && cachedPost.video) ? 'Vidéo' : (cachedPost && cachedPost.imgs && cachedPost.imgs.length) ? 'Photo' : 'Post';
-      var pThumbRaw = (cachedPost && cachedPost.imgs && cachedPost.imgs[0]) ? cachedPost.imgs[0] : '';
-      var pThumb = (pThumbRaw.indexOf('data:image/') === 0 || pThumbRaw.indexOf('https://') === 0) ? pThumbRaw : '';
-      if (pThumb) {
-        icon = '<div class="gw-share-banner-icon"><img src="' + pThumb + '" alt=""></div>';
-      } else {
-        var ico2 = pType === 'Vidéo' ? 'fa-film' : pType === 'Photo' ? 'fa-image' : 'fa-comment';
-        icon = '<div class="gw-share-banner-icon"><i class="fas ' + ico2 + '" style="color:#fff;font-size:18px"></i></div>';
-      }
-      mainTitle = (pType === 'Vidéo' ? '🎬' : pType === 'Photo' ? '📷' : '💬') + ' ' + pType + ' partagé t\'attend !';
-      sub = screenId === 'screen-login' ? 'Connecte-toi pour voir le contenu' : 'Crée ton compte gratuitement';
-    }
-
-    banner.innerHTML =
-      icon +
-      '<div class="gw-share-banner-text">' +
-        '<div class="gw-share-banner-title">' + mainTitle + '</div>' +
-        '<div class="gw-share-banner-sub">' + sub + '</div>' +
-      '</div>' +
-      '<i class="fas fa-chevron-right" style="color:#7C3AED;font-size:12px;margin-left:auto;flex-shrink:0"></i>';
-
-    banner.classList.remove('hidden');
-  } catch(e) {}
-}
-
-/* ═══════════════════════════════════════════════════════
-   MODALE DE LANDING pour les posts normaux partagés (?p=)
-   Affichée si l'utilisateur connecté arrive via un lien de post
-   ═══════════════════════════════════════════════════════ */
-function _gwShowPostLandingModal(post) {
-  var old = document.getElementById('gw-post-landing-modal');
-  if (old) old.remove();
-
-  var isVideo = !!(post.video && post.video.url);
-  var imgs    = post.imgs || [];
-  var hasImg  = imgs.length > 0;
-  var txt     = (post.text || '').slice(0, 200) + ((post.text || '').length > 200 ? '…' : '');
-  var author  = escHtml(post.nom || post.userName || 'Utilisateur');
-  var avatar  = post.photo
-    ? '<img src="' + post.photo + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%">'
-    : '<span style="font-size:14px;color:#fff;font-weight:700">' + (author[0] || '?') + '</span>';
-
-  /* Miniature du contenu */
-  var thumbHtml = '';
-  if (isVideo) {
-    thumbHtml =
-      '<div style="width:100%;height:200px;background:#000;border-radius:0;position:relative;' +
-           'display:flex;align-items:center;justify-content:center;overflow:hidden">' +
-        (post.video.thumb
-          ? '<img src="' + post.video.thumb + '" style="width:100%;height:100%;object-fit:cover;opacity:.7">'
-          : '<div style="width:100%;height:100%;background:linear-gradient(135deg,#1E293B,#0F172A)"></div>') +
-        '<div style="position:absolute;width:56px;height:56px;border-radius:50%;' +
-             'background:rgba(255,255,255,.15);backdrop-filter:blur(4px);border:2px solid rgba(255,255,255,.3);' +
-             'display:flex;align-items:center;justify-content:center">' +
-          '<i class="fas fa-play" style="color:#fff;font-size:20px;margin-left:3px"></i>' +
-        '</div>' +
-        '<div style="position:absolute;top:10px;left:10px;background:rgba(0,0,0,.6);border-radius:6px;' +
-             'padding:3px 8px;font-size:10px;color:#fff;font-weight:700">🎬 VIDÉO</div>' +
-      '</div>';
-  } else if (hasImg) {
-    thumbHtml =
-      '<div style="width:100%;height:200px;overflow:hidden;position:relative">' +
-        '<img src="' + imgs[0] + '" style="width:100%;height:100%;object-fit:cover">' +
-        (imgs.length > 1
-          ? '<div style="position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,.6);border-radius:6px;' +
-              'padding:3px 8px;font-size:10px;color:#fff">📷 +' + (imgs.length - 1) + '</div>'
-          : '') +
-      '</div>';
-  }
-
-  /* Dégradé sur la miniature */
-  var gradOverlay = (isVideo || hasImg)
-    ? '<div style="position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(transparent,#0F172A)"></div>'
-    : '';
-
-  var modal = document.createElement('div');
-  modal.id = 'gw-post-landing-modal';
-  modal.style.cssText =
-    'position:fixed;inset:0;z-index:99999;display:flex;align-items:flex-end;justify-content:center;' +
-    'background:rgba(0,0,0,.75);backdrop-filter:blur(6px)';
-
-  modal.innerHTML =
-    '<div style="background:#0F172A;border-radius:28px 28px 0 0;width:100%;max-width:520px;overflow:hidden;' +
-         'animation:artShareUp .3s ease;max-height:92vh;overflow-y:auto">' +
-
-      /* Miniature du contenu */
-      (thumbHtml
-        ? '<div style="position:relative">' + thumbHtml + gradOverlay + '</div>'
-        : '<div style="height:12px"></div>') +
-
-      /* Fermer */
-      '<button onclick="document.getElementById(\'gw-post-landing-modal\').remove()" ' +
-        'style="position:absolute;top:12px;right:12px;background:rgba(0,0,0,.6);border:none;' +
-               'border-radius:50%;width:32px;height:32px;color:#fff;font-size:18px;cursor:pointer;' +
-               'display:flex;align-items:center;justify-content:center;line-height:1;z-index:2">×</button>' +
-
-      /* Contenu */
-      '<div style="padding:18px 22px 36px">' +
-
-        /* Auteur */
-        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">' +
-          '<div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#7C3AED,#DB2777);' +
-               'flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden">' +
-            avatar +
-          '</div>' +
-          '<div>' +
-            '<div style="font-weight:700;color:#F1F5F9;font-size:14px">' + author + '</div>' +
-            '<div style="font-size:11px;color:#64748B">Membre Geniwork</div>' +
-          '</div>' +
-          /* Badge Geniwork */
-          '<div style="margin-left:auto;background:rgba(124,58,237,.15);border-radius:20px;padding:4px 10px;' +
-               'display:flex;align-items:center;gap:5px">' +
-            '<i class="fas fa-shield-alt" style="color:#A78BFA;font-size:10px"></i>' +
-            '<span style="color:#A78BFA;font-size:10px;font-weight:700">Geniwork</span>' +
-          '</div>' +
-        '</div>' +
-
-        /* Texte du post */
-        (txt
-          ? '<div style="font-size:14px;color:#CBD5E1;line-height:1.65;margin-bottom:18px;' +
-              'background:#1E293B;border-radius:12px;padding:12px 14px">' +
-              escHtml(txt) +
-            '</div>'
-          : '') +
-
-        /* CTA — rejoindre */
-        '<div style="background:rgba(124,58,237,.1);border:1px solid rgba(124,58,237,.25);' +
-             'border-radius:16px;padding:16px;margin-bottom:0">' +
-          '<div style="text-align:center;font-size:13px;color:#CBD5E1;margin-bottom:14px;line-height:1.55">' +
-            '<i class="fas fa-lock" style="color:#A78BFA;margin-right:5px"></i>' +
-            'Rejoins <strong style="color:#A78BFA">Geniwork</strong> pour voir ce contenu,<br>' +
-            'commenter, aimer et interagir avec la communauté !' +
-          '</div>' +
-          '<div style="display:flex;flex-direction:column;gap:10px">' +
-            '<button onclick="document.getElementById(\'gw-post-landing-modal\').remove();goTo(\'screen-register\')" ' +
-              'style="width:100%;padding:15px;border:none;border-radius:14px;cursor:pointer;font-size:15px;font-weight:800;' +
-                     'background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;' +
-                     'display:flex;align-items:center;justify-content:center;gap:10px">' +
-              '<i class="fas fa-user-plus"></i> Créer mon compte — Gratuit</button>' +
-            '<button onclick="document.getElementById(\'gw-post-landing-modal\').remove();goTo(\'screen-login\')" ' +
-              'style="width:100%;padding:13px;border:1px solid #334155;border-radius:14px;cursor:pointer;font-size:14px;font-weight:700;' +
-                     'background:transparent;color:#A78BFA">' +
-              '<i class="fas fa-sign-in-alt"></i> J\'ai déjà un compte</button>' +
-          '</div>' +
-        '</div>' +
-
-      '</div>' +
-    '</div>';
-
-  document.body.appendChild(modal);
-  modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
-}
-
 function _gwHandleDeepLink() {
   try {
     var params = new URLSearchParams(window.location.search);
-
-    /* ── Deep link ARTISTE : ?song=postId ── */
-    var songId = params.get('song');
-    if (songId) {
-      /* Nettoie l'URL */
-      window.history.replaceState({}, '', window.location.origin + window.location.pathname);
-      _gwOpenDeepSong(songId);
-      return;
-    }
-
     var postId = params.get('p');
     var ptype  = params.get('pt') || 'post';
     if (!postId) return;
@@ -2199,27 +1849,6 @@ function _gwHandleDeepLink() {
     /* Nettoie l'URL sans recharger la page */
     var cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState({}, '', cleanUrl);
-
-    /* Si non connecté → sauvegarder pour après login et afficher landing */
-    if (!_currentUser) {
-      localStorage.setItem('gw_pending_post', postId);
-      localStorage.setItem('gw_pending_post_at', String(Date.now()));
-      /* Essayer de charger les données du post pour la bannière */
-      if (_gwFbDB) {
-        _gwFbDB.ref('gw/posts').once('value').then(function(snap) {
-          var obj = snap.val() || {}, found = null;
-          Object.keys(obj).forEach(function(k) {
-            var arr = Array.isArray(obj[k]) ? obj[k] : Object.values(obj[k] || {});
-            arr.forEach(function(p) { if (p && String(p.id) === String(postId)) found = p; });
-          });
-          if (found) {
-            try { localStorage.setItem('gw_pending_post_data', JSON.stringify(found)); } catch(e){}
-            _gwShowPostLandingModal(found);
-          }
-        }).catch(function(){});
-      }
-      return;
-    }
 
     /* Cherche le post dans le cache local */
     var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
@@ -2254,227 +1883,6 @@ function _gwHandleDeepLink() {
   } catch(e) {}
 }
 
-/* ═══════════════════════════════════════════════════════
-   DEEP LINK ARTISTE — ouvre un son partagé depuis l'ext.
-   ═══════════════════════════════════════════════════════ */
-function _gwOpenDeepSong(songId) {
-  if (!_gwFbDB) { setTimeout(function(){ _gwOpenDeepSong(songId); }, 600); return; }
-
-  /* Charger le son depuis Firebase */
-  _gwFbDB.ref('gw/artiste_posts/' + songId).once('value', function(snap) {
-    var post = snap.val();
-    if (!post) { showToast('Son introuvable', 'warn'); return; }
-    post.id = songId;
-
-    /* Charger les stats */
-    _gwFbDB.ref('gw/artiste_stats/' + songId).once('value', function(sSnap) {
-      var stats = sSnap.val() || {};
-      _artisteSongDeepModal(post, stats);
-    }, function() {
-      _artisteSongDeepModal(post, {});
-    });
-  }, function() {
-    showToast('Son introuvable', 'warn');
-  });
-}
-
-function _artisteSongDeepModal(post, stats) {
-  /* Supprimer si déjà ouvert */
-  var old = document.getElementById('artiste-deep-modal');
-  if (old) old.remove();
-
-  var title      = escHtml(post.title || 'Sans titre');
-  var artist     = escHtml(post.artistName || post.userName || 'Artiste');
-  var genre      = escHtml(post.genre || '');
-  var plays      = stats.plays || 0;
-  var downloads  = stats.downloads || 0;
-  var coverUrl   = post.coverUrl || '';
-  var canDl      = !!post.allowDownload && !!post.audioUrl;
-  var isLogged   = !!_currentUser;
-
-  var coverHtml = coverUrl
-    ? '<img src="' + coverUrl + '" style="width:100%;height:100%;object-fit:cover;border-radius:18px">'
-    : '<div style="width:100%;height:100%;border-radius:18px;background:linear-gradient(135deg,#7C3AED,#DB2777);' +
-      'display:flex;align-items:center;justify-content:center">' +
-      '<i class="fas fa-music" style="color:#fff;font-size:48px"></i></div>';
-
-  var modal = document.createElement('div');
-  modal.id = 'artiste-deep-modal';
-  modal.style.cssText =
-    'position:fixed;inset:0;z-index:99999;display:flex;align-items:flex-end;justify-content:center;' +
-    'background:rgba(0,0,0,.75);backdrop-filter:blur(6px)';
-
-  modal.innerHTML =
-    '<div style="background:#0F172A;border-radius:28px 28px 0 0;width:100%;max-width:520px;' +
-         'padding:0 0 40px;overflow:hidden;animation:artShareUp .3s ease">' +
-
-      /* Cover en haut — pleine largeur */
-      '<div style="width:100%;height:240px;position:relative;overflow:hidden">' +
-        coverHtml +
-        /* Dégradé bas */
-        '<div style="position:absolute;bottom:0;left:0;right:0;height:80px;' +
-             'background:linear-gradient(transparent,#0F172A)"></div>' +
-        /* Badge Geniwork */
-        '<div style="position:absolute;top:14px;left:14px;background:rgba(0,0,0,.6);' +
-             'border-radius:20px;padding:5px 12px;display:flex;align-items:center;gap:6px">' +
-          '<i class="fas fa-music" style="color:#A78BFA;font-size:12px"></i>' +
-          '<span style="color:#fff;font-size:11px;font-weight:700">Geniwork Music</span>' +
-        '</div>' +
-        /* Bouton fermer */
-        '<button onclick="document.getElementById(\'artiste-deep-modal\').remove()" ' +
-          'style="position:absolute;top:12px;right:12px;background:rgba(0,0,0,.6);border:none;' +
-                 'border-radius:50%;width:32px;height:32px;color:#fff;font-size:18px;cursor:pointer;' +
-                 'display:flex;align-items:center;justify-content:center;line-height:1">×</button>' +
-      '</div>' +
-
-      /* Infos son */
-      '<div style="padding:18px 22px 0">' +
-        '<div style="font-size:22px;font-weight:800;color:#F1F5F9;margin-bottom:4px">' + title + '</div>' +
-        '<div style="font-size:14px;color:#94A3B8;margin-bottom:6px">' + artist +
-          (genre ? ' <span style="color:#A78BFA">· ' + genre + '</span>' : '') + '</div>' +
-
-        /* Stats */
-        '<div style="display:flex;gap:14px;margin-bottom:20px">' +
-          '<span style="color:#64748B;font-size:12px"><i class="fas fa-headphones-alt" style="color:#A78BFA"></i> ' +
-            plays + ' écoutes</span>' +
-          '<span style="color:#64748B;font-size:12px"><i class="fas fa-download" style="color:#34D399"></i> ' +
-            downloads + ' téléch.</span>' +
-        '</div>' +
-
-        /* Actions selon état connexion */
-        (isLogged
-          /* Déjà connecté → boutons directs */
-          ? '<div style="display:flex;flex-direction:column;gap:10px">' +
-              /* Écouter */
-              (post.audioUrl
-                ? '<button onclick="_artisteDeepPlay(\'' + songId_safe(post.id) + '\')" ' +
-                    'style="width:100%;padding:15px;border:none;border-radius:14px;cursor:pointer;font-size:15px;font-weight:700;' +
-                           'background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;' +
-                           'display:flex;align-items:center;justify-content:center;gap:10px">' +
-                    '<i class="fas fa-play"></i> Écouter maintenant</button>'
-                : '') +
-              /* Télécharger */
-              (canDl
-                ? '<button onclick="_artisteDeepDownload(\'' + songId_safe(post.id) + '\')" ' +
-                    'style="width:100%;padding:14px;border:none;border-radius:14px;cursor:pointer;font-size:14px;font-weight:700;' +
-                           'background:rgba(52,211,153,.15);color:#34D399;' +
-                           'display:flex;align-items:center;justify-content:center;gap:10px">' +
-                    '<i class="fas fa-download"></i> Télécharger</button>'
-                : '') +
-              /* Voir dans l'app */
-              '<button onclick="_artisteDeepGoApp(\'' + songId_safe(post.id) + '\')" ' +
-                'style="width:100%;padding:13px;border:1px solid #334155;border-radius:14px;cursor:pointer;font-size:14px;' +
-                       'background:transparent;color:#94A3B8">' +
-                'Voir dans la section Artiste</button>' +
-            '</div>'
-          /* Non connecté → inscription / connexion */
-          : '<div style="background:rgba(124,58,237,.1);border:1px solid rgba(124,58,237,.25);border-radius:16px;padding:16px;margin-bottom:14px">' +
-              '<div style="font-size:13px;color:#CBD5E1;line-height:1.6;margin-bottom:12px;text-align:center">' +
-                '<i class="fas fa-lock" style="color:#A78BFA;margin-right:6px"></i>' +
-                'Rejoins <strong style="color:#A78BFA">Geniwork</strong> pour écouter et télécharger ce son gratuitement !' +
-              '</div>' +
-              '<div style="display:flex;flex-direction:column;gap:10px">' +
-                '<button onclick="_artisteDeepSignup()" ' +
-                  'style="width:100%;padding:15px;border:none;border-radius:14px;cursor:pointer;font-size:15px;font-weight:800;' +
-                         'background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;' +
-                         'display:flex;align-items:center;justify-content:center;gap:10px">' +
-                  '<i class="fas fa-user-plus"></i> Créer mon compte — Gratuit</button>' +
-                '<button onclick="_artisteDeepLogin()" ' +
-                  'style="width:100%;padding:13px;border:1px solid #334155;border-radius:14px;cursor:pointer;font-size:14px;font-weight:700;' +
-                         'background:transparent;color:#A78BFA">' +
-                  '<i class="fas fa-sign-in-alt"></i> J\'ai déjà un compte</button>' +
-              '</div>' +
-            '</div>') +
-      '</div>' +
-    '</div>';
-
-  document.body.appendChild(modal);
-
-  /* Fermer en cliquant l'overlay */
-  modal.addEventListener('click', function(e) {
-    if (e.target === modal) modal.remove();
-  });
-
-  /* Stocker l'ID pour après login */
-  try { localStorage.setItem('gw_pending_song', post.id); localStorage.setItem('gw_pending_song_at', String(Date.now())); } catch(e) {}
-}
-
-/* Helper pour éviter XSS dans les IDs inline */
-function songId_safe(id) { return String(id).replace(/[^a-zA-Z0-9_-]/g, ''); }
-
-/* Écouter directement depuis la modal */
-function _artisteDeepPlay(songId) {
-  document.getElementById('artiste-deep-modal') && document.getElementById('artiste-deep-modal').remove();
-  _gwOpenDeepSong._goPlay = songId;
-  _artisteDeepGoApp(songId);
-  setTimeout(function() { _artistePlay(songId); }, 1600);
-}
-
-/* Télécharger directement depuis la modal */
-function _artisteDeepDownload(songId) {
-  document.getElementById('artiste-deep-modal') && document.getElementById('artiste-deep-modal').remove();
-  _artisteDownload(songId);
-}
-
-/* Aller dans la section Artiste pour voir ce son */
-function _artisteDeepGoApp(songId) {
-  document.getElementById('artiste-deep-modal') && document.getElementById('artiste-deep-modal').remove();
-  /* Naviguer vers Marketplace > Artiste */
-  var mkBtn = document.querySelector('.bnav-item[data-page="p-marketplace"]');
-  if (mkBtn) { navTo(mkBtn, 'p-marketplace'); }
-  setTimeout(function() {
-    try { setMkCat('artiste'); } catch(e) {}
-    /* Mettre en surbrillance le son cible */
-    setTimeout(function() {
-      var row = document.getElementById('artiste-row-' + songId);
-      if (row) {
-        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        row.style.background = 'rgba(124,58,237,.25)';
-        setTimeout(function() { row.style.background = ''; }, 2000);
-      }
-    }, 1200);
-  }, 500);
-}
-
-/* Redirection vers inscription — garde le son en attente */
-function _artisteDeepSignup() {
-  document.getElementById('artiste-deep-modal') && document.getElementById('artiste-deep-modal').remove();
-  goTo('screen-register');
-}
-
-/* Redirection vers connexion — garde le son en attente */
-function _artisteDeepLogin() {
-  document.getElementById('artiste-deep-modal') && document.getElementById('artiste-deep-modal').remove();
-  goTo('screen-login');
-}
-
-/* Ouvre un post partagé par son ID — utilisé après login quand l'URL est déjà nettoyée */
-function _gwOpenDeepPostById(postId) {
-  if (!postId) return;
-  var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
-  if (post) { _gwOpenDeepPost(post, 'post'); return; }
-  if (!_gwFbDB) { showToast('Publication introuvable', 'warn'); return; }
-  /* Cherche dans Firebase si pas en cache local */
-  _gwFbDB.ref('gw/posts').once('value').then(function(snap) {
-    var obj = snap.val() || {}, found = null;
-    Object.keys(obj).forEach(function(k) {
-      var arr = Array.isArray(obj[k]) ? obj[k] : Object.values(obj[k] || {});
-      arr.forEach(function(p) { if (p && String(p.id) === String(postId)) found = p; });
-    });
-    if (found) { _gwOpenDeepPost(found, 'post'); return; }
-    /* Essaie dans les posts officiels */
-    _gwFbDB.ref('gw/official_posts').once('value').then(function(s2) {
-      var o2 = s2.val();
-      if (o2) {
-        var arr2 = Array.isArray(o2) ? o2 : Object.values(o2);
-        var found2 = arr2.find(function(p) { return p && String(p.id) === String(postId); });
-        if (found2) { _gwOpenDeepPost(found2, 'post'); return; }
-      }
-      showToast('Publication introuvable', 'warn');
-    }).catch(function(){});
-  }).catch(function(){});
-}
-
 function _gwOpenDeepPost(post, ptype) {
   if (!post) return;
   navTo(null, 'p-home');
@@ -2495,14 +1903,6 @@ function _gwFbPreloadAndStart() {
     _gwStartApp();
     return;
   }
-
-  var _preloadStartDone = false;
-  function _safeStartApp() {
-    if (_preloadStartDone) return;
-    _preloadStartDone = true;
-    _gwStartApp();
-  }
-  var _preloadStartTimeout = setTimeout(_safeStartApp, 8000);
 
   Promise.all([
     _gwFbDB.ref('gw/users').once('value'),
@@ -2585,12 +1985,10 @@ function _gwFbPreloadAndStart() {
       } catch(e){}
     }
 
-    clearTimeout(_preloadStartTimeout);
-    _safeStartApp();
+    _gwStartApp();
   }).catch(function() {
     /* En cas d'erreur réseau, démarre quand même avec le cache local */
-    clearTimeout(_preloadStartTimeout);
-    _safeStartApp();
+    _gwStartApp();
   });
 }
 
@@ -2598,24 +1996,6 @@ function _gwFbPreloadAndStart() {
 window.addEventListener('load', function() {
   /* ── IndexedDB vidéo ── */
   _gwInitVideoDB();
-
-  /* ── Deep link : sauvegarder ?song= ou ?p= avant tout login ── */
-  (function() {
-    try {
-      var _params = new URLSearchParams(window.location.search);
-      var _sid = _params.get('song');
-      var _pid = _params.get('p');
-      if (_sid) {
-        localStorage.setItem('gw_pending_song', _sid);
-        localStorage.setItem('gw_pending_song_at', String(Date.now()));
-        window.history.replaceState({}, '', window.location.origin + window.location.pathname);
-      } else if (_pid) {
-        localStorage.setItem('gw_pending_post', _pid);
-        localStorage.setItem('gw_pending_post_at', String(Date.now()));
-        window.history.replaceState({}, '', window.location.origin + window.location.pathname);
-      }
-    } catch(e) {}
-  })();
 
   /* ══════════════════════════════════════════════════════════════
      FAST-PATH : utilisateur de retour avec session valide en cache
@@ -2626,15 +2006,6 @@ window.addEventListener('load', function() {
 
   /* ── Firebase : init + auth + sync + preload (arrière-plan si fast-path actif) ── */
   _gwInitFirebase();
-
-  /* ── Filet de sécurité : si Firebase SDK ne se charge pas (CDN bloqué ou réseau lent),
-     démarrer quand même l'app après 10s pour ne pas bloquer les utilisateurs ── */
-  setTimeout(function() {
-    if (!_gwFbReady && !_gwAppStarted) {
-      console.warn('[GW] Firebase SDK non disponible → démarrage dégradé');
-      try { _gwStartApp(); } catch(e){}
-    }
-  }, 10000);
 
   /* GIS se charge de manière async — on attend qu'il soit dispo */
   var _gisTimer = setInterval(function() {
@@ -2656,11 +2027,6 @@ function goTo(screenId) {
      directement vers screen-app sans attendre Firebase (< 100 ms) ── */
   if (screenId === 'screen-login' && !_gwAppStarted) {
     if (_gwInstantAutoLogin()) return;
-  }
-
-  /* ── Bannière contenu partagé sur les écrans login/register ── */
-  if (screenId === 'screen-login' || screenId === 'screen-register') {
-    setTimeout(function() { _gwRefreshShareBanner(screenId); }, 80);
   }
 
   /* ── Vérification ban en temps réel (si ban appliqué pendant session) ── */
@@ -2696,26 +2062,7 @@ function getUsers() {
 }
 function saveUsers(users) {
   localStorage.setItem('gw_users', JSON.stringify(users));
-  if (!_gwFbSkip && _gwFbReady && _gwFbDB) {
-    /* Transaction : lit la liste actuelle Firebase puis merge pour ne jamais
-       écraser des utilisateurs inscrits depuis d'autres appareils en parallèle */
-    _gwFbDB.ref('gw/users').transaction(function(current) {
-      var fbList = Array.isArray(current) ? current : [];
-      users.forEach(function(u) {
-        if (!u || !u.email) return;
-        var exists = fbList.findIndex(function(x) { return x && x.email && x.email.toLowerCase() === u.email.toLowerCase(); });
-        if (exists === -1) {
-          fbList.push(u);
-        } else {
-          fbList[exists] = u; /* mise à jour si déjà présent */
-        }
-      });
-      return fbList;
-    }).catch(function(e) {
-      /* Fallback : écriture directe si transaction échoue */
-      _gwFbDB.ref('gw/users').set(users).catch(function(){});
-    });
-  }
+  if (!_gwFbSkip) _gwFbSet('users', users);
 }
 function findUser(email) {
   return getUsers().find(function(u) {
@@ -2889,7 +2236,6 @@ function _gwLoadSession() {
     if (s.deviceId && s.deviceId !== _gwGetDeviceId()) { localStorage.removeItem('gw_session'); return null; }
     /* ── Renouvelle automatiquement la session à chaque ouverture ── */
     s.expires = Date.now() + 365 * 24 * 3600 * 1000;
-    s.token   = _gwToken();
     localStorage.setItem('gw_session', JSON.stringify(s));
     return s;
   } catch (e) { localStorage.removeItem('gw_session'); return null; }
@@ -2940,15 +2286,12 @@ function generateCode() {
 
 /* ── Envoie un code par e-mail via /api/send-code ── */
 function _gwMailCode(email, code, type, onDone) {
-  var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  var timer = ctrl ? setTimeout(function() { ctrl.abort(); }, 15000) : null;
   fetch('/api/send-code', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ email: email, code: code, type: type }),
-    signal:  ctrl ? ctrl.signal : undefined
+    body:    JSON.stringify({ email: email, code: code, type: type })
   })
-  .then(function(r) { if (timer) clearTimeout(timer); return r.json(); })
+  .then(function(r) { return r.json(); })
   .then(function(data) {
     if (data.ok) {
       showToast('Code envoyé à ' + email + ' 📧', 'ok');
@@ -2958,7 +2301,6 @@ function _gwMailCode(email, code, type, onDone) {
     if (onDone) onDone(!!data.ok);
   })
   .catch(function() {
-    if (timer) clearTimeout(timer);
     showToast('Impossible d\'envoyer l\'email. Vérifiez la connexion.', 'err');
     if (onDone) onDone(false);
   });
@@ -3017,44 +2359,16 @@ function doRegister() {
   }
 
   if (_gwFbReady && _gwFbDB) {
-    /* Désactive le bouton pour éviter les double-clics */
-    var _regBtn = document.querySelector('#screen-register .btn-blue.full');
-    if (_regBtn) { _regBtn.disabled = true; _regBtn.textContent = 'Vérification…'; }
-
-    var _regDone = false;
-    function _restoreRegBtn() {
-      if (_regBtn) { _regBtn.disabled = false; _regBtn.textContent = 'Créer mon compte'; }
-    }
-    function _finishReg(emailTaken) {
-      if (_regDone) return;
-      _regDone = true;
-      _restoreRegBtn();
-      if (emailTaken) {
-        setEmailError(true);
-        showToast('Cette adresse e-mail est déjà utilisée', 'err');
-      } else {
-        _proceedRegister();
-      }
-    }
-
-    /* Timeout de sécurité : si Firebase tarde (connexion lente / pays éloigné),
-       on passe quand même à l'étape suivante après 5 secondes */
-    var _regTimeout = setTimeout(function() { _finishReg(false); }, 5000);
-
+    showToast('Vérification en cours…', 'info');
     _gwFbDB.ref('gw/users').once('value').then(function(snap) {
-      clearTimeout(_regTimeout);
       var fbUsers = snap.val();
-      /* ── Met à jour localStorage avec la liste complète de Firebase ──
-         Évite que saveUsers() lors de l'inscription écrase Firebase
-         avec une liste incomplète (appareil sans cache local). */
-      if (Array.isArray(fbUsers) && fbUsers.length) {
-        try { localStorage.setItem('gw_users', JSON.stringify(fbUsers)); } catch(e){}
+      if (Array.isArray(fbUsers) && fbUsers.find(function(u){ return u.email && u.email.toLowerCase() === email; })) {
+        setEmailError(true);
+        showToast('Cette adresse e-mail est déjà utilisée', 'err'); return;
       }
-      var taken = Array.isArray(fbUsers) && !!fbUsers.find(function(u){ return u.email && u.email.toLowerCase() === email; });
-      _finishReg(taken);
+      _proceedRegister();
     }).catch(function() {
-      clearTimeout(_regTimeout);
-      _finishReg(false);
+      _proceedRegister();
     });
   } else {
     _proceedRegister();
@@ -3112,10 +2426,17 @@ function doVerify() {
       openCGU();
     }, 1000);
   }).catch(function() {
-    /* crypto.subtle indisponible — refuser pour ne jamais stocker un mot de passe en clair */
+    /* Fallback si crypto non disponible (rare) */
+    var users = getUsers();
+    if (users.some(function(u) { return u.email.toLowerCase() === _verifyData.email.toLowerCase(); })) {
+      showToast('Cette adresse e-mail est déjà utilisée', 'err');
+      goTo('screen-login'); return;
+    }
+    users.push(_verifyData);
+    saveUsers(users);
     _verifyCode = '';
-    _verifyData = null;
-    showToast('Votre navigateur ne supporte pas le chiffrement requis. Essayez Chrome ou Firefox.', 'err');
+    showToast('Compte vérifié ✓ Lisez les CGU pour continuer', 'ok');
+    setTimeout(function() { openCGU(); }, 1000);
   });
 }
 
@@ -3179,8 +2500,7 @@ function doLogin() {
     if (!ok) {
       _gwRecordFail(bruteKey);
       try { _secOnLoginFail(email); } catch(e){}
-      var _lockedSecs = _gwLockedSeconds(bruteKey);
-      var remaining   = _lockedSecs > 0 ? 0 : Math.max(0, 5 - ((_gwAttempts[bruteKey] || {}).count || 0));
+      var remaining = 5 - ((_gwAttempts[bruteKey] || {}).count || 0);
       showToast('Email ou mot de passe incorrect' + (remaining <= 2 ? ' (' + remaining + ' essai(s) restant)' : ''), 'err');
       return;
     }
@@ -3287,10 +2607,8 @@ function _gwDetectRegCountry(email) {
     if (_existing.regCountry) return;
   } catch(e) {}
 
-  var _ipCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  var _ipTimer = _ipCtrl ? setTimeout(function() { _ipCtrl.abort(); }, 8000) : null;
-  fetch('https://ipapi.co/json/', { signal: _ipCtrl ? _ipCtrl.signal : undefined })
-    .then(function(r) { if (_ipTimer) clearTimeout(_ipTimer); return r.ok ? r.json() : null; })
+  fetch('https://ipapi.co/json/')
+    .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
       if (!data || !data.country_name) return;
       var cName = data.country_name || '';
@@ -3298,10 +2616,10 @@ function _gwDetectRegCountry(email) {
       var rDate = new Date().toISOString();
 
       /* ── Écriture Firebase (update — préserve tous les autres champs) ── */
-      if (_gwFbDB) {
+      if (window._gwFbDB) {
         try {
           var fbKey = _gwFbKey(email);
-          _gwFbDB.ref('gw/profiles/' + fbKey).update({
+          window._gwFbDB.ref('gw/profiles/' + fbKey).update({
             regCountry:     cName,
             regCountryCode: cCode,
             regDate:        rDate
@@ -3578,61 +2896,13 @@ function _purgeDemoLegacy() {
 }
 _purgeDemoLegacy();
 
-/* ── Notification inbox — niveau module (accessible depuis _syncInboxNow + listeners) ── */
-var _dmToastedMap = {}; /* senderFbKey → dernier timestamp toasté (par expéditeur, session) */
-
-function _showInboxToast(entry) {
-  if (!entry || !entry.fromEmail || !_currentUser) return;
-  var _sk = _gwFbKey(entry.fromEmail);
-  /* Dédup : n'affiche que si le message est plus récent que le dernier toast pour cet expéditeur */
-  if (entry.at && _dmToastedMap[_sk] && entry.at < _dmToastedMap[_sk]) return;
-  /* Ne pas toaster si la conversation est actuellement ouverte (message visible à l'écran) */
-  var _msgPageActive = (function() {
-    var pg = document.getElementById('p-messages');
-    var sc = document.getElementById('chat-screen');
-    return pg && pg.classList.contains('active') && sc && sc.classList.contains('open');
-  })();
-  var _convOpen = _msgPageActive && _chatConvId && DEMO_CONVERSATIONS.find(function(c) {
-    return c.id === _chatConvId && !c.isGroup && c.email === entry.fromEmail;
-  });
-  if (_convOpen) return;
-  if (entry.at) _dmToastedMap[_sk] = entry.at;
-  var _senderName = entry.fromName || entry.fromEmail || 'Quelqu\'un';
-  var _preview    = (entry.lastMsg || '').slice(0, 35);
-  showToast('💬 ' + _senderName + (_preview ? ' : ' + _preview : ' vous a écrit'), 'ok');
-}
-
 function initApp(user) {
   _currentUser = user;
-
-  /* Reset des posts en mémoire → évite que les posts de la session précédente restent visibles */
-  DEMO_POSTS.length = 0;
-  PENDING_POSTS.length = 0;
-  _persistedPostsLoaded = false;
 
   /* Crée / renouvelle la session sécurisée */
   if (!_gwLoadSession()) {
     _gwCreateSession(user);
   }
-
-  /* ── Contenu partagé en attente (deep link) : ouvrir après login ── */
-  try {
-    var _pendingSong = localStorage.getItem('gw_pending_song');
-    var _pendingPost = localStorage.getItem('gw_pending_post');
-    if (_pendingSong) {
-      localStorage.removeItem('gw_pending_song');
-      localStorage.removeItem('gw_pending_song_at');
-      setTimeout(function() { _gwOpenDeepSong(_pendingSong); }, 1200);
-    } else if (_pendingPost) {
-      var _ppId = _pendingPost; /* capture avant les removeItem */
-      localStorage.removeItem('gw_pending_post');
-      localStorage.removeItem('gw_pending_post_at');
-      localStorage.removeItem('gw_pending_post_data');
-      /* _gwHandleDeepLink() lit les params URL qui sont déjà effacés —
-         on ouvre directement le post par son ID. */
-      setTimeout(function() { _gwOpenDeepPostById(_ppId); }, 1000);
-    }
-  } catch(e) {}
 
   /* ── Nettoyage listeners Firebase de la session précédente (évite doublons) ── */
   try {
@@ -3650,38 +2920,6 @@ function initApp(user) {
 
   /* ── Firebase : écoute les notifs en temps réel pour cet utilisateur ── */
   _gwFbWatchUserNotifs(user.email);
-
-  /* ── Auto-sync : vérifie que l'utilisateur existe bien dans Firebase.
-     Si son inscription n'a pas atteint Firebase (connexion lente au moment de
-     l'inscription), on le re-synchronise automatiquement au prochain login. ── */
-  if (_gwFbReady && _gwFbDB && user.email) {
-    setTimeout(function() {
-      _gwFbDB.ref('gw/users').once('value').then(function(snap) {
-        var fbUsers = snap.val();
-        var emailLower = user.email.toLowerCase();
-        var existsInFb = Array.isArray(fbUsers) && fbUsers.some(function(u) {
-          return u && u.email && u.email.toLowerCase() === emailLower;
-        });
-        if (!existsInFb) {
-          /* L'utilisateur n'est pas dans Firebase → on le sync maintenant */
-          var localUsers = getUsers();
-          if (localUsers.length) {
-            console.log('[GW] Auto-sync compte manquant dans Firebase :', user.email);
-            saveUsers(localUsers);
-          }
-        } else if (Array.isArray(fbUsers) && fbUsers.length) {
-          /* Met à jour localStorage avec la liste complète si Firebase en a plus */
-          var localUsers2 = getUsers();
-          if (fbUsers.length > localUsers2.length) {
-            try { localStorage.setItem('gw_users', JSON.stringify(fbUsers)); } catch(e){}
-          }
-        }
-      }).catch(function(){});
-    }, 4000); /* délai 4s pour laisser Firebase se connecter d'abord */
-  }
-
-  /* ── Firebase : écoute les milestones en temps réel ── */
-  _gwFbWatchMilestones(user.email);
   /* ── Firebase : écoute l'index abonnés en temps réel ── */
   _gwFbWatchFollowers(user.email);
   /* ── Firebase : écoute le compteur d'abonnés du compte officiel ── */
@@ -3693,78 +2931,15 @@ function initApp(user) {
   if (_gwFbReady && _gwFbDB && user.email) {
     var _myFbKey = _gwFbKey(user.email);
 
-    /* Inbox — listener temps réel */
+    /* Inbox */
     var _inboxRef = _gwFbDB.ref('gw/inboxes/' + _myFbKey);
     _gwFbDB._prevInboxRef = _inboxRef;
-    var _inboxFirstLoad = true; /* premier déclenchement = chargement initial, pas de toast */
-    /* _showInboxToast et _dmToastedMap sont maintenant au niveau module (avant initApp)
-       → accessibles aussi depuis _syncInboxNow (fallback Firebase toutes les 8s) */
-    /* Réinitialise la map pour la nouvelle session (évite les faux-positifs après reconnexion) */
-    _dmToastedMap = {};
-    var _dmLoginTs = Date.now(); /* timestamp de connexion → sert à pré-marquer les vieux msgs */
-    /* Debounce : évite les appels triples (value + child_changed + child_added simultanés) */
-    var _inboxDebounceTimer = null;
-    function _debouncedCheckInbox(fresh) {
-      clearTimeout(_inboxDebounceTimer);
-      _inboxDebounceTimer = setTimeout(function() {
-        try { _checkDMInbox(fresh); } catch(e){}
-      }, 120);
-    }
-
-    /* Helper : met à jour le cache localStorage inbox pour une seule entrée */
-    function _patchLocalInbox(entry) {
-      if (!entry || !entry.fromEmail || !_currentUser) return;
-      try {
-        var _lk   = 'gw_dm_inbox_' + _currentUser.email;
-        var _list = JSON.parse(localStorage.getItem(_lk) || '[]');
-        var _idx  = -1;
-        for (var i = 0; i < _list.length; i++) {
-          if (_list[i].fromEmail === entry.fromEmail) { _idx = i; break; }
-        }
-        if (_idx >= 0) { _list[_idx] = entry; } else { _list.push(entry); }
-        localStorage.setItem(_lk, JSON.stringify(_list));
-      } catch(e) {}
-    }
-
-    /* on('value') — chargement initial uniquement */
     _inboxRef.on('value', function(snap) {
       var inbox = snap.val();
-      if (!_currentUser) return;
-      var list = inbox ? (Array.isArray(inbox) ? inbox : Object.values(inbox)) : [];
+      if (!inbox || !_currentUser) return;
+      var list = Array.isArray(inbox) ? inbox : Object.values(inbox);
       try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(list)); } catch(e){}
-      if (_inboxFirstLoad) {
-        _inboxFirstLoad = false;
-        /* Pré-marque les entrées ANTÉRIEURES au login → évite de toaster des vieux messages
-           lors d'une reconnexion Firebase ou d'un rechargement.
-           Les messages arrivés pendant le chargement initial (at >= _dmLoginTs) gardent leur toast. */
-        list.forEach(function(e) {
-          if (e && e.fromEmail && e.at && e.at < _dmLoginTs) {
-            _dmToastedMap[_gwFbKey(e.fromEmail)] = e.at;
-          }
-        });
-        try { _checkDMInbox(false); } catch(e){} /* chargement initial → pas de toast */
-      }
-      /* Les mises à jour temps réel sont gérées exclusivement par child_changed/child_added */
-    });
-
-    /* child_changed — entrée inbox MISE À JOUR (même expéditeur, nouveau message) — temps réel direct */
-    _inboxRef.on('child_changed', function(childSnap) {
-      if (!_currentUser) return;
-      var entry = childSnap.val();
-      if (!entry || !entry.fromEmail) return;
-      _patchLocalInbox(entry);
-      try { _showInboxToast(entry); } catch(e){}
-      _debouncedCheckInbox(true);
-    });
-
-    /* child_added — NOUVELLE entrée inbox (nouvel expéditeur ou ré-ajout après suppression) */
-    _inboxRef.on('child_added', function(childSnap) {
-      if (_inboxFirstLoad || !_currentUser) return; /* ignorer le lot initial */
-      var entry = childSnap.val();
-      if (!entry || !entry.fromEmail) return;
-      _patchLocalInbox(entry);
-      try { _showInboxToast(entry); } catch(e){}
-      _debouncedCheckInbox(true);
+      try { _checkDMInbox(); } catch(e){}
     });
 
     /* DMs : gw/dm_msgs (per-message, atomique) est l'unique source de vérité désormais.
@@ -3804,12 +2979,8 @@ function initApp(user) {
           try { _updateChatMsgCounter(); } catch(e2){}
           try { _subUpdateSidebarChip(merged2.planType || 'free'); } catch(e2){}
         }
-        /* Rafraîchit le feed pour mettre à jour les avatars — seulement si le feed est visible */
-        var _feedVis = document.getElementById('feed-list');
-        var _feedPg  = document.getElementById('p-home');
-        if (_feedVis && _feedPg && _feedPg.classList.contains('active')) {
-          try { renderFeed(getAllPosts()); } catch(e2){}
-        }
+        /* Rafraîchit le feed pour mettre à jour les avatars (debounce 300ms) */
+        if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e2){} }
       } catch(e){}
     }
     _gwFbDB.ref('gw/profiles').on('child_added',   _onProfileSnap);
@@ -3834,43 +3005,15 @@ function initApp(user) {
     _gwFbDB.ref('gw/group_msgs').on('child_changed', function(snap) { try { _gwMergeGroupMsg(snap); } catch(e){} });
 
     /* Charge les posts de tous les utilisateurs depuis Firebase au login */
-    var _loginPostsDone = false;
-    var _loginPostsTimeout = setTimeout(function() {
-      if (!_loginPostsDone) { _loginPostsDone = true; _persistedPostsLoaded = true; }
-    }, 8000);
     _gwFbDB.ref('gw/posts').once('value').then(function(snap) {
-      if (_loginPostsDone) return;
-      _loginPostsDone = true;
-      clearTimeout(_loginPostsTimeout);
       var allPosts = snap.val() || {};
-
-      /* ── Nettoyer les posts périmés : utilisateurs dont les posts n'existent
-         plus dans Firebase mais restent en localStorage ou en DEMO_POSTS ── */
-      var fbUserKeys = {};
-      Object.keys(allPosts).forEach(function(fk) { fbUserKeys[fk] = true; });
-      /* Collecter les clés localStorage périmées */
-      var staleEntries = [];
-      for (var _li = 0; _li < localStorage.length; _li++) {
-        var _lk = localStorage.key(_li);
-        if (_lk && _lk.indexOf('gw_userposts_') === 0) {
-          var _lEmail = _lk.replace('gw_userposts_', '');
-          if (!fbUserKeys[_gwFbKey(_lEmail)]) staleEntries.push({ key: _lk, email: _lEmail });
-        }
-      }
-      /* Supprimer les entrées périmées */
-      staleEntries.forEach(function(e) {
-        try { localStorage.removeItem(e.key); } catch(err){}
-        DEMO_POSTS = DEMO_POSTS.filter(function(p) { return p.ownerEmail !== e.email; });
-      });
-
       Object.keys(allPosts).forEach(function(fk) {
         var fps = allPosts[fk];
         if (!Array.isArray(fps)) return;
         var em = fk.replace(/__d__/g,'.').replace(/__a__/g,'@');
-        /* Filtrer les tombstones avant de stocker en localStorage */
-        var clean = fps.filter(function(p) { return p && p.id && !_gwIsDeleted(p.id); });
-        try { localStorage.setItem(_userPostsKey(em), JSON.stringify(clean)); } catch(e){}
-        clean.forEach(function(p) {
+        try { localStorage.setItem(_userPostsKey(em), JSON.stringify(fps)); } catch(e){}
+        fps.forEach(function(p) {
+          if (!p || !p.id) return;
           if (!p.images) p.images = [];
           if (!DEMO_POSTS.find(function(d){ return d.id === p.id; })) {
             p.likers = loadPostLikers(p.id);
@@ -3881,7 +3024,7 @@ function initApp(user) {
       DEMO_POSTS.sort(function(a,b){ return b.id - a.id; });
       _persistedPostsLoaded = true;
       try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e){}
-    }).catch(function(){ clearTimeout(_loginPostsTimeout); _loginPostsDone = true; _persistedPostsLoaded = true; });
+    }).catch(function(){});
   }
 
   /* Initiales de l'avatar */
@@ -3911,9 +3054,6 @@ function initApp(user) {
   getAllPosts().forEach(function(post) {
     post.likers = loadPostLikers(post.id);
   });
-
-  /* Applique les tombstones de suppression admin avant le premier rendu */
-  _gwApplyTombstones();
 
   /* Rend les posts du feed — _buildMergedFeedPool intègre les posts officiels automatiquement */
   var _initAllPosts = getAllPosts();
@@ -4056,25 +3196,6 @@ function _refreshCurrentUserAvatars() {
       el.innerHTML = '<span>' + escHtml(initials) + '</span>';
     }
   });
-
-  /* Synchronise le mini-avatar du compose bar sous le héro */
-  var cloneAv = document.getElementById('feed-compose-av-clone');
-  if (cloneAv) {
-    if (photo) {
-      cloneAv.className = cloneAv.className.replace(/\bav-photo\b/g, '').trim() + ' av-photo';
-      cloneAv.innerHTML = '<img src="' + escHtml(photo) + '" alt=""/>';
-    } else {
-      cloneAv.className = cloneAv.className.replace(/\bav-photo\b/g, '').trim();
-      cloneAv.innerHTML = '<span>' + escHtml(initials) + '</span>';
-    }
-  }
-
-  /* Prénom dans le héro */
-  var heroFirst = document.getElementById('hero-firstname');
-  if (heroFirst) {
-    var firstName = (_currentUser.nom || '').split(' ')[0] || 'Bienvenue';
-    heroFirst.textContent = firstName;
-  }
 
   /* Rafraîchit aussi le drawer sidebar */
   _refreshSidebar();
@@ -4251,13 +3372,6 @@ function navTo(btn, pageId) {
   var previousPage = _feedCurrentPage;
   _feedCurrentPage = pageId;
 
-  /* Quand on quitte la page Messages, ferme le chat actif proprement.
-     Cela réinitialise _chatConvId → les prochains messages déclenchent
-     le toast et le badge non-lu correctement */
-  if (previousPage === 'p-messages' && pageId !== 'p-messages' && _chatConvId) {
-    try { closeChat(); } catch(e) {}
-  }
-
   /* Si on retape Accueil alors qu'on y est déjà → refresh immédiat */
   if (pageId === 'p-home' && previousPage === 'p-home') {
     _feedDoRefresh();
@@ -4293,7 +3407,6 @@ function navTo(btn, pageId) {
     try { _updateCartBadge(); }             catch(e) {}
     try { _collabRender(); }                catch(e) {}
     try { _mkRenderTxTabs(); }              catch(e) {}
-    try { _gwApplyMkSections(); }           catch(e) {}
     /* Sync Firebase en arrière-plan → re-rendu automatique sans bouton */
     if (_gwFbReady && _gwFbDB) {
       Promise.all([
@@ -4322,7 +3435,6 @@ function navTo(btn, pageId) {
 
   /* Sync immédiat des messages non lus à l'ouverture de la page Messages */
   if (pageId === 'p-messages') {
-    _syncInboxNow();   /* lecture directe Firebase — contourne le cache localStorage */
     _globalMsgPoll();
     renderConversations();
   }
@@ -5965,33 +5077,8 @@ function switchFeedTab(btn, tab) {
 ══════════════════════════════════════════ */
 function _userPostsKey(email) { return 'gw_userposts_' + email; }
 
-/* ── Tombstones : IDs de posts supprimés par l'admin ── */
-var _gwDeletedIds = (function() {
-  try { return JSON.parse(localStorage.getItem('gw_deleted_ids') || '{}'); } catch(e) { return {}; }
-})();
-
-function _gwMarkDeleted(postId) {
-  _gwDeletedIds[String(postId)] = Date.now();
-  try { localStorage.setItem('gw_deleted_ids', JSON.stringify(_gwDeletedIds)); } catch(e){}
-}
-
-function _gwIsDeleted(postId) {
-  return !!_gwDeletedIds[String(postId)];
-}
-
-function _gwApplyTombstones() {
-  var before = DEMO_POSTS.length + PENDING_POSTS.length;
-  DEMO_POSTS    = DEMO_POSTS.filter(function(p)    { return !_gwIsDeleted(p.id); });
-  PENDING_POSTS = PENDING_POSTS.filter(function(p) { return !_gwIsDeleted(p.id); });
-  if (DEMO_POSTS.length + PENDING_POSTS.length < before) {
-    try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e){}
-  }
-}
-
 function loadPersistedUserPosts(email) {
-  var posts = JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
-  /* Filtrer les posts marqués supprimés (tombstones) */
-  return posts.filter(function(p) { return p && p.id && !_gwIsDeleted(p.id); });
+  return JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
 }
 
 function savePersistedUserPosts(email, posts) {
@@ -6067,35 +5154,6 @@ function getPostsByAuthor(email, nom) {
 }
 
 /* ══════════════════════════════════════════
-   THUMBNAIL : première frame sur les vidéos du feed
-══════════════════════════════════════════ */
-function _gwInitSingleVideoThumb(vid) {
-  if (!vid || !vid.src || vid._gwThumbInit) return;
-  vid._gwThumbInit = true;
-  /* preload="auto" requis — "metadata" ne charge pas les frames vidéo */
-  vid.preload = 'auto';
-  function showFirstFrame() {
-    /* Seek à 2s pour sauter les éventuelles frames noires d'intro */
-    try { vid.currentTime = 2.0; } catch(e) {}
-  }
-  if (vid.readyState >= 2) {
-    showFirstFrame();
-  } else {
-    vid.addEventListener('loadeddata', showFirstFrame, { once: true });
-  }
-}
-
-/* Re-déclenche l'IntersectionObserver pour une vidéo dont src vient d'être posé.
-   L'observer ne se redéclenche pas automatiquement pour un élément déjà observé. */
-function _gwReobserveFeedVid(vid) {
-  if (!vid || !_feedVideoObserver) return;
-  _feedVideoObserver.unobserve(vid);
-  vid._gwVidTracked = false;
-  /* Petit délai pour que le navigateur enregistre le src avant de ré-observer */
-  setTimeout(function() { _initFeedVideoObserver(); }, 50);
-}
-
-/* ══════════════════════════════════════════
    AUTOPLAY VIDÉO AU SCROLL (feed)
 ══════════════════════════════════════════ */
 var _feedVideoObserver = null;
@@ -6129,7 +5187,7 @@ function _initFeedVideoObserver() {
         var mutedBadge = isRp ? null : document.getElementById((isOff ? 'off-fvm-' : 'fvm-') + rawId);
 
         if (entry.isIntersecting) {
-          if (!video.src) { return; } /* src pas encore là — _gwReobserveFeedVid la rebranchera */
+          if (!video.src) { return; } /* src pas encore chargée, skip */
           /* Buffer agressif dès que visible */
           video.preload = 'auto';
           /* Pause toutes les autres vidéos du feed */
@@ -6181,7 +5239,7 @@ function _initFeedVideoObserver() {
           if (mutedBadge) mutedBadge.style.opacity = '0';
         }
       });
-    }, { threshold: 0.3, rootMargin: '50px 0px' });
+    }, { threshold: 0.5, rootMargin: '100px 0px' });
   }
 
   /* Observe toutes les nouvelles vidéos non encore trackées (normales + officielles + reposts)
@@ -6191,8 +5249,6 @@ function _initFeedVideoObserver() {
       vid._gwVidTracked = true;
       _feedVideoObserver.observe(vid);
     }
-    /* Afficher la première frame comme couverture */
-    _gwInitSingleVideoThumb(vid);
   });
 }
 
@@ -6307,12 +5363,11 @@ function _buildMergedFeedPool(regularPosts) {
       offIdx++;
     }
   }
-  /* Si pas assez de posts réguliers pour déclencher l'insertion, ajoute les officiels à la fin */
-  while (offIdx < offs.length) {
-    var fp = Object.assign({}, offs[offIdx]);
+  /* Si moins de INTERVAL posts réguliers, insérer quand même le 1er officiel à la fin */
+  if (offIdx === 0 && offs.length && regularPosts.length > 0) {
+    var fp = Object.assign({}, offs[0]);
     fp._isOfficialInFeed = true;
     merged.push(fp);
-    offIdx++;
   }
 
   return merged;
@@ -6320,16 +5375,13 @@ function _buildMergedFeedPool(regularPosts) {
 
 var _renderFeedTimer = null;
 function renderFeed(posts) {
-  /* Debounce : premier appel → rendu immédiat + fenêtre de blocage 300ms.
-     Appels suivants dans la fenêtre → réinitialise le timer, rendu à la fin. */
+  /* Debounce : si appelé plusieurs fois rapidement (sync Firebase), attend 300ms */
   if (_renderFeedTimer) {
     clearTimeout(_renderFeedTimer);
-    _renderFeedTimer = setTimeout(function() { _renderFeedTimer = null; _renderFeedNow(posts); }, 300);
+    _renderFeedTimer = setTimeout(function() { _renderFeedTimer = null; _renderFeedNow(posts); }, 600);
     return;
   }
   _renderFeedNow(posts);
-  /* Ouvre une fenêtre de 300ms — les appels suivants sont debounced */
-  _renderFeedTimer = setTimeout(function() { _renderFeedTimer = null; }, 300);
 }
 function _renderFeedNow(posts) {
   var list       = document.getElementById('feed-list');
@@ -6409,9 +5461,9 @@ function _feedAppendBatch(immediate) {
   /* Lot suivant dans le pool */
   var batch = _feedPool.slice(_feedOffset, _feedOffset + _FEED_PAGE);
 
-  /* Pool épuisé → recyclage infini avec nouveaux IDs (les posts officiels ne sont pas recyclés) */
+  /* Pool épuisé → recyclage infini avec nouveaux IDs */
   if (!batch.length) {
-    var base = (_feedPool.length ? _feedPool : getAllPosts()).filter(function(p) { return !p._isOfficialInFeed; });
+    var base = _feedPool.length ? _feedPool : getAllPosts();
     if (!base.length) return;
     var start = _feedCycleOff % base.length;
     batch = base.slice(start, start + _FEED_PAGE);
@@ -6543,7 +5595,6 @@ function buildPostCard(post) {
 
   /* Like par utilisateur courant */
   var userEmail = _currentUser ? _currentUser.email : '';
-  if (!Array.isArray(post.likers)) post.likers = loadPostLikers(post.id);
   var liked     = post.likers.indexOf(userEmail) !== -1;
   var likeCount = post.baseLikes + post.likers.length;
 
@@ -6560,10 +5611,9 @@ function buildPostCard(post) {
     '</button>';
 
   /* Texte tronqué si > 200 chars */
-  var _postText = post.text || '';
-  var shortText = _postText;
-  var needMore  = _postText.length > 200;
-  if (needMore) shortText = _postText.slice(0, 200);
+  var shortText = post.text;
+  var needMore  = post.text.length > 200;
+  if (needMore) shortText = post.text.slice(0, 200);
 
   /* Vidéo HTML */
   var videoHtml = '';
@@ -6577,13 +5627,11 @@ function buildPostCard(post) {
                : (post.video.url ? escHtml(post.video.url) : '');
 
     var vViews = _getVideoViews(post.id);
-    /* Style portrait (short 9:16) vs paysage (video 16:9) + crop éditeur */
-    var _fCrop = (post.video && post.video.cropRatio) || null;
-    var _fOff  = (post.video && post.video.cropOffset) || {x:50, y:50};
-    var _fAr   = _fCrop ? _fCrop.replace(':', '/') : (isShrt ? '9/16' : '16/9');
-    var wrapStyle = 'position:relative;overflow:hidden;border-radius:10px;aspect-ratio:' + _fAr + ';background:#000' +
-      (isShrt ? ';max-width:240px;margin:0 auto' : '');
-    var vidStyle  = 'width:100%;height:100%;object-fit:cover;display:block;pointer-events:none;object-position:' + _fOff.x + '% ' + _fOff.y + '%';
+    /* Style portrait (short 9:16) vs paysage (video 16:9) */
+    var wrapStyle = isShrt
+      ? 'position:relative;overflow:hidden;border-radius:10px;max-width:240px;margin:0 auto;aspect-ratio:9/16;background:#000'
+      : 'position:relative;overflow:hidden;border-radius:10px;aspect-ratio:16/9;background:#000';
+    var vidStyle  = 'width:100%;height:100%;object-fit:cover;display:block;pointer-events:none';
     var typeBadge = isShrt
       ? '<span class="post-video-type-badge post-video-type-short"><i class="fas fa-mobile-screen-button"></i> SHORT</span>'
       : '<span class="post-video-type-badge post-video-type-video"><i class="fas fa-video"></i> VIDÉO</span>';
@@ -6615,7 +5663,7 @@ function buildPostCard(post) {
           var bUrl = URL.createObjectURL(blob);
           /* Met à jour la source vidéo dans le DOM */
           var el = document.getElementById('fv-' + pid);
-          if (el) { el.src = bUrl; _gwInitSingleVideoThumb(el); _gwReobserveFeedVid(el); }
+          if (el) { el.src = bUrl; }
           /* Met à jour le onclick pour le player plein écran */
           var wrap = document.getElementById('pvw-' + pid);
           if (wrap) {
@@ -6793,9 +5841,9 @@ function buildPostCard(post) {
     '</div>' +
     '<div class="post-body">' +
       (post.type === 'repost' && post.repostOf
-        ? (shortText ? '<p class="post-text" id="ptxt-' + post.id + '">' + _gwRenderTextWithHashtags(shortText) + '</p>' : '') +
+        ? (shortText ? '<p class="post-text" id="ptxt-' + post.id + '">' + escHtml(shortText) + '</p>' : '') +
           repostCardHtml
-        : '<p class="post-text" id="ptxt-' + post.id + '">' + _gwRenderTextWithHashtags(shortText) +
+        : '<p class="post-text" id="ptxt-' + post.id + '">' + escHtml(shortText) +
           (needMore ? '… <button class="see-more" onclick="expandPost(' + post.id + ')">Voir plus</button>' : '') +
           '</p>' +
           videoHtml + imagesHtml + docHtml
@@ -6852,7 +5900,7 @@ function buildPostCard(post) {
         var bUrl = URL.createObjectURL(blob);
         var el = document.getElementById('rp-fv-' + pid);
         if (el) {
-          el.src = bUrl; _gwInitSingleVideoThumb(el); _gwReobserveFeedVid(el);
+          el.src = bUrl;
           /* Met en cache l'URL dans l'objet repostOf pour les rendus suivants */
           var stored = DEMO_POSTS.find(function(p) { return String(p.id) === String(pid); }) ||
                        PENDING_POSTS.find(function(p) { return String(p.id) === String(pid); });
@@ -6878,124 +5926,12 @@ function escHtml(str) {
     .replace(/'/g,'&#39;');
 }
 
-/* ══════════════════════════════════════════
-   HASHTAGS
-══════════════════════════════════════════ */
-
-/* Extrait la liste des hashtags uniques d'un texte (ex: ['sport','music']) */
-function _gwExtractHashtags(text) {
-  if (!text) return [];
-  var matches = text.match(/#([\wÀ-ÿ]+)/g) || [];
-  var seen = {};
-  return matches.map(function(m) { return m.slice(1).toLowerCase(); })
-    .filter(function(t) { if (seen[t]) return false; seen[t] = true; return true; });
-}
-
-/* Convertit le texte brut en HTML avec #hashtags cliquables et @mentions colorées */
-function _gwRenderTextWithHashtags(text) {
-  if (!text) return '';
-  return escHtml(text).replace(/#([\wÀ-ÿ]+)/g, function(match, tag) {
-    return '<span class="gw-hashtag" onclick="event.stopPropagation();_gwHashtagClick(\''+tag.toLowerCase()+'\')">' + match + '</span>';
-  });
-}
-
-/* Variable globale : hashtag actif pour le filtre feed */
-var _gwActiveHashtag = null;
-
-/* Filtrer le feed par hashtag — clic sur un #tag dans le feed */
-function _gwHashtagClick(tag) {
-  _gwActiveHashtag = tag;
-  /* Bandeau hashtag en haut du feed */
-  var existing = document.getElementById('gw-hashtag-bar');
-  if (existing) existing.remove();
-  var bar = document.createElement('div');
-  bar.id = 'gw-hashtag-bar';
-  bar.style.cssText = 'position:sticky;top:0;z-index:50;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:700;border-radius:0 0 12px 12px;box-shadow:0 4px 16px rgba(99,102,241,.35)';
-  bar.innerHTML =
-    '<span><i class="fas fa-hashtag" style="margin-right:6px;opacity:.8"></i>' + escHtml(tag) + '</span>' +
-    '<button onclick="_gwClearHashtagFilter()" style="background:rgba(255,255,255,.2);border:none;color:#fff;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-times" style="margin-right:4px"></i>Tout voir</button>';
-  var feedList = document.getElementById('feed-list');
-  if (feedList && feedList.parentNode) feedList.parentNode.insertBefore(bar, feedList);
-
-  /* Filtre les posts */
-  var filtered = getAllPosts().filter(function(p) {
-    var tags = p.hashtags || _gwExtractHashtags(p.text || '');
-    return tags.indexOf(tag) !== -1;
-  });
-  if (!filtered.length) { showToast('Aucun post avec #' + tag, ''); return; }
-  renderFeed(filtered);
-}
-
-/* Efface le filtre hashtag et revient au feed normal */
-function _gwClearHashtagFilter() {
-  _gwActiveHashtag = null;
-  var bar = document.getElementById('gw-hashtag-bar');
-  if (bar) bar.remove();
-  renderFeed(getAllPosts());
-}
-
-/* ── Suggestion de hashtags pendant la frappe ── */
-function _gwHashtagSuggest(ta) {
-  var box = document.getElementById('gw-hashtag-suggest');
-  if (!box) return;
-  var val  = ta.value;
-  var cur  = ta.selectionStart;
-  /* Trouve le mot en cours (commence par #) */
-  var before = val.slice(0, cur);
-  var match  = before.match(/#([\wÀ-ÿ]*)$/);
-  if (!match) { box.style.display = 'none'; return; }
-  var partial = match[1].toLowerCase();
-  /* Collecte tous les hashtags déjà utilisés dans les posts */
-  var all = {};
-  getAllPosts().forEach(function(p) {
-    (_gwExtractHashtags(p.text || '')).forEach(function(t) { all[t] = (all[t] || 0) + 1; });
-  });
-  var suggestions = Object.keys(all)
-    .filter(function(t) { return partial === '' || t.indexOf(partial) === 0; })
-    .sort(function(a, b) { return all[b] - all[a]; })
-    .slice(0, 6);
-  if (!suggestions.length) { box.style.display = 'none'; return; }
-  box.style.display = 'block';
-  box.innerHTML = suggestions.map(function(t) {
-    return '<div onclick="_gwHashtagInsert(\'' + t + '\')" style="padding:9px 14px;font-size:13px;font-weight:600;color:#A5B4FC;cursor:pointer;border-bottom:1px solid #334155;transition:background .12s" onmouseover="this.style.background=\'#273149\'" onmouseout="this.style.background=\'\'">' +
-      '<i class="fas fa-hashtag" style="margin-right:6px;opacity:.6;font-size:11px"></i>' + escHtml(t) +
-      '<span style="float:right;font-size:11px;color:#64748B;font-weight:400">' + all[t] + ' post' + (all[t] > 1 ? 's' : '') + '</span>' +
-    '</div>';
-  }).join('');
-}
-
-/* Insère le hashtag sélectionné dans le textarea */
-function _gwHashtagInsert(tag) {
-  var ta  = document.getElementById('pub-text');
-  var box = document.getElementById('gw-hashtag-suggest');
-  if (!ta) return;
-  var val = ta.value;
-  var cur = ta.selectionStart;
-  var before = val.slice(0, cur);
-  var after  = val.slice(cur);
-  /* Remplace le #partiel en cours */
-  var newBefore = before.replace(/#([\wÀ-ÿ]*)$/, '#' + tag + ' ');
-  ta.value = newBefore + after;
-  ta.selectionStart = ta.selectionEnd = newBefore.length;
-  ta.focus();
-  if (box) box.style.display = 'none';
-}
-
-/* Ferme la boîte de suggestions si on clique ailleurs */
-document.addEventListener('click', function(e) {
-  var box = document.getElementById('gw-hashtag-suggest');
-  var ta  = document.getElementById('pub-text');
-  if (box && ta && !ta.contains(e.target) && !box.contains(e.target)) {
-    box.style.display = 'none';
-  }
-});
-
 /* Expand post text */
 function expandPost(postId) {
   var post = getAllPosts().find(function(p) { return p.id === postId; });
   if (!post) return;
   var el = document.getElementById('ptxt-' + postId);
-  if (el) el.innerHTML = _gwRenderTextWithHashtags(post.text);
+  if (el) el.innerHTML = escHtml(post.text);
 }
 
 /* ══════════════════════════════════════════
@@ -7044,9 +5980,8 @@ function likePost(postId) {
     count.textContent = total;
   });
 
-  /* Persiste les likes */
+  /* Persiste les likes dans localStorage */
   savePostLikers(postId, post.likers);
-  _fbLikeWrite(postId, email, liked);
 
   /* Milestone likes */
   if (liked) {
@@ -7102,7 +6037,6 @@ function dislikePost(postId) {
         post.likers.splice(likeIdx, 1);
         var total = post.baseLikes + post.likers.length;
         savePostLikers(postId, post.likers);
-        _fbLikeWrite(postId, email, false);
         document.querySelectorAll('[id="like-btn-' + postId + '"]').forEach(function(b) {
           b.className = 'act-btn';
           var i = b.querySelector('i'); if (i) i.className = 'far fa-heart';
@@ -7307,32 +6241,8 @@ function archivePost(postId) {
 
 /* ── Supprimer un post ── */
 function deletePost(postId) {
-  /* Bottom sheet de confirmation — compatible Capacitor (pas de confirm() bloquant) */
-  var bg = document.createElement('div');
-  bg.id = 'del-post-sheet';
-  bg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+  if (!confirm('Supprimer cette publication ?')) return;
 
-  var sheet = document.createElement('div');
-  sheet.style.cssText = 'background:#fff;width:100%;max-width:430px;border-radius:20px 20px 0 0;padding:24px 20px 32px;box-shadow:0 -4px 24px rgba(0,0,0,.15)';
-  sheet.innerHTML =
-    '<p style="text-align:center;font-size:15px;font-weight:600;color:#0F172A;margin:0 0 20px">Supprimer cette publication ?</p>' +
-    '<button id="del-post-confirm" style="width:100%;padding:14px;background:#EF4444;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:10px">Supprimer</button>' +
-    '<button id="del-post-cancel"  style="width:100%;padding:14px;background:#F1F5F9;color:#334155;border:none;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer">Annuler</button>';
-
-  bg.appendChild(sheet);
-  document.body.appendChild(bg);
-
-  function _close() { if (bg.parentNode) bg.parentNode.removeChild(bg); }
-
-  bg.addEventListener('click', function(e) { if (e.target === bg) _close(); });
-  document.getElementById('del-post-cancel').onclick  = _close;
-  document.getElementById('del-post-confirm').onclick = function() {
-    _close();
-    _doDeletePost(postId);
-  };
-}
-
-function _doDeletePost(postId) {
   /* Trouve le post */
   var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(postId); }) ||
              PENDING_POSTS.find(function(p) { return String(p.id) === String(postId); });
@@ -7353,12 +6263,6 @@ function _doDeletePost(postId) {
   /* Retire la card du DOM */
   var card = document.getElementById('post-' + postId);
   if (card) card.remove();
-
-  /* ── Tombstone local + Firebase → propagé à TOUS les appareils ── */
-  _gwMarkDeleted(String(postId));
-  if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/deleted_posts/' + postId).set({ at: Date.now(), by: (_currentUser ? _currentUser.email : '?') }).catch(function(){});
-  }
 
   /* ── Sync vers localStorage + Firebase (source de vérité permanente) ── */
   if (_currentUser) {
@@ -7631,12 +6535,6 @@ function _openVideoClassic(post, duration) {
   var _newViews = _incrementVideoViews(postId);
   _checkViewMilestone(postId, post.ownerEmail || null, _newViews);
 
-  /* Trim + crop éventuellement enregistrés dans les métadonnées */
-  _vpPendingTrimStart  = (post.video && post.video.trimStart)  || 0;
-  _vpPendingTrimEnd    = (post.video && post.video.trimEnd)    || 0;
-  _vpPendingCropRatio  = (post.video && post.video.cropRatio)  || null;
-  _vpPendingCropOffset = (post.video && post.video.cropOffset) || {x:50, y:50};
-
   /* Ouvre le player UI immédiatement — ne pas attendre l'URL */
   _vpPopulateDetail(post);
   var modal = document.getElementById('video-player-modal');
@@ -7772,7 +6670,7 @@ function _vpPopulateDetail(post) {
     if (desc && hasOwnTitle) {
       descWrap.innerHTML =
         '<div class="vpd-desc-title">Description</div>' +
-        '<div class="vpd-desc-text' + (desc.length > 120 ? '' : ' expanded') + '" id="vpd-desc-text">' + _gwRenderTextWithHashtags(desc) + '</div>' +
+        '<div class="vpd-desc-text' + (desc.length > 120 ? '' : ' expanded') + '" id="vpd-desc-text">' + escHtml(desc) + '</div>' +
         (desc.length > 120 ?
           '<button class="vpd-voir-plus" id="vpd-voir-plus" onclick="vpExpandDesc()">Voir plus</button>' : '');
     } else {
@@ -8176,14 +7074,11 @@ function loadPostLikers(postId) {
   return v;
 }
 function savePostLikers(postId, likers) {
-  _likersCache[String(postId)] = likers;
+  _likersCache[String(postId)] = likers; /* met à jour le cache */
   localStorage.setItem('gw_likers_' + postId, JSON.stringify(likers));
-}
-function _fbLikeWrite(postId, email, liked) {
-  if (!_gwFbReady || !_gwFbDB) return;
-  var ref = _gwFbDB.ref('gw/likes/' + postId + '/' + _gwFbKey(email));
-  if (liked) { ref.set(email).catch(function(){}); }
-  else        { ref.remove().catch(function(){}); }
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/likes/' + postId).set(likers).catch(function(){});
+  }
 }
 
 function loadUserComments(postId) {
@@ -8191,6 +7086,9 @@ function loadUserComments(postId) {
 }
 function saveUserComments(postId, comments) {
   localStorage.setItem('gw_comments_' + postId, JSON.stringify(comments));
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/comments/' + postId).set(comments).catch(function(){});
+  }
 }
 
 /* Récupère réactions d'un commentaire (👍/👎) */
@@ -8422,9 +7320,6 @@ function submitComment() {
   var comments = loadUserComments(_currentPostId);
   comments.push(newC);
   saveUserComments(_currentPostId, comments);
-  if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/comments/' + _currentPostId + '/' + newC.id).set(newC).catch(function(){});
-  }
 
   input.value = '';
   cancelReply();
@@ -8487,13 +7382,7 @@ function saveEditComment(cid, postId) {
 
   var comments = loadUserComments(postId);
   var c = comments.find(function(x) { return x.id === cid; });
-  if (c) {
-    c.text = newText; c.edited = true;
-    saveUserComments(postId, comments);
-    if (_gwFbReady && _gwFbDB) {
-      _gwFbDB.ref('gw/comments/' + postId + '/' + cid).update({ text: newText, edited: true }).catch(function(){});
-    }
-  }
+  if (c) { c.text = newText; c.edited = true; saveUserComments(postId, comments); }
 
   var textEl = document.getElementById('ctxt-' + cid);
   if (textEl) textEl.innerHTML = escHtml(newText);
@@ -8512,14 +7401,9 @@ function saveEditComment(cid, postId) {
 /* ── SUPPRIMER UN COMMENTAIRE ── */
 function deleteComment(cid, postId) {
   var comments = loadUserComments(postId);
-  var toDelete = comments.filter(function(x) { return x.id === cid || x.parentId === cid; });
+  /* Supprime le commentaire et ses réponses */
   comments = comments.filter(function(x) { return x.id !== cid && x.parentId !== cid; });
   saveUserComments(postId, comments);
-  if (_gwFbReady && _gwFbDB) {
-    toDelete.forEach(function(x) {
-      _gwFbDB.ref('gw/comments/' + postId + '/' + x.id).remove().catch(function(){});
-    });
-  }
 
   /* Supprime aussi les éléments DOM (commentaire + réponses) */
   var el = document.getElementById('comment-' + cid);
@@ -8883,79 +7767,19 @@ function _incShareCount(postId) {
 }
 
 function sharePost(postId) {
-  var post     = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
-  /* Deep link vers ce post dans l'app Geniwork */
-  var shareUrl = 'https://geniwork.vercel.app/?p=' + postId;
-  var isVideo  = !!(post && post.video && post.video.url);
-  var hasImg   = !!(post && post.images && post.images.length);
-  var pType    = isVideo ? '🎬 Vidéo' : hasImg ? '📷 Photo' : '💬 Post';
-  var author   = post ? (post.nom || post.author || 'Geniwork') : 'Geniwork';
-  var preview  = post && post.text ? post.text.slice(0, 80) + (post.text.length > 80 ? '…' : '') : '';
-  var fullMsg  = pType + ' de ' + author + ' sur Geniwork\n' +
-                 (preview ? '"' + preview + '"\n' : '') +
-                 'Rejoins la communauté 👇\n' + shareUrl;
+  var post      = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+  var shareUrl  = window.location.origin + '/p/' + postId;
+  var shareText = post
+    ? (post.author || '') + ' sur Geniwork' + (post.text ? ' : ' + post.text.slice(0, 80) + '…' : '')
+    : 'Découvrez cette publication sur Geniwork !';
 
-  /* Fermer si déjà ouvert */
-  var oldP = document.getElementById('gw-post-share-panel');
-  var oldO = document.getElementById('gw-post-share-overlay');
-  if (oldP) { oldP.remove(); if (oldO) oldO.remove(); return; }
-
-  var msgEnc = encodeURIComponent(fullMsg);
-  var urlEnc = encodeURIComponent(shareUrl);
-  var twEnc  = encodeURIComponent(pType + ' de ' + author + ' sur @Geniwork');
-  var wa     = 'https://wa.me/?text=' + msgEnc;
-  var fb     = 'https://www.facebook.com/sharer/sharer.php?u=' + urlEnc;
-  var tw     = 'https://twitter.com/intent/tweet?text=' + twEnc + '&url=' + urlEnc;
-  var tg     = 'https://t.me/share/url?url=' + urlEnc + '&text=' + encodeURIComponent(pType + ' de ' + author + ' sur Geniwork');
-  var btnStyle = 'display:flex;flex-direction:column;align-items:center;gap:6px;text-decoration:none';
-  var icoStyle = 'width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center';
-  var lblStyle = 'color:#94A3B8;font-size:10px;text-align:center';
-  var safeUrl  = shareUrl.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-
-  var _closeJs = "var p=document.getElementById('gw-post-share-panel');var o=document.getElementById('gw-post-share-overlay');if(p)p.remove();if(o)o.remove()";
-
-  var panel = document.createElement('div');
-  panel.id = 'gw-post-share-panel';
-  panel.style.cssText =
-    'position:fixed;bottom:0;left:0;right:0;background:#1E293B;border-radius:20px 20px 0 0;' +
-    'padding:16px 16px 36px;z-index:10001;box-shadow:0 -8px 40px rgba(0,0,0,.6);' +
-    'border-top:1px solid #334155;animation:artShareUp .22s ease';
-
-  panel.innerHTML =
-    '<div style="width:36px;height:4px;background:#475569;border-radius:2px;margin:0 auto 14px"></div>' +
-    '<div style="font-weight:700;color:#F1F5F9;font-size:14px;margin-bottom:2px;' +
-      'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + pType +
-      (author ? ' · ' + escHtml(author) : '') + '</div>' +
-    (preview ? '<div style="color:#64748B;font-size:11px;margin-bottom:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">"' + escHtml(preview) + '"</div>' : '<div style="margin-bottom:14px"></div>') +
-    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">' +
-      '<a href="' + wa + '" target="_blank" rel="noopener" onclick="' + _closeJs + '" style="' + btnStyle + '">' +
-        '<div style="' + icoStyle + 'background:#25D366"><i class="fab fa-whatsapp" style="color:#fff;font-size:24px"></i></div>' +
-        '<span style="' + lblStyle + '">WhatsApp</span></a>' +
-      '<a href="' + fb + '" target="_blank" rel="noopener" onclick="' + _closeJs + '" style="' + btnStyle + '">' +
-        '<div style="' + icoStyle + 'background:#1877F2"><i class="fab fa-facebook-f" style="color:#fff;font-size:22px"></i></div>' +
-        '<span style="' + lblStyle + '">Facebook</span></a>' +
-      '<a href="' + tw + '" target="_blank" rel="noopener" onclick="' + _closeJs + '" style="' + btnStyle + '">' +
-        '<div style="' + icoStyle + 'background:#000;border:1px solid #333"><i class="fab fa-twitter" style="color:#fff;font-size:20px"></i></div>' +
-        '<span style="' + lblStyle + '">Twitter / X</span></a>' +
-      '<a href="' + tg + '" target="_blank" rel="noopener" onclick="' + _closeJs + '" style="' + btnStyle + '">' +
-        '<div style="' + icoStyle + 'background:#229ED9"><i class="fab fa-telegram-plane" style="color:#fff;font-size:22px"></i></div>' +
-        '<span style="' + lblStyle + '">Telegram</span></a>' +
-    '</div>' +
-    '<button onclick="_gwCopyLink(\'' + safeUrl + '\',null);' + _closeJs + '" ' +
-      'style="width:100%;padding:13px;background:#0F172A;border:1px solid #334155;border-radius:12px;' +
-             'color:#94A3B8;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:10px">' +
-      '<i class="fas fa-link" style="color:#7C3AED"></i> Copier le lien</button>' +
-    '<button onclick="' + _closeJs + '" ' +
-      'style="width:100%;padding:12px;background:transparent;border:1px solid #334155;border-radius:12px;' +
-             'color:#64748B;font-size:13px;cursor:pointer">Fermer</button>';
-
-  var overlay = document.createElement('div');
-  overlay.id = 'gw-post-share-overlay';
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);z-index:10000';
-  overlay.onclick = function() { panel.remove(); overlay.remove(); };
-  document.body.appendChild(overlay);
-  document.body.appendChild(panel);
-  notifyShare(post);
+  if (navigator.share) {
+    navigator.share({ title: 'Geniwork', text: shareText, url: shareUrl })
+      .then(function() { notifyShare(post); })
+      .catch(function() {});
+  } else {
+    _gwCopyLink(shareUrl, post);
+  }
 }
 
 function _gwCopyLink(text, post) {
@@ -9100,7 +7924,7 @@ function doRepost(postId) {
     author:     _currentUser.nom,
     role:       'Geniwork Member',
     verified:   false,
-    at:         rpId, time: 'À l\'instant',
+    at:         Date.now(), time: 'À l\'instant',
     text:       '',
     images:     [],
     video:      null,
@@ -9761,66 +8585,6 @@ function _pubOpenVideoCamera() {
   _pubOpenCameraPhotoShort();
 }
 
-/* ── Filtre caméra ── */
-function _gwCamSetFilter(idx) {
-  _camFilterIdx = idx;
-  var vid = document.getElementById('gw-cam-preview');
-  var css = _GW_CAM_FILTERS[idx] ? _GW_CAM_FILTERS[idx].css : '';
-  if (vid) vid.style.filter = css || '';
-  /* Met à jour les boutons de la bande */
-  _GW_CAM_FILTERS.forEach(function(f, i) {
-    var btn = document.getElementById('gw-cf-' + i);
-    if (!btn) return;
-    var circle = btn.querySelector('div');
-    var label  = btn.querySelector('span');
-    var isActive = i === idx;
-    if (circle) circle.style.borderColor = isActive ? '#fff' : 'rgba(255,255,255,.3)';
-    if (label)  { label.style.color = isActive ? '#fff' : 'rgba(255,255,255,.6)'; label.style.fontWeight = isActive ? '700' : '400'; }
-  });
-}
-
-/* ── Zoom ── */
-function _gwCamApplyZoom(z) {
-  _camZoom = Math.min(4, Math.max(1, z));
-  var vid = document.getElementById('gw-cam-preview');
-  /* Préserver le flip frontale en plus du zoom */
-  var flip = (_camFacing === 'user') ? 'scaleX(-1) ' : '';
-  if (vid) vid.style.transform = flip + 'scale(' + _camZoom + ')';
-  /* Indicateur */
-  var ind = document.getElementById('gw-cam-zoom-ind');
-  if (ind) {
-    ind.textContent = _camZoom.toFixed(1) + '×';
-    ind.style.opacity = '1';
-    clearTimeout(ind._gwHideT);
-    ind._gwHideT = setTimeout(function() { ind.style.opacity = '0'; }, 1200);
-  }
-}
-
-function _gwCamZoomStep(delta) {
-  _gwCamApplyZoom(_camZoom + delta);
-}
-
-/* ── Met à jour les miniatures de la bande filtres avec la vidéo réelle ── */
-function _gwCamUpdateFilterThumbs() {
-  var vid = document.getElementById('gw-cam-preview');
-  if (!vid || vid.readyState < 2) return;
-  var W = 52, H = 52;
-  _GW_CAM_FILTERS.forEach(function(f, i) {
-    var prev = document.getElementById('gw-cf-prev-' + i);
-    if (!prev) return;
-    try {
-      var cvs = document.createElement('canvas');
-      cvs.width = W; cvs.height = H;
-      var ctx = cvs.getContext('2d');
-      if (f.css) ctx.filter = f.css;
-      ctx.drawImage(vid, 0, 0, W, H);
-      prev.style.backgroundImage = 'url(' + cvs.toDataURL('image/jpeg', .7) + ')';
-      prev.style.backgroundSize  = 'cover';
-      prev.innerHTML = '';
-    } catch(e) {}
-  });
-}
-
 /* ── Bascule Photo ↔ Short depuis le toggle de l'overlay caméra ── */
 function _gwCamSetModePS(type) {
   var isPhoto = type === 'photo';
@@ -9928,50 +8692,14 @@ function _previewPickedDoc() {
    CAMÉRA DIRECTE — getUserMedia
    Permission explicite + preview live + capture photo/vidéo
 ══════════════════════════════════════════ */
-var _camMode      = 'photo';       /* 'photo' | 'video'        */
-var _camFacing    = 'environment'; /* 'environment' | 'user'   */
-var _camStream    = null;
-var _camRecorder  = null;
-var _camChunks    = [];
+var _camMode     = 'photo';       /* 'photo' | 'video'        */
+var _camFacing   = 'environment'; /* 'environment' | 'user'   */
+var _camStream   = null;
+var _camRecorder = null;
+var _camChunks   = [];
 var _camRecording = false;
-var _camTimer     = null;
-var _camSeconds   = 0;
-var _camFilterIdx = 0;             /* filtre live actif        */
-var _camZoom      = 1.0;           /* zoom actif (1.0 – 4.0)   */
-var _camPinchDist0 = 0;            /* distance initiale pinch  */
-var _camZoom0      = 1.0;          /* zoom au début du pinch   */
-
-/* ── Définition des filtres caméra + éditeur ── */
-/* swatch : gradient qui représente visuellement le rendu du filtre */
-var _GW_CAM_FILTERS = [
-  { name: 'Normal', css: '',                                              swatch: 'linear-gradient(135deg,#6EE7B7,#3B82F6,#9333EA)' },
-  { name: 'Vif',    css: 'saturate(1.9) contrast(1.1)',                  swatch: 'linear-gradient(135deg,#F97316,#EF4444,#EC4899,#A855F7)' },
-  { name: 'Noir',   css: 'grayscale(1) contrast(1.18)',                  swatch: 'linear-gradient(135deg,#111,#555,#999,#ddd)' },
-  { name: 'Fade',   css: 'contrast(.86) brightness(1.14) saturate(.7)',  swatch: 'linear-gradient(135deg,#DDE1F0,#C3CFEA,#E8D5F5,#F0E6FF)' },
-  { name: 'Chaud',  css: 'sepia(.45) saturate(1.45) brightness(1.06)',   swatch: 'linear-gradient(135deg,#F59E0B,#D97706,#B45309,#92400E)' },
-  { name: 'Froid',  css: 'saturate(.82) hue-rotate(22deg) brightness(1.1)', swatch: 'linear-gradient(135deg,#38BDF8,#0EA5E9,#2563EB,#4338CA)' },
-  { name: 'Drama',  css: 'contrast(1.5) saturate(1.28) brightness(.9)',  swatch: 'linear-gradient(135deg,#1E1B4B,#7C1D1D,#1E293B,#450A0A)' },
-  { name: 'Rétro',  css: 'sepia(.7) contrast(.86) brightness(1.14) saturate(1.25)', swatch: 'linear-gradient(135deg,#CA8A04,#A16207,#92400E,#78350F)' },
-  { name: 'Lune',   css: 'grayscale(.6) contrast(1.2) brightness(.95)', swatch: 'linear-gradient(135deg,#334155,#475569,#64748B,#94A3B8)' },
-];
-
-/* ── État de l'éditeur photo ── */
-var _gwPhotoEdit = {
-  origDataUrl: null,
-  callback:    null,
-  filterIdx:   0,
-  bright:      100,
-  contrast:    100,
-  sat:         100,
-  rotation:    0,
-  cropRatio:   null,
-  texts:       [],
-  activeTab:   'filters'
-};
-
-/* ── État drag/pinch texte ── */
-var _gwPeDrag = { idx: -1, lastX: 0, lastY: 0, moved: false,
-                  pinchIdx: -1, pinchDist0: 0, pinchSize0: 0 };
+var _camTimer    = null;
+var _camSeconds  = 0;
 
 function triggerCameraPhoto() { _camMode = 'photo'; _gwOpenCamera(); }
 /* triggerCameraVideo est définie plus haut avec le paramètre type */
@@ -9982,9 +8710,9 @@ function _gwCamConstraints() {
   var isVid   = (_camMode === 'video' && _pubVideoType === 'video');
   var base    = { facingMode: { ideal: _camFacing } };
   if (isShort) {
-    /* Résolution naturelle paysage — le portrait 9:16 est géré par object-fit:cover */
-    base.width  = { ideal: 1280 };
-    base.height = { ideal: 720 };
+    /* Portrait 9:16 — Short TikTok */
+    base.width  = { ideal: 1080 };
+    base.height = { ideal: 1920 };
   } else if (isVid) {
     /* Paysage 16:9 — Vidéo YouTube */
     base.width  = { ideal: 1920 };
@@ -10024,111 +8752,54 @@ function _gwOpenCamera(facing) {
 function _gwShowCameraUI() {
   var existing = document.getElementById('gw-cam-overlay');
   if (existing) existing.remove();
-  _camFilterIdx = 0; _camZoom = 1.0;
-  var isVideo = _camMode === 'video';
 
-  /* Génère la bande de filtres avec swatches colorés */
-  var filterStrip = '<div id="gw-cam-filter-strip" style="position:absolute;bottom:140px;left:0;right:0;z-index:4;overflow-x:auto;white-space:nowrap;padding:0 12px;scrollbar-width:none">';
-  _GW_CAM_FILTERS.forEach(function(f, i) {
-    var active = i === 0;
-    filterStrip +=
-      '<button id="gw-cf-' + i + '" onclick="_gwCamSetFilter(' + i + ')" ' +
-        'style="display:inline-flex;flex-direction:column;align-items:center;gap:5px;margin-right:12px;' +
-               'background:none;border:none;cursor:pointer;padding:2px">' +
-        '<div style="width:52px;height:52px;border-radius:12px;overflow:hidden;' +
-             'border:2.5px solid ' + (active ? '#fff' : 'rgba(255,255,255,.28)') + ';flex-shrink:0;' +
-             'background:' + f.swatch + ';box-shadow:' + (active ? '0 0 0 2px rgba(255,255,255,.5)' : 'none') + '">' +
-        '</div>' +
-        '<span style="color:' + (active ? '#fff' : 'rgba(255,255,255,.6)') + ';font-size:10px;font-weight:' + (active ? '700' : '400') + '">' + f.name + '</span>' +
-      '</button>';
-  });
-  filterStrip += '</div>';
+  var isVideo = _camMode === 'video';
 
   var overlay = document.createElement('div');
   overlay.id = 'gw-cam-overlay';
   overlay.style.cssText =
-    'position:fixed;inset:0;z-index:3500;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden';
+    'position:fixed;inset:0;z-index:3500;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center';
 
   overlay.innerHTML =
-    /* Preview caméra plein écran */
+    /* Preview caméra plein écran (Photo ou Short) */
     '<video id="gw-cam-preview" autoplay playsinline muted ' +
-      'style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0;' +
-             'transform-origin:center center;transition:transform .1s"></video>' +
+      'style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0"></video>' +
 
-    /* Barre top */
-    '<div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:linear-gradient(to bottom,rgba(0,0,0,.6),transparent);z-index:5">' +
+    /* Barre top — toggle Photo / Short toujours visible */
+    '<div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:linear-gradient(to bottom,rgba(0,0,0,.6),transparent);z-index:3">' +
       '<button onclick="_gwCloseCamera()" style="width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.45);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>' +
+      /* Toggle Photo ↔ Short */
       '<div style="display:flex;gap:6px;background:rgba(0,0,0,.35);border-radius:30px;padding:4px">' +
         '<button id="gw-cam-t-photo" onclick="_gwCamSetModePS(\'photo\')" ' +
-          'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_camMode==='photo'?'#16A34A':'rgba(255,255,255,.3)') + ';background:' + (_camMode==='photo'?'#16A34A':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_camMode==='photo'?'700':'500') + ';cursor:pointer">📷 Photo</button>' +
+          'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_camMode==='photo'?'#16A34A':'rgba(255,255,255,.3)') + ';background:' + (_camMode==='photo'?'#16A34A':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_camMode==='photo'?'700':'500') + ';cursor:pointer">' +
+          '📷 Photo</button>' +
         '<button id="gw-cam-t-short" onclick="_gwCamSetModePS(\'short\')" ' +
-          'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_camMode==='video'?'#E11D48':'rgba(255,255,255,.3)') + ';background:' + (_camMode==='video'?'#E11D48':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_camMode==='video'?'700':'500') + ';cursor:pointer">📹 Short</button>' +
+          'style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:24px;border:2px solid ' + (_camMode==='video'?'#E11D48':'rgba(255,255,255,.3)') + ';background:' + (_camMode==='video'?'#E11D48':'rgba(255,255,255,.18)') + ';color:#fff;font-size:12px;font-weight:' + (_camMode==='video'?'700':'500') + ';cursor:pointer">' +
+          '📹 Short</button>' +
       '</div>' +
       '<button onclick="_gwFlipCamera()" style="width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.45);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-camera-rotate"></i></button>' +
     '</div>' +
 
-    /* Zoom indicator */
-    '<div id="gw-cam-zoom-ind" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);' +
-         'background:rgba(0,0,0,.55);color:#fff;font-size:13px;font-weight:700;padding:5px 14px;' +
-         'border-radius:20px;pointer-events:none;opacity:0;transition:opacity .3s;z-index:5">1.0×</div>' +
-
-    /* Timer */
-    (isVideo ? '<div id="gw-cam-timer" style="position:absolute;top:68px;left:50%;transform:translateX(-50%);background:rgba(220,38,38,.85);color:#fff;font-size:13px;font-weight:800;padding:4px 14px;border-radius:20px;display:none;z-index:6"><i class="fas fa-circle" style="font-size:8px;margin-right:5px;animation:blink 1s infinite"></i><span id="gw-cam-time">0:00</span></div>' : '') +
-
-    /* Bande de filtres */
-    (!isVideo ? filterStrip : '') +
+    /* Timer enregistrement (Short seulement) */
+    (isVideo ? '<div id="gw-cam-timer" style="position:absolute;top:68px;left:50%;transform:translateX(-50%);background:rgba(220,38,38,.85);color:#fff;font-size:13px;font-weight:800;padding:4px 14px;border-radius:20px;display:none;z-index:4"><i class="fas fa-circle" style="font-size:8px;margin-right:5px;animation:blink 1s infinite"></i><span id="gw-cam-time">0:00</span></div>' : '') +
 
     /* Barre bas */
-    '<div style="position:absolute;bottom:0;left:0;right:0;padding:20px 20px 44px;background:linear-gradient(to top,rgba(0,0,0,.75),transparent);display:flex;align-items:center;justify-content:space-between;z-index:5">' +
+    '<div style="position:absolute;bottom:0;left:0;right:0;padding:28px 20px 40px;background:linear-gradient(to top,rgba(0,0,0,.65),transparent);display:flex;align-items:center;justify-content:center;gap:32px;z-index:3">' +
       /* Galerie */
       '<button onclick="_gwCamPickGallery()" style="width:46px;height:46px;border-radius:12px;background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.4);color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-images"></i></button>' +
-      /* Capture */
+      /* Bouton capture / enregistrement */
       (isVideo
-        ? '<button id="gw-cam-rec-btn" onclick="_gwToggleRecord()" style="width:72px;height:72px;border-radius:50%;background:#EF4444;border:4px solid #fff;color:#fff;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(239,68,68,.4)"><i class="fas fa-circle" id="gw-cam-rec-ico"></i></button>'
-        : '<button onclick="_gwCapturePhoto()" style="width:72px;height:72px;border-radius:50%;background:#fff;border:5px solid rgba(255,255,255,.35);cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,.2)"><div style="width:56px;height:56px;border-radius:50%;background:#fff;border:2px solid #ddd"></div></button>') +
-      /* Zoom +/- */
-      '<div style="display:flex;flex-direction:column;gap:6px">' +
-        '<button onclick="_gwCamZoomStep(0.5)" style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.2);border:1.5px solid rgba(255,255,255,.4);color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-weight:700">+</button>' +
-        '<button onclick="_gwCamZoomStep(-0.5)" style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.2);border:1.5px solid rgba(255,255,255,.4);color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-weight:700">−</button>' +
-      '</div>' +
+        ? '<button id="gw-cam-rec-btn" onclick="_gwToggleRecord()" style="width:70px;height:70px;border-radius:50%;background:#EF4444;border:4px solid #fff;color:#fff;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(239,68,68,.4)"><i class="fas fa-circle" id="gw-cam-rec-ico"></i></button>'
+        : '<button onclick="_gwCapturePhoto()" style="width:70px;height:70px;border-radius:50%;background:#fff;border:5px solid rgba(255,255,255,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(255,255,255,.25)"><div style="width:54px;height:54px;border-radius:50%;background:#fff;border:2px solid #ccc"></div></button>') +
+      /* Placeholder droit */
+      '<div style="width:46px"></div>' +
     '</div>';
 
   document.body.appendChild(overlay);
 
-  /* Brancher le stream */
+  /* Branche le stream sur le <video> */
   var vid = document.getElementById('gw-cam-preview');
-  if (vid) {
-    vid.srcObject = _camStream;
-    /* Caméra frontale : miroir horizontal pour un preview naturel */
-    if (_camFacing === 'user') vid.style.transform = 'scaleX(-1)';
-  }
-
-  /* ── Pinch to zoom ── */
-  overlay.addEventListener('touchstart', function(e) {
-    if (e.touches.length === 2) {
-      e.preventDefault();
-      _camPinchDist0 = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY);
-      _camZoom0 = _camZoom;
-    }
-  }, { passive: false });
-
-  overlay.addEventListener('touchmove', function(e) {
-    if (e.touches.length === 2) {
-      e.preventDefault();
-      var dist = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY);
-      var newZoom = Math.min(4, Math.max(1, _camZoom0 * (dist / _camPinchDist0)));
-      _gwCamApplyZoom(newZoom);
-    }
-  }, { passive: false });
-
-  overlay.addEventListener('touchend', function(e) {
-    if (e.touches.length < 2) { _camPinchDist0 = 0; }
-  });
-
+  if (vid) vid.srcObject = _camStream;
 }
 
 /* ── Calcule la hauteur des zones noires haut/bas autour du cadre 16:9 ── */
@@ -10150,22 +8821,23 @@ function _gwCamUpdateBars() {
 }
 
 /* ── Capture photo ── */
-var _gwCapturing = false; /* anti double-tap */
-
 function _gwCapturePhoto() {
-  /* Bug #3 : double-tap guard */
-  if (_gwCapturing) return;
-
   var vid = document.getElementById('gw-cam-preview');
   if (!vid) return;
+  var canvas = document.createElement('canvas');
+  canvas.width  = vid.videoWidth  || 1280;
+  canvas.height = vid.videoHeight || 720;
+  canvas.getContext('2d').drawImage(vid, 0, 0);
+  var dataUrl = canvas.toDataURL('image/jpeg', 0.92);
 
-  /* Bug #1 : vidéo pas encore prête → image noire */
-  if (!vid.videoWidth || !vid.videoHeight || vid.readyState < 2) {
-    showToast('Caméra en cours de démarrage…', '');
-    return;
+  /* Ajoute à _pickedImages comme une photo normale (compressée) */
+  if (_pickedVideo) { _clearVideo(); }
+  if (_pickedImages.length < 6) {
+    _compressImageForChat(dataUrl, 200000, function(compressed) {
+      _pickedImages.push(compressed);
+      renderImgPreviews();
+    });
   }
-
-  _gwCapturing = true;
 
   /* Flash blanc */
   var flash = document.createElement('div');
@@ -10173,785 +8845,9 @@ function _gwCapturePhoto() {
   document.body.appendChild(flash);
   setTimeout(function() { flash.remove(); }, 120);
 
-  /* Bug #2 : appliquer le zoom réel + le filtre actif */
-  var vw = vid.videoWidth, vh = vid.videoHeight;
-  var canvas = document.createElement('canvas');
-  canvas.width  = vw;
-  canvas.height = vh;
-  var ctx = canvas.getContext('2d');
-  var filterCss = _GW_CAM_FILTERS[_camFilterIdx] ? _GW_CAM_FILTERS[_camFilterIdx].css : '';
-
-  ctx.save();
-  /* Caméra frontale : flipper le canvas pour que la photo = ce qu'on voit */
-  if (_camFacing === 'user') {
-    ctx.translate(vw, 0);
-    ctx.scale(-1, 1);
-  }
-  if (filterCss) ctx.filter = filterCss;
-
-  if (_camZoom > 1.01) {
-    /* Recadrer la zone centrale selon le zoom pour que preview = capture */
-    var sw = Math.round(vw / _camZoom);
-    var sh = Math.round(vh / _camZoom);
-    var sx = Math.round((vw - sw) / 2);
-    var sy = Math.round((vh - sh) / 2);
-    ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, vw, vh);
-  } else {
-    ctx.drawImage(vid, 0, 0, vw, vh);
-  }
-  ctx.restore();
-
-  var dataUrl = canvas.toDataURL('image/jpeg', 0.92);
-
-  /* Fermer caméra et ouvrir l'éditeur photo */
   _gwCloseCamera();
-  _gwShowPhotoEditor(dataUrl, function(editedUrl) {
-    _gwCapturing = false;
-    if (_pickedVideo) { _clearVideo(); }
-    if (_pickedImages.length < 6) {
-      _compressImageForChat(editedUrl, 200000, function(compressed) {
-        _pickedImages.push(compressed);
-        renderImgPreviews();
-      });
-    }
-  });
-
-  /* Sécurité : libérer le verrou si l'éditeur est annulé */
-  setTimeout(function() { _gwCapturing = false; }, 8000);
-}
-
-/* ─────────────────────────────────────────────────────────────
-   ÉDITEUR PHOTO — UI à onglets (Filtres | Ajuster | Texte | Recadrer)
-   ───────────────────────────────────────────────────────────── */
-function _gwShowPhotoEditor(dataUrl, callback) {
-  var existing = document.getElementById('gw-photo-edit-ov');
-  if (existing) existing.remove();
-
-  _gwPhotoEdit.origDataUrl = dataUrl;
-  _gwPhotoEdit.callback    = callback;
-  _gwPhotoEdit.filterIdx   = 0;
-  _gwPhotoEdit.bright      = 100;
-  _gwPhotoEdit.contrast    = 100;
-  _gwPhotoEdit.sat         = 100;
-  _gwPhotoEdit.rotation    = 0;
-  _gwPhotoEdit.cropRatio   = null; /* null | '1:1' | '4:3' | '3:4' | '16:9' */
-  _gwPhotoEdit.texts       = [];
-  _gwPhotoEdit.activeTab   = 'filters';
-
-  /* ── Bande de filtres ── */
-  var filterHtml = '';
-  _GW_CAM_FILTERS.forEach(function(f, i) {
-    var active = i === 0;
-    filterHtml +=
-      '<button id="gw-pe-cf-' + i + '" onclick="_gwPhotoEditSetFilter(' + i + ')" ' +
-        'style="display:inline-flex;flex-direction:column;align-items:center;gap:5px;' +
-               'background:none;border:none;cursor:pointer;padding:2px 4px;flex-shrink:0">' +
-        '<div style="width:58px;height:58px;border-radius:14px;' +
-             'background:' + f.swatch + ';' +
-             'border:3px solid ' + (active ? '#A78BFA' : 'rgba(255,255,255,.18)') + ';' +
-             'box-shadow:' + (active ? '0 0 0 2px rgba(167,139,250,.45),0 4px 12px rgba(0,0,0,.5)' : '0 2px 8px rgba(0,0,0,.4)') + '">' +
-        '</div>' +
-        '<span style="color:' + (active ? '#A78BFA' : 'rgba(255,255,255,.5)') + ';font-size:10px;' +
-              'font-weight:' + (active ? '700' : '400') + ';letter-spacing:.3px">' + f.name + '</span>' +
-      '</button>';
-  });
-
-  /* ── Sliders ── */
-  var adjustHtml =
-    '<div style="padding:18px 20px;display:flex;flex-direction:column;gap:16px">' +
-      _gwPeSlider('☀️ Luminosité', 'bright',   0, 200, 100) +
-      _gwPeSlider('◑ Contraste',  'contrast', 0, 200, 100) +
-      _gwPeSlider('🎨 Saturation', 'sat',      0, 200, 100) +
-      '<div style="display:flex;justify-content:center;margin-top:4px">' +
-        '<button onclick="_gwPhotoEditRotate()" ' +
-          'style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.1);' +
-                 'border:1px solid rgba(255,255,255,.2);color:#fff;font-size:13px;padding:9px 22px;' +
-                 'border-radius:22px;cursor:pointer">' +
-          '<i class="fas fa-rotate-right"></i> Rotation 90°</button>' +
-      '</div>' +
-    '</div>';
-
-  /* ── Recadrer ── */
-  var cropRatios = [
-    { key: null,   label: 'Original', icon: '⊡' },
-    { key: '1:1',  label: '1:1',     icon: '□' },
-    { key: '4:3',  label: '4:3',     icon: '▭' },
-    { key: '3:4',  label: '3:4',     icon: '▯' },
-    { key: '16:9', label: '16:9',    icon: '▬' },
-  ];
-  var cropHtml = '<div style="padding:18px 20px">' +
-    '<p style="color:rgba(255,255,255,.45);font-size:11px;text-align:center;margin:0 0 14px;text-transform:uppercase;letter-spacing:.8px">Format de recadrage</p>' +
-    '<div style="display:flex;gap:10px;justify-content:center">';
-  cropRatios.forEach(function(r) {
-    var active   = _gwPhotoEdit.cropRatio === r.key;
-    var keyArg   = r.key === null ? 'null' : "'" + r.key + "'";
-    cropHtml +=
-      '<button onclick="_gwPeSetCropRatio(' + keyArg + ')" ' +
-        'id="gw-pe-crop-' + (r.key || 'orig') + '" ' +
-        'style="display:flex;flex-direction:column;align-items:center;gap:6px;' +
-               'background:' + (active ? 'rgba(124,58,237,.3)' : 'rgba(255,255,255,.08)') + ';' +
-               'border:1.5px solid ' + (active ? '#7C3AED' : 'rgba(255,255,255,.15)') + ';' +
-               'border-radius:14px;padding:10px 12px;cursor:pointer;min-width:54px">' +
-        '<span style="font-size:20px">' + r.icon + '</span>' +
-        '<span style="color:' + (active ? '#A78BFA' : 'rgba(255,255,255,.55)') + ';font-size:11px;font-weight:' + (active ? '700' : '400') + '">' + r.label + '</span>' +
-      '</button>';
-  });
-  cropHtml += '</div></div>';
-
-  /* ── Overlay principal ── */
-  var ov = document.createElement('div');
-  ov.id = 'gw-photo-edit-ov';
-  ov.style.cssText =
-    'position:fixed;inset:0;z-index:4500;background:#0d0d14;display:flex;flex-direction:column;overflow:hidden';
-
-  ov.innerHTML =
-    /* ── Barre haut ── */
-    '<div style="display:flex;align-items:center;justify-content:space-between;' +
-         'padding:14px 16px;background:#111118;flex-shrink:0;' +
-         'border-bottom:1px solid rgba(255,255,255,.07)">' +
-      '<button onclick="_gwPhotoEditCancel()" ' +
-        'style="background:rgba(255,255,255,.08);border:none;color:rgba(255,255,255,.75);' +
-               'font-size:14px;cursor:pointer;padding:8px 16px;border-radius:20px">Annuler</button>' +
-      '<span style="color:#fff;font-weight:700;font-size:15px;letter-spacing:.3px">Modifier</span>' +
-      '<button onclick="_gwPhotoEditApply()" ' +
-        'style="background:linear-gradient(135deg,#7C3AED,#DB2777);border:none;' +
-               'color:#fff;font-size:14px;font-weight:700;cursor:pointer;padding:8px 18px;border-radius:20px;' +
-               'box-shadow:0 4px 14px rgba(124,58,237,.4)">Utiliser ✓</button>' +
-    '</div>' +
-
-    /* ── Canvas ── */
-    '<div style="flex:1;display:flex;align-items:center;justify-content:center;' +
-         'overflow:hidden;min-height:0;background:#0d0d14;position:relative">' +
-      '<canvas id="gw-pe-canvas" style="max-width:100%;max-height:100%;border-radius:4px;' +
-              'box-shadow:0 8px 32px rgba(0,0,0,.6)"></canvas>' +
-    '</div>' +
-
-    /* ── Zone de contenu des onglets ── */
-    '<div id="gw-pe-tab-content" style="flex-shrink:0;background:#111118;' +
-         'border-top:1px solid rgba(255,255,255,.07);overflow:hidden">' +
-
-      /* Filtres */
-      '<div id="gw-pe-panel-filters" style="overflow-x:auto;white-space:nowrap;' +
-           'padding:14px 14px 10px;scrollbar-width:none">' +
-        filterHtml +
-      '</div>' +
-
-      /* Ajuster */
-      '<div id="gw-pe-panel-adjust" style="display:none">' + adjustHtml + '</div>' +
-
-      /* Texte */
-      '<div id="gw-pe-panel-text" style="display:none;padding:18px 20px;' +
-           'display:none;flex-direction:column;align-items:center;gap:12px">' +
-        '<p style="color:rgba(255,255,255,.45);font-size:11px;text-align:center;margin:0;' +
-                  'text-transform:uppercase;letter-spacing:.8px">Texte sur la photo</p>' +
-        '<button onclick="_gwPhotoEditOpenText()" ' +
-          'style="display:flex;align-items:center;gap:10px;background:linear-gradient(135deg,rgba(124,58,237,.3),rgba(219,39,119,.2));' +
-                 'border:1.5px solid rgba(124,58,237,.5);color:#A78BFA;font-size:15px;font-weight:700;' +
-                 'padding:14px 32px;border-radius:24px;cursor:pointer;width:100%;justify-content:center;' +
-                 'box-shadow:0 4px 14px rgba(124,58,237,.25)">' +
-          '<span style="font-size:18px">Aa</span> Ajouter du texte</button>' +
-        '<div id="gw-pe-text-list" style="width:100%;display:flex;flex-direction:column;gap:8px"></div>' +
-      '</div>' +
-
-      /* Recadrer */
-      '<div id="gw-pe-panel-crop" style="display:none">' + cropHtml + '</div>' +
-
-    '</div>' + /* fin tab-content */
-
-    /* ── Barre d'onglets ── */
-    '<div style="display:flex;background:#0d0d14;border-top:1px solid rgba(255,255,255,.07);' +
-         'flex-shrink:0;padding-bottom:env(safe-area-inset-bottom,0)">' +
-      _gwPeTabBtn('filters', 'fa-magic',      'Filtres',  true)  +
-      _gwPeTabBtn('adjust',  'fa-sliders-h',  'Ajuster',  false) +
-      _gwPeTabBtn('text',    'fa-font',        'Texte',    false) +
-      _gwPeTabBtn('crop',    'fa-crop-alt',    'Recadrer', false) +
-    '</div>';
-
-  document.body.appendChild(ov);
-  _gwPeRedraw();
-  /* Activer le drag de texte sur le canvas */
-  setTimeout(_gwPeInitDrag, 200);
-}
-
-/* ── Drag de texte sur le canvas ── */
-function _gwPeClientToCanvas(cnv, cx, cy) {
-  var rect = cnv.getBoundingClientRect();
-  return {
-    x: (cx - rect.left) * (cnv.width  / rect.width),
-    y: (cy - rect.top)  * (cnv.height / rect.height)
-  };
-}
-
-function _gwPeHitText(imgX, imgY) {
-  var cnv = document.getElementById('gw-pe-canvas');
-  if (!cnv) return -1;
-  var W = cnv.width, H = cnv.height;
-  var threshold = Math.max(W, H) * 0.18;
-  var best = -1, bestDist = Infinity;
-  (_gwPhotoEdit.texts || []).forEach(function(t, i) {
-    var dist = Math.hypot(imgX - t.xPct * W, imgY - t.yPct * H);
-    if (dist < threshold && dist < bestDist) { bestDist = dist; best = i; }
-  });
-  return best;
-}
-
-function _gwPeInitDrag() {
-  var cnv = document.getElementById('gw-pe-canvas');
-  if (!cnv || cnv._gwDragReady) return;
-  cnv._gwDragReady = true;
-
-  cnv.addEventListener('touchstart', function(e) {
-    if (!_gwPhotoEdit.texts.length) return;
-
-    /* ── Pinch à 2 doigts : redimensionner le texte ── */
-    if (e.touches.length === 2) {
-      var t0 = e.touches[0], t1 = e.touches[1];
-      var p0 = _gwPeClientToCanvas(cnv, t0.clientX, t0.clientY);
-      var p1 = _gwPeClientToCanvas(cnv, t1.clientX, t1.clientY);
-      var midX = (p0.x + p1.x) / 2, midY = (p0.y + p1.y) / 2;
-      var hit = _gwPeHitText(midX, midY);
-      if (hit >= 0) {
-        e.preventDefault();
-        _gwPeDrag.pinchIdx   = hit;
-        _gwPeDrag.pinchDist0 = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
-        _gwPeDrag.pinchSize0 = _gwPhotoEdit.texts[hit].size || Math.round(cnv.width * 0.07);
-        _gwPeDrag.idx = -1;
-      }
-      return;
-    }
-
-    /* ── 1 doigt : drag ── */
-    var t = e.touches[0];
-    var pos = _gwPeClientToCanvas(cnv, t.clientX, t.clientY);
-    var hit = _gwPeHitText(pos.x, pos.y);
-    if (hit < 0) return;
-    e.preventDefault();
-    _gwPeDrag.idx   = hit;
-    _gwPeDrag.lastX = t.clientX;
-    _gwPeDrag.lastY = t.clientY;
-    _gwPeDrag.moved = false;
-  }, { passive: false });
-
-  cnv.addEventListener('touchmove', function(e) {
-    /* ── Pinch move ── */
-    if (e.touches.length === 2 && _gwPeDrag.pinchIdx >= 0) {
-      e.preventDefault();
-      var t0 = e.touches[0], t1 = e.touches[1];
-      var dist  = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
-      var scale = dist / (_gwPeDrag.pinchDist0 || 1);
-      var minSz = Math.round(cnv.width * 0.025);
-      var maxSz = Math.round(cnv.width * 0.30);
-      var newSz = Math.min(maxSz, Math.max(minSz, Math.round(_gwPeDrag.pinchSize0 * scale)));
-      _gwPhotoEdit.texts[_gwPeDrag.pinchIdx].size = newSz;
-      _gwPeRedraw();
-      return;
-    }
-
-    /* ── Drag move ── */
-    if (_gwPeDrag.idx < 0) return;
-    e.preventDefault();
-    var t    = e.touches[0];
-    var rect = cnv.getBoundingClientRect();
-    var sx   = cnv.width  / rect.width;
-    var sy   = cnv.height / rect.height;
-    var dx   = (t.clientX - _gwPeDrag.lastX) * sx;
-    var dy   = (t.clientY - _gwPeDrag.lastY) * sy;
-    var txt  = _gwPhotoEdit.texts[_gwPeDrag.idx];
-    if (txt) {
-      txt.xPct = Math.min(0.97, Math.max(0.03, txt.xPct + dx / cnv.width));
-      txt.yPct = Math.min(0.97, Math.max(0.03, txt.yPct + dy / cnv.height));
-    }
-    _gwPeDrag.lastX = t.clientX;
-    _gwPeDrag.lastY = t.clientY;
-    _gwPeDrag.moved = true;
-    _gwPeRedraw();
-  }, { passive: false });
-
-  cnv.addEventListener('touchend', function(e) {
-    if (e.touches.length < 2) _gwPeDrag.pinchIdx = -1;
-    if (e.touches.length === 0) _gwPeDrag.idx = -1;
-  });
-}
-
-function _gwPeTabBtn(tabId, icon, label, active) {
-  return '<button onclick="_gwPeSetTab(\'' + tabId + '\')" id="gw-pe-tab-' + tabId + '" ' +
-    'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;' +
-           'background:none;border:none;cursor:pointer;padding:11px 0 13px;' +
-           'border-top:2px solid ' + (active ? '#7C3AED' : 'transparent') + '">' +
-    '<i class="fas ' + icon + '" style="font-size:18px;color:' + (active ? '#A78BFA' : 'rgba(255,255,255,.4)') + '"></i>' +
-    '<span style="font-size:10px;color:' + (active ? '#A78BFA' : 'rgba(255,255,255,.38)') + ';' +
-          'font-weight:' + (active ? '600' : '400') + ';letter-spacing:.3px">' + label + '</span>' +
-  '</button>';
-}
-
-function _gwPeSetTab(tabId) {
-  _gwPhotoEdit.activeTab = tabId;
-  var tabs   = ['filters','adjust','text','crop'];
-  var panels = ['filters','adjust','text','crop'];
-  tabs.forEach(function(t) {
-    var btn = document.getElementById('gw-pe-tab-' + t);
-    if (!btn) return;
-    var active = t === tabId;
-    btn.style.borderTopColor = active ? '#7C3AED' : 'transparent';
-    var ico = btn.querySelector('i');
-    var lbl = btn.querySelector('span');
-    if (ico) ico.style.color = active ? '#A78BFA' : 'rgba(255,255,255,.4)';
-    if (lbl) { lbl.style.color = active ? '#A78BFA' : 'rgba(255,255,255,.38)'; lbl.style.fontWeight = active ? '600' : '400'; }
-  });
-  panels.forEach(function(p) {
-    var panel = document.getElementById('gw-pe-panel-' + p);
-    if (panel) panel.style.display = (p === tabId) ? (p === 'text' ? 'flex' : 'block') : 'none';
-  });
-  /* Ouvrir directement le modal texte quand on tape sur l'onglet Texte */
-  if (tabId === 'text') {
-    setTimeout(function() { _gwPeRefreshTextList(); }, 50);
-  }
-}
-
-function _gwPeRefreshTextList() {
-  var list = document.getElementById('gw-pe-text-list');
-  if (!list) return;
-  if (!_gwPhotoEdit.texts.length) {
-    list.innerHTML = '<p style="color:rgba(255,255,255,.3);font-size:12px;text-align:center;margin:4px 0">Aucun texte — appuie sur le bouton ci-dessus pour en ajouter</p>';
-    return;
-  }
-  list.innerHTML = _gwPhotoEdit.texts.map(function(t, i) {
-    return '<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.07);' +
-                       'border-radius:12px;padding:9px 12px;border:1px solid rgba(255,255,255,.09)">' +
-      /* pastille couleur */
-      '<div style="width:20px;height:20px;border-radius:50%;background:' + t.color + ';flex-shrink:0;' +
-                  'border:2px solid rgba(255,255,255,.35)"></div>' +
-      /* texte */
-      '<span style="color:#fff;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
-        escHtml(t.text) + '</span>' +
-      /* bouton modifier */
-      '<button onclick="_gwPhotoEditOpenText(' + i + ')" ' +
-        'style="background:rgba(124,58,237,.25);border:1px solid rgba(124,58,237,.4);color:#A78BFA;' +
-               'width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:11px;' +
-               'display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
-        '<i class="fas fa-pencil-alt"></i></button>' +
-      /* bouton supprimer */
-      '<button onclick="_gwPeRemoveText(' + i + ')" ' +
-        'style="background:rgba(239,68,68,.18);border:1px solid rgba(239,68,68,.35);color:#F87171;' +
-               'width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:11px;' +
-               'display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
-        '<i class="fas fa-times"></i></button>' +
-    '</div>';
-  }).join('');
-}
-
-function _gwPeRemoveText(idx) {
-  _gwPhotoEdit.texts.splice(idx, 1);
-  _gwPeRefreshTextList();
-  _gwPeRedraw();
-}
-
-/* ── Crop ratio ── */
-function _gwPeSetCropRatio(ratio) {
-  _gwPhotoEdit.cropRatio = ratio;
-  var keys = [null, '1:1', '4:3', '3:4', '16:9'];
-  keys.forEach(function(k) {
-    var id = 'gw-pe-crop-' + (k || 'orig');
-    var btn = document.getElementById(id);
-    if (!btn) return;
-    var active = k === ratio;
-    btn.style.background   = active ? 'rgba(124,58,237,.3)' : 'rgba(255,255,255,.08)';
-    btn.style.borderColor  = active ? '#7C3AED' : 'rgba(255,255,255,.15)';
-    var lbl = btn.querySelector('span:last-child');
-    if (lbl) { lbl.style.color = active ? '#A78BFA' : 'rgba(255,255,255,.55)'; lbl.style.fontWeight = active ? '700' : '400'; }
-  });
-  _gwPeRedraw();
-}
-
-function _gwPeSlider(label, key, min, max, def) {
-  return '<div style="display:flex;align-items:center;gap:12px">' +
-    '<span style="color:rgba(255,255,255,.55);font-size:12px;width:88px;flex-shrink:0">' + label + '</span>' +
-    '<input type="range" min="' + min + '" max="' + max + '" value="' + def + '" ' +
-           'oninput="_gwPeSlideChange(\'' + key + '\',this.value)" id="gw-pe-sl-' + key + '" ' +
-           'style="flex:1;height:4px;accent-color:#7C3AED;cursor:pointer">' +
-    '<span id="gw-pe-val-' + key + '" style="color:rgba(255,255,255,.4);font-size:11px;width:28px;text-align:right">' + def + '</span>' +
-  '</div>';
-}
-
-function _gwPeSlideChange(key, val) {
-  _gwPhotoEdit[key] = parseInt(val, 10);
-  var valEl = document.getElementById('gw-pe-val-' + key);
-  if (valEl) valEl.textContent = val;
-  _gwPeRedraw();
-}
-
-function _gwPhotoEditSetFilter(idx) {
-  _gwPhotoEdit.filterIdx = idx;
-  _GW_CAM_FILTERS.forEach(function(f, i) {
-    var btn   = document.getElementById('gw-pe-cf-' + i);
-    if (!btn) return;
-    var swatch = btn.querySelector('div');
-    var lbl    = btn.querySelector('span');
-    var active = i === idx;
-    if (swatch) {
-      swatch.style.borderColor = active ? '#A78BFA' : 'rgba(255,255,255,.18)';
-      swatch.style.boxShadow   = active ? '0 0 0 2px rgba(167,139,250,.45),0 4px 12px rgba(0,0,0,.5)' : '0 2px 8px rgba(0,0,0,.4)';
-    }
-    if (lbl) { lbl.style.color = active ? '#A78BFA' : 'rgba(255,255,255,.5)'; lbl.style.fontWeight = active ? '700' : '400'; }
-  });
-  _gwPeRedraw();
-}
-
-function _gwPhotoEditRotate() {
-  _gwPhotoEdit.rotation = (_gwPhotoEdit.rotation + 90) % 360;
-  _gwPeRedraw();
-}
-
-/* Arrondi canvas compatible tous navigateurs */
-function _gwCtxRoundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.arcTo(x + w, y,     x + w, y + r,     r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
-  ctx.lineTo(x + r, y + h);
-  ctx.arcTo(x,     y + h, x,     y + h - r, r);
-  ctx.lineTo(x,     y + r);
-  ctx.arcTo(x,     y,     x + r, y,          r);
-  ctx.closePath();
-}
-
-function _gwPeRedraw() {
-  var cnv = document.getElementById('gw-pe-canvas');
-  if (!cnv) return;
-  var img = new Image();
-  img.onload = function() {
-    var rot     = _gwPhotoEdit.rotation;
-    var swapped = rot === 90 || rot === 270;
-    var baseW   = swapped ? img.height : img.width;
-    var baseH   = swapped ? img.width  : img.height;
-
-    /* Appliquer le recadrage */
-    var outW = baseW, outH = baseH;
-    if (_gwPhotoEdit.cropRatio) {
-      var parts2 = _gwPhotoEdit.cropRatio.split(':');
-      var rw = parseFloat(parts2[0]), rh = parseFloat(parts2[1]);
-      var target = rw / rh;
-      var current = baseW / baseH;
-      if (current > target) { outW = Math.round(baseH * target); }
-      else                  { outH = Math.round(baseW / target); }
-    }
-    cnv.width  = outW;
-    cnv.height = outH;
-
-    var ctx = cnv.getContext('2d');
-    ctx.clearRect(0, 0, outW, outH);
-
-    /* Filtres photo */
-    var fparts = [];
-    var f = _GW_CAM_FILTERS[_gwPhotoEdit.filterIdx];
-    if (f && f.css) fparts.push(f.css);
-    if (_gwPhotoEdit.bright   !== 100) fparts.push('brightness(' + (_gwPhotoEdit.bright / 100).toFixed(2) + ')');
-    if (_gwPhotoEdit.contrast !== 100) fparts.push('contrast('   + (_gwPhotoEdit.contrast / 100).toFixed(2) + ')');
-    if (_gwPhotoEdit.sat      !== 100) fparts.push('saturate('   + (_gwPhotoEdit.sat / 100).toFixed(2) + ')');
-    ctx.filter = fparts.length ? fparts.join(' ') : 'none';
-
-    /* Rotation + centrage sur le canvas rogné */
-    ctx.save();
-    ctx.translate(outW / 2, outH / 2);
-    ctx.rotate(rot * Math.PI / 180);
-    ctx.drawImage(img, -img.width / 2, -img.height / 2);
-    ctx.restore();
-
-    /* Textes */
-    ctx.filter = 'none';
-    (_gwPhotoEdit.texts || []).forEach(function(t) {
-      var px    = t.xPct * outW;
-      var py    = t.yPct * outH;
-      var fs    = t.size || Math.round(outW * 0.07);
-      var style = t.style || 'plain'; /* 'plain' | 'box' | 'outline' */
-      ctx.font         = 'bold ' + fs + 'px Arial, sans-serif';
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.shadowBlur   = 0; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
-
-      if (style === 'box') {
-        /* Boîte blanche arrondie derrière le texte */
-        var metrics = ctx.measureText(t.text);
-        var tw  = metrics.width;
-        var th  = fs * 1.25;
-        var pad = fs * 0.35;
-        var rx  = px - tw / 2 - pad;
-        var ry  = py - th / 2 - pad * 0.4;
-        var rw2 = tw + pad * 2;
-        var rh2 = th + pad * 0.8;
-        var rad = fs * 0.22;
-        ctx.fillStyle = 'rgba(255,255,255,0.93)';
-        _gwCtxRoundRect(ctx, rx, ry, rw2, rh2, rad);
-        ctx.fill();
-        /* Texte sombre sur fond blanc */
-        ctx.fillStyle = (t.color && t.color !== '#ffffff') ? t.color : '#111111';
-        ctx.fillText(t.text, px, py);
-
-      } else if (style === 'outline') {
-        /* Contour noir épais + remplissage coloré */
-        ctx.lineWidth   = fs * 0.14;
-        ctx.lineJoin    = 'round';
-        ctx.strokeStyle = 'rgba(0,0,0,.88)';
-        ctx.strokeText(t.text, px, py);
-        ctx.fillStyle   = t.color || '#ffffff';
-        ctx.fillText(t.text, px, py);
-
-      } else {
-        /* Plain : couleur + ombre douce */
-        ctx.shadowColor   = 'rgba(0,0,0,.75)';
-        ctx.shadowBlur    = 8;
-        ctx.shadowOffsetX = 2;
-        ctx.shadowOffsetY = 2;
-        ctx.fillStyle = t.color || '#ffffff';
-        ctx.fillText(t.text, px, py);
-        ctx.shadowBlur = 0; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
-      }
-    });
-  };
-  img.src = _gwPhotoEdit.origDataUrl;
-}
-
-/* ── Modal ajout / modification de texte ──
-   editIdx : index dans _gwPhotoEdit.texts (-1 = nouveau)          */
-function _gwPhotoEditOpenText(editIdx) {
-  var existing = document.getElementById('gw-pe-text-modal');
-  if (existing) existing.remove();
-
-  var isEdit   = (typeof editIdx === 'number' && editIdx >= 0);
-  var existing_t = isEdit ? (_gwPhotoEdit.texts[editIdx] || null) : null;
-
-  /* Couleurs disponibles */
-  var colors = ['#ffffff','#000000','#FFDD00','#FF4444','#44AAFF','#44FF88','#FF44CC'];
-
-  /* Couleur active au départ */
-  var initColor = (existing_t && existing_t.color) ? existing_t.color : '#ffffff';
-  var initColorIdx = 0;
-  colors.forEach(function(c, i) { if (c.toLowerCase() === initColor.toLowerCase()) initColorIdx = i; });
-
-  /* Taille active */
-  var cnv = document.getElementById('gw-pe-canvas');
-  var W   = cnv ? cnv.width : 1080;
-  var sizeMap = { s: Math.round(W * 0.05), m: Math.round(W * 0.08), l: Math.round(W * 0.13) };
-  var revSizeMap = {};
-  Object.keys(sizeMap).forEach(function(k) { revSizeMap[sizeMap[k]] = k; });
-  var initSize  = (existing_t && existing_t.size)  ? (revSizeMap[existing_t.size] || 's') : 's';
-  var initStyle = (existing_t && existing_t.style) ? existing_t.style : 'plain';
-
-  var colorBtns = colors.map(function(c, i) {
-    return '<button id="gw-pe-tc-' + i + '" onclick="_gwPeSelectColor(\'' + c + '\',' + i + ')" ' +
-      'style="width:34px;height:34px;border-radius:50%;background:' + c + ';' +
-             'border:3px solid ' + (i === initColorIdx ? '#A78BFA' : 'rgba(255,255,255,.28)') + ';' +
-             'cursor:pointer;flex-shrink:0"></button>';
-  }).join('');
-
-  var modal = document.createElement('div');
-  modal.id = 'gw-pe-text-modal';
-  modal.style.cssText =
-    'position:fixed;inset:0;z-index:5000;background:rgba(0,0,0,.72);display:flex;align-items:flex-end;justify-content:center';
-  modal.innerHTML =
-    '<div style="background:#1a1a2e;border-radius:22px 22px 0 0;padding:20px 20px 38px;width:100%;max-width:560px">' +
-      '<div style="width:36px;height:4px;background:rgba(255,255,255,.18);border-radius:2px;margin:0 auto 16px"></div>' +
-      '<p style="color:#fff;font-weight:700;font-size:16px;margin:0 0 14px">' +
-        (isEdit ? '✏️ Modifier le texte' : 'Ajouter du texte') + '</p>' +
-      '<input id="gw-pe-text-inp" type="text" placeholder="Écris ton texte ici..." maxlength="80" ' +
-             'value="' + (existing_t ? escHtml(existing_t.text) : '') + '" ' +
-             'style="width:100%;box-sizing:border-box;padding:13px 14px;border-radius:14px;' +
-                    'background:rgba(255,255,255,.1);border:1.5px solid rgba(255,255,255,.2);' +
-                    'color:#fff;font-size:16px;outline:none;margin-bottom:16px">' +
-      /* Style de texte */
-      '<p style="color:rgba(255,255,255,.45);font-size:11px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.6px">Style</p>' +
-      '<div style="display:flex;gap:8px;margin-bottom:14px">' +
-        _gwPeStyleBtn('plain',   initStyle, 'A',   'Normal') +
-        _gwPeStyleBtn('box',     initStyle, '⬜A', 'Boîte')  +
-        _gwPeStyleBtn('outline', initStyle, 'Ⓐ',  'Contour') +
-      '</div>' +
-      '<p style="color:rgba(255,255,255,.45);font-size:11px;margin:0 0 9px;text-transform:uppercase;letter-spacing:.6px">Couleur</p>' +
-      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">' + colorBtns + '</div>' +
-      '<div style="display:flex;gap:10px;margin-bottom:16px">' +
-        '<div style="flex:1">' +
-          '<p style="color:rgba(255,255,255,.45);font-size:11px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.6px">Taille</p>' +
-          '<div style="display:flex;gap:7px">' +
-            _gwPeSzBtn('s', initSize) + _gwPeSzBtn('m', initSize) + _gwPeSzBtn('l', initSize) +
-          '</div>' +
-        '</div>' +
-        (isEdit ? '' :
-          '<div style="flex:1">' +
-            '<p style="color:rgba(255,255,255,.45);font-size:11px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.6px">Position</p>' +
-            '<div style="display:flex;gap:7px">' +
-              _gwPePosBtn('top','top') + _gwPePosBtn('mid','top') + _gwPePosBtn('bot','top') +
-            '</div>' +
-          '</div>'
-        ) +
-      '</div>' +
-      '<div style="display:flex;gap:10px">' +
-        '<button onclick="_gwPeTextCancel()" ' +
-          'style="flex:1;padding:14px;border-radius:14px;background:rgba(255,255,255,.08);' +
-                 'border:1px solid rgba(255,255,255,.18);color:#fff;font-size:15px;cursor:pointer">Annuler</button>' +
-        '<button onclick="_gwPeTextConfirm()" ' +
-          'style="flex:2;padding:14px;border-radius:14px;background:linear-gradient(135deg,#7C3AED,#DB2777);' +
-                 'border:none;color:#fff;font-size:15px;font-weight:700;cursor:pointer">' +
-          (isEdit ? 'Mettre à jour ✓' : 'Ajouter ✓') + '</button>' +
-      '</div>' +
-    '</div>';
-
-  modal._gwTextColor = initColor;
-  modal._gwTextSize  = initSize;
-  modal._gwTextPos   = 'top';
-  modal._gwTextStyle = initStyle;
-  modal._gwEditIdx   = isEdit ? editIdx : -1;
-  document.body.appendChild(modal);
-  setTimeout(function() {
-    var inp = document.getElementById('gw-pe-text-inp');
-    if (inp) { inp.focus(); inp.select(); }
-  }, 80);
-}
-
-function _gwPeStyleBtn(styleKey, initStyle, icon, label) {
-  var active = styleKey === initStyle;
-  return '<button id="gw-pe-st-' + styleKey + '" onclick="_gwPeSelectStyle(\'' + styleKey + '\')" ' +
-    'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:9px 4px;' +
-           'border-radius:12px;' +
-           'background:' + (active ? 'rgba(124,58,237,.35)' : 'rgba(255,255,255,.07)') + ';' +
-           'border:1.5px solid ' + (active ? '#7C3AED' : 'rgba(255,255,255,.15)') + ';' +
-           'cursor:pointer">' +
-    '<span style="font-size:18px;color:' + (active ? '#A78BFA' : '#fff') + ';font-weight:700;' +
-          'font-family:Arial,sans-serif">' + icon + '</span>' +
-    '<span style="font-size:10px;color:' + (active ? '#A78BFA' : 'rgba(255,255,255,.5)') + ';' +
-          'font-weight:' + (active ? '600' : '400') + '">' + label + '</span>' +
-  '</button>';
-}
-
-function _gwPeSelectStyle(styleKey) {
-  var modal = document.getElementById('gw-pe-text-modal');
-  if (modal) modal._gwTextStyle = styleKey;
-  ['plain','box','outline'].forEach(function(s) {
-    var btn = document.getElementById('gw-pe-st-' + s);
-    if (!btn) return;
-    var active = s === styleKey;
-    btn.style.background  = active ? 'rgba(124,58,237,.35)' : 'rgba(255,255,255,.07)';
-    btn.style.borderColor = active ? '#7C3AED' : 'rgba(255,255,255,.15)';
-    var icon = btn.querySelector('span:first-child');
-    var lbl  = btn.querySelector('span:last-child');
-    if (icon) icon.style.color = active ? '#A78BFA' : '#fff';
-    if (lbl)  { lbl.style.color = active ? '#A78BFA' : 'rgba(255,255,255,.5)'; lbl.style.fontWeight = active ? '600' : '400'; }
-  });
-}
-
-function _gwPeSzBtn(sz, initSz) {
-  var labels = { s: 'S', m: 'M', l: 'L' };
-  var szPx   = { s: '13px', m: '16px', l: '20px' };
-  var active = sz === initSz;
-  return '<button id="gw-pe-sz-' + sz + '" onclick="_gwPeSelectSize(\'' + sz + '\')" ' +
-    'style="flex:1;padding:10px 4px;border-radius:10px;' +
-           'background:' + (active ? 'rgba(124,58,237,.35)' : 'rgba(255,255,255,.07)') + ';' +
-           'border:1.5px solid ' + (active ? '#7C3AED' : 'rgba(255,255,255,.18)') + ';' +
-           'color:' + (active ? '#A78BFA' : 'rgba(255,255,255,.6)') + ';' +
-           'font-size:' + szPx[sz] + ';cursor:pointer;font-weight:700">' + labels[sz] + '</button>';
-}
-
-function _gwPePosBtn(pos, initPos) {
-  var labels = { top: 'Haut', mid: 'Milieu', bot: 'Bas' };
-  var active = pos === initPos;
-  return '<button id="gw-pe-pos-' + pos + '" onclick="_gwPeSelectPos(\'' + pos + '\')" ' +
-    'style="flex:1;padding:10px 4px;border-radius:10px;' +
-           'background:' + (active ? 'rgba(124,58,237,.35)' : 'rgba(255,255,255,.07)') + ';' +
-           'border:1.5px solid ' + (active ? '#7C3AED' : 'rgba(255,255,255,.18)') + ';' +
-           'color:' + (active ? '#A78BFA' : 'rgba(255,255,255,.6)') + ';' +
-           'font-size:11px;cursor:pointer;font-weight:600">' + labels[pos] + '</button>';
-}
-
-function _gwPeSelectColor(color, idx) {
-  var modal = document.getElementById('gw-pe-text-modal');
-  if (modal) modal._gwTextColor = color;
-  for (var i = 0; i < 7; i++) {
-    var btn = document.getElementById('gw-pe-tc-' + i);
-    if (btn) btn.style.borderColor = i === idx ? '#A78BFA' : 'rgba(255,255,255,.28)';
-  }
-}
-
-function _gwPeSelectSize(sz) {
-  var modal = document.getElementById('gw-pe-text-modal');
-  if (modal) modal._gwTextSize = sz;
-  ['s','m','l'].forEach(function(s) {
-    var btn = document.getElementById('gw-pe-sz-' + s);
-    if (!btn) return;
-    var active = s === sz;
-    btn.style.background  = active ? 'rgba(124,58,237,.35)' : 'rgba(255,255,255,.07)';
-    btn.style.borderColor = active ? '#7C3AED' : 'rgba(255,255,255,.18)';
-    btn.style.color       = active ? '#A78BFA' : 'rgba(255,255,255,.6)';
-  });
-}
-
-function _gwPeSelectPos(pos) {
-  var modal = document.getElementById('gw-pe-text-modal');
-  if (modal) modal._gwTextPos = pos;
-  ['top','mid','bot'].forEach(function(p) {
-    var btn = document.getElementById('gw-pe-pos-' + p);
-    if (!btn) return;
-    var active = p === pos;
-    btn.style.background  = active ? 'rgba(124,58,237,.35)' : 'rgba(255,255,255,.07)';
-    btn.style.borderColor = active ? '#7C3AED' : 'rgba(255,255,255,.18)';
-    btn.style.color       = active ? '#A78BFA' : 'rgba(255,255,255,.6)';
-  });
-}
-
-function _gwPeTextCancel() {
-  var modal = document.getElementById('gw-pe-text-modal');
-  if (modal) modal.remove();
-}
-
-function _gwPeTextConfirm() {
-  var modal = document.getElementById('gw-pe-text-modal');
-  var inp   = document.getElementById('gw-pe-text-inp');
-  if (!modal || !inp) return;
-  var text = (inp.value || '').trim();
-  if (!text) { modal.remove(); return; }
-  var cnv = document.getElementById('gw-pe-canvas');
-  var W   = cnv ? cnv.width : 1080;
-  var sizeMap = { s: Math.round(W * 0.05), m: Math.round(W * 0.08), l: Math.round(W * 0.13) };
-  var posYMap = { top: 0.11, mid: 0.5, bot: 0.89 };
-  var color = modal._gwTextColor || '#ffffff';
-  var size  = sizeMap[modal._gwTextSize || 's'];
-  var style = modal._gwTextStyle  || 'plain';
-
-  var editIdx = modal._gwEditIdx;
-  if (typeof editIdx === 'number' && editIdx >= 0 && _gwPhotoEdit.texts[editIdx]) {
-    /* Mode édition — on conserve la position drag déjà définie */
-    _gwPhotoEdit.texts[editIdx].text  = text;
-    _gwPhotoEdit.texts[editIdx].color = color;
-    _gwPhotoEdit.texts[editIdx].size  = size;
-    _gwPhotoEdit.texts[editIdx].style = style;
-  } else {
-    /* Nouveau texte */
-    _gwPhotoEdit.texts.push({
-      text:  text,
-      color: color,
-      size:  size,
-      style: style,
-      xPct:  0.5,
-      yPct:  posYMap[modal._gwTextPos || 'top']
-    });
-  }
-  modal.remove();
-  _gwPeRefreshTextList();
-  _gwPeRedraw();
-}
-
-function _gwPhotoEditApply() {
-  var cnv = document.getElementById('gw-pe-canvas');
-  if (!cnv) return;
-  var editedUrl = cnv.toDataURL('image/jpeg', 0.92);
-  var cb = _gwPhotoEdit.callback;
-  var ov = document.getElementById('gw-photo-edit-ov');
-  if (ov) ov.remove();
-  if (cb) cb(editedUrl);
-}
-
-function _gwPhotoEditCancel() {
-  var ov = document.getElementById('gw-photo-edit-ov');
-  if (ov) ov.remove();
+  renderImgPreviews();
+  showToast('Photo capturée ✓', 'ok');
 }
 
 /* ── Enregistrement vidéo ── */
@@ -11085,10 +8981,6 @@ function _gwOpenVideoEditor() {
   /* Nouveaux états */
   _ved.cuts=[]; _ved.clips=[]; _ved.muted=true;
   _ved.zoom=null; _ved.zoomDur=2; _ved.intro=null; _ved.outro=null;
-  _ved.activeClip=0; _ved.selectedClip=0; _ved.transitions=[];
-  _ved._nextPending=false; _ved.cropRatio=null;
-  _ved.cropOffset={x:50,y:50};
-  _ved.cutMarkers=[]; _ved.selectedSeg=-1;
 
   var old = document.getElementById('gw-ved-ov');
   if (old) old.remove();
@@ -11121,82 +9013,36 @@ function _gwOpenVideoEditor() {
       '<div id="gw-ved-fg-grain"    style="position:absolute;inset:0;pointer-events:none;display:none;opacity:.12;background-image:url(\'data:image/svg+xml,%3Csvg xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cfilter id%3D%22n%22%3E%3CfeTurbulence type%3D%22fractalNoise%22 baseFrequency%3D%220.9%22 numOctaves%3D%224%22/%3E%3C/filter%3E%3Crect width%3D%22100%25%22 height%3D%22100%25%22 filter%3D%22url(%23n)%22/%3E%3C/svg%3E\');background-size:160px"></div>' +
       /* Couche layers (texte/emoji) */
       '<div id="gw-ved-layers" style="position:absolute;inset:0;overflow:hidden"></div>' +
-      /* Bouton play overlay (tap sur la vidéo) */
-      '<button id="gw-ved-playbtn-ov" onclick="_gwVedTogglePlay()" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,.45);border:2px solid rgba(255,255,255,.4);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:5;opacity:.7">' +
-        '<i class="fas fa-play"></i></button>' +
-      /* Overlay transparent pour le pan (au-dessus de tout sauf quand inactif) */
-      '<div id="gw-ved-pan-ov" style="position:absolute;inset:0;z-index:20;display:none;touch-action:none;cursor:grab"></div>' +
+      /* Bouton play/pause — centré au milieu du wrap */
+      '<button id="gw-ved-playbtn" onclick="_gwVedTogglePlay()" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid rgba(255,255,255,.55);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:5">' +
+        '<i id="gw-ved-playico" class="fas fa-pause"></i></button>' +
     '</div>' +   /* fin gw-ved-wrap */
     '</div>' +   /* fin gw-ved-mid  */
 
-    /* ── Timeline filmstrip TikTok-style ── */
-    '<div id="gw-ved-tl" style="background:#111;flex-shrink:0">' +
-
-      /* Timecode + play/seek controls */
-      '<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 16px 3px">' +
-        '<span style="color:#fff;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums">' +
-          '<span id="gw-ved-tc">0:00</span>' +
-          '<span style="color:#334155;margin:0 4px">/</span>' +
-          '<span id="gw-ved-dur-lbl" style="color:#475569">—</span>' +
-        '</span>' +
-        '<div style="display:flex;align-items:center;gap:14px">' +
-          '<button onclick="_gwVedSeekRel(-3)" ' +
-            'style="background:none;border:none;color:#64748B;font-size:14px;cursor:pointer;padding:4px">' +
-            '<i class="fas fa-backward-step"></i></button>' +
-          '<button id="gw-ved-playbtn" onclick="_gwVedTogglePlay()" ' +
-            'style="width:34px;height:34px;border-radius:50%;background:#7C3AED;border:none;color:#fff;' +
-            'font-size:14px;display:flex;align-items:center;justify-content:center;cursor:pointer;' +
-            'box-shadow:0 0 0 3px rgba(124,58,237,.2)">' +
-            '<i id="gw-ved-playico" class="fas fa-pause"></i>' +
-          '</button>' +
-          '<button onclick="_gwVedSeekRel(3)" ' +
-            'style="background:none;border:none;color:#64748B;font-size:14px;cursor:pointer;padding:4px">' +
-            '<i class="fas fa-forward-step"></i></button>' +
-        '</div>' +
+    /* Barre de trim */
+    '<div style="padding:10px 16px 6px;background:#111;flex-shrink:0">' +
+      '<div style="position:relative;height:34px;background:#1E293B;border-radius:8px">' +
+        '<div id="gw-ved-prog"     style="position:absolute;top:0;bottom:0;left:0;width:0%;background:rgba(124,58,237,.3);border-radius:8px;pointer-events:none"></div>' +
+        '<div id="gw-ved-trimzone" style="position:absolute;top:0;bottom:0;left:0%;right:0%;border:2px solid #7C3AED;border-radius:8px;pointer-events:none;box-sizing:border-box"></div>' +
+        '<input type="range" id="gw-ved-ts" min="0" max="100" value="0"   step="0.1" oninput="_gwVedTrimInput()" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:3">' +
+        '<input type="range" id="gw-ved-te" min="0" max="100" value="100" step="0.1" oninput="_gwVedTrimInput()" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:3">' +
+        '<div id="gw-ved-hs" style="position:absolute;top:0;bottom:0;left:0;width:6px;background:#7C3AED;border-radius:3px 0 0 3px;pointer-events:none"></div>' +
+        '<div id="gw-ved-he" style="position:absolute;top:0;bottom:0;right:0;width:6px;background:#7C3AED;border-radius:0 3px 3px 0;pointer-events:none"></div>' +
       '</div>' +
-
-      /* Filmstrip scrollable */
-      '<div id="gw-ved-filmwrap" ' +
-        'style="overflow-x:auto;-webkit-overflow-scrolling:touch;padding:3px 16px 3px;scroll-behavior:smooth">' +
-        '<div id="gw-ved-filminner" ' +
-          'style="display:flex;align-items:center;gap:6px;position:relative;min-width:min-content">' +
-          /* Blocs de clips (générés par JS) */
-          '<div id="gw-ved-clips-row" style="display:flex;gap:3px;position:relative"></div>' +
-          /* Bouton + Ajouter un clip */
-          '<button onclick="_gwVedAddClip()" ' +
-            'style="width:40px;height:56px;flex-shrink:0;border-radius:8px;' +
-            'background:rgba(124,58,237,.1);border:1.5px dashed rgba(124,58,237,.55);' +
-            'color:#7C3AED;font-size:22px;font-weight:300;cursor:pointer;' +
-            'display:flex;align-items:center;justify-content:center">+</button>' +
-        '</div>' +
+      '<div style="display:flex;justify-content:space-between;margin-top:4px">' +
+        '<span id="gw-ved-ts-lbl" style="color:#94A3B8;font-size:11px">0:00</span>' +
+        '<span style="color:#64748B;font-size:11px" id="gw-ved-dur-lbl">—</span>' +
+        '<span id="gw-ved-te-lbl" style="color:#94A3B8;font-size:11px">—</span>' +
       '</div>' +
-
-      /* Piste audio */
-      '<div style="padding:2px 16px 7px">' +
-        '<div id="gw-ved-audio-row" onclick="_gwVedAddSound()" ' +
-          'style="height:28px;background:#1E293B;border-radius:7px;display:flex;align-items:center;' +
-          'padding:0 10px;gap:8px;cursor:pointer;border:1px solid #334155">' +
-          '<i class="fas fa-music" style="color:#475569;font-size:10px"></i>' +
-          '<span id="gw-ved-audio-lbl" style="color:#475569;font-size:11px">Ajouter un son</span>' +
-        '</div>' +
-      '</div>' +
-
-      /* Sliders compat (masqués — utilisés par _gwVedTrimInput) */
-      '<input type="range" id="gw-ved-ts" min="0" max="100" value="0"   step="0.1" oninput="_gwVedTrimInput()" style="display:none">' +
-      '<input type="range" id="gw-ved-te" min="0" max="100" value="100" step="0.1" oninput="_gwVedTrimInput()" style="display:none">' +
-      '<span id="gw-ved-ts-lbl" style="display:none">0:00</span>' +
-      '<span id="gw-ved-te-lbl" style="display:none">—</span>' +
-
     '</div>' +
 
     /* Tabs */
     '<div id="gw-ved-tabs" style="display:flex;background:#111;border-top:1px solid #1E293B;flex-shrink:0;overflow-x:auto;-webkit-overflow-scrolling:touch">' +
-      (isShort ? '' : _vedTab('trim',    'fa-scissors',             'Couper',   true))  +
-      _vedTab('filter',  'fa-sliders',              'Filtre',   !isShort ? false : true) +
-      _vedTab('text',    'fa-font',                 'Texte',    false) +
-      _vedTab('emoji',   'fa-face-smile',           'Emoji',    false) +
-      _vedTab('effects', 'fa-wand-magic-sparkles',  'Effets',   false) +
-      _vedTab('crop',    'fa-crop-alt',             'Recadrer', false) +
+      _vedTab('trim',    'fa-scissors',             'Couper',  true)  +
+      _vedTab('filter',  'fa-sliders',              'Filtre',  false) +
+      _vedTab('text',    'fa-font',                 'Texte',   false) +
+      _vedTab('emoji',   'fa-face-smile',           'Emoji',   false) +
+      _vedTab('effects', 'fa-wand-magic-sparkles',  'Effets',  false) +
     '</div>' +
 
     /* Panel contenu */
@@ -11215,7 +9061,7 @@ function _gwOpenVideoEditor() {
     } else {
       _gwVedSetDuration(v.duration);
     }
-  }, { once: true });
+  });
   v.addEventListener('seeked', function() {
     if (!isFinite(v.duration) || v.duration <= 0) return;
     _gwVedSetDuration(v.duration);
@@ -11224,27 +9070,20 @@ function _gwOpenVideoEditor() {
   v.addEventListener('timeupdate', function() {
     if (!v.duration) return;
     var ct = v.currentTime;
-    /* Saute les portions coupées du clip actif */
-    var _activeCuts = _ved.activeClip === 0 ? _ved.cuts
-      : ((_ved.clips[_ved.activeClip - 1] || {}).cuts || []);
-    for (var ci = 0; ci < _activeCuts.length; ci++) {
-      if (ct >= _activeCuts[ci].start && ct < _activeCuts[ci].end) {
-        v.currentTime = _activeCuts[ci].end;
+    /* Saute les portions marquées pour suppression */
+    for (var ci = 0; ci < _ved.cuts.length; ci++) {
+      if (ct >= _ved.cuts[ci].start && ct < _ved.cuts[ci].end) {
+        v.currentTime = _ved.cuts[ci].end;
         return;
       }
     }
-    /* Fin du trim du clip actif → clip suivant */
-    var _activeTrimEnd = _ved.activeClip === 0
-      ? (_ved.trim.end || v.duration)
-      : (((_ved.clips[_ved.activeClip - 1] || {}).trim || {}).end || v.duration);
-    if (ct >= _activeTrimEnd - 0.05 && !_ved._nextPending) {
-      _gwVedNextClip(); return;
+    /* Boucle sur le trim */
+    if (_ved.trim.end && ct > _ved.trim.end) {
+      v.currentTime = _ved.trim.start || 0;
     }
-    /* Timecode */
-    var tc = document.getElementById('gw-ved-tc');
-    if (tc) tc.textContent = _vedFmt(ct);
-    /* Playhead sur filmstrip */
-    _gwVedUpdatePlayhead(ct, v.duration);
+    var p = (ct / v.duration) * 100;
+    var bar = document.getElementById('gw-ved-prog');
+    if (bar) bar.style.width = p + '%';
     /* Effet intro (fondu/glissement sur les 0.8 premières secondes) */
     var wrap = document.getElementById('gw-ved-wrap');
     if (wrap && _ved.intro && ct < 0.8) {
@@ -11258,7 +9097,6 @@ function _gwOpenVideoEditor() {
     }
   });
   v.play().catch(function(){});
-  v.addEventListener('ended', function() { _gwVedNextClip(); });
 
   /* Snapshot pour les miniatures filtres (1 frame) */
   _vedSnapTimer = setTimeout(function() { _gwVedSnapFrame(); }, 500);
@@ -11269,13 +9107,7 @@ function _gwOpenVideoEditor() {
     if (e.target === wrap || e.target.id === 'gw-ved-vid') _gwVedDeselectAll();
   });
 
-  /* Shorts : pas de tab Couper — ouvrir Filtre par défaut */
-  _gwVedShowPanel(isShort ? 'filter' : 'trim');
-
-  /* Auto-crop 16:9 pour les vidéos normales (pas les shorts) */
-  if (!isShort) {
-    setTimeout(function() { _gwVedSetCropRatio('16:9'); }, 80);
-  }
+  _gwVedShowPanel('trim');
 }
 var _vedSnapTimer = null;
 var _vedSnapDataUrl = null;
@@ -11292,20 +9124,6 @@ function _gwVedSnapFrame() {
     document.querySelectorAll('.gw-ved-fsnap').forEach(function(img) {
       img.src = _vedSnapDataUrl;
     });
-    /* Met à jour les filmstrip canvases avec la vraie frame */
-    var snapImg = new Image();
-    snapImg.onload = function() {
-      document.querySelectorAll('canvas[data-gw-thumb]').forEach(function(fc) {
-        try {
-          var fctx = fc.getContext('2d');
-          var fw = fc.width, fh = fc.height;
-          for (var x = 0; x < fw; x += 44) {
-            fctx.drawImage(snapImg, x, 0, Math.min(44, fw - x), fh);
-          }
-        } catch(e2) {}
-      });
-    };
-    snapImg.src = _vedSnapDataUrl;
   } catch(e){}
 }
 
@@ -11322,7 +9140,7 @@ function _vedTab(mode, icon, label, active) {
 function _gwVedShowPanel(mode) {
   _ved.mode = mode;
   /* Tabs */
-  ['trim','filter','text','emoji','effects','crop'].forEach(function(m) {
+  ['trim','filter','text','emoji','effects'].forEach(function(m) {
     var t = document.getElementById('gw-ved-tab-' + m);
     if (!t) return;
     t.style.color       = m === mode ? '#A78BFA' : '#64748B';
@@ -11332,91 +9150,73 @@ function _gwVedShowPanel(mode) {
   if (!panel) return;
 
   if (mode === 'trim') {
-    var vt = document.getElementById('gw-ved-vid');
-    var dur = (vt && vt.duration && isFinite(vt.duration)) ? vt.duration
-            : (_pickedVideo && _pickedVideo.duration) || 0;
-    var selMuted = _ved.muted;
-    var segs = _gwVedGetSegments(dur);
-    var hasCuts = segs.length > 1;
-
-    /* ── Liste des segments — affiché EN PREMIER quand présents ── */
-    var segsListHtml = '';
-    if (hasCuts) {
-      segsListHtml = '<div style="margin-bottom:8px">' +
-        '<div style="color:#94A3B8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Segments — appuie sur 🗑 pour supprimer</div>' +
-        '<div style="display:flex;flex-direction:column;gap:5px">';
-      segs.forEach(function(seg, i) {
-        segsListHtml +=
-          '<div style="display:flex;align-items:center;justify-content:space-between;' +
-            'padding:10px 12px;border-radius:11px;' +
-            'background:rgba(255,255,255,.06);border:1.5px solid rgba(255,255,255,.12)">' +
-            '<div style="display:flex;align-items:center;gap:8px">' +
-              '<span style="font-size:14px">▶</span>' +
-              '<div>' +
-                '<div style="color:#E2E8F0;font-size:13px;font-weight:700">Segment ' + (i+1) + '</div>' +
-                '<div style="color:#64748B;font-size:11px">' + _vedFmt(seg.start) + ' → ' + _vedFmt(seg.end) + '</div>' +
-              '</div>' +
-            '</div>' +
-            '<button onclick="_gwVedDeleteSegAt(' + i + ')" ' +
-              'style="background:rgba(239,68,68,.2);border:1.5px solid rgba(239,68,68,.5);border-radius:9px;' +
-              'color:#F87171;font-size:18px;font-weight:700;padding:6px 14px;cursor:pointer;min-width:48px">🗑</button>' +
-          '</div>';
-      });
-      segsListHtml += '</div></div>';
-    }
-
-    /* Trim actif info (poignées déplacées) */
-    var trimS = _ved.trim.start || 0;
-    var trimE = (_ved.trim.end !== null && _ved.trim.end !== undefined) ? _ved.trim.end : dur;
-    var trimBadge = (trimS > 0 || (trimE > 0 && trimE < dur - 0.1))
-      ? '<div style="display:flex;align-items:center;justify-content:space-between;' +
-          'background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.35);' +
-          'border-radius:9px;padding:6px 10px;margin-bottom:8px">' +
-          '<span style="color:#FBBF24;font-size:11px;font-weight:700">✂ ' + _vedFmt(trimS) + ' → ' + _vedFmt(trimE) + ' · ' + _vedFmt(trimE-trimS) + '</span>' +
-          '<button onclick="_gwVedResetTrim()" style="background:none;border:none;color:#F87171;font-size:11px;font-weight:700;cursor:pointer;padding:0 4px">Reset ↩</button>' +
-        '</div>'
-      : '';
-
-    /* Bouton Diviser — grand si pas de coupures, compact sinon */
-    var diviserBtn = hasCuts
-      ? '<button onclick="_gwVedCutHere()" ' +
-          'style="width:100%;padding:9px;background:rgba(251,191,36,.1);' +
-          'border:1.5px solid rgba(251,191,36,.5);border-radius:10px;' +
-          'color:#FBBF24;font-size:13px;font-weight:700;cursor:pointer;' +
-          'display:flex;align-items:center;justify-content:center;gap:7px;margin-bottom:8px">' +
-          '<i class="fas fa-scissors"></i> Diviser encore ici' +
-        '</button>'
-      : '<div style="margin-bottom:10px">' +
-          '<div style="color:#94A3B8;font-size:11px;margin-bottom:8px">Déplace la barre blanche du filmstrip, puis appuie sur Diviser. Ensuite supprime la partie voulue.</div>' +
-          '<button onclick="_gwVedCutHere()" ' +
-            'style="width:100%;padding:13px;background:rgba(251,191,36,.15);' +
-            'border:2px solid #FBBF24;border-radius:12px;' +
-            'color:#FBBF24;font-size:15px;font-weight:800;cursor:pointer;' +
-            'display:flex;align-items:center;justify-content:center;gap:9px">' +
-            '<i class="fas fa-scissors" style="font-size:15px"></i> Diviser ici' +
-          '</button>' +
+    /* ── Liste des portions supprimées ── */
+    var cutsHtml = '';
+    if (_ved.cuts.length) {
+      cutsHtml = '<div style="margin-top:8px">' +
+        '<p style="color:#64748B;font-size:10px;margin:0 0 5px;text-transform:uppercase;letter-spacing:.5px">Portions supprimées</p>';
+      _ved.cuts.forEach(function(cut, i) {
+        cutsHtml += '<div style="display:flex;align-items:center;justify-content:space-between;' +
+          'background:#1E293B;border-radius:8px;padding:6px 10px;margin-bottom:4px">' +
+          '<span style="color:#F87171;font-size:12px">✂ ' + _vedFmt(cut.start) + ' → ' + _vedFmt(cut.end) + '</span>' +
+          '<button onclick="_gwVedRemoveCut(' + i + ')" ' +
+            'style="background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);' +
+            'border-radius:6px;color:#F87171;font-size:11px;cursor:pointer;padding:2px 8px">Restaurer</button>' +
         '</div>';
-
-    /* Son toggle compact */
-    var sonToggle =
-      '<div style="display:flex;align-items:center;justify-content:space-between;' +
-        'background:#1E293B;border-radius:9px;padding:7px 11px">' +
-        '<div style="display:flex;align-items:center;gap:6px">' +
-          '<span style="font-size:13px">' + (selMuted?'🔇':'🔊') + '</span>' +
-          '<span style="color:#94A3B8;font-size:11px;font-weight:600">Son</span>' +
-        '</div>' +
-        '<button onclick="_gwVedToggleSoundClip(0)" ' +
-          'style="background:' + (selMuted?'#334155':'#7C3AED') + ';border:none;border-radius:14px;' +
-          'color:#fff;font-size:10px;font-weight:700;padding:4px 11px;cursor:pointer">' +
-          (selMuted?'Muet':'Actif') + '</button>' +
-      '</div>';
-
+      });
+      cutsHtml += '</div>';
+    }
+    /* ── Liste des clips ajoutés ── */
+    var clipsHtml = '';
+    if (_ved.clips.length) {
+      clipsHtml = '<div style="margin-top:8px">' +
+        '<p style="color:#64748B;font-size:10px;margin:0 0 5px;text-transform:uppercase;letter-spacing:.5px">Clips ajoutés</p>';
+      _ved.clips.forEach(function(cl, i) {
+        clipsHtml += '<div style="display:flex;align-items:center;justify-content:space-between;' +
+          'background:#1E293B;border-radius:8px;padding:6px 10px;margin-bottom:4px">' +
+          '<span style="color:#A78BFA;font-size:12px">📹 Clip ' + (i+1) + ' · ' + _vedFmt(cl.duration) + '</span>' +
+          '<button onclick="_gwVedRemoveClip(' + i + ')" ' +
+            'style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);' +
+            'border-radius:6px;color:#F87171;font-size:11px;cursor:pointer;padding:2px 8px">✕</button>' +
+        '</div>';
+      });
+      clipsHtml += '</div>';
+    }
     panel.innerHTML =
-      '<div style="padding:10px 14px">' +
-        trimBadge +
-        segsListHtml +     /* ← SEGMENTS EN PREMIER quand il y en a */
-        diviserBtn +
-        sonToggle +
+      '<div style="padding:12px 16px">' +
+        /* Son toggle */
+        '<div style="display:flex;align-items:center;justify-content:space-between;' +
+          'background:#1E293B;border-radius:10px;padding:9px 12px;margin-bottom:10px">' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<span style="font-size:15px">' + (_ved.muted ? '🔇' : '🔊') + '</span>' +
+            '<span style="color:#CBD5E1;font-size:12px;font-weight:600">Son</span>' +
+          '</div>' +
+          '<button onclick="_gwVedToggleSound()" ' +
+            'style="background:' + (_ved.muted ? '#334155' : '#7C3AED') + ';border:none;border-radius:16px;' +
+            'color:#fff;font-size:11px;font-weight:700;padding:5px 13px;cursor:pointer">' +
+            (_ved.muted ? '🔇 Désactivé' : '🔊 Activé') + '</button>' +
+        '</div>' +
+        /* Instructions */
+        '<p style="color:#64748B;font-size:11px;margin:0 0 8px;line-height:1.5">' +
+          'Réglez les <span style="color:#A78BFA">curseurs</span> sur la barre ci-dessus, ' +
+          'puis supprimez la portion ou gardez-la.' +
+        '</p>' +
+        /* Bouton supprimer */
+        '<button onclick="_gwVedMarkCut()" ' +
+          'style="width:100%;padding:9px;background:rgba(239,68,68,.12);' +
+          'border:1.5px solid rgba(239,68,68,.35);border-radius:10px;' +
+          'color:#F87171;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:4px">' +
+          '✂&nbsp; Supprimer la portion sélectionnée' +
+        '</button>' +
+        cutsHtml +
+        clipsHtml +
+        /* Bouton ajouter clip */
+        '<button onclick="_gwVedAddClip()" ' +
+          'style="width:100%;padding:9px;background:rgba(124,58,237,.08);' +
+          'border:1.5px dashed rgba(124,58,237,.5);border-radius:10px;' +
+          'color:#A78BFA;font-size:12px;font-weight:700;cursor:pointer;margin-top:8px">' +
+          '＋&nbsp; Ajouter un clip Short' +
+        '</button>' +
       '</div>';
   }
   else if (mode === 'filter') {
@@ -11563,336 +9363,6 @@ function _gwVedShowPanel(mode) {
     xh += '</div></div>';
     panel.innerHTML = xh;
   }
-  else if (mode === 'crop') {
-    /* ── Recadrer : choix du format ── */
-    var isShort = _pubVideoType === 'short';
-    var cropOpts = isShort
-      ? [{ key: null,   label: 'Auto',   icon: '⊡' },
-         { key: '9:16', label: '9:16',   icon: '▯' },
-         { key: '1:1',  label: '1:1',    icon: '□' },
-         { key: '4:3',  label: '4:3',    icon: '▭' }]
-      : [{ key: null,   label: 'Auto',   icon: '⊡' },
-         { key: '16:9', label: '16:9',   icon: '▬' },
-         { key: '1:1',  label: '1:1',    icon: '□' },
-         { key: '9:16', label: '9:16',   icon: '▯' }];
-    var hasCrop = !!_ved.cropRatio;
-    var ch = '<div style="padding:12px 16px">' +
-      '<p style="color:#64748B;font-size:10px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.5px">Format de recadrage</p>' +
-      '<div style="display:flex;gap:8px;justify-content:center;margin-bottom:' + (hasCrop ? '12' : '4') + 'px">';
-    cropOpts.forEach(function(r) {
-      var active = _ved.cropRatio === r.key;
-      var ka = r.key === null ? 'null' : "'" + r.key + "'";
-      ch += '<button onclick="_gwVedSetCropRatio(' + ka + ')" ' +
-        'style="display:flex;flex-direction:column;align-items:center;gap:5px;' +
-        'background:' + (active ? 'rgba(124,58,237,.25)' : 'rgba(255,255,255,.06)') + ';' +
-        'border:1.5px solid ' + (active ? '#7C3AED' : '#1E293B') + ';' +
-        'border-radius:12px;padding:9px 12px;cursor:pointer;min-width:54px">' +
-        '<span style="font-size:18px">' + r.icon + '</span>' +
-        '<span style="font-size:11px;font-weight:' + (active ? '700' : '400') + ';' +
-        'color:' + (active ? '#A78BFA' : '#64748B') + '">' + r.label + '</span>' +
-        '</button>';
-    });
-    ch += '</div>';
-    /* Instruction de repositionnement (quand un crop est actif) */
-    if (hasCrop) {
-      var ox = Math.round(_ved.cropOffset.x);
-      var oy = Math.round(_ved.cropOffset.y);
-      var atCenter = ox === 50 && oy === 50;
-      ch +=
-        '<div style="background:rgba(30,41,59,.9);border:1px solid #334155;border-radius:12px;padding:10px 12px">' +
-          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">' +
-            '<div style="display:flex;align-items:center;gap:7px">' +
-              '<span style="font-size:16px">✋</span>' +
-              '<span style="color:#CBD5E1;font-size:12px;font-weight:700">Glisser pour repositionner</span>' +
-            '</div>' +
-            '<button onclick="_gwVedResetCropOffset()" ' +
-              'style="background:' + (atCenter ? 'rgba(255,255,255,.06)' : 'rgba(124,58,237,.2)') + ';' +
-              'border:1px solid ' + (atCenter ? '#334155' : '#7C3AED') + ';border-radius:8px;' +
-              'color:' + (atCenter ? '#64748B' : '#A78BFA') + ';font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer">Centrer</button>' +
-          '</div>' +
-          '<div style="color:#64748B;font-size:11px">Touche et glisse la vidéo en haut, bas, gauche ou droite pour choisir la partie visible.</div>' +
-          (atCenter ? '' :
-            '<div style="color:#7C3AED;font-size:10px;margin-top:5px;font-weight:600">Position : ' + ox + '% / ' + oy + '%</div>') +
-        '</div>';
-    }
-    ch += '</div>';
-    panel.innerHTML = ch;
-  }
-}
-
-/* ── Recadrage vidéo ── */
-function _gwVedSetCropRatio(ratio) {
-  _ved.cropRatio = ratio;
-  if (!ratio) _ved.cropOffset = {x:50, y:50};
-  var wrap = document.getElementById('gw-ved-wrap');
-  var mid  = document.getElementById('gw-ved-mid');
-  var vid  = document.getElementById('gw-ved-vid');
-  if (wrap && mid) {
-    if (!ratio) {
-      _gwVedAdaptContainer();
-    } else {
-      var parts = ratio.split(':');
-      var rw = parseFloat(parts[0]), rh = parseFloat(parts[1]);
-      var cw = mid.clientWidth  || window.innerWidth;
-      var ch = mid.clientHeight || Math.round(window.innerHeight * 0.42);
-      var targetAR = rw / rh;
-      var dw, dh;
-      if (targetAR <= cw / ch) {
-        dh = ch; dw = Math.round(ch * targetAR);
-      } else {
-        dw = cw; dh = Math.round(cw / targetAR);
-      }
-      wrap.style.width  = dw + 'px';
-      wrap.style.height = dh + 'px';
-    }
-  }
-  /* Appliquer object-fit/position sur la vidéo */
-  if (vid) {
-    vid.style.objectFit      = 'cover';
-    vid.style.objectPosition = (ratio ? _ved.cropOffset.x : 50) + '% ' + (ratio ? _ved.cropOffset.y : 50) + '%';
-  }
-  /* Activer/désactiver le pan overlay */
-  _gwVedBindCropPan(!!ratio);
-  /* Masquer le bouton play quand le pan est actif (il est sous l'overlay) */
-  var playOv = document.getElementById('gw-ved-playbtn-ov');
-  if (playOv) playOv.style.display = ratio ? 'none' : 'flex';
-  _gwVedShowPanel('crop');
-}
-
-/* ── Pan/glisser pour repositionner dans le cadre de crop ── */
-function _gwVedBindCropPan(enable) {
-  var ov  = document.getElementById('gw-ved-pan-ov');
-  var vid = document.getElementById('gw-ved-vid');
-  if (!ov) return;
-
-  if (!enable) {
-    ov.style.display = 'none';
-    return;
-  }
-  ov.style.display = 'block';
-
-  /* Handlers déjà liés → pas besoin de les rajouter */
-  if (ov._gwPanBound) return;
-  ov._gwPanBound = true;
-  if (!_ved.cropOffset) _ved.cropOffset = {x:50, y:50};
-
-  function doMove(startCX, startCY, startOX, startOY, curX, curY) {
-    var wrap = document.getElementById('gw-ved-wrap');
-    if (!wrap) return;
-    var ww = wrap.offsetWidth  || 300;
-    var wh = wrap.offsetHeight || 200;
-    /* Sensibilité 1.5 : glisser 2/3 du conteneur = plein décalage */
-    var dxPct = ((curX - startCX) / ww) * 150;
-    var dyPct = ((curY - startCY) / wh) * 150;
-    _ved.cropOffset.x = Math.max(0, Math.min(100, startOX - dxPct));
-    _ved.cropOffset.y = Math.max(0, Math.min(100, startOY - dyPct));
-    if (vid) vid.style.objectPosition = _ved.cropOffset.x + '% ' + _ved.cropOffset.y + '%';
-  }
-
-  /* Touch */
-  ov.addEventListener('touchstart', function(e) {
-    e.preventDefault();
-    var t0    = e.touches[0];
-    var sx    = t0.clientX, sy = t0.clientY;
-    var sox   = _ved.cropOffset.x, soy = _ved.cropOffset.y;
-    ov.style.cursor = 'grabbing';
-    function mv(ev) { ev.preventDefault(); doMove(sx, sy, sox, soy, ev.touches[0].clientX, ev.touches[0].clientY); }
-    function up()   { ov.style.cursor = 'grab'; document.removeEventListener('touchmove', mv); document.removeEventListener('touchend', up); _gwVedShowPanel('crop'); }
-    document.addEventListener('touchmove', mv, { passive: false });
-    document.addEventListener('touchend', up);
-  }, { passive: false });
-
-  /* Mouse (desktop) */
-  ov.addEventListener('mousedown', function(e) {
-    e.preventDefault();
-    var sx  = e.clientX, sy = e.clientY;
-    var sox = _ved.cropOffset.x, soy = _ved.cropOffset.y;
-    ov.style.cursor = 'grabbing';
-    function mv(ev) { doMove(sx, sy, sox, soy, ev.clientX, ev.clientY); }
-    function up()   { ov.style.cursor = 'grab'; document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); _gwVedShowPanel('crop'); }
-    document.addEventListener('mousemove', mv);
-    document.addEventListener('mouseup', up);
-  });
-}
-
-/* ── Reset la position du pan ── */
-function _gwVedResetCropOffset() {
-  _ved.cropOffset = {x:50, y:50};
-  var vid = document.getElementById('gw-ved-vid');
-  if (vid) vid.style.objectPosition = '50% 50%';
-  _gwVedShowPanel('crop');
-  showToast('Position réinitialisée', 'ok');
-}
-
-/* ── Reset complet du trim ── */
-function _gwVedResetTrim() {
-  var v = document.getElementById('gw-ved-vid');
-  var dur = (v && v.duration && isFinite(v.duration)) ? v.duration
-          : (_pickedVideo && _pickedVideo.duration) || 0;
-  _ved.trim.start = 0;
-  _ved.trim.end   = dur || null;
-  _ved.cutMarkers = [];
-  _gwVedUpdateTrimOverlays(0);
-  _gwVedRenderCutMarkers();
-  _gwVedShowPanel('trim');
-  showToast('Trim réinitialisé', 'ok');
-}
-
-/* ── Rasoir : retourne les segments définis par les cut markers ── */
-function _gwVedGetSegments(dur) {
-  if (!dur || dur <= 0) return [{ start: 0, end: 0 }];
-  var markers = [0].concat(_ved.cutMarkers.slice()).concat([dur]);
-  var segs = [];
-  for (var i = 0; i < markers.length - 1; i++) {
-    segs.push({ start: markers[i], end: markers[i + 1] });
-  }
-  return segs;
-}
-
-/* ── Rasoir : place une coupure à la position actuelle du playhead ── */
-function _gwVedCutHere() {
-  var v = document.getElementById('gw-ved-vid');
-  if (!v || !v.duration || !isFinite(v.duration)) return;
-  var t = v.currentTime;
-  /* Trop proche du début, de la fin ou d'une coupure existante → ignorer */
-  if (t < 0.15 || t > v.duration - 0.15) {
-    showToast('Positionnez la tête de lecture au milieu de la vidéo', ''); return;
-  }
-  for (var i = 0; i < _ved.cutMarkers.length; i++) {
-    if (Math.abs(_ved.cutMarkers[i] - t) < 0.3) return;
-  }
-  _ved.cutMarkers.push(t);
-  _ved.cutMarkers.sort(function(a, b) { return a - b; });
-  _gwVedRenderCutMarkers();
-  _gwVedShowPanel('trim');
-  showToast('✂ Coupure placée à ' + _vedFmt(t), 'ok');
-}
-
-/* ── Rasoir : sélectionner / désélectionner un segment ── */
-function _gwVedSelectSeg(idx) {
-  _ved.selectedSeg = (idx < 0 || _ved.selectedSeg === idx) ? -1 : idx;
-  _gwVedRenderCutMarkers();
-  if (_ved.mode === 'trim') _gwVedShowPanel('trim');
-}
-
-/* ── Rasoir : supprimer le segment sélectionné (via selectedSeg) ── */
-function _gwVedDeleteSeg() {
-  _gwVedDeleteSegAt(_ved.selectedSeg);
-}
-
-/* ── Rasoir : supprimer un segment par index direct ── */
-function _gwVedDeleteSegAt(idx) {
-  if (idx < 0) return;
-  var v = document.getElementById('gw-ved-vid');
-  var dur = (v && v.duration && isFinite(v.duration)) ? v.duration
-          : (_pickedVideo && _pickedVideo.duration) || 0;
-  var segs = _gwVedGetSegments(dur);
-  if (idx >= segs.length) return;
-  if (segs.length <= 1) {
-    showToast('Impossible de supprimer le seul segment', ''); return;
-  }
-  var seg = segs[idx];
-  if (idx === 0) {
-    /* Supprimer le début → avancer le trim start */
-    _ved.trim.start = seg.end;
-    _ved.cutMarkers = _ved.cutMarkers.filter(function(m) { return m > seg.end - 0.05; });
-  } else if (idx === segs.length - 1) {
-    /* Supprimer la fin → reculer le trim end */
-    _ved.trim.end = seg.start;
-    _ved.cutMarkers = _ved.cutMarkers.filter(function(m) { return m < seg.start + 0.05; });
-  } else {
-    showToast('Seuls le premier ou le dernier segment peuvent être supprimés', ''); return;
-  }
-  _ved.selectedSeg = -1;
-  _gwVedUpdateTrimOverlays(0);
-  _gwVedRenderCutMarkers();
-  _gwVedShowPanel('trim');
-  showToast('Segment supprimé ✓', 'ok');
-}
-
-/* ── Rendu filmstrip CapCut : zones cliquables + marqueurs de coupure ── */
-function _gwVedRenderCutMarkers() {
-  var clip0 = document.getElementById('gw-ved-clip-0');
-  if (!clip0) return;
-  var v = document.getElementById('gw-ved-vid');
-  var dur = (v && v.duration && isFinite(v.duration)) ? v.duration
-          : (_pickedVideo && _pickedVideo.duration) || 1;
-  var clipW = clip0.offsetWidth || 200;
-
-  /* Nettoyer anciens éléments */
-  clip0.querySelectorAll('.gw-cut-mk,.gw-seg-ov').forEach(function(el) { el.remove(); });
-
-  /* Si pas encore de coupures → rien à afficher */
-  if (_ved.cutMarkers.length === 0 && _ved.cuts.length === 0 && _ved.selectedSeg < 0) return;
-
-  var segs = _gwVedGetSegments(dur);
-
-  /* Zones de segment cliquables (z-index 3) */
-  segs.forEach(function(seg, i) {
-    var x1 = Math.round((seg.start / dur) * clipW);
-    var x2 = Math.round((seg.end   / dur) * clipW);
-    var w  = Math.max(4, x2 - x1 - 1);
-
-    var isDeleted = _ved.cuts.some(function(c) {
-      return c.start <= seg.start + 0.05 && c.end >= seg.end - 0.05;
-    });
-    var isSel = _ved.selectedSeg === i;
-
-    var zone = document.createElement('div');
-    zone.className = 'gw-seg-ov';
-    zone.style.cssText =
-      'position:absolute;top:0;bottom:0;left:' + x1 + 'px;width:' + w + 'px;' +
-      'z-index:3;box-sizing:border-box;cursor:pointer;' +
-      'border:' + (isSel ? '2.5px solid #F59E0B' : (isDeleted ? '2px solid rgba(239,68,68,.7)' : '1px solid rgba(255,255,255,.08)')) + ';' +
-      'background:' + (isDeleted ? 'rgba(239,68,68,.45)' : isSel ? 'rgba(251,191,36,.18)' : 'transparent') + ';';
-
-    if (isDeleted) {
-      /* Croix rouge sur le segment supprimé */
-      var cross = document.createElement('div');
-      cross.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
-        'font-size:14px;font-weight:900;color:rgba(255,255,255,.8);pointer-events:none';
-      cross.textContent = '✕';
-      zone.appendChild(cross);
-    }
-
-    /* Clic → sélectionner le segment (et chercher dedans) */
-    (function(idx, segStart) {
-      zone.addEventListener('click', function(e) {
-        e.stopPropagation();
-        _gwVedSelectSeg(idx);
-        /* Seek au début du segment si pas supprimé */
-        if (!isDeleted) {
-          var vv = document.getElementById('gw-ved-vid');
-          if (vv) { vv.pause(); vv.currentTime = segStart + 0.05; }
-          var ico = document.getElementById('gw-ved-playico');
-          if (ico) ico.className = 'fas fa-play';
-          var pb = document.getElementById('gw-ved-playbtn');
-          if (pb) pb.style.background = '#7C3AED';
-        }
-      });
-    })(i, seg.start);
-
-    clip0.appendChild(zone);
-  });
-
-  /* Marqueurs de coupure — ligne blanche + ✂ */
-  _ved.cutMarkers.forEach(function(t) {
-    var x = Math.round((t / dur) * clipW);
-
-    var line = document.createElement('div');
-    line.className = 'gw-cut-mk';
-    line.style.cssText = 'position:absolute;top:-6px;bottom:-6px;left:' + (x - 1) + 'px;width:3px;' +
-      'background:#fff;z-index:7;pointer-events:none;border-radius:2px;' +
-      'box-shadow:0 0 6px rgba(0,0,0,.9),0 0 2px rgba(255,255,255,.6)';
-    clip0.appendChild(line);
-
-    var ico = document.createElement('div');
-    ico.className = 'gw-cut-mk';
-    ico.style.cssText = 'position:absolute;top:-20px;left:' + (x - 8) + 'px;font-size:13px;' +
-      'z-index:8;pointer-events:none;user-select:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,.8))';
-    ico.textContent = '✂';
-    clip0.appendChild(ico);
-  });
 }
 
 /* ══ NOUVELLES FONCTIONS ÉDITEUR ══════════════════════════════════════════ */
@@ -11907,43 +9377,34 @@ function _gwVedToggleSound() {
 
 /* ── Découpe : marquer la portion sélectionnée pour suppression ── */
 function _gwVedMarkCut() {
-  var cidx    = _ved.selectedClip;
-  var realDur = _gwVedClipRealDur(cidx);
-  /* Fallback : si la durée n'est pas encore stockée, on lit le video element */
-  if (!realDur) {
-    var v0 = document.getElementById('gw-ved-vid');
-    if (v0 && v0.duration > 0) realDur = v0.duration;
-  }
-  if (!realDur) { showToast('Vidéo non prête', 'err'); return; }
-  var trimObj = cidx === 0 ? _ved.trim
-    : (_ved.clips[cidx - 1] ? (_ved.clips[cidx - 1].trim || (_ved.clips[cidx - 1].trim = {start:0,end:null})) : null);
-  if (!trimObj) return;
-  var s = trimObj.start || 0;
-  var e = (trimObj.end !== null && trimObj.end !== undefined) ? trimObj.end : realDur;
-  if (e - s < 0.2) { showToast('Sélectionnez une portion plus grande', 'err'); return; }
-  if (s <= 0.05 && e >= realDur - 0.05) { showToast('Impossible de supprimer toute la vidéo', 'err'); return; }
-  if (cidx === 0) {
-    _ved.cuts.push({ start: s, end: e });
-    _ved.trim.start = 0; _ved.trim.end = realDur;
-  } else {
-    if (!_ved.clips[cidx - 1].cuts) _ved.clips[cidx - 1].cuts = [];
-    _ved.clips[cidx - 1].cuts.push({ start: s, end: e });
-    _ved.clips[cidx - 1].trim.start = 0;
-    _ved.clips[cidx - 1].trim.end = realDur;
-  }
-  _gwVedRebuildClipAfterCut(cidx);
+  var v = document.getElementById('gw-ved-vid');
+  if (!v || !v.duration) return;
+  var s = _ved.trim.start || 0;
+  var e = _ved.trim.end   || v.duration;
+  if (e - s < 0.3) { showToast('Sélectionnez une portion plus grande', 'err'); return; }
+  /* Vérifie que ce n'est pas toute la vidéo */
+  if (s <= 0.05 && e >= v.duration - 0.05) { showToast('Impossible de supprimer toute la vidéo', 'err'); return; }
+  _ved.cuts.push({ start: s, end: e });
+  /* Remet les curseurs à 0–100 */
+  _ved.trim.start = 0;
+  _ved.trim.end   = v.duration;
+  var sEl = document.getElementById('gw-ved-ts'), eEl = document.getElementById('gw-ved-te');
+  if (sEl) sEl.value = 0;
+  if (eEl) eEl.value = 100;
+  ['gw-ved-hs','gw-ved-trimzone'].forEach(function(id){
+    var el = document.getElementById(id); if (el) el.style.left = '0%';
+  });
+  var he = document.getElementById('gw-ved-he'), tz = document.getElementById('gw-ved-trimzone');
+  if (he) he.style.right = '0%';
+  if (tz) tz.style.right = '0%';
+  document.getElementById('gw-ved-ts-lbl') && (document.getElementById('gw-ved-ts-lbl').textContent = '0:00');
+  document.getElementById('gw-ved-te-lbl') && (document.getElementById('gw-ved-te-lbl').textContent = _vedFmt(v.duration));
   showToast('Portion supprimée ✂', 'ok');
   _gwVedShowPanel('trim');
 }
 
 function _gwVedRemoveCut(i) {
-  var cidx = _ved.selectedClip;
-  if (cidx === 0) {
-    _ved.cuts.splice(i, 1);
-  } else if (_ved.clips[cidx - 1] && _ved.clips[cidx - 1].cuts) {
-    _ved.clips[cidx - 1].cuts.splice(i, 1);
-  }
-  _gwVedRebuildClipAfterCut(cidx);
+  _ved.cuts.splice(i, 1);
   _gwVedShowPanel('trim');
 }
 
@@ -11955,18 +9416,13 @@ function _gwVedAddClip() {
     var file = inp.files && inp.files[0];
     if (!file) return;
     var url = URL.createObjectURL(file);
-    var cl = { url: url, blob: file, name: file.name, duration: 0,
-               trim: {start:0, end:null}, cuts: [], muted: _ved.muted };
+    var cl = { url: url, blob: file, name: file.name, duration: 0 };
     _ved.clips.push(cl);
-    /* Récupère la durée puis reconstruit le filmstrip */
+    /* Récupère la durée */
     var tmp = document.createElement('video');
     tmp.src = url;
     tmp.onloadedmetadata = function() {
-      cl.duration = tmp.duration || 2;
-      cl.trim.end = cl.duration;
-      /* Reconstruit toute la row pour insérer la transition + le nouveau bloc */
-      var mainDur = (document.getElementById('gw-ved-vid') || {}).duration || 0;
-      if (mainDur > 0) _gwVedBuildTimeline(mainDur);
+      cl.duration = tmp.duration;
       if (_ved.mode === 'trim') _gwVedShowPanel('trim');
     };
     showToast('Clip ajouté ✓', 'ok');
@@ -11977,11 +9433,6 @@ function _gwVedAddClip() {
 
 function _gwVedRemoveClip(i) {
   _ved.clips.splice(i, 1);
-  _ved.transitions.splice(i, 1);
-  if (_ved.activeClip > _ved.clips.length) _ved.activeClip = 0;
-  if (_ved.selectedClip > _ved.clips.length) _ved.selectedClip = 0;
-  var mainDur = (document.getElementById('gw-ved-vid') || {}).duration || 0;
-  if (mainDur > 0) _gwVedBuildTimeline(mainDur);
   _gwVedShowPanel('trim');
 }
 
@@ -12082,721 +9533,10 @@ function _gwVedSetDuration(dur) {
   var el = document.getElementById('gw-ved-te-lbl');
   if (dl) dl.textContent = d;
   if (el) el.textContent = d;
+  /* Met aussi à jour la durée dans _pickedVideo si absente */
   if (_pickedVideo && (!_pickedVideo.duration || _pickedVideo.duration <= 0)) {
     _pickedVideo.duration = dur;
   }
-  /* Construit le filmstrip */
-  _gwVedBuildTimeline(dur);
-}
-
-/* ══ FILMSTRIP TIMELINE ════════════════════════════════════════════════════ */
-var _gwVedPxSec = 64; /* pixels par seconde — adaptatif */
-
-/* ── Construit toute la timeline (appelé par _gwVedSetDuration) ── */
-function _gwVedBuildTimeline(duration) {
-  if (!duration || !isFinite(duration) || duration <= 0) return;
-  /* Échelle adaptative selon la durée */
-  _gwVedPxSec = duration < 8 ? 72 : duration < 20 ? 52 : duration < 60 ? 36 : 20;
-  var row = document.getElementById('gw-ved-clips-row');
-  if (!row) return;
-  row.innerHTML = '';
-  /* Clip principal */
-  row.appendChild(_gwVedMakeClipBlock(0, _pickedVideo.url, duration, true));
-  /* Clips supplémentaires avec bouton transition avant chacun */
-  _ved.clips.forEach(function(cl, i) {
-    row.appendChild(_gwVedMakeTransitionBtn(i));
-    row.appendChild(_gwVedMakeClipBlock(i + 1, cl.url, cl.duration || 2, false));
-  });
-  /* ⚠ Réappliquer les coupes + marqueurs rasoir après stabilisation du DOM */
-  setTimeout(function() {
-    if (_ved.cuts.length) _gwVedRebuildClipAfterCut(0);
-    _ved.clips.forEach(function(cl, i) {
-      if (cl.cuts && cl.cuts.length) _gwVedRebuildClipAfterCut(i + 1);
-    });
-    _gwVedRenderCutMarkers();
-  }, 0);
-}
-
-/* ── Crée un bloc de clip dans le filmstrip ── */
-function _gwVedMakeClipBlock(idx, url, duration, isMain) {
-  var W   = Math.max(100, Math.round(duration * _gwVedPxSec));
-  var H   = 56;
-  var wrap = document.createElement('div');
-  wrap.id  = 'gw-ved-clip-' + idx;
-  wrap.style.cssText =
-    'position:relative;height:' + H + 'px;width:' + W + 'px;flex-shrink:0;' +
-    'border-radius:8px;overflow:visible;' +
-    'border:2.5px solid ' + (isMain?'#FBBF24':'#1D4ED8') + ';cursor:pointer';
-
-  /* Canvas thumbnails */
-  var cv = document.createElement('canvas');
-  cv.width = W; cv.height = H;
-  cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;' +
-    'border-radius:6px;overflow:hidden;display:block';
-  var ctx = cv.getContext('2d');
-  ctx.fillStyle = '#1E293B';
-  ctx.fillRect(0, 0, W, H);
-  wrap.appendChild(cv);
-
-  /* Durée label */
-  var dur = document.createElement('div');
-  dur.style.cssText = 'position:absolute;top:3px;left:' + (isMain?'18':'4') + 'px;' +
-    'background:rgba(0,0,0,.65);color:#fff;font-size:9px;font-weight:700;' +
-    'padding:1px 5px;border-radius:4px;pointer-events:none;z-index:6';
-  dur.textContent = _vedFmt(duration);
-  wrap.appendChild(dur);
-
-  /* Overlay gauche (zone découpée — trim start) */
-  var ovL = document.createElement('div');
-  ovL.id = 'gw-ved-tov-l-' + idx;
-  ovL.style.cssText = 'position:absolute;left:0;top:0;bottom:0;width:0;' +
-    'background:rgba(0,0,0,.6);pointer-events:none;z-index:4;border-radius:6px 0 0 6px';
-  wrap.appendChild(ovL);
-  /* Overlay droit */
-  var ovR = document.createElement('div');
-  ovR.id = 'gw-ved-tov-r-' + idx;
-  ovR.style.cssText = 'position:absolute;right:0;top:0;bottom:0;width:0;' +
-    'background:rgba(0,0,0,.6);pointer-events:none;z-index:4;border-radius:0 6px 6px 0';
-  wrap.appendChild(ovR);
-
-  /* Handle gauche (trim start) — sur tous les clips */
-  var hs = document.createElement('div');
-  hs.id = 'gw-ved-hs-' + idx;
-  var handleColor = isMain ? '#FBBF24' : '#1D4ED8';
-  hs.style.cssText = 'position:absolute;left:0;top:-5px;bottom:-5px;width:22px;z-index:8;' +
-    'background:' + handleColor + ';cursor:ew-resize;display:flex;align-items:center;justify-content:center;' +
-    'border-radius:6px 0 0 6px;box-shadow:2px 0 6px rgba(0,0,0,.5)';
-  hs.innerHTML = '<div style="width:3px;height:20px;background:rgba(0,0,0,.45);border-radius:2px;pointer-events:none"></div>';
-  wrap.appendChild(hs);
-  /* Handle droit (trim end) */
-  var he = document.createElement('div');
-  he.id = 'gw-ved-he-' + idx;
-  he.style.cssText = 'position:absolute;right:0;top:-5px;bottom:-5px;width:22px;z-index:8;' +
-    'background:' + handleColor + ';cursor:ew-resize;display:flex;align-items:center;justify-content:center;' +
-    'border-radius:0 6px 6px 0;box-shadow:-2px 0 6px rgba(0,0,0,.5)';
-  he.innerHTML = '<div style="width:3px;height:20px;background:rgba(0,0,0,.45);border-radius:2px;pointer-events:none"></div>';
-  wrap.appendChild(he);
-  if (isMain) {
-    /* Playhead uniquement sur le clip principal au départ */
-    var ph = document.createElement('div');
-    ph.id = 'gw-ved-playhead';
-    ph.style.cssText = 'position:absolute;top:-5px;bottom:-5px;left:0;width:2px;' +
-      'background:#fff;z-index:10;pointer-events:none;border-radius:1px;' +
-      'box-shadow:0 0 6px rgba(255,255,255,.8)';
-    ph.innerHTML = '<div style="position:absolute;top:0;left:50%;transform:translateX(-50%);' +
-      'width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;' +
-      'border-top:6px solid #fff"></div>';
-    wrap.appendChild(ph);
-  } else {
-    /* Clip secondaire : tap = sélectionner, drag horizontal = déplacer */
-    _gwVedBindClipInteraction(wrap, idx);
-  }
-  /* Canvas : seek si clip actif */
-  cv.addEventListener('click', function(e) {
-    if (_ved.activeClip !== idx) { _gwVedSelectClip(idx); return; }
-    var v = document.getElementById('gw-ved-vid');
-    if (!v || !v.duration) return;
-    var r = cv.getBoundingClientRect();
-    v.currentTime = Math.max(0, Math.min(v.duration, ((e.clientX - r.left) / r.width) * v.duration));
-  });
-  /* Drag handles */
-  _gwVedBindHandles(hs, he, idx);
-  /* Générer les thumbnails */
-  _gwVedGenThumbs(cv, url, duration, W, H);
-  return wrap;
-}
-
-/* ── Génère les miniatures filmstrip (gradient + 1 frame via snap différé) ── */
-function _gwVedGenThumbs(canvas, url, duration, W, H) {
-  /* Remplir immédiatement avec un gradient (safe sur Android, pas de 2ème video) */
-  var ctx = canvas.getContext('2d');
-  var grad = ctx.createLinearGradient(0, 0, W, 0);
-  grad.addColorStop(0,   '#1a2744');
-  grad.addColorStop(0.5, '#2D1B69');
-  grad.addColorStop(1,   '#1a2744');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, H);
-  /* Marquer ce canvas pour mise à jour quand le snap est prêt */
-  canvas.setAttribute('data-gw-thumb', '1');
-}
-
-/* ── Drag & drop des handles trim sur le filmstrip ── */
-function _gwVedBindHandles(hsEl, heEl, clipIdx) {
-  if (clipIdx === undefined) clipIdx = 0;
-  function getPos(clientX) {
-    var clip = document.getElementById('gw-ved-clip-' + clipIdx);
-    if (!clip) return 0;
-    var r = clip.getBoundingClientRect();
-    return Math.max(0, Math.min(1, (clientX - r.left) / r.width));
-  }
-  function getTrimObj() {
-    if (clipIdx === 0) return _ved.trim;
-    var cl = _ved.clips[clipIdx - 1];
-    if (!cl) return null;
-    if (!cl.trim) cl.trim = {start:0, end:null};
-    return cl.trim;
-  }
-  function applyS(ratio) {
-    var v = document.getElementById('gw-ved-vid');
-    if (!v) return;
-    var tr = getTrimObj(); if (!tr) return;
-    var realDur = _gwVedClipRealDur(clipIdx) || (v.duration > 0 ? v.duration : 1);
-    var cuts    = clipIdx === 0 ? _ved.cuts : ((_ved.clips[clipIdx-1]||{}).cuts||[]);
-    var realT   = cuts.length
-      ? _gwVedEffToReal(ratio * _gwVedGetEffDur(clipIdx, realDur), clipIdx, realDur)
-      : ratio * realDur;
-    var maxT = ((tr.end !== null && tr.end !== undefined) ? tr.end : realDur) - 0.2;
-    tr.start = Math.max(0, Math.min(realT, maxT));
-    _gwVedUpdateTrimOverlays(clipIdx);
-    if (v.paused && _ved.activeClip === clipIdx) v.currentTime = tr.start;
-    if (clipIdx === 0) { var lbl = document.getElementById('gw-ved-ts-lbl'); if (lbl) lbl.textContent = _vedFmt(tr.start); }
-  }
-  function applyE(ratio) {
-    var v = document.getElementById('gw-ved-vid');
-    if (!v) return;
-    var tr = getTrimObj(); if (!tr) return;
-    var realDur = _gwVedClipRealDur(clipIdx) || (v.duration > 0 ? v.duration : 1);
-    var cuts    = clipIdx === 0 ? _ved.cuts : ((_ved.clips[clipIdx-1]||{}).cuts||[]);
-    var realT   = cuts.length
-      ? _gwVedEffToReal(ratio * _gwVedGetEffDur(clipIdx, realDur), clipIdx, realDur)
-      : ratio * realDur;
-    var minT = (tr.start || 0) + 0.2;
-    tr.end = Math.max(minT, Math.min(realDur, realT));
-    _gwVedUpdateTrimOverlays(clipIdx);
-    if (v.paused && _ved.activeClip === clipIdx) v.currentTime = tr.end;
-    if (clipIdx === 0) { var lbl = document.getElementById('gw-ved-te-lbl'); if (lbl) lbl.textContent = _vedFmt(tr.end); }
-  }
-  function bind(el, applyFn) {
-    el.addEventListener('touchstart', function(e) {
-      e.preventDefault(); e.stopPropagation();
-      var mv = function(ev) { applyFn(getPos(ev.touches[0].clientX)); };
-      var up = function() { document.removeEventListener('touchmove', mv); document.removeEventListener('touchend', up); };
-      document.addEventListener('touchmove', mv, { passive: false });
-      document.addEventListener('touchend', up);
-    }, { passive: false });
-    el.addEventListener('mousedown', function(e) {
-      e.preventDefault();
-      var mv = function(ev) { applyFn(getPos(ev.clientX)); };
-      var up = function() { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
-      document.addEventListener('mousemove', mv);
-      document.addEventListener('mouseup', up);
-    });
-  }
-  bind(hsEl, applyS);
-  bind(heEl, applyE);
-}
-
-/* ── Met à jour les overlays sombres gauche/droite selon trim ── */
-function _gwVedUpdateTrimOverlays(clipIdx) {
-  if (clipIdx === undefined) clipIdx = _ved.selectedClip;
-  var trim = clipIdx === 0 ? _ved.trim
-    : ((_ved.clips[clipIdx - 1] || {}).trim || {start:0, end:null});
-  var realDur = _gwVedClipRealDur(clipIdx) || 1;
-  if (!realDur) { var vt = document.getElementById('gw-ved-vid'); if (vt) realDur = vt.duration || 1; }
-  var cuts = clipIdx === 0 ? _ved.cuts : ((_ved.clips[clipIdx-1]||{}).cuts||[]);
-  var sR, eR;
-  if (!cuts.length) {
-    /* Fast path : aucune coupe, rapport direct */
-    sR = (trim.start || 0) / realDur;
-    eR = ((trim.end !== null && trim.end !== undefined) ? trim.end : realDur) / realDur;
-  } else {
-    var effDur = _gwVedGetEffDur(clipIdx, realDur) || 1;
-    sR = _gwVedRealToEff(trim.start || 0, clipIdx, realDur) / effDur;
-    eR = _gwVedRealToEff((trim.end !== null && trim.end !== undefined) ? trim.end : realDur, clipIdx, realDur) / effDur;
-  }
-  sR = Math.max(0, Math.min(1, sR));
-  eR = Math.max(0, Math.min(1, eR));
-  var ovL = document.getElementById('gw-ved-tov-l-' + clipIdx);
-  var ovR = document.getElementById('gw-ved-tov-r-' + clipIdx);
-  var hs  = document.getElementById('gw-ved-hs-' + clipIdx);
-  var he  = document.getElementById('gw-ved-he-' + clipIdx);
-  if (ovL) ovL.style.width = (sR * 100) + '%';
-  if (ovR) ovR.style.width = ((1 - eR) * 100) + '%';
-  if (hs)  hs.style.left   = (sR * 100) + '%';
-  if (he)  he.style.right  = ((1 - eR) * 100) + '%';
-  /* Zone sélectionnée : surbrillance rouge (zone à supprimer) */
-  var block = document.getElementById('gw-ved-clip-' + clipIdx);
-  if (block) {
-    var selOv = block.querySelector('.gw-ved-sel-ov');
-    if (!selOv) {
-      selOv = document.createElement('div');
-      selOv.className = 'gw-ved-sel-ov';
-      selOv.style.cssText = 'position:absolute;top:0;bottom:0;pointer-events:none;z-index:3;' +
-        'background:rgba(239,68,68,.22);border-top:2px solid rgba(239,68,68,.75);border-bottom:2px solid rgba(239,68,68,.75)';
-      block.appendChild(selOv);
-    }
-    var selW = (eR - sR);
-    if (selW > 0.01 && selW < 0.99) {
-      selOv.style.left    = (sR * 100) + '%';
-      selOv.style.width   = (selW * 100) + '%';
-      selOv.style.display = '';
-    } else {
-      selOv.style.display = 'none';
-    }
-  }
-}
-
-/* ── Déplace le playhead en fonction du temps courant ── */
-function _gwVedUpdatePlayhead(ct, dur) {
-  var ph = document.getElementById('gw-ved-playhead');
-  if (!ph || !dur) return;
-  var clip = document.getElementById('gw-ved-clip-' + _ved.activeClip);
-  if (!clip) return;
-  if (ph.parentElement !== clip) clip.appendChild(ph);
-  /* Convertit le temps réel en position dans le filmstrip compressé */
-  var realDur = _gwVedClipRealDur(_ved.activeClip) || dur;
-  var effDur  = _gwVedGetEffDur(_ved.activeClip, realDur) || realDur;
-  var effCt   = _gwVedRealToEff(ct, _ved.activeClip, realDur);
-  var pos = (effCt / effDur) * clip.offsetWidth;
-  ph.style.left = pos + 'px';
-  /* Auto-scroll */
-  var wrap = document.getElementById('gw-ved-filmwrap');
-  if (wrap && wrap.clientWidth > 0) {
-    var clipLeft = 0, el = clip;
-    while (el && el !== wrap) { clipLeft += el.offsetLeft; el = el.offsetParent; }
-    var absPos = clipLeft + pos;
-    var rel = absPos - wrap.scrollLeft;
-    if (rel > wrap.clientWidth * 0.72 || rel < 20) {
-      wrap.scrollLeft = Math.max(0, absPos - wrap.clientWidth * 0.3);
-    }
-  }
-}
-
-/* ── Reculer / Avancer de N secondes ── */
-function _gwVedSeekRel(s) {
-  var v = document.getElementById('gw-ved-vid');
-  if (!v || !v.duration) return;
-  v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + s));
-}
-
-/* ── Son (piste audio — stub) ── */
-function _gwVedAddSound() {
-  showToast('Ajouter un son — disponible prochainement', 'info');
-}
-
-/* ══ DRAG-TO-REORDER CLIPS ══════════════════════════════════════════════════ */
-
-/**
- * Lie les interactions tap (sélection) ET drag horizontal (déplacement)
- * sur un bloc clip secondaire.
- */
-function _gwVedBindClipInteraction(el, clipIdx) {
-  var sx = 0, moved = false;
-
-  function start(cx) { sx = cx; moved = false; el.style.transition = ''; }
-
-  function move(cx) {
-    var dx = cx - sx;
-    if (!moved && Math.abs(dx) > 10) {
-      moved = true;
-      el.style.opacity = '0.55';
-    }
-    if (moved) el.style.transform = 'translateX(' + dx + 'px)';
-  }
-
-  function end(cx) {
-    var dx = cx - sx;
-    el.style.opacity   = '';
-    el.style.transform = '';
-    if (!moved) {
-      /* Tap simple → sélectionner le clip pour l'édition */
-      _gwVedSelectClip(clipIdx);
-    } else {
-      /* Drag → déplacer si distance suffisante */
-      var threshold = (el.offsetWidth || 60) * 0.35;
-      if (Math.abs(dx) > threshold) {
-        _gwVedMoveClip(clipIdx, dx < 0 ? -1 : 1);
-      }
-    }
-  }
-
-  /* Touch */
-  el.addEventListener('touchstart', function(e) {
-    start(e.touches[0].clientX);
-  }, { passive: true });
-  el.addEventListener('touchmove', function(e) {
-    if (moved) e.preventDefault();
-    move(e.touches[0].clientX);
-  }, { passive: false });
-  el.addEventListener('touchend', function(e) {
-    end(e.changedTouches[0].clientX);
-  });
-
-  /* Mouse (desktop) */
-  el.addEventListener('mousedown', function(e) {
-    start(e.clientX);
-    var mv = function(ev) { move(ev.clientX); };
-    var up = function(ev) {
-      end(ev.clientX);
-      document.removeEventListener('mousemove', mv);
-      document.removeEventListener('mouseup', up);
-    };
-    document.addEventListener('mousemove', mv);
-    document.addEventListener('mouseup', up);
-  });
-}
-
-/**
- * Déplace le clip secondaire d'une position dans la liste.
- * dir = -1 (vers la gauche/avant) ou +1 (vers la droite/après).
- */
-function _gwVedMoveClip(clipIdx, dir) {
-  var i  = clipIdx - 1;           /* index 0-based dans _ved.clips */
-  var ni = i + dir;
-  if (ni < 0 || ni >= _ved.clips.length) {
-    showToast(dir < 0 ? 'Déjà en premier' : 'Déjà en dernier', 'info');
-    return;
-  }
-  /* Échange les clips */
-  var tmp = _ved.clips[i]; _ved.clips[i] = _ved.clips[ni]; _ved.clips[ni] = tmp;
-  /* Échange les transitions correspondantes */
-  var tt  = _ved.transitions[Math.min(i, ni)] || 'none';
-  /* On réinitialise les transitions (swap simple suffit) */
-  var t1  = _ved.transitions[i]  || 'none';
-  var t2  = _ved.transitions[ni] || 'none';
-  _ved.transitions[i]  = t2;
-  _ved.transitions[ni] = t1;
-  /* Recharge le clip 0 si un autre était actif */
-  if (_ved.activeClip !== 0) {
-    var v = document.getElementById('gw-ved-vid');
-    if (v && _pickedVideo) { v.src = _pickedVideo.url; v.muted = _ved.muted; v.load(); }
-    _ved.activeClip = 0;
-  }
-  _ved.selectedClip = 0;
-  /* Reconstruit le filmstrip */
-  var mainDur = _gwVedClipRealDur(0);
-  if (!mainDur) { var vv = document.getElementById('gw-ved-vid'); if (vv) mainDur = vv.duration; }
-  if (mainDur > 0) _gwVedBuildTimeline(mainDur);
-  _gwVedShowPanel('trim');
-  showToast('Clip déplacé ✓', 'ok');
-}
-
-/* ══ MULTI-CLIP : LECTURE SÉQUENTIELLE ══════════════════════════════════════ */
-
-/* Retourne le tableau complet [clip0, clip1, clip2, ...] */
-function _gwVedAllClips() {
-  var main = {
-    url: _pickedVideo ? _pickedVideo.url : '',
-    duration: _pickedVideo ? (_pickedVideo.duration || 0) : 0,
-    trim: _ved.trim, cuts: _ved.cuts, muted: _ved.muted
-  };
-  return [main].concat(_ved.clips);
-}
-
-/* Passe au clip suivant (appelé par timeupdate/ended) */
-function _gwVedNextClip() {
-  if (_ved._nextPending) return;
-  _ved._nextPending = true;
-  var all = _gwVedAllClips();
-  var next = _ved.activeClip + 1;
-  if (next >= all.length) {
-    /* Fin de tous les clips — on pause */
-    var v = document.getElementById('gw-ved-vid');
-    if (v) { v.pause(); v.currentTime = (_ved.trim.start || 0); }
-    var ico = document.getElementById('gw-ved-playico');
-    if (ico) ico.className = 'fas fa-play';
-    _ved.activeClip = 0;
-    _ved._nextPending = false;
-    return;
-  }
-  var transType = _ved.transitions[_ved.activeClip] || 'none';
-  _gwVedApplyTransitionFx(transType, function() {
-    _ved._nextPending = false;
-    _gwVedLoadClip(next);
-  });
-}
-
-/* Charge et joue le clip à l'index donné */
-function _gwVedLoadClip(idx) {
-  _ved.activeClip  = idx;
-  _ved.selectedClip = idx;
-  var all = _gwVedAllClips();
-  var cl  = all[idx];
-  if (!cl) return;
-  var v = document.getElementById('gw-ved-vid');
-  if (!v) return;
-  v.src   = cl.url;
-  v.muted = cl.muted !== undefined ? cl.muted : _ved.muted;
-  v.load();
-  var startAt = (cl.trim && cl.trim.start) || 0;
-  v.addEventListener('loadedmetadata', function onLM() {
-    v.removeEventListener('loadedmetadata', onLM);
-    v.currentTime = startAt;
-    v.play().catch(function(){});
-    var ico = document.getElementById('gw-ved-playico');
-    if (ico) ico.className = 'fas fa-pause';
-  });
-  /* Surbrillance filmstrip */
-  for (var i = 0; i < all.length; i++) {
-    var el = document.getElementById('gw-ved-clip-' + i);
-    if (el) el.style.borderColor = (i === idx) ? '#7C3AED' : (i === 0 ? '#5B21B6' : '#1D4ED8');
-  }
-  if (_ved.mode === 'trim') _gwVedShowPanel('trim');
-}
-
-/* Sélectionne un clip pour l'édition (sans forcément le jouer) */
-function _gwVedSelectClip(idx) {
-  _ved.selectedClip = idx;
-  var all = _gwVedAllClips();
-  var cl  = all[idx];
-  if (!cl) return;
-  /* Si ce n'est pas le clip actif, on le charge en pause pour preview */
-  if (idx !== _ved.activeClip) {
-    _ved.activeClip = idx;
-    var v = document.getElementById('gw-ved-vid');
-    if (v) {
-      v.src = cl.url; v.muted = cl.muted !== undefined ? cl.muted : _ved.muted; v.load();
-      var st = (cl.trim && cl.trim.start) || 0;
-      v.addEventListener('loadedmetadata', function onLM2() {
-        v.removeEventListener('loadedmetadata', onLM2);
-        v.currentTime = st;
-      });
-    }
-  }
-  /* Surbrillance */
-  for (var i = 0; i < all.length; i++) {
-    var el = document.getElementById('gw-ved-clip-' + i);
-    if (el) el.style.borderColor = (i === idx) ? '#7C3AED' : (i === 0 ? '#5B21B6' : '#1D4ED8');
-  }
-  if (_ved.mode === 'trim') _gwVedShowPanel('trim');
-}
-
-/* Applique un effet visuel de transition sur le wrap */
-function _gwVedApplyTransitionFx(type, cb) {
-  var wrap = document.getElementById('gw-ved-wrap');
-  if (!wrap || !type || type === 'none') { if (cb) cb(); return; }
-  var animMap = { fade:'gwOutroFade', slide:'gwOutroSlide', zoom:'gwZoomOut', blur:'gwOutroBlur' };
-  var anim = animMap[type] || 'gwOutroFade';
-  wrap.style.animation = anim + ' .35s ease forwards';
-  setTimeout(function() { wrap.style.animation = ''; if (cb) cb(); }, 380);
-}
-
-/* Crée un bouton de transition entre deux clips dans le filmstrip */
-function _gwVedMakeTransitionBtn(i) {
-  var btn = document.createElement('button');
-  btn.id = 'gw-ved-trans-' + i;
-  var type = _ved.transitions[i] || 'none';
-  btn.style.cssText =
-    'width:26px;height:56px;flex-shrink:0;border:none;background:none;' +
-    'cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;z-index:5';
-  btn.innerHTML = _gwVedTransBtnInner(type);
-  btn.onclick = function() { _gwVedShowTransitionPicker(i); };
-  return btn;
-}
-function _gwVedTransBtnInner(type) {
-  var active = type && type !== 'none';
-  return '<div style="width:22px;height:22px;border-radius:50%;' +
-    'background:' + (active?'#7C3AED':'#334155') + ';' +
-    'display:flex;align-items:center;justify-content:center;' +
-    'border:2px solid ' + (active?'#A78BFA':'#475569') + ';' +
-    'box-shadow:0 0 6px rgba(124,58,237,.35);font-size:10px;color:#fff">⬡</div>';
-}
-
-/* Affiche le picker de transition dans le panel */
-function _gwVedShowTransitionPicker(i) {
-  var panel = document.getElementById('gw-ved-panel');
-  if (!panel) return;
-  var cur = _ved.transitions[i] || 'none';
-  var opts = [
-    {id:'none', icon:'✕', lbl:'Aucune'},
-    {id:'fade', icon:'◻', lbl:'Fondu'},
-    {id:'slide',icon:'▶', lbl:'Glissement'},
-    {id:'zoom', icon:'🔍', lbl:'Zoom'},
-    {id:'blur', icon:'◎', lbl:'Flou'}
-  ];
-  var html = '<div style="padding:12px 16px">' +
-    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
-      '<button onclick="_gwVedShowPanel(\'trim\')" style="background:none;border:none;' +
-        'color:#A78BFA;cursor:pointer;font-size:20px;padding:0;line-height:1">‹</button>' +
-      '<span style="color:#fff;font-size:13px;font-weight:700">Transition · Clip ' + (i+1) + ' → ' + (i+2) + '</span>' +
-    '</div>' +
-    '<div style="display:flex;flex-wrap:wrap;gap:8px">';
-  opts.forEach(function(opt) {
-    var on = cur === opt.id;
-    html += '<button onclick="_gwVedSetTransition(' + i + ',\'' + opt.id + '\')" ' +
-      'style="flex:0 0 calc(33% - 6px);padding:10px 4px;border-radius:10px;cursor:pointer;text-align:center;' +
-      'background:' + (on?'rgba(124,58,237,.25)':'#1E293B') + ';' +
-      'border:1.5px solid ' + (on?'#7C3AED':'rgba(71,85,105,.4)') + '">' +
-      '<div style="font-size:18px">' + opt.icon + '</div>' +
-      '<div style="color:' + (on?'#A78BFA':'#94A3B8') + ';font-size:10px;font-weight:600;margin-top:3px">' + opt.lbl + '</div>' +
-    '</button>';
-  });
-  html += '</div></div>';
-  panel.innerHTML = html;
-}
-
-/* Enregistre la transition et met à jour le bouton */
-function _gwVedSetTransition(i, type) {
-  _ved.transitions[i] = type;
-  var btn = document.getElementById('gw-ved-trans-' + i);
-  if (btn) btn.innerHTML = _gwVedTransBtnInner(type);
-  _gwVedShowTransitionPicker(i);
-}
-
-/* ══ MAPPING TEMPS RÉEL ↔ TEMPS EFFECTIF (filmstrip compressé) ══════════════ */
-
-/* Durée réelle stockée pour un clip (avant coupes) */
-function _gwVedClipRealDur(clipIdx) {
-  if (clipIdx === 0) {
-    /* Essaie toutes les sources connues dans l'ordre de fiabilité */
-    var d = (_pickedVideo && _pickedVideo.duration > 0 ? _pickedVideo.duration : 0)
-         || (_ved.trim.end  > 0 ? _ved.trim.end  : 0);
-    if (!d) { var v0 = document.getElementById('gw-ved-vid'); if (v0 && v0.duration > 0 && _ved.activeClip === 0) d = v0.duration; }
-    return d || 0;
-  }
-  return (_ved.clips[clipIdx - 1] && _ved.clips[clipIdx - 1].duration) || 0;
-}
-
-/* Segments jouables pour un clip (exclut les coupes) */
-function _gwVedGetSegments(clipIdx, realDur) {
-  var cuts = clipIdx === 0 ? _ved.cuts : ((_ved.clips[clipIdx - 1] || {}).cuts || []);
-  var segs = [{start: 0, end: realDur}];
-  cuts.slice().sort(function(a, b) { return a.start - b.start; }).forEach(function(cut) {
-    var ns = [];
-    segs.forEach(function(s) {
-      if (cut.end <= s.start || cut.start >= s.end) { ns.push(s); }
-      else {
-        if (cut.start > s.start) ns.push({start: s.start, end: cut.start});
-        if (cut.end   < s.end  ) ns.push({start: cut.end,  end: s.end});
-      }
-    });
-    segs = ns;
-  });
-  return segs;
-}
-
-/* Durée effective (après coupes) */
-function _gwVedGetEffDur(clipIdx, realDur) {
-  if (!realDur) realDur = _gwVedClipRealDur(clipIdx);
-  var segs = _gwVedGetSegments(clipIdx, realDur);
-  var d = segs.reduce(function(a, s) { return a + (s.end - s.start); }, 0);
-  return Math.max(0.1, d);
-}
-
-/* Temps réel → position dans le filmstrip effectif */
-function _gwVedRealToEff(realT, clipIdx, realDur) {
-  var segs = _gwVedGetSegments(clipIdx, realDur);
-  var effT = 0;
-  for (var i = 0; i < segs.length; i++) {
-    if (realT <= segs[i].start) return effT;
-    if (realT <= segs[i].end)   return effT + (realT - segs[i].start);
-    effT += segs[i].end - segs[i].start;
-  }
-  return effT;
-}
-
-/* Position dans le filmstrip effectif → temps réel (inverse) */
-function _gwVedEffToReal(effT, clipIdx, realDur) {
-  var segs = _gwVedGetSegments(clipIdx, realDur);
-  var rem = effT;
-  for (var i = 0; i < segs.length; i++) {
-    var sd = segs[i].end - segs[i].start;
-    if (rem <= sd) return segs[i].start + rem;
-    rem -= sd;
-  }
-  return segs.length ? segs[segs.length - 1].end : effT;
-}
-
-/* ── Reconstruit le bloc filmstrip après une coupe (rétrécit + regénère thumbnails) ── */
-function _gwVedRebuildClipAfterCut(clipIdx) {
-  var allCl   = _gwVedAllClips();
-  var cl      = allCl[clipIdx];
-  if (!cl) return;
-  var realDur = _gwVedClipRealDur(clipIdx);
-  if (!realDur) { var vv = document.getElementById('gw-ved-vid'); if (vv) realDur = vv.duration; }
-  if (!realDur) return;
-  var segs    = _gwVedGetSegments(clipIdx, realDur);
-  var effDur  = segs.reduce(function(a, s) { return a + (s.end - s.start); }, 0);
-  if (effDur < 0.1) effDur = 0.1;
-  var newW    = Math.max(60, Math.round(effDur * _gwVedPxSec));
-  var block   = document.getElementById('gw-ved-clip-' + clipIdx);
-  if (!block) return;
-  /* Rétrécit le bloc */
-  block.style.width = newW + 'px';
-  /* Redimensionne et regénère le canvas */
-  var cv = block.querySelector('canvas');
-  if (cv) {
-    cv.width = newW; cv.height = 56;
-    var ctx = cv.getContext('2d');
-    ctx.fillStyle = '#1E293B'; ctx.fillRect(0, 0, newW, 56);
-    _gwVedGenThumbsSegs(cv, cl.url, realDur, newW, 56, segs, effDur);
-  }
-  /* Met à jour le label durée (2ème enfant du bloc, après canvas) */
-  var durLbl = block.children[1];
-  if (durLbl && !durLbl.id) durLbl.textContent = _vedFmt(effDur);
-  /* Supprime les overlays de coupe et cache la sélection */
-  block.querySelectorAll('.gw-ved-cut-ov').forEach(function(el) { el.remove(); });
-  var selOv = block.querySelector('.gw-ved-sel-ov');
-  if (selOv) selOv.style.display = 'none';
-  /* Remet les handles aux bords */
-  _gwVedUpdateTrimOverlays(clipIdx);
-}
-
-/* ── Génère les thumbnails en sautant les coupes ── */
-function _gwVedGenThumbsSegs(canvas, url, realDur, W, H, segments, effDur) {
-  var FRMW = 44;
-  var n    = Math.ceil(W / FRMW);
-  var ctx  = canvas.getContext('2d');
-  var tmp  = document.createElement('video');
-  tmp.muted = true; tmp.preload = 'metadata'; tmp.src = url;
-  var i = 0;
-  function next() {
-    if (i >= n) { tmp.src = ''; return; }
-    /* Temps effectif → temps réel */
-    var et = (i / n) * effDur, rem = et, rt = realDur;
-    for (var si = 0; si < segments.length; si++) {
-      var sd = segments[si].end - segments[si].start;
-      if (rem <= sd) { rt = segments[si].start + rem; break; }
-      rem -= sd;
-    }
-    tmp.currentTime = Math.min(rt, Math.max(0, realDur - 0.05));
-    tmp.addEventListener('seeked', function h() {
-      tmp.removeEventListener('seeked', h);
-      try { ctx.drawImage(tmp, i * FRMW, 0, FRMW, H); } catch(e) {}
-      i++; setTimeout(next, 20);
-    });
-  }
-  tmp.addEventListener('loadedmetadata', function() { next(); });
-  tmp.addEventListener('error', function() {});
-  tmp.load();
-}
-
-/* Dessine les zones coupées (rouge semi-transparent) sur le filmstrip — LEGACY, non utilisé */
-function _gwVedDrawCutsOnFilmstrip(clipIdx) {
-  var v = document.getElementById('gw-ved-vid');
-  if (!v || !v.duration) return;
-  var cuts = clipIdx === 0 ? _ved.cuts
-    : ((_ved.clips[clipIdx - 1] || {}).cuts || []);
-  var block = document.getElementById('gw-ved-clip-' + clipIdx);
-  if (!block) return;
-  block.querySelectorAll('.gw-ved-cut-ov').forEach(function(el) { el.remove(); });
-  cuts.forEach(function(cut) {
-    var ov = document.createElement('div');
-    ov.className = 'gw-ved-cut-ov';
-    var l = (cut.start / v.duration * 100).toFixed(2) + '%';
-    var w = ((cut.end - cut.start) / v.duration * 100).toFixed(2) + '%';
-    ov.style.cssText = 'position:absolute;top:0;bottom:0;left:' + l + ';width:' + w + ';' +
-      'background:rgba(239,68,68,.42);pointer-events:none;z-index:5;' +
-      'display:flex;align-items:center;justify-content:center;' +
-      'border:1px solid rgba(239,68,68,.65);border-radius:2px';
-    ov.innerHTML = '<span style="color:#fff;font-size:9px;text-shadow:0 1px 3px rgba(0,0,0,.8)">✂</span>';
-    block.appendChild(ov);
-  });
-}
-
-/* Toggle son pour un clip précis */
-function _gwVedToggleSoundClip(cidx) {
-  if (cidx === 0) {
-    _ved.muted = !_ved.muted;
-    var v = document.getElementById('gw-ved-vid');
-    if (v && _ved.activeClip === 0) v.muted = _ved.muted;
-  } else if (_ved.clips[cidx - 1]) {
-    var cl = _ved.clips[cidx - 1];
-    cl.muted = cl.muted === undefined ? !_ved.muted : !cl.muted;
-    var v2 = document.getElementById('gw-ved-vid');
-    if (v2 && _ved.activeClip === cidx) v2.muted = cl.muted;
-  }
-  _gwVedShowPanel('trim');
 }
 
 /* ── Play / Pause ── */
@@ -13003,11 +9743,10 @@ function _gwVedConfirm() {
   if (_pickedVideo) {
     var wrap = document.getElementById('gw-ved-wrap');
     _pickedVideo.editorData = {
-      filter:    _ved.filter,
-      effects:   JSON.parse(JSON.stringify(_ved.effects)),
-      trim:      Object.assign({}, _ved.trim),
-      cropRatio: _ved.cropRatio || null,
-      layers:    _ved.layers.map(function(l) {
+      filter:  _ved.filter,
+      effects: JSON.parse(JSON.stringify(_ved.effects)),
+      trim:    Object.assign({}, _ved.trim),
+      layers:  _ved.layers.map(function(l) {
         var el = document.getElementById('gw-ved-lyr-' + l.id);
         var pos = { x:50, y:40 };
         if (el && wrap) {
@@ -13019,10 +9758,8 @@ function _gwVedConfirm() {
         return Object.assign({}, l, pos);
       })
     };
-    _pickedVideo.trimStart  = _ved.trim.start > 0.1 ? _ved.trim.start : 0;
-    _pickedVideo.trimEnd    = _ved.trim.end;
-    _pickedVideo.cropRatio  = _ved.cropRatio  || null;
-    _pickedVideo.cropOffset = _ved.cropOffset ? Object.assign({}, _ved.cropOffset) : {x:50, y:50};
+    _pickedVideo.trimStart = _ved.trim.start > 0.1 ? _ved.trim.start : 0;
+    _pickedVideo.trimEnd   = _ved.trim.end;
   }
   _gwVedClose();
   renderVideoPreview();
@@ -13165,11 +9902,6 @@ function renderImgPreviews() {
         '<button class="rm-img" style="position:absolute;top:4px;right:4px" onclick="removeImgAt(' + i + ')">' +
           '<i class="fas fa-times"></i>' +
         '</button>' +
-        '<button onclick="editImgAt(' + i + ')" style="position:absolute;bottom:4px;right:4px;' +
-          'width:26px;height:26px;border-radius:50%;background:rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.35);' +
-          'color:#fff;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center">' +
-          '<i class="fas fa-sliders-h"></i>' +
-        '</button>' +
       '</div>';
   });
   html += '</div>';
@@ -13187,17 +9919,6 @@ function removeImgAt(idx) {
   document.getElementById('img-picker').value      = '';
   document.getElementById('cam-back-photo').value  = '';
   document.getElementById('cam-front-photo').value = '';
-}
-
-function editImgAt(idx) {
-  var originalSrc = _pickedImages[idx];
-  if (!originalSrc) return;
-  _gwShowPhotoEditor(originalSrc, function(editedUrl) {
-    _compressImageForChat(editedUrl, 200000, function(compressed) {
-      _pickedImages[idx] = compressed;
-      renderImgPreviews();
-    });
-  });
 }
 
 function removeImg() {
@@ -13302,39 +10023,15 @@ function renderVideoPreview() {
         '</div>';
     }
   }
-  var _cropR  = _pickedVideo.cropRatio  || null;
-  var _cropOff= _pickedVideo.cropOffset || {x:50, y:50};
-  var _vidCropStyle = 'width:100%;display:block;background:#000;';
-  if (_cropR) {
-    var _cParts = _cropR.split(':');
-    _vidCropStyle += 'aspect-ratio:' + _cParts[0] + '/' + _cParts[1] + ';object-fit:cover;max-height:320px;' +
-      'object-position:' + _cropOff.x + '% ' + _cropOff.y + '%;';
-  } else {
-    _vidCropStyle += 'max-height:260px;';
-  }
   preview.innerHTML =
-    '<video id="pub-prev-vid" src="' + _pickedVideo.url + '" controls playsinline webkit-playsinline ' +
-      'style="' + _vidCropStyle + '"></video>' +
+    '<video src="' + _pickedVideo.url + '" controls playsinline webkit-playsinline ' +
+      'style="width:100%;max-height:260px;display:block"></video>' +
     '<button class="rm-video" onclick="removeVideo()"><i class="fas fa-times"></i></button>' +
     '<div class="pub-video-meta">' +
       '<span><i class="fas fa-clock"></i> ' + formatDuration(_pickedVideo.duration) + '</span>' +
       '<span><i class="fas fa-hdd"></i> '   + formatFileSize(_pickedVideo.size)     + '</span>' +
       '<span><i class="fas fa-film"></i> '  + escHtml(_pickedVideo.name.slice(0, 22)) + '</span>' +
     '</div>' + metaTag;
-  /* Appliquer le trim sur la prévisualisation */
-  var _ppv = document.getElementById('pub-prev-vid');
-  var _pts = _pickedVideo.trimStart || 0;
-  var _pte = _pickedVideo.trimEnd   || 0;
-  if (_ppv && (_pts > 0 || _pte > 0)) {
-    _ppv.addEventListener('loadedmetadata', function() {
-      if (_pts > 0) _ppv.currentTime = _pts;
-    }, { once: true });
-    if (_pte > 0) {
-      _ppv.addEventListener('timeupdate', function() {
-        if (_ppv.currentTime >= _pte) { _ppv.pause(); _ppv.currentTime = _pts; }
-      });
-    }
-  }
 }
 
 function removeVideo() {
@@ -13801,7 +10498,7 @@ function _vsCreateItem(post, idx) {
   var pr      = post.ownerEmail ? (loadUserProfile(post.ownerEmail) || {}) : {};
   var nom     = pr.nom || (post.ownerEmail ? post.ownerEmail.split('@')[0] : 'Utilisateur');
   var photo   = pr.photo || '';
-  var ownerKey = post.ownerEmail || '';
+  var ownerKey = post.ownerEmail ? _gwFbKey(post.ownerEmail) : '';
   var followed = ownerKey ? isFollowing(ownerKey) : false;
   var isOwn    = _currentUser && post.ownerEmail === _currentUser.email;
 
@@ -13835,7 +10532,7 @@ function _vsCreateItem(post, idx) {
       avHtml +
       '<div style="display:flex;flex-direction:column;gap:2px;min-width:0">' +
         '<span class="vs-author">@' + escHtml(nom) + '</span>' +
-        (caption ? '<span class="vs-caption">' + _gwRenderTextWithHashtags(caption) + '</span>' : '') +
+        (caption ? '<span class="vs-caption">' + escHtml(caption) + '</span>' : '') +
       '</div>' +
       (!isOwn
         ? '<button class="vs-follow-btn" id="vs-follow-' + postIdStr + '"' +
@@ -14252,18 +10949,6 @@ function openShortsDiscover() {
   openVideoScroll(posts[0].id);
 }
 
-function openMarketplaceCollab() {
-  var navBtn = document.querySelector('[data-page="p-marketplace"]');
-  navTo(navBtn, 'p-marketplace');
-  renderMarketplaceUserServices();
-  setTimeout(function() {
-    var collabBtn = document.getElementById('mk-cat-btn-collab');
-    if (collabBtn) setMkCat(collabBtn, 'collab');
-    var collabSec = document.getElementById('mk-collab-section');
-    if (collabSec) collabSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, 150);
-}
-
 /* ── Videos Discover — YouTube-style ─────────────────────────────────── */
 var _vdCurrentFilter = 'tout';
 var _vdSearchQuery   = '';
@@ -14530,34 +11215,6 @@ function openVideoPlayer(src, duration) {
     if (mb) mb.style.opacity = '0';
   });
 
-  /* Lire et reset trim + crop en attente */
-  var _vpTS  = _vpPendingTrimStart  || 0;
-  var _vpTE  = _vpPendingTrimEnd    || 0;
-  var _vpCR  = _vpPendingCropRatio  || null;
-  var _vpCOff= _vpPendingCropOffset || {x:50, y:50};
-  _vpPendingTrimStart  = 0;
-  _vpPendingTrimEnd    = 0;
-  _vpPendingCropRatio  = null;
-  _vpPendingCropOffset = null;
-
-  /* Appliquer le ratio de crop + position sur le player vidéo */
-  var _vpArea = document.getElementById('vp-area');
-  if (_vpArea) {
-    if (_vpCR) {
-      var _vpCRParts = _vpCR.split(':');
-      var _vpCRAr    = _vpCRParts[0] + '/' + _vpCRParts[1];
-      _vpArea.style.aspectRatio    = _vpCRAr;
-      video.style.aspectRatio      = _vpCRAr;
-      video.style.objectFit        = 'cover';
-      video.style.objectPosition   = _vpCOff.x + '% ' + _vpCOff.y + '%';
-    } else {
-      _vpArea.style.aspectRatio  = '';
-      video.style.aspectRatio    = '16/9';
-      video.style.objectFit      = 'contain';
-      video.style.objectPosition = '50% 50%';
-    }
-  }
-
   /* Source — preload auto + force le navigateur à commencer le buffer immédiatement */
   video.preload = 'auto';
   video.playsInline = true;
@@ -14565,7 +11222,7 @@ function openVideoPlayer(src, duration) {
   video.style.transform  = 'translateZ(0)';
   video.src = src;
   video.load(); /* force le fetch immédiat — évite la saccade au premier play */
-  video.currentTime = _vpTS > 0 ? _vpTS : 0;
+  video.currentTime = 0;
   video.playbackRate = 1;
 
   /* Durée initiale */
@@ -14604,21 +11261,13 @@ function openVideoPlayer(src, duration) {
   /* Events vidéo */
   video.onloadedmetadata = function() {
     var d = video.duration;
-    if (durEl) durEl.textContent = formatDuration(_vpTE > 0 ? (_vpTE - _vpTS) : d);
-    if (seek)  { seek.min = _vpTS; seek.max = _vpTE > 0 ? _vpTE : d; }
-    if (_vpTS > 0) video.currentTime = _vpTS;
+    if (durEl) durEl.textContent = formatDuration(d);
+    if (seek)  seek.max = d;
   };
   video.ontimeupdate = function() {
     if (seek && !seek._dragging) seek.value = video.currentTime;
-    if (curEl) curEl.textContent = formatDuration(video.currentTime - (_vpTS || 0));
+    if (curEl) curEl.textContent = formatDuration(video.currentTime);
     _vpUpdateSeekGradient();
-    /* Appliquer la fin du trim */
-    if (_vpTE > 0 && video.currentTime >= _vpTE) {
-      video.pause();
-      video.currentTime = _vpTS > 0 ? _vpTS : 0;
-      _vpSetPlayIcon(false);
-      vpShowControls();
-    }
   };
   video.onplay = function() {
     _vpSetPlayIcon(true);
@@ -14653,12 +11302,7 @@ function openVideoPlayer(src, duration) {
 
 function closeVideoPlayer() {
   var video = document.getElementById('vp-video');
-  if (video) {
-    video.pause(); video.src = ''; video.ontimeupdate = null; video.onended = null;
-    video.style.aspectRatio = '16/9'; video.style.objectFit = 'contain'; video.style.objectPosition = '50% 50%';
-  }
-  var _vpArea = document.getElementById('vp-area');
-  if (_vpArea) _vpArea.style.aspectRatio = '';
+  if (video) { video.pause(); video.src = ''; video.ontimeupdate = null; video.onended = null; }
   if (_vpCommentsTimer) { clearInterval(_vpCommentsTimer); _vpCommentsTimer = null; }
   var modal = document.getElementById('video-player-modal');
   if (modal) modal.style.display = 'none';
@@ -14669,12 +11313,6 @@ function closeVideoPlayer() {
   /* Réactive l'autoplay feed */
   _initFeedVideoObserver();
 }
-
-/* ── Trim + crop pending pour openVideoPlayer (set avant appel, reset dedans) ── */
-var _vpPendingTrimStart  = 0;
-var _vpPendingTrimEnd    = 0;
-var _vpPendingCropRatio  = null;
-var _vpPendingCropOffset = null;
 
 /* ── Controls show/hide (tap-to-reveal, auto-hide 3s when playing) ── */
 var _vpCtrlTimer   = null;
@@ -14842,14 +11480,11 @@ function translatePost(postId) {
   /* Si UI en FR → traduit vers EN, sinon vers FR */
   var lang     = _getCurrentLang();
   var langpair = lang === 'fr' ? 'fr|en' : 'en|fr';
-  var query    = (post.text || '').slice(0, 500);
+  var query    = post.text.slice(0, 500);
 
-  var _trCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  var _trTimer = _trCtrl ? setTimeout(function() { _trCtrl.abort(); }, 10000) : null;
   fetch('https://api.mymemory.translated.net/get?q=' +
-        encodeURIComponent(query) + '&langpair=' + langpair,
-        { signal: _trCtrl ? _trCtrl.signal : undefined })
-    .then(function(r) { if (_trTimer) clearTimeout(_trTimer); return r.json(); })
+        encodeURIComponent(query) + '&langpair=' + langpair)
+    .then(function(r) { return r.json(); })
     .then(function(data) {
       var translated = data.responseData && data.responseData.translatedText;
       if (translated && translated !== query) {
@@ -14862,7 +11497,6 @@ function translatePost(postId) {
       btn.disabled = false;
     })
     .catch(function() {
-      if (_trTimer) clearTimeout(_trTimer);
       btn.innerHTML = '<i class="fas fa-language"></i> ' + t('post.translate');
       btn.disabled  = false;
       showToast('Traduction indisponible', 'err');
@@ -15230,11 +11864,7 @@ function publierPost() {
         videoType: _pickedVideo.videoType || 'video',
         vidType:  (_pubVidMeta && _pubVidMeta.vidType)  || '',
         category: (_pubVidMeta && _pubVidMeta.category) || '',
-        title:    (_pubVidMeta && _pubVidMeta.title)    || '',
-        trimStart:  _pickedVideo.trimStart  || 0,
-        trimEnd:    _pickedVideo.trimEnd    || 0,
-        cropRatio:  _pickedVideo.cropRatio  || null,
-        cropOffset: _pickedVideo.cropOffset || {x:50,y:50} }
+        title:    (_pubVidMeta && _pubVidMeta.title)    || '' }
     : null;
 
   /* Document : idbId + url courante + métadonnées */
@@ -15264,10 +11894,9 @@ function publierPost() {
     author:     _currentUser ? _currentUser.nom : 'Moi',
     role:       'Geniwork Member',
     verified:   false,
-    at:         postId,
+    at:         Date.now(),
     time:       'À l\'instant',
     text:       text,
-    hashtags:   _gwExtractHashtags(text),
     images:     _imagesSnapshot,               /* base64 pour affichage immédiat */
     video:      videoData,
     doc:        docData,
@@ -15650,12 +12279,12 @@ function markAllRead() {
 })();
 
 function getNotifIcon(type) {
-  var icons = { like: 'fa-heart', comment: 'fa-comment', share: 'fa-share-nodes', follow: 'fa-user-plus', system: 'fa-bell', milestone: 'fa-trophy', bug_report: 'fa-bug', plan_limit: 'fa-lock', official: 'fa-bullhorn', artiste_approved: 'fa-music', artiste_rejected: 'fa-times-circle' };
+  var icons = { like: 'fa-heart', comment: 'fa-comment', share: 'fa-share-nodes', follow: 'fa-user-plus', system: 'fa-bell', milestone: 'fa-trophy', bug_report: 'fa-bug', plan_limit: 'fa-lock', official: 'fa-bullhorn' };
   return icons[type] || 'fa-bell';
 }
 
 function getNotifBadgeCls(type) {
-  var cls = { like: 'nb-like', comment: 'nb-comment', share: 'nb-share', follow: 'nb-follow', system: 'nb-system', milestone: 'nb-milestone', bug_report: 'nb-system', plan_limit: 'nb-system', official: 'nb-system', artiste_approved: 'nb-milestone', artiste_rejected: 'nb-system' };
+  var cls = { like: 'nb-like', comment: 'nb-comment', share: 'nb-share', follow: 'nb-follow', system: 'nb-system', milestone: 'nb-milestone', bug_report: 'nb-system', plan_limit: 'nb-system', official: 'nb-system' };
   return cls[type] || 'nb-system';
 }
 
@@ -16677,10 +13306,8 @@ function _locDetectGPS() {
     function(pos) {
       var lat = pos.coords.latitude;
       var lng = pos.coords.longitude;
-      var _nomCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      var _nomTimer = _nomCtrl ? setTimeout(function() { _nomCtrl.abort(); }, 8000) : null;
-      fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&accept-language=fr', { signal: _nomCtrl ? _nomCtrl.signal : undefined })
-        .then(function(r) { if (_nomTimer) clearTimeout(_nomTimer); return r.json(); })
+      fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&accept-language=fr')
+        .then(function(r) { return r.json(); })
         .then(function(data) {
           var addr    = data.address || {};
           var city    = addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
@@ -18366,7 +14993,7 @@ function _saveDMConvList() {
         time:     c.time,
         lastMsg:  c.lastMsg,
         lastAt:   c.lastAt,
-        unread:   c.unread || 0, /* préservé — survivra au reload */
+        unread:   0, /* reset à 0 : _globalMsgPoll recalcule */
         archived: c.archived || false,
         messages: [] /* rechargées depuis gw_dm_* */
       };
@@ -18605,14 +15232,10 @@ function _writeGroupInbox(targetEmail, groupMeta) {
       if (idx !== -1) inbox[idx] = Object.assign({}, inbox[idx], groupMeta);
       localStorage.setItem(key, JSON.stringify(inbox));
     }
-    /* ── Sync Firebase inbox groupe ──
-       On écrit sur un nœud enfant unique par groupe (projOwnerEmail + projId)
-       pour ne pas écraser les invitations des autres membres. */
+    /* ── Sync Firebase inbox groupe ── */
     if (_gwFbReady && _gwFbDB) {
-      var _fbGrpInboxKey  = _gwFbKey(targetEmail);
-      var _fbGrpEntryKey  = _gwFbKey(String(groupMeta.projOwnerEmail) + '_' + String(groupMeta.projId));
-      _gwFbDB.ref('gw/group_inboxes/' + _fbGrpInboxKey + '/' + _fbGrpEntryKey)
-        .set(groupMeta).catch(function(){});
+      var _fbGrpInboxKey = _gwFbKey(targetEmail);
+      _gwFbDB.ref('gw/group_inboxes/' + _fbGrpInboxKey).set(inbox).catch(function(){});
     }
   } catch(e) {}
 }
@@ -18755,9 +15378,6 @@ function renderConversations() {
         '<i class="fas fa-comment-slash"></i>' +
         '<p>' + (_msgTab === 'unread' ? 'Aucun message non lu' : 'Aucune conversation') + '</p>' +
       '</div>';
-    /* Badge toujours mis à jour même si la liste filtrée est vide */
-    var _totalUnreadEmpty = DEMO_CONVERSATIONS.reduce(function(s, c) { return s + (c.unread || 0); }, 0);
-    _updateMsgNavBadge(_totalUnreadEmpty);
     return;
   }
 
@@ -20098,15 +16718,6 @@ function _updateGroupMsg(conv, msgId, updates) {
   conv.messages = conv.messages.map(function(m) {
     return String(m.id) === String(msgId) ? Object.assign({}, m, updates) : m;
   });
-  /* Sync Firebase — tous les membres reçoivent la mise à jour via child_changed */
-  if (_gwFbReady && _gwFbDB) {
-    try {
-      var _fbGrpKey = _getGroupMsgKey(conv.projId, conv.projOwnerEmail)
-        .replace(/\./g,'__d__').replace(/@/g,'__a__');
-      _gwFbDB.ref('gw/group_msgs/' + _fbGrpKey + '/messages/' + msgId)
-        .update(updates).catch(function(){});
-    } catch(e) {}
-  }
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -20125,10 +16736,8 @@ function _updateGroupMsg(conv, msgId, updates) {
 
 /* Calcule la clé Firebase d'une conversation DM (emails triés + encodage) */
 function _dmFbKey(emailA, emailB) {
-  var a = (emailA || '').toLowerCase();
-  var b = (emailB || '').toLowerCase();
-  return ('gw_dm_' + [a, b].sort().join('__'))
-    .replace(/\./g, '__d__').replace(/@/g, '__a__').replace(/[#$\[\]\/]/g, '_');
+  return ('gw_dm_' + [emailA, emailB].sort().join('__'))
+    .replace(/\./g, '__d__').replace(/@/g, '__a__');
 }
 
 /* ── Ferme le listener Firebase de la conversation active ── */
@@ -20177,13 +16786,10 @@ function _dmOpen(conv) {
       'Chargement des messages…</div>';
   }
 
-  /* ── Architecture : once('value') déclenche le rendu groupé ──────────────
-     Firebase garantit que TOUS les child_added pour les données existantes
-     ont été émis AVANT que once('value') se déclenche.
-     Donc on accumule dans batchBuffer via child_added, puis on rend tout d'un
-     coup quand once('value') confirme que la lecture initiale est terminée.
-     Les messages temps réel arrivent ensuite via child_added (firstBatch=false).
-     L'idempotence data-msg-id évite les doublons si child_added rejoue des msgs. */
+  /* ── child_added : unique source de vérité ─────────────────────
+     Firebase rejoue TOUS les enfants existants au premier attach,
+     puis envoie les nouveaux en temps réel.
+     _appendBubble() (via data-msg-id) garantit l'idempotence.     */
   var firstBatch = true;
   var batchBuffer = [];
 
@@ -20195,7 +16801,7 @@ function _dmOpen(conv) {
     if (!msg || !msg.id || !msg.from) return;
 
     if (firstBatch) {
-      /* Accumule le premier lot → rendu groupé quand once('value') confirme la fin */
+      /* Accumule le premier lot → rendu groupé après 150 ms */
       batchBuffer.push(msg);
     } else {
       /* Message temps réel → rendu immédiat */
@@ -20231,10 +16837,8 @@ function _dmOpen(conv) {
     }
   });
 
-  /* ── once('value') : signal de fin du lot initial ──────────────────────────
-     Firebase garantit : tous les child_added existants ont déjà été émis.
-     On rend maintenant le lot groupé (batchBuffer) et on passe en mode temps réel. */
-  ref.once('value', function() {
+  /* Rendu groupé du premier lot (messages historiques) */
+  setTimeout(function() {
     if (_dmRef !== ref || _dmRefKey !== fbKey) return;
     firstBatch = false;
 
@@ -20243,14 +16847,14 @@ function _dmOpen(conv) {
 
     /* Trie chronologiquement avant de rendre */
     batchBuffer.sort(function(a, b2) { return (Number(a.id)||0) - (Number(b2.id)||0); });
-    batchBuffer.forEach(function(m) { _dmRenderMsg(m, ref, fbKey, true); });
+    batchBuffer.forEach(function(m) { _dmRenderMsg(m, ref, fbKey); });
     batchBuffer = [];
-    renderConversations(); /* un seul rebuild après tout le lot */
 
     setTimeout(_scrollChatToBottom, 60);
 
     /* ── Marque comme lus tous les messages reçus (from ≠ moi) ──
        Persisté dans Firebase → survit aux reconnexions */
+    batchBuffer.forEach(function() {}); /* reset (déjà vidé) */
     var msgsToMarkRead = [];
     var b2 = document.getElementById('chat-messages');
     if (b2) {
@@ -20289,11 +16893,11 @@ function _dmOpen(conv) {
         String(Date.now())
       );
     } catch(e) {}
-  });
+  }, 200);
 }
 
 /* ── Rend un message dans le DOM + met à jour l'état de la conversation ── */
-function _dmRenderMsg(msg, ref, fbKey, skipRefresh) {
+function _dmRenderMsg(msg, ref, fbKey) {
   if (_dmRef !== ref || _dmRefKey !== fbKey) return;
 
   var box = document.getElementById('chat-messages');
@@ -20331,7 +16935,7 @@ function _dmRenderMsg(msg, ref, fbKey, skipRefresh) {
        '📎 ' + (msg.fileName || 'Fichier'));
     conv2.lastMsg = lbl;
     conv2.lastAt  = msg.at || Date.now();
-    if (!skipRefresh) renderConversations();
+    renderConversations();
   }
 }
 
@@ -20821,20 +17425,18 @@ function handleChatAttach(input) {
     var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
     if (!conv) return;
     var msgType = isImage ? 'img' : (isVideo ? 'video' : 'file');
-    var _mNow   = Date.now();
-    var _mId    = _mNow * 1000 + Math.floor(Math.random() * 1000);
     var msg = {
-      id:       _mId,
+      id:       Date.now(),
       from:     _currentUser.email,
+      to:       conv.email,
       text:     isImage ? '' : file.name,
       type:     msgType,
       fileName: file.name,
       fileSize: _formatFileSize(file.size),
       time:     _nowTime(),
-      at:       _mNow,
+      at:       Date.now(),
       read:     false   /* ← sera mis à true quand le destinataire ouvre la conv */
     };
-    if (!conv.isGroup && conv.email) msg.to = conv.email;
     if (isStorageUrl) { msg.data_url = dataOrUrl; }
     else              { msg.data     = dataOrUrl; }
 
@@ -20908,9 +17510,7 @@ function handleChatAttach(input) {
   }
 }
 
-var _chatSendPending = false;
 function sendChatMessage() {
-  if (_chatSendPending) return; /* empêche le double-envoi */
   _closeEmojiPicker();
   var inp  = document.getElementById('chat-input');
   var text = inp ? inp.value.trim() : '';
@@ -20952,17 +17552,16 @@ function sendChatMessage() {
   _incDailyCount('msgs', _currentUser.email);
   _updateChatMsgCounter();  /* Met à jour le placeholder selon le nouveau compteur */
 
-  var _now  = Date.now();
-  var _msgId = _now * 1000 + Math.floor(Math.random() * 1000);
+  var ts = Date.now();
   var newMsg = {
-    id:   _msgId,
+    id:   ts,
     from: _currentUser.email,
+    to:   conv.email,
     text: text,
     type: 'text',
-    at:   _now,
+    at:   ts,
     read: false   /* ← sera mis à true par le destinataire quand il ouvre la conv */
   };
-  if (!conv.isGroup && conv.email) newMsg.to = conv.email;
   /* Ajoute replyTo seulement si présent (Firebase n'accepte pas undefined) */
   if (_chatReplyRef) newMsg.replyTo = _chatReplyRef;
   cancelChatReply();
@@ -20972,7 +17571,7 @@ function sendChatMessage() {
   if (box) {
     var row = document.createElement('div');
     row.className = 'chat-msg-row mine';
-    row.setAttribute('data-msg-id', String(_msgId));
+    row.setAttribute('data-msg-id', String(ts));
     row.innerHTML = _buildBubbleHtml(newMsg, true);
     box.appendChild(row);
     _scrollChatToBottom();
@@ -20980,12 +17579,10 @@ function sendChatMessage() {
 
   /* Mise à jour sidebar */
   conv.lastMsg = text;
-  conv.lastAt  = _now;
+  conv.lastAt  = ts;
   renderConversations();
 
   /* ── Écriture Firebase ── */
-  _chatSendPending = true;
-  setTimeout(function() { _chatSendPending = false; }, 1500); /* reset après 1.5s */
   if (conv.isGroup) {
     _saveGroupMsg(conv, newMsg);
     _saveGroupConvs();
@@ -22832,13 +19429,6 @@ function renderMarketplaceUserServices() {
     return;
   }
 
-  /* Ne pas afficher si on est en mode Artiste */
-  var _activeMkCat2 = (document.querySelector('.mk-cat.active') || {}).textContent || '';
-  if (_activeMkCat2.trim().toLowerCase().indexOf('artiste') !== -1) {
-    section.style.display = 'none';
-    return;
-  }
-
   section.style.display = '';
 
   var _svcCards = [];
@@ -22927,1657 +19517,36 @@ function _mkHideEmptyRows() {
 }
 
 function setMkCat(btn, cat) {
-  /* Bloquer si la section est désactivée par l'admin */
-  var cfg = _admGetPlansConfig();
-  var gated = { ebook: cfg.ebookEnabled !== false, collab: cfg.collabEnabled !== false, artiste: cfg.artisteEnabled !== false };
-  if (gated[cat] === false) { showToast('Section indisponible', 'err'); return; }
-
   document.querySelectorAll('.mk-cat').forEach(function(b) { b.classList.remove('active'); });
   btn.classList.add('active');
 
-  var isArtiste = (cat === 'artiste');
-
-  /* ── Barre de recherche Marketplace + Filtres : masqués en mode Artiste ── */
-  var mkSearchRow = document.querySelector('.mk-search-row');
-  if (mkSearchRow) mkSearchRow.style.display = isArtiste ? 'none' : '';
-
-  /* ── Section Commerce (Acheter/vendre + Transactions) ── */
-  var mkCommerce = document.getElementById('mk-commerce-section');
-  if (mkCommerce) mkCommerce.style.display = isArtiste ? 'none' : '';
-
-  /* ── Annonces des membres ── */
-  var mkUserSrv = document.getElementById('mk-user-services-section');
-  if (mkUserSrv) mkUserSrv.style.display = isArtiste ? 'none' : '';
-
-  /* ── Section Artiste ── */
-  var artisteSection = document.getElementById('mk-artiste-section');
-  if (artisteSection) {
-    artisteSection.style.display = isArtiste ? '' : 'none';
-    if (isArtiste) {
-      /* Réinitialiser la recherche artiste */
-      _artisteSearch = '';
-      var si = document.getElementById('artiste-search-input');
-      if (si) si.value = '';
-      _artisteLoad();
-    }
-  }
-
-  if (isArtiste) {
-    /* Tout masquer sauf les onglets et la section artiste */
-    document.querySelectorAll('.mk-service-card').forEach(function(c) { c.style.display = 'none'; });
-    document.querySelectorAll('.mk-cards-row').forEach(function(r) { r.style.display = 'none'; });
-    var collabSec = document.getElementById('mk-collab-section');
-    if (collabSec) collabSec.style.display = 'none';
-    /* Annonces des membres (créé dynamiquement par _mkRenderSystemListings) */
-    var annoncesSec = document.getElementById('mk-annonces-section');
-    if (annoncesSec) annoncesSec.style.display = 'none';
-    /* FAB "+" vendre */
-    var fab = document.getElementById('mk-sell-fab');
-    if (fab) fab.style.display = 'none';
-    return;
-  }
-
-  /* Stopper l'audio si on quitte la section Artiste */
-  var _plyr = document.getElementById('artiste-mini-player');
-  if (_plyr) {
-    var _aud = document.getElementById('artiste-audio-el');
-    if (_aud) { _aud.pause(); _aud.src = ''; }
-    _plyr.remove();
-  }
-
-  /* Restaurer ce qui était masqué en mode artiste */
-  var annoncesSec2 = document.getElementById('mk-annonces-section');
-  if (annoncesSec2) annoncesSec2.style.display = '';
-  var fab2 = document.getElementById('mk-sell-fab');
-  if (fab2) fab2.style.display = '';
-
-  /* ── Filtre par type de contenu (modes non-artiste) ── */
+  /* ── Filtre par type de contenu ── */
   document.querySelectorAll('.mk-service-card').forEach(function(c) {
     if (cat === 'all') { c.style.display = ''; return; }
-    var cardType  = (c.dataset.type || c.dataset.listingType || '').toLowerCase();
+
+    var cardType = (c.dataset.type || c.dataset.listingType || '').toLowerCase();
     var isCollab  = cardType === 'collab' || c.classList.contains('mk-collab-card');
     var isEbook   = cardType === 'ebook';
     var isProduct = cardType === 'product' || cardType === 'produit';
     var isService = !isCollab && !isEbook && !isProduct;
+
     var show = false;
-    if (cat === 'service') show = isService;
-    if (cat === 'product') show = isProduct;
-    if (cat === 'ebook')   show = isEbook;
-    if (cat === 'collab')  show = isCollab;
+    if (cat === 'service')  show = isService;
+    if (cat === 'product')  show = isProduct;
+    if (cat === 'ebook')    show = isEbook;
+    if (cat === 'collab')   show = isCollab;
+
     c.style.display = show ? '' : 'none';
   });
 
   /* Cache les lignes vides après filtrage */
   if (cat !== 'all') _mkHideEmptyRows();
-  else document.querySelectorAll('.mk-cards-row').forEach(function(r) { r.style.display = ''; });
+  else document.querySelectorAll('.mk-cards-row').forEach(function(r){ r.style.display = ''; });
 
-  /* Section Collaboration */
+  /* Afficher/masquer la section "Offres de collaboration" */
   var collabSection = document.getElementById('mk-collab-section');
   if (collabSection) {
     collabSection.style.display = (cat === 'all' || cat === 'collab') ? '' : 'none';
-  }
-}
-
-/* ══════════════════════════════════════════
-   ARTISTE / STREAMING — Sons & Musiques
-══════════════════════════════════════════ */
-
-var _artistePosts = [];
-
-var _artisteStats       = {};   /* { postId: { plays:N, downloads:N } } */
-var _artisteLikes       = {};   /* { postId: { userKey: 'like'|'dislike' } } */
-var _artisteSearch      = '';   /* terme de recherche actuel */
-var _artistePlayedSet   = {};   /* { postId: true } — sons déjà comptés cette session */
-var _artisteWeeklyPlays = {};   /* { postId: N } — écoutes de la semaine courante */
-
-/* Retourne la clé de la semaine courante ex: "2026-W23" */
-function _getArtisteWeekKey(offset) {
-  var d = new Date();
-  if (offset) d = new Date(d.getTime() + offset * 7 * 24 * 3600 * 1000);
-  /* Semaine ISO (lundi = jour 1) */
-  var jan1 = new Date(d.getFullYear(), 0, 1);
-  var dayOfYear = Math.floor((d - jan1) / 86400000);
-  var weekNum = Math.ceil((dayOfYear + jan1.getDay() + 1) / 7);
-  return d.getFullYear() + '-W' + String(weekNum).padStart(2, '0');
-}
-
-function _artisteCheckPendingNotif() {
-  if (!_currentUser || !_gwFbDB) return;
-  var uKey = _gwFbKey(_currentUser.email);
-  _gwFbDB.ref('gw/artiste_pending_notifs/' + uKey).once('value', function(snap) {
-    var notif = snap.val();
-    if (!notif) return;
-    /* Injecter dans le système de notifications de l'app */
-    pushNotif(_currentUser.email, notif);
-    /* Afficher un banner visible directement dans la section */
-    _artisteShowNotifBanner(notif);
-    /* Supprimer de Firebase une fois reçu */
-    _gwFbDB.ref('gw/artiste_pending_notifs/' + uKey).remove();
-  });
-}
-
-/* ═══════════════════════════════════════════════════════
-   TOP 10 HEBDOMADAIRE — notification automatique chaque semaine
-   Déclenché au premier chargement de la section Artiste.
-   Un seul client peut exécuter le job (verrou Firebase 10 min).
-   ═══════════════════════════════════════════════════════ */
-function _artisteCheckWeeklyTop10() {
-  if (!_gwFbDB) return;
-  var currentWk = _getArtisteWeekKey();
-  var prevWk    = _getArtisteWeekKey(-1); /* semaine précédente */
-
-  _gwFbDB.ref('gw/artiste_weekly_top_notif').once('value', function(snap) {
-    var meta = snap.val() || {};
-    /* Déjà envoyé cette semaine ? */
-    if (meta.lastWeek === currentWk) return;
-    /* Verrou anti-doublon : un autre client tourne depuis < 10 min ? */
-    if (meta.lockTs && (Date.now() - meta.lockTs) < 600000) return;
-
-    /* Acquérir le verrou */
-    _gwFbDB.ref('gw/artiste_weekly_top_notif/lockTs').set(Date.now());
-
-    /* Lire les écoutes de la semaine PRÉCÉDENTE */
-    _gwFbDB.ref('gw/artiste_weekly_plays/' + prevWk).once('value', function(wSnap) {
-      var weekData = wSnap.val();
-      if (!weekData) {
-        /* Pas de données semaine précédente → marquer comme fait et sortir */
-        _gwFbDB.ref('gw/artiste_weekly_top_notif').update({ lastWeek: currentWk, lockTs: null });
-        return;
-      }
-
-      /* Trier et garder le Top 10 */
-      var entries = Object.keys(weekData).map(function(pid) {
-        return { postId: pid, weekPlays: weekData[pid] };
-      });
-      entries.sort(function(a, b) { return b.weekPlays - a.weekPlays; });
-      var top10 = entries.slice(0, 10);
-
-      /* Charger les posts pour trouver l'auteur de chaque son */
-      _gwFbDB.ref('gw/artiste_posts').once('value', function(pSnap) {
-        var allPosts = {};
-        pSnap.forEach(function(ch) { allPosts[ch.key] = ch.val(); });
-
-        var sent = {}; /* éviter 2 notifs au même artiste */
-        top10.forEach(function(entry, rank) {
-          var post = allPosts[entry.postId];
-          if (!post || !post.userKey) return;
-          if (sent[post.userKey]) return;
-          sent[post.userKey] = true;
-
-          var rankNum = rank + 1;
-          var medal   = rankNum === 1 ? '🥇' : rankNum === 2 ? '🥈' : rankNum === 3 ? '🥉' : '🏅';
-          var title   = medal + ' Top ' + rankNum + ' de la semaine — Geniwork';
-          var body    =
-            'Félicitations ' + (post.artistName || post.userName || '') + ' ! 🎉\n\n' +
-            'Votre son "' + (post.title || 'Sans titre') + '" est classé ' + medal + ' N°' + rankNum +
-            ' du Top ' + top10.length + ' cette semaine avec ' + entry.weekPlays + ' écoute' +
-            (entry.weekPlays > 1 ? 's' : '') + ' !\n\n' +
-            'Continuez à publier de la bonne musique pour rester dans le classement 🎵';
-
-          var notifObj = {
-            type: 'artiste_top10',
-            title: title,
-            body: body,
-            rank: rankNum,
-            weekPlays: entry.weekPlays,
-            postTitle: post.title || '',
-            weekKey: prevWk,
-            ts: Date.now()
-          };
-
-          /* Stocker dans pending_notifs pour cross-device */
-          _gwFbDB.ref('gw/artiste_pending_notifs/' + post.userKey).set(notifObj);
-
-          /* Push FCM si possible */
-          if (typeof _gwSendPushNotif === 'function' && post.userEmail) {
-            _gwSendPushNotif(post.userEmail, title,
-              'Votre son est N°' + rankNum + ' du classement avec ' + entry.weekPlays + ' écoutes !',
-              'artiste-top10-week');
-          }
-        });
-
-        /* Marquer comme traité */
-        _gwFbDB.ref('gw/artiste_weekly_top_notif').update({
-          lastWeek: currentWk,
-          lastRun:  Date.now(),
-          lockTs:   null,
-          top10:    top10.slice(0, 10)
-        });
-      });
-    });
-  });
-}
-
-function _artisteShowNotifBanner(notif) {
-  var old = document.getElementById('artiste-notif-banner'); if (old) old.remove();
-  var isApproved = notif.type === 'artiste_approved';
-  var isTop10    = notif.type === 'artiste_top10';
-  var bg, border, color, icon, title;
-  if (isTop10) {
-    bg = 'linear-gradient(135deg,rgba(245,158,11,.12),rgba(124,58,237,.1))';
-    border = 'rgba(245,158,11,.35)'; color = '#F59E0B';
-    icon  = 'fa-trophy';
-    title = notif.title || '🏆 Classement Hebdomadaire';
-  } else if (isApproved) {
-    bg = 'rgba(16,185,129,.12)'; border = 'rgba(16,185,129,.35)'; color = '#34D399';
-    icon = 'fa-check-circle';
-    title = notif.title || '🎵 Compte Artiste Vérifié';
-  } else {
-    bg = 'rgba(239,68,68,.1)'; border = 'rgba(239,68,68,.3)'; color = '#F87171';
-    icon = 'fa-times-circle';
-    title = notif.title || '🎵 Demande Refusée';
-  }
-
-  var banner = document.createElement('div');
-  banner.id = 'artiste-notif-banner';
-  banner.style.cssText =
-    'border:1px solid ' + border + ';border-radius:14px;' +
-    'padding:14px 16px;margin-bottom:14px;position:relative;animation:artShareUp .3s ease';
-  banner.style.background = bg;
-
-  /* Corps du message avec retours à la ligne */
-  var msgText = notif.body || notif.msg || '';
-  var lines = msgText.split('\n').map(function(l) {
-    return l ? '<span style="display:block;margin-bottom:3px">' + escHtml(l) + '</span>' : '<br>';
-  }).join('');
-
-  banner.innerHTML =
-    '<button onclick="document.getElementById(\'artiste-notif-banner\').remove()" ' +
-      'style="position:absolute;top:8px;right:10px;background:none;border:none;color:' + color + ';font-size:16px;cursor:pointer;line-height:1">×</button>' +
-    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
-      '<div style="width:36px;height:36px;border-radius:50%;background:' + bg + ';border:1px solid ' + border + ';' +
-           'display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
-        '<i class="fas ' + icon + '" style="color:' + color + ';font-size:16px"></i>' +
-      '</div>' +
-      '<strong style="color:' + color + ';font-size:14px">' + escHtml(title) + '</strong>' +
-    '</div>' +
-    '<div style="color:#CBD5E1;font-size:12px;line-height:1.7">' + lines + '</div>';
-
-  var listWrap = document.getElementById('artiste-list-wrap');
-  if (listWrap && listWrap.parentNode) {
-    listWrap.parentNode.insertBefore(banner, listWrap);
-  }
-}
-
-function _artisteLoad() {
-  var wrap = document.getElementById('artiste-list-wrap');
-  if (!wrap) return;
-  wrap.innerHTML = '<div style="text-align:center;padding:24px 0"><i class="fas fa-spinner fa-spin" style="color:#7C3AED;font-size:22px"></i></div>';
-  /* Vérifier si l'artiste a une notification en attente */
-  _artisteCheckPendingNotif();
-  /* Vérifier le Top 10 hebdomadaire */
-  _artisteCheckWeeklyTop10();
-  /* Charge posts + stats + likes + weekly en parallèle */
-  var postsLoaded = false, statsLoaded = false, likesLoaded = false, weekLoaded = false;
-  function _tryRender() {
-    if (postsLoaded && statsLoaded && likesLoaded && weekLoaded) _artisteRender();
-  }
-  _gwFbDB.ref('gw/artiste_posts').orderByChild('ts').limitToLast(50).once('value', function(snap) {
-    _artistePosts = [];
-    snap.forEach(function(ch) { _artistePosts.unshift(Object.assign({ id: ch.key }, ch.val())); });
-    postsLoaded = true; _tryRender();
-  }, function() { _artistePosts = []; postsLoaded = true; _tryRender(); });
-
-  _gwFbDB.ref('gw/artiste_stats').once('value', function(snap) {
-    _artisteStats = snap.val() || {};
-    statsLoaded = true; _tryRender();
-  }, function() { _artisteStats = {}; statsLoaded = true; _tryRender(); });
-
-  _gwFbDB.ref('gw/artiste_likes').once('value', function(snap) {
-    _artisteLikes = snap.val() || {};
-    likesLoaded = true; _tryRender();
-  }, function() { _artisteLikes = {}; likesLoaded = true; _tryRender(); });
-
-  /* Écoutes de la semaine courante */
-  var _wk = _getArtisteWeekKey();
-  _gwFbDB.ref('gw/artiste_weekly_plays/' + _wk).once('value', function(snap) {
-    _artisteWeeklyPlays = snap.val() || {};
-    weekLoaded = true; _tryRender();
-  }, function() { _artisteWeeklyPlays = {}; weekLoaded = true; _tryRender(); });
-}
-
-function _artisteExtInfo(link) {
-  var lnk = (link || '').toLowerCase();
-  if (lnk.indexOf('spotify')    !== -1) return { icon: 'fab fa-spotify',   color: '#1DB954', name: 'Spotify' };
-  if (lnk.indexOf('soundcloud') !== -1) return { icon: 'fab fa-soundcloud', color: '#FF5500', name: 'SoundCloud' };
-  if (lnk.indexOf('youtube')    !== -1) return { icon: 'fab fa-youtube',    color: '#FF4444', name: 'YouTube' };
-  if (lnk.indexOf('deezer')     !== -1) return { icon: 'fas fa-music',      color: '#5B8DEF', name: 'Deezer' };
-  if (lnk.indexOf('boomplay')   !== -1) return { icon: 'fas fa-music',      color: '#FF6B35', name: 'Boomplay' };
-  if (lnk.indexOf('audiomack')  !== -1) return { icon: 'fas fa-headphones', color: '#FF6B35', name: 'Audiomack' };
-  return { icon: 'fas fa-external-link-alt', color: '#94A3B8', name: 'Écouter' };
-}
-
-function _artisteFmt(n) {
-  n = n || 0;
-  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-  if (n >= 1000)    return (n / 1000).toFixed(1) + 'k';
-  return String(n);
-}
-
-function _artisteFilteredPosts() {
-  var q = (_artisteSearch || '').toLowerCase().trim();
-  var list = q
-    ? _artistePosts.filter(function(p) {
-        return (p.title      || '').toLowerCase().indexOf(q) !== -1 ||
-               (p.artistName || '').toLowerCase().indexOf(q) !== -1 ||
-               (p.genre      || '').toLowerCase().indexOf(q) !== -1;
-      })
-    : _artistePosts.slice();
-  /* Tri par écoutes de la semaine (décroissant) */
-  list.sort(function(a, b) {
-    return (_artisteWeeklyPlays[b.id] || 0) - (_artisteWeeklyPlays[a.id] || 0);
-  });
-  return list;
-}
-
-/* Palette couleurs — fixe (dark), sauf les chiffres qui s'adaptent */
-function _artCol() {
-  var d = document.body.classList.contains('dark-mode');
-  return {
-    title:       '#F1F5F9',
-    artist:      '#94A3B8',
-    genre:       '#A78BFA',
-    header:      '#475569',
-    border:      '#1E293B',
-    rowHover:    '#1E293B',
-    num:         '#475569',
-    countVal:    d ? '#F1F5F9' : '#0F172A',   /* chiffre écoutes/téléch. adaptatif */
-    countLbl:    d ? '#64748B' : '#475569',   /* label "écoutes" / "téléch." adaptatif */
-    badge:       'rgba(124,58,237,.15)',
-    badgeTxt:    '#A78BFA',
-    badgeDl:     'rgba(16,185,129,.15)',
-    badgeDlTxt:  '#34D399',
-    extBg:       '#0F172A',
-    noResult:    '#475569',
-  };
-}
-
-function _artisteRender() {
-  var wrap = document.getElementById('artiste-list-wrap');
-  if (!wrap) return;
-
-  var filtered = _artisteFilteredPosts();
-
-  var c = _artCol(); /* palette thème */
-
-  if (!_artistePosts.length) {
-    wrap.innerHTML =
-      '<div style="text-align:center;padding:32px 0">' +
-        '<i class="fas fa-headphones-alt" style="font-size:44px;color:' + c.border + ';display:block;margin-bottom:12px"></i>' +
-        '<p style="color:' + c.countLbl + ';font-size:14px;margin:0">Aucun son publié<br><small>Soyez le premier à partager votre musique !</small></p>' +
-      '</div>';
-    return;
-  }
-
-  if (!filtered.length) {
-    wrap.innerHTML =
-      '<div style="text-align:center;padding:28px 0">' +
-        '<i class="fas fa-search" style="font-size:32px;color:' + c.border + ';display:block;margin-bottom:10px"></i>' +
-        '<p style="color:' + c.noResult + ';font-size:13px;margin:0">Aucun résultat pour "<b>' + escHtml(_artisteSearch) + '</b>"</p>' +
-      '</div>';
-    return;
-  }
-
-  /* ── Bannière classement semaine ── */
-  var _wkLabel = _getArtisteWeekKey();
-  var html =
-    '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;' +
-         'background:linear-gradient(135deg,rgba(124,58,237,.15),rgba(219,39,119,.1));' +
-         'border-radius:12px;border:1px solid rgba(124,58,237,.2)">' +
-      '<span style="font-size:18px">🔥</span>' +
-      '<div>' +
-        '<div style="font-size:12px;font-weight:700;color:#A78BFA">Classement — Semaine ' + _wkLabel.split('-W')[1] + '</div>' +
-        '<div style="font-size:10px;color:#64748B">Trié par écoutes cette semaine</div>' +
-      '</div>' +
-    '</div>' +
-
-    /* ── En-tête style Spotify ── */
-    '<div style="display:grid;grid-template-columns:28px 1fr 54px 54px 36px;gap:0 8px;' +
-         'padding:0 4px 8px;border-bottom:1px solid ' + c.border + ';margin-bottom:4px;align-items:center">' +
-      '<span style="color:' + c.header + ';font-size:10px;font-weight:700;text-transform:uppercase">#</span>' +
-      '<span style="color:' + c.header + ';font-size:10px;font-weight:700;text-transform:uppercase">Titre</span>' +
-      '<span style="color:' + c.header + ';font-size:10px;font-weight:700;text-transform:uppercase;text-align:center">' +
-        '<i class="fas fa-fire" title="Écoutes semaine" style="color:#F97316"></i></span>' +
-      '<span style="color:' + c.header + ';font-size:10px;font-weight:700;text-transform:uppercase;text-align:center">' +
-        '<i class="fas fa-download" title="Téléchargements"></i></span>' +
-      '<span></span>' +
-    '</div>';
-
-  filtered.forEach(function(p, idx) {
-    var hasFile    = !!p.audioUrl;
-    var hasExt     = !!p.extLink;
-    var ext        = hasExt ? _artisteExtInfo(p.extLink) : null;
-    var canDl      = !!p.allowDownload && hasFile;
-    var stats      = _artisteStats[p.id] || {};
-    var weekPlaysN = _artisteWeeklyPlays[p.id] || 0;
-    var plays      = _artisteFmt(weekPlaysN);
-    var downloads  = _artisteFmt(stats.downloads || 0);
-    var num        = idx + 1;
-    /* Médaille pour le podium */
-    var numHtml = num === 1 ? '🥇' : num === 2 ? '🥈' : num === 3 ? '🥉' : num;
-
-    html +=
-      '<div id="artiste-row-' + p.id + '" onclick="_artisteRowClick(\'' + p.id + '\')" ' +
-        'style="display:grid;grid-template-columns:28px 1fr 54px 54px 36px;gap:0 8px;align-items:center;' +
-               'padding:9px 4px;border-radius:8px;cursor:pointer;transition:background .12s" ' +
-        'onmouseover="this.style.background=\'' + c.rowHover + '\'" onmouseout="this.style.background=\'\'">' +
-
-        /* # — médaille pour top 3, numéro sinon */
-        '<div style="text-align:center;font-size:' + (num <= 3 ? '17' : '13') + 'px;font-weight:600;' +
-             'color:' + c.num + ';line-height:1">' + numHtml + '</div>' +
-
-        /* Cover + infos */
-        '<div style="display:flex;align-items:center;gap:10px;min-width:0">' +
-          '<div style="width:42px;height:42px;border-radius:6px;flex-shrink:0;overflow:hidden;' +
-               'background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;align-items:center;justify-content:center">' +
-            (p.coverUrl
-              ? '<img src="' + p.coverUrl + '" style="width:100%;height:100%;object-fit:cover" loading="lazy">'
-              : '<i class="fas fa-music" style="color:#fff;font-size:15px"></i>') +
-          '</div>' +
-          '<div style="min-width:0">' +
-            '<div style="color:' + c.title + ';font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
-              escHtml(p.title || 'Sans titre') + '</div>' +
-            '<div style="font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
-              '<span style="color:' + c.artist + '">' + escHtml(p.artistName || p.userName || 'Artiste') + '</span>' +
-              (p.genre ? '<span style="color:' + c.genre + '"> · ' + escHtml(p.genre) + '</span>' : '') +
-            '</div>' +
-            /* Badges */
-            '<div style="display:flex;gap:4px;margin-top:3px;flex-wrap:wrap">' +
-              (hasFile ? '<span style="background:' + c.badge + ';color:' + c.badgeTxt + ';font-size:9px;border-radius:10px;padding:1px 6px">Direct</span>' : '') +
-              (hasExt  ? '<span style="background:' + c.extBg + ';color:' + (ext ? ext.color : c.artist) + ';font-size:9px;border-radius:10px;padding:1px 6px">' + (ext ? ext.name : 'Lien') + '</span>' : '') +
-              (canDl   ? '<span style="background:' + c.badgeDl + ';color:' + c.badgeDlTxt + ';font-size:9px;border-radius:10px;padding:1px 6px"><i class="fas fa-download"></i> DL</span>' : '') +
-            '</div>' +
-            /* Boutons J'aime / J'aime pas */
-            (function() {
-              var myKey    = _currentUser ? _gwFbKey(_currentUser.email) : '';
-              var postVotes = _artisteLikes[p.id] || {};
-              var myVote   = myKey ? (postVotes[myKey] || '') : '';
-              var likesCnt = Object.keys(postVotes).filter(function(k){ return postVotes[k] === 'like'; }).length;
-              var disCnt   = Object.keys(postVotes).filter(function(k){ return postVotes[k] === 'dislike'; }).length;
-              var likedCol  = '#A78BFA';
-              var disCol    = '#F87171';
-              var likedBg   = myVote === 'like'    ? 'rgba(167,139,250,.2)' : 'transparent';
-              var disBg     = myVote === 'dislike' ? 'rgba(248,113,113,.2)' : 'transparent';
-              var likedTxt  = myVote === 'like'    ? likedCol : c.num;
-              var disTxt    = myVote === 'dislike' ? disCol   : c.num;
-              var btnBase   = 'border:none;border-radius:20px;padding:2px 7px;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;gap:3px;transition:all .15s';
-              return '<div style="display:flex;gap:6px;margin-top:5px" id="artiste-votes-' + p.id + '">' +
-                '<button onclick="event.stopPropagation();_artisteToggleLike(\'' + p.id + '\',\'like\')" ' +
-                  'style="' + btnBase + ';background:' + likedBg + ';color:' + likedTxt + '">' +
-                  '<i class="fas fa-thumbs-up"></i> ' + (likesCnt || '') + '</button>' +
-                '<button onclick="event.stopPropagation();_artisteToggleLike(\'' + p.id + '\',\'dislike\')" ' +
-                  'style="' + btnBase + ';background:' + disBg + ';color:' + disTxt + '">' +
-                  '<i class="fas fa-thumbs-down"></i> ' + (disCnt || '') + '</button>' +
-              '</div>';
-            })() +
-          '</div>' +
-        '</div>' +
-
-        /* Écoutes semaine */
-        '<div style="text-align:center">' +
-          '<div style="color:' + (weekPlaysN > 0 ? '#F97316' : c.countVal) + ';font-size:12px;font-weight:700">' +
-            (weekPlaysN > 0 ? '🔥 ' : '') + plays + '</div>' +
-          '<div style="color:' + c.countLbl + ';font-size:9px">cette sem.</div>' +
-        '</div>' +
-
-        /* Téléchargements */
-        '<div style="text-align:center">' +
-          '<div style="color:' + c.countVal + ';font-size:12px;font-weight:700">' + downloads + '</div>' +
-          '<div style="color:' + c.countLbl + ';font-size:9px">téléch.</div>' +
-        '</div>' +
-
-        /* Action principale */
-        '<div style="display:flex;flex-direction:column;gap:4px;align-items:center">' +
-          /* Play (audio direct) */
-          (hasFile
-            ? '<button onclick="event.stopPropagation();_artistePlay(\'' + p.id + '\')" ' +
-                'title="Écouter" ' +
-                'style="background:linear-gradient(135deg,#7C3AED,#DB2777);border:none;border-radius:50%;' +
-                       'width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer">' +
-                '<i class="fas fa-play" style="color:#fff;font-size:11px;margin-left:1px"></i>' +
-              '</button>'
-            : (hasExt
-              ? '<a href="' + escHtml(p.extLink) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" ' +
-                  'style="width:32px;height:32px;border-radius:50%;background:#0F172A;display:flex;align-items:center;justify-content:center;text-decoration:none">' +
-                  '<i class="' + ext.icon + '" style="color:' + ext.color + ';font-size:14px"></i>' +
-                '</a>'
-              : '')) +
-          /* Télécharger (si autorisé) */
-          (canDl
-            ? '<button onclick="event.stopPropagation();_artisteDownload(\'' + p.id + '\')" ' +
-                'title="Télécharger" ' +
-                'style="background:#0F172A;border:none;border-radius:50%;width:28px;height:28px;' +
-                       'display:flex;align-items:center;justify-content:center;cursor:pointer">' +
-                '<i class="fas fa-download" style="color:#34D399;font-size:10px"></i>' +
-              '</button>'
-            : '') +
-          /* Partager */
-          '<button onclick="event.stopPropagation();_artisteShare(\'' + p.id + '\')" ' +
-            'title="Partager" ' +
-            'style="background:#0F172A;border:none;border-radius:50%;width:28px;height:28px;' +
-                   'display:flex;align-items:center;justify-content:center;cursor:pointer">' +
-            '<i class="fas fa-share-alt" style="color:#60A5FA;font-size:10px"></i>' +
-          '</button>' +
-          /* Supprimer — visible uniquement pour le créateur */
-          (_currentUser && p.userKey === _gwFbKey(_currentUser.email)
-            ? '<button onclick="event.stopPropagation();_artisteConfirmDelete(\'' + p.id + '\')" ' +
-                'title="Supprimer mon son" ' +
-                'style="background:#0F172A;border:none;border-radius:50%;width:28px;height:28px;' +
-                       'display:flex;align-items:center;justify-content:center;cursor:pointer">' +
-                '<i class="fas fa-trash-alt" style="color:#F87171;font-size:10px"></i>' +
-              '</button>'
-            : '') +
-        '</div>' +
-
-      '</div>';
-  });
-
-  wrap.innerHTML = html;
-}
-
-function _artisteRowClick(postId) {
-  var post = _artistePosts.find(function(p) { return p.id === postId; });
-  if (!post) return;
-  if (post.audioUrl) { _artistePlay(postId); }
-  else if (post.extLink) { window.open(post.extLink, '_blank'); }
-}
-
-function _artisteIncrStat(postId, field) {
-  if (!_gwFbDB || !postId) return;
-  try {
-    _gwFbDB.ref('gw/artiste_stats/' + postId + '/' + field)
-      .transaction(function(v) { return (v || 0) + 1; });
-    /* Pour les écoutes : incrémenter aussi le compteur hebdomadaire */
-    if (field === 'plays') {
-      var _wk = _getArtisteWeekKey();
-      _gwFbDB.ref('gw/artiste_weekly_plays/' + _wk + '/' + postId)
-        .transaction(function(v) { return (v || 0) + 1; });
-      _artisteWeeklyPlays[postId] = (_artisteWeeklyPlays[postId] || 0) + 1;
-    }
-    /* Mise à jour locale immédiate */
-    if (!_artisteStats[postId]) _artisteStats[postId] = {};
-    _artisteStats[postId][field] = (_artisteStats[postId][field] || 0) + 1;
-    /* Re-trier et re-rendre la liste pour que le classement reflète la nouvelle écoute */
-    if (field === 'plays') {
-      try { _artisteRender(); } catch(e) {}
-    } else {
-      /* Pour les téléchargements : mise à jour ciblée de la cellule uniquement */
-      var targetRow = document.getElementById('artiste-row-' + postId);
-      if (targetRow) {
-        var cols = targetRow.children;
-        var _c = _artCol();
-        if (cols[3]) cols[3].innerHTML = '<div style="color:' + _c.countVal + ';font-size:12px;font-weight:700">' + _artisteFmt(_artisteStats[postId].downloads) + '</div><div style="color:' + _c.countLbl + ';font-size:9px">téléch.</div>';
-      }
-    }
-  } catch(e) {}
-}
-
-function _artisteDownload(postId) {
-  var post = _artistePosts.find(function(p) { return p.id === postId; });
-  if (!post || !post.audioUrl) return;
-  if (!post.allowDownload) { showToast('Téléchargement non autorisé', 'err'); return; }
-  var a = document.createElement('a');
-  a.href = post.audioUrl;
-  a.download = (post.title || 'son') + '.' + (post.audioUrl.split('.').pop().split('?')[0] || 'mp3');
-  a.target = '_blank';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  _artisteIncrStat(postId, 'downloads');
-  showToast('Téléchargement lancé ⬇', 'ok');
-}
-
-/* ── Partage d'un son ── */
-function _artisteShare(postId) {
-  var post = _artistePosts.find(function(p) { return p.id === postId; });
-  if (!post) return;
-
-  /* Fermer si déjà ouvert */
-  var old = document.getElementById('artiste-share-panel');
-  var oldOv = document.getElementById('artiste-share-overlay');
-  if (old) { old.remove(); if (oldOv) oldOv.remove(); return; }
-
-  var title    = post.title || 'Sans titre';
-  var artist   = post.artistName || post.userName || 'Artiste';
-  /* Lien deep-link vers ce son dans l'app Geniwork */
-  var shareUrl = 'https://geniwork.vercel.app/?song=' + encodeURIComponent(postId);
-  var fullMsg  = '🎵 ' + title + ' — ' + artist + '\nÉcoute sur Geniwork 👇\n' + shareUrl;
-  var msgText  = encodeURIComponent(fullMsg);
-  var urlEnc   = encodeURIComponent(shareUrl);
-  var twText   = encodeURIComponent('🎵 ' + title + ' — ' + artist + ' sur @Geniwork');
-
-  var wa  = 'https://wa.me/?text=' + msgText;
-  var fb  = 'https://www.facebook.com/sharer/sharer.php?u=' + urlEnc;
-  var tw  = 'https://twitter.com/intent/tweet?text=' + twText + '&url=' + urlEnc;
-  var tg  = 'https://t.me/share/url?url=' + urlEnc + '&text=' + encodeURIComponent('🎵 ' + title + ' — ' + artist);
-  var safeUrl = shareUrl.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-  var btnStyle = 'display:flex;flex-direction:column;align-items:center;gap:6px;text-decoration:none';
-  var icoStyle = 'width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center';
-  var lblStyle = 'color:#94A3B8;font-size:10px;text-align:center';
-
-  var panel = document.createElement('div');
-  panel.id = 'artiste-share-panel';
-  panel.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#1E293B;border-radius:20px 20px 0 0;' +
-    'padding:16px 16px 36px;z-index:10001;box-shadow:0 -8px 40px rgba(0,0,0,.6);' +
-    'border-top:1px solid #334155;animation:artShareUp .22s ease';
-
-  panel.innerHTML =
-    /* Handle */
-    '<div style="width:36px;height:4px;background:#475569;border-radius:2px;margin:0 auto 14px"></div>' +
-    /* Titre son */
-    '<div style="font-weight:700;color:#F1F5F9;font-size:14px;margin-bottom:2px;' +
-      'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(title) + '</div>' +
-    '<div style="color:#94A3B8;font-size:12px;margin-bottom:18px">' + escHtml(artist) + '</div>' +
-    /* Grille plateformes */
-    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">' +
-      /* WhatsApp */
-      '<a href="' + wa + '" target="_blank" rel="noopener" ' +
-        'onclick="var p=document.getElementById(\'artiste-share-panel\');var o=document.getElementById(\'artiste-share-overlay\');if(p)p.remove();if(o)o.remove()" ' +
-        'style="' + btnStyle + '">' +
-        '<div style="' + icoStyle + 'background:#25D366"><i class="fab fa-whatsapp" style="color:#fff;font-size:24px"></i></div>' +
-        '<span style="' + lblStyle + '">WhatsApp</span>' +
-      '</a>' +
-      /* Facebook */
-      '<a href="' + fb + '" target="_blank" rel="noopener" ' +
-        'onclick="var p=document.getElementById(\'artiste-share-panel\');var o=document.getElementById(\'artiste-share-overlay\');if(p)p.remove();if(o)o.remove()" ' +
-        'style="' + btnStyle + '">' +
-        '<div style="' + icoStyle + 'background:#1877F2"><i class="fab fa-facebook-f" style="color:#fff;font-size:22px"></i></div>' +
-        '<span style="' + lblStyle + '">Facebook</span>' +
-      '</a>' +
-      /* Twitter / X */
-      '<a href="' + tw + '" target="_blank" rel="noopener" ' +
-        'onclick="var p=document.getElementById(\'artiste-share-panel\');var o=document.getElementById(\'artiste-share-overlay\');if(p)p.remove();if(o)o.remove()" ' +
-        'style="' + btnStyle + '">' +
-        '<div style="' + icoStyle + 'background:#000;border:1px solid #333"><i class="fab fa-twitter" style="color:#fff;font-size:20px"></i></div>' +
-        '<span style="' + lblStyle + '">Twitter / X</span>' +
-      '</a>' +
-      /* Telegram */
-      '<a href="' + tg + '" target="_blank" rel="noopener" ' +
-        'onclick="var p=document.getElementById(\'artiste-share-panel\');var o=document.getElementById(\'artiste-share-overlay\');if(p)p.remove();if(o)o.remove()" ' +
-        'style="' + btnStyle + '">' +
-        '<div style="' + icoStyle + 'background:#229ED9"><i class="fab fa-telegram-plane" style="color:#fff;font-size:22px"></i></div>' +
-        '<span style="' + lblStyle + '">Telegram</span>' +
-      '</a>' +
-    '</div>' +
-    /* Copier le lien */
-    '<button onclick="_artisteCopyLink(\'' + safeUrl + '\')" ' +
-      'style="width:100%;padding:13px;background:#0F172A;border:1px solid #334155;border-radius:12px;' +
-             'color:#94A3B8;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:10px">' +
-      '<i class="fas fa-link" style="color:#7C3AED"></i> Copier le lien' +
-    '</button>' +
-    /* Fermer */
-    '<button onclick="var p=document.getElementById(\'artiste-share-panel\');var o=document.getElementById(\'artiste-share-overlay\');if(p)p.remove();if(o)o.remove()" ' +
-      'style="width:100%;padding:12px;background:transparent;border:1px solid #334155;border-radius:12px;' +
-             'color:#64748B;font-size:13px;cursor:pointer">' +
-      'Fermer' +
-    '</button>';
-
-  /* Overlay assombrisseur */
-  var overlay = document.createElement('div');
-  overlay.id = 'artiste-share-overlay';
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);z-index:10000';
-  overlay.onclick = function() { panel.remove(); overlay.remove(); };
-
-  document.body.appendChild(overlay);
-  document.body.appendChild(panel);
-}
-
-function _artisteCopyLink(url) {
-  var closePanel = function() {
-    var p = document.getElementById('artiste-share-panel');
-    var o = document.getElementById('artiste-share-overlay');
-    if (p) p.remove();
-    if (o) o.remove();
-  };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(url).then(function() {
-      showToast('Lien copié ! 🔗', 'ok');
-    }).catch(function() {
-      _artisteCopyLinkFallback(url);
-    });
-  } else {
-    _artisteCopyLinkFallback(url);
-  }
-  closePanel();
-}
-
-function _artisteCopyLinkFallback(url) {
-  var ta = document.createElement('textarea');
-  ta.value = url;
-  ta.style.cssText = 'position:fixed;top:-999px;left:-999px;opacity:0';
-  document.body.appendChild(ta);
-  ta.focus(); ta.select();
-  try { document.execCommand('copy'); showToast('Lien copié ! 🔗', 'ok'); }
-  catch(e) { showToast('Copiez ce lien : ' + url, 'info'); }
-  document.body.removeChild(ta);
-}
-
-/* ── Suppression d'un son (créateur uniquement) ── */
-function _artisteConfirmDelete(postId) {
-  /* Fermer si déjà ouvert */
-  var old = document.getElementById('artiste-del-modal');
-  var oldOv = document.getElementById('artiste-del-overlay');
-  if (old) { old.remove(); if (oldOv) oldOv.remove(); return; }
-
-  var post = _artistePosts.find(function(p) { return p.id === postId; });
-  if (!post) return;
-
-  var panel = document.createElement('div');
-  panel.id = 'artiste-del-modal';
-  panel.style.cssText =
-    'position:fixed;bottom:0;left:0;right:0;background:#1E293B;border-radius:20px 20px 0 0;' +
-    'padding:20px 16px 36px;z-index:10001;box-shadow:0 -8px 40px rgba(0,0,0,.6);' +
-    'border-top:1px solid #334155;animation:artShareUp .22s ease';
-
-  panel.innerHTML =
-    '<div style="width:36px;height:4px;background:#475569;border-radius:2px;margin:0 auto 16px"></div>' +
-    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">' +
-      '<div style="width:42px;height:42px;border-radius:8px;flex-shrink:0;overflow:hidden;' +
-           'background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;align-items:center;justify-content:center">' +
-        (post.coverUrl
-          ? '<img src="' + post.coverUrl + '" style="width:100%;height:100%;object-fit:cover">'
-          : '<i class="fas fa-music" style="color:#fff;font-size:14px"></i>') +
-      '</div>' +
-      '<div>' +
-        '<div style="font-weight:700;color:#F1F5F9;font-size:14px">' + escHtml(post.title || 'Sans titre') + '</div>' +
-        '<div style="color:#94A3B8;font-size:12px">' + escHtml(post.artistName || '') + '</div>' +
-      '</div>' +
-    '</div>' +
-    '<p style="color:#F87171;font-size:13px;margin:14px 0 18px;text-align:center">' +
-      '<i class="fas fa-exclamation-triangle" style="margin-right:6px"></i>' +
-      'Supprimer ce son définitivement ?<br>' +
-      '<span style="color:#64748B;font-size:11px">Cette action est irréversible.</span>' +
-    '</p>' +
-    '<div style="display:flex;gap:10px">' +
-      '<button onclick="var p=document.getElementById(\'artiste-del-modal\');var o=document.getElementById(\'artiste-del-overlay\');if(p)p.remove();if(o)o.remove()" ' +
-        'style="flex:1;padding:13px;background:#1E293B;border:1px solid #334155;border-radius:12px;' +
-               'color:#94A3B8;font-size:14px;cursor:pointer">Annuler</button>' +
-      '<button onclick="_artisteDeletePost(\'' + postId + '\')" ' +
-        'style="flex:1;padding:13px;background:#EF4444;border:none;border-radius:12px;' +
-               'color:#fff;font-size:14px;font-weight:700;cursor:pointer">' +
-        '<i class="fas fa-trash-alt"></i> Supprimer</button>' +
-    '</div>';
-
-  var overlay = document.createElement('div');
-  overlay.id = 'artiste-del-overlay';
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);z-index:10000';
-  overlay.onclick = function() { panel.remove(); overlay.remove(); };
-
-  document.body.appendChild(overlay);
-  document.body.appendChild(panel);
-}
-
-function _artisteDeletePost(postId) {
-  /* Fermer le modal de confirmation */
-  var p = document.getElementById('artiste-del-modal');
-  var o = document.getElementById('artiste-del-overlay');
-  if (p) p.remove();
-  if (o) o.remove();
-
-  if (!_gwFbDB)      { showToast('Firebase non initialisé', 'err'); return; }
-  if (!_currentUser) { showToast('Non connecté', 'err'); return; }
-
-  /* Récupère le post pour éventuellement supprimer les fichiers Storage */
-  var post = _artistePosts.find(function(x) { return x.id === postId; });
-
-  /* Vérification ownership côté client — double protection */
-  if (post && post.userKey && post.userKey !== _gwFbKey(_currentUser.email)) {
-    showToast('Action non autorisée', 'err');
-    return;
-  }
-
-  /* Supprime le post Firebase */
-  _gwFbDB.ref('gw/artiste_posts/' + postId).remove();
-  /* Supprime les stats */
-  _gwFbDB.ref('gw/artiste_stats/' + postId).remove();
-
-  /* Supprime les fichiers Storage si ce sont des URLs Firebase Storage */
-  if (post) {
-    var storageBase = 'firebasestorage.googleapis.com';
-    if (post.audioUrl && post.audioUrl.indexOf(storageBase) !== -1 && _gwFbStorage) {
-      try { _gwFbStorage.refFromURL(post.audioUrl).delete(); } catch(e) {}
-    }
-    if (post.coverUrl && post.coverUrl.indexOf(storageBase) !== -1 && _gwFbStorage) {
-      try { _gwFbStorage.refFromURL(post.coverUrl).delete(); } catch(e) {}
-    }
-    /* Stoppe le mini-player si ce son est en cours */
-    var player = document.getElementById('artiste-mini-player');
-    if (player) {
-      var audio = document.getElementById('artiste-audio-el');
-      if (audio) { audio.pause(); }
-      player.remove();
-    }
-  }
-
-  /* Mise à jour locale */
-  _artistePosts = _artistePosts.filter(function(x) { return x.id !== postId; });
-  delete _artisteStats[postId];
-  delete _artistePlayedSet[postId];
-  _artisteRender();
-
-  showToast('Son supprimé', 'ok');
-}
-
-/* ── Système J'aime / J'aime pas ── */
-function _artisteToggleLike(postId, vote) {
-  if (!_currentUser) { showToast('Connectez-vous pour voter', 'err'); return; }
-  var myKey = _gwFbKey(_currentUser.email);
-  if (!_artisteLikes[postId]) _artisteLikes[postId] = {};
-  var current = _artisteLikes[postId][myKey] || '';
-
-  if (current === vote) {
-    /* Même vote → annuler */
-    delete _artisteLikes[postId][myKey];
-    _gwFbDB.ref('gw/artiste_likes/' + postId + '/' + myKey).remove();
-  } else {
-    /* Nouveau vote ou changement */
-    _artisteLikes[postId][myKey] = vote;
-    _gwFbDB.ref('gw/artiste_likes/' + postId + '/' + myKey).set(vote);
-  }
-  /* Mise à jour locale du bloc votes sans re-rendre toute la liste */
-  _artisteRefreshVotes(postId);
-}
-
-function _artisteRefreshVotes(postId) {
-  var wrap = document.getElementById('artiste-votes-' + postId);
-  if (!wrap) return;
-  var myKey    = _currentUser ? _gwFbKey(_currentUser.email) : '';
-  var postVotes = _artisteLikes[postId] || {};
-  var myVote   = myKey ? (postVotes[myKey] || '') : '';
-  var likesCnt = Object.keys(postVotes).filter(function(k){ return postVotes[k] === 'like'; }).length;
-  var disCnt   = Object.keys(postVotes).filter(function(k){ return postVotes[k] === 'dislike'; }).length;
-  var likedBg  = myVote === 'like'    ? 'rgba(167,139,250,.2)' : 'transparent';
-  var disBg    = myVote === 'dislike' ? 'rgba(248,113,113,.2)' : 'transparent';
-  var likedTxt = myVote === 'like'    ? '#A78BFA' : '#475569';
-  var disTxt   = myVote === 'dislike' ? '#F87171' : '#475569';
-  var btnBase  = 'border:none;border-radius:20px;padding:2px 7px;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;gap:3px;transition:all .15s';
-  wrap.innerHTML =
-    '<button onclick="event.stopPropagation();_artisteToggleLike(\'' + postId + '\',\'like\')" ' +
-      'style="' + btnBase + ';background:' + likedBg + ';color:' + likedTxt + '">' +
-      '<i class="fas fa-thumbs-up"></i> ' + (likesCnt || '') + '</button>' +
-    '<button onclick="event.stopPropagation();_artisteToggleLike(\'' + postId + '\',\'dislike\')" ' +
-      'style="' + btnBase + ';background:' + disBg + ';color:' + disTxt + '">' +
-      '<i class="fas fa-thumbs-down"></i> ' + (disCnt || '') + '</button>';
-}
-
-function _artisteOnSearch(q) {
-  _artisteSearch = q || '';
-  _artisteRender();
-}
-
-function _artistePlay(postId) {
-  var post = _artistePosts.find(function(p) { return p.id === postId; });
-  if (!post) return;
-  if (!post.audioUrl) { showToast('Aucun audio disponible', 'err'); return; }
-  /* Fermer le player précédent s'il y en a un */
-  var existing = document.getElementById('artiste-mini-player');
-  if (existing) existing.remove();
-  var pl = document.createElement('div');
-  pl.id = 'artiste-mini-player';
-  pl.style.cssText = 'position:fixed;bottom:70px;left:12px;right:12px;background:#1E293B;border-radius:16px;padding:12px 14px;z-index:9999;box-shadow:0 12px 40px #0009;border:1px solid #334155';
-  /* Barre de progression audio */
-  pl.innerHTML =
-    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
-      '<div style="width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,#7C3AED,#DB2777);flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center">' +
-        (post.coverUrl ? '<img src="' + post.coverUrl + '" style="width:100%;height:100%;object-fit:cover">' : '<i class="fas fa-music" style="color:#fff;font-size:16px"></i>') +
-      '</div>' +
-      '<div style="flex:1;min-width:0">' +
-        '<div style="font-weight:700;color:#F1F5F9;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(post.title || 'Sans titre') + '</div>' +
-        '<div style="color:#94A3B8;font-size:11px">' + escHtml(post.artistName || post.userName || 'Artiste') + '</div>' +
-      '</div>' +
-      '<button id="artiste-pl-btn" onclick="_artisteTogglePlay()" style="background:#7C3AED;border:none;border-radius:50%;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0">' +
-        '<i class="fas fa-pause" style="color:#fff;font-size:14px"></i>' +
-      '</button>' +
-      '<button onclick="document.getElementById(\'artiste-mini-player\').remove()" style="background:#0F172A;border:none;border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0">' +
-        '<i class="fas fa-times" style="color:#64748B;font-size:12px"></i>' +
-      '</button>' +
-    '</div>' +
-    /* Barre de progression */
-    '<div id="artiste-pl-bar-wrap" style="background:#0F172A;border-radius:100px;height:4px;cursor:pointer" onclick="_artisteSeek(event)">' +
-      '<div id="artiste-pl-bar" style="background:linear-gradient(90deg,#7C3AED,#DB2777);height:100%;width:0%;border-radius:100px;transition:width .5s linear"></div>' +
-    '</div>' +
-    '<div style="display:flex;justify-content:space-between;margin-top:4px">' +
-      '<span id="artiste-pl-cur" style="color:#64748B;font-size:10px">0:00</span>' +
-      '<span id="artiste-pl-dur" style="color:#64748B;font-size:10px">--:--</span>' +
-    '</div>' +
-    '<audio id="artiste-audio-el" src="' + post.audioUrl + '" autoplay style="display:none"></audio>';
-  document.body.appendChild(pl);
-
-  /* Incrémenter le compteur d'écoutes — 1 fois par utilisateur par 24h */
-  var _now = Date.now();
-  var _DAY = 24 * 60 * 60 * 1000;
-  if (_currentUser && _gwFbDB) {
-    var _uKey = _gwFbKey(_currentUser.email);
-    _gwFbDB.ref('gw/artiste_played/' + postId + '/' + _uKey).once('value', function(snap) {
-      var lastPlay = snap.val() || 0;
-      if (_now - lastPlay >= _DAY) {
-        /* Plus de 24h depuis la dernière écoute → on compte */
-        _gwFbDB.ref('gw/artiste_played/' + postId + '/' + _uKey).set(_now);
-        _artisteIncrStat(postId, 'plays');
-      }
-      /* Sinon : déjà écouté aujourd'hui → pas de +1 */
-    });
-  } else {
-    /* Non connecté → dédup par session uniquement */
-    if (!_artistePlayedSet[postId]) {
-      _artistePlayedSet[postId] = true;
-      _artisteIncrStat(postId, 'plays');
-    }
-  }
-
-  /* Mise à jour de la barre de progression */
-  var aud = document.getElementById('artiste-audio-el');
-  aud.addEventListener('timeupdate', function() {
-    if (!aud.duration) return;
-    var pct = (aud.currentTime / aud.duration) * 100;
-    var bar = document.getElementById('artiste-pl-bar');
-    var cur = document.getElementById('artiste-pl-cur');
-    var dur = document.getElementById('artiste-pl-dur');
-    if (bar) bar.style.width = pct + '%';
-    if (cur) cur.textContent = _vedFmt(aud.currentTime);
-    if (dur) dur.textContent = _vedFmt(aud.duration);
-  });
-  aud.addEventListener('ended', function() {
-    var btn = document.getElementById('artiste-pl-btn');
-    if (btn) btn.innerHTML = '<i class="fas fa-play" style="color:#fff;font-size:14px;margin-left:2px"></i>';
-  });
-}
-
-function _artisteTogglePlay() {
-  var aud = document.getElementById('artiste-audio-el');
-  var btn = document.getElementById('artiste-pl-btn');
-  if (!aud) return;
-  if (aud.paused) {
-    aud.play();
-    if (btn) btn.innerHTML = '<i class="fas fa-pause" style="color:#fff;font-size:14px"></i>';
-  } else {
-    aud.pause();
-    if (btn) btn.innerHTML = '<i class="fas fa-play" style="color:#fff;font-size:14px;margin-left:2px"></i>';
-  }
-}
-
-function _artisteSeek(e) {
-  var aud  = document.getElementById('artiste-audio-el');
-  var wrap = document.getElementById('artiste-pl-bar-wrap');
-  if (!aud || !wrap || !aud.duration) return;
-  var rect = wrap.getBoundingClientRect();
-  var ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-  aud.currentTime = ratio * aud.duration;
-}
-
-function _artisteRefresh(btn) {
-  if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true; }
-  var done = 0;
-  function _done() { done++; if (done === 2) { _artisteRender(); if (btn) { btn.innerHTML = '<i class="fas fa-sync-alt"></i>'; btn.disabled = false; } } }
-  _gwFbDB.ref('gw/artiste_posts').orderByChild('ts').limitToLast(50).once('value', function(snap) {
-    _artistePosts = [];
-    snap.forEach(function(ch) { _artistePosts.unshift(Object.assign({ id: ch.key }, ch.val())); });
-    _done();
-  }, function() { _done(); });
-  _gwFbDB.ref('gw/artiste_stats').once('value', function(snap) {
-    _artisteStats = snap.val() || {};
-    _done();
-  }, function() { _artisteStats = {}; _done(); });
-}
-
-/* Fichiers sélectionnés dans le formulaire artiste */
-var _apAudioFile  = null;  /* File objet audio importé du téléphone */
-var _apCoverFile  = null;  /* File objet photo de couverture */
-var _apCoverDataUrl = null; /* aperçu base64 de la cover */
-
-function _artisteOpenPost() {
-  if (!_currentUser) { showToast('Connectez-vous d\'abord', 'err'); return; }
-  /* Vérifier le statut de vérification artiste */
-  var uKey = _gwFbKey(_currentUser.email);
-  _gwFbDB.ref('gw/artiste_verif_requests/' + uKey).once('value', function(snap) {
-    var req = snap.val();
-    if (!req) {
-      /* Jamais demandé → afficher le formulaire de demande de vérification */
-      _artisteShowVerifForm();
-    } else if (req.status === 'approved') {
-      /* Vérifié → ouvrir le formulaire de publication */
-      _artisteOpenPostForm();
-    } else if (req.status === 'pending') {
-      _artisteShowVerifStatus('pending', req);
-    } else if (req.status === 'rejected') {
-      _artisteShowVerifStatus('rejected', req);
-    }
-  }, function() {
-    /* Erreur réseau → laisser passer */
-    _artisteOpenPostForm();
-  });
-}
-
-function _artisteShowVerifForm() {
-  var old = document.getElementById('artiste-post-overlay'); if (old) old.remove();
-  var overlay = document.createElement('div');
-  overlay.id = 'artiste-post-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:#000c;z-index:10000;display:flex;align-items:flex-end';
-  var artistName = (_currentUser.nom || '').trim();
-  overlay.innerHTML =
-    '<div style="background:#0F172A;border-radius:20px 20px 0 0;width:100%;padding:20px 16px 36px;max-height:92vh;overflow-y:auto;box-sizing:border-box">' +
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">' +
-        '<div>' +
-          '<h3 style="color:#F1F5F9;font-size:17px;margin:0;font-weight:700"><i class="fas fa-music" style="color:#A78BFA;margin-right:8px"></i>Devenir Artiste</h3>' +
-          '<p style="color:#64748B;font-size:12px;margin:4px 0 0">Vérification requise avant de publier</p>' +
-        '</div>' +
-        '<button onclick="document.getElementById(\'artiste-post-overlay\').remove()" style="background:#1E293B;border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;color:#94A3B8;font-size:18px;line-height:1">×</button>' +
-      '</div>' +
-      /* Info box */
-      '<div style="background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.3);border-radius:12px;padding:12px 14px;margin-bottom:18px">' +
-        '<p style="color:#A78BFA;font-size:13px;margin:0;line-height:1.6">' +
-          '<i class="fas fa-shield-halved" style="margin-right:6px"></i>' +
-          'Pour publier de la musique sur Geniwork, votre compte artiste doit être vérifié par un administrateur. ' +
-          'Remplissez ce formulaire — vous recevrez une réponse rapidement.' +
-        '</p>' +
-      '</div>' +
-      /* Nom d'artiste */
-      '<label style="color:#94A3B8;font-size:12px;font-weight:600;display:block;margin-bottom:6px">NOM D\'ARTISTE *</label>' +
-      '<input id="av-artist-name" type="text" value="' + escHtml(artistName) + '" placeholder="Votre nom de scène…" ' +
-        'style="width:100%;padding:12px;background:#1E293B;border:1px solid #334155;border-radius:10px;color:#F1F5F9;font-size:14px;box-sizing:border-box;margin-bottom:14px">' +
-      /* Genre musical */
-      '<label style="color:#94A3B8;font-size:12px;font-weight:600;display:block;margin-bottom:6px">GENRE MUSICAL *</label>' +
-      '<input id="av-genre" type="text" placeholder="Afrobeat, Rap, Gospel, Zouk…" ' +
-        'style="width:100%;padding:12px;background:#1E293B;border:1px solid #334155;border-radius:10px;color:#F1F5F9;font-size:14px;box-sizing:border-box;margin-bottom:14px">' +
-      /* Bio */
-      '<label style="color:#94A3B8;font-size:12px;font-weight:600;display:block;margin-bottom:6px">PRÉSENTATION (optionnel)</label>' +
-      '<textarea id="av-bio" rows="3" placeholder="Parlez-nous de vous, de votre musique…" ' +
-        'style="width:100%;padding:12px;background:#1E293B;border:1px solid #334155;border-radius:10px;color:#F1F5F9;font-size:14px;box-sizing:border-box;resize:none;margin-bottom:18px"></textarea>' +
-      /* Condition originalité */
-      '<div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.25);border-radius:12px;padding:14px;margin-bottom:18px">' +
-        '<label style="display:flex;align-items:flex-start;gap:12px;cursor:pointer">' +
-          '<input type="checkbox" id="av-original-agree" style="margin-top:3px;width:18px;height:18px;accent-color:#10B981;flex-shrink:0">' +
-          '<span style="color:#CBD5E1;font-size:13px;line-height:1.6">' +
-            '<strong style="color:#34D399">Je certifie</strong> que toutes les musiques que je publierai sur Geniwork seront mes ' +
-            '<strong style="color:#34D399">créations originales</strong> et ne porteront pas atteinte aux droits d\'auteur d\'autres artistes.' +
-          '</span>' +
-        '</label>' +
-      '</div>' +
-      /* Submit */
-      '<button onclick="_artisteSubmitVerif()" id="av-submit-btn" ' +
-        'style="width:100%;padding:14px;background:linear-gradient(135deg,#7C3AED,#DB2777);border:none;border-radius:12px;' +
-               'color:#fff;font-size:14px;font-weight:700;cursor:pointer">' +
-        '<i class="fas fa-paper-plane"></i> Envoyer ma demande' +
-      '</button>' +
-    '</div>';
-  document.body.appendChild(overlay);
-}
-
-function _artisteShowVerifStatus(status, req) {
-  var old = document.getElementById('artiste-post-overlay'); if (old) old.remove();
-  var overlay = document.createElement('div');
-  overlay.id = 'artiste-post-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:#000c;z-index:10000;display:flex;align-items:flex-end';
-
-  var isPending = (status === 'pending');
-  var color  = isPending ? '#F59E0B' : '#EF4444';
-  var bgCol  = isPending ? 'rgba(245,158,11,.1)' : 'rgba(239,68,68,.1)';
-  var border = isPending ? 'rgba(245,158,11,.3)'  : 'rgba(239,68,68,.3)';
-  var icon   = isPending ? 'fa-clock'             : 'fa-times-circle';
-  var title  = isPending ? 'Demande en attente'   : 'Demande refusée';
-  var msg    = isPending
-    ? 'Votre demande de vérification artiste a été envoyée. Un administrateur va l\'examiner bientôt.'
-    : 'Votre demande a été refusée.' + (req.rejectionReason ? '<br><small style="color:#94A3B8">' + escHtml(req.rejectionReason) + '</small>' : '');
-
-  overlay.innerHTML =
-    '<div style="background:#0F172A;border-radius:20px 20px 0 0;width:100%;padding:24px 16px 36px;box-sizing:border-box">' +
-      '<div style="text-align:right;margin-bottom:12px">' +
-        '<button onclick="document.getElementById(\'artiste-post-overlay\').remove()" style="background:#1E293B;border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;color:#94A3B8;font-size:18px;line-height:1">×</button>' +
-      '</div>' +
-      '<div style="text-align:center;padding:10px 0 20px">' +
-        '<div style="width:64px;height:64px;border-radius:50%;background:' + bgCol + ';border:2px solid ' + border + ';' +
-             'display:flex;align-items:center;justify-content:center;margin:0 auto 14px">' +
-          '<i class="fas ' + icon + '" style="color:' + color + ';font-size:26px"></i>' +
-        '</div>' +
-        '<h3 style="color:#F1F5F9;font-size:17px;margin:0 0 10px;font-weight:700">' + title + '</h3>' +
-        '<p style="color:#94A3B8;font-size:14px;line-height:1.6;margin:0">' + msg + '</p>' +
-      '</div>' +
-      (status === 'rejected'
-        ? '<button onclick="document.getElementById(\'artiste-post-overlay\').remove();_artisteShowVerifForm()" ' +
-            'style="width:100%;padding:13px;background:linear-gradient(135deg,#7C3AED,#DB2777);border:none;border-radius:12px;' +
-                   'color:#fff;font-size:14px;font-weight:700;cursor:pointer;margin-top:8px">' +
-            '<i class="fas fa-redo"></i> Soumettre une nouvelle demande</button>'
-        : '') +
-    '</div>';
-  document.body.appendChild(overlay);
-}
-
-function _artisteSubmitVerif() {
-  if (!_currentUser) { showToast('Connectez-vous d\'abord', 'err'); return; }
-  if (!_gwFbDB)      { showToast('Firebase non initialisé', 'err'); return; }
-  var artistName = (document.getElementById('av-artist-name') || {}).value || '';
-  var genre      = (document.getElementById('av-genre')      || {}).value || '';
-  var bio        = (document.getElementById('av-bio')         || {}).value || '';
-  var agreed     = (document.getElementById('av-original-agree') || {}).checked;
-
-  if (!artistName.trim()) { showToast('Le nom d\'artiste est obligatoire', 'err'); return; }
-  if (!genre.trim())      { showToast('Le genre musical est obligatoire', 'err'); return; }
-  if (!agreed) { showToast('Veuillez accepter la condition d\'originalité', 'err'); return; }
-
-  var btn = document.getElementById('av-submit-btn');
-  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Envoi…'; }
-
-  var uKey = _gwFbKey(_currentUser.email);
-  var req = {
-    status:         'pending',
-    userEmail:      _currentUser.email,
-    userName:       _currentUser.nom || _currentUser.email,
-    userKey:        uKey,
-    artistName:     artistName.trim(),
-    genre:          genre.trim(),
-    bio:            bio.trim(),
-    agreedOriginal: true,
-    ts:             Date.now()
-  };
-  _gwFbDB.ref('gw/artiste_verif_requests/' + uKey).set(req)
-    .then(function() {
-      var ol = document.getElementById('artiste-post-overlay'); if (ol) ol.remove();
-      _artisteShowVerifStatus('pending', req);
-      showToast('Demande envoyée ! 🎵', 'ok');
-    })
-    .catch(function(e) {
-      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Envoyer ma demande'; }
-      showToast('Erreur : ' + (e.message || 'connexion'), 'err');
-    });
-}
-
-function _artisteOpenPostForm() {
-  /* ── Vérifier la limite du plan gratuit (3 sons max) ── */
-  if (!_currentUser || !_gwFbDB) { _artisteOpenPostFormDo(); return; }
-  var uKey = _gwFbKey(_currentUser.email);
-  var _lupProfile = loadUserProfile(_currentUser.email);
-  var _lupPlan = (_lupProfile && _lupProfile.planType) ? _lupProfile.planType : 'free';
-  if (_lupPlan === 'free') {
-    _gwFbDB.ref('gw/artiste_posts').orderByChild('userKey').equalTo(uKey).once('value', function(snap) {
-      var count = snap.numChildren();
-      if (count >= 3) {
-        _showPlanLimitModal(
-          '🎵 Limite du plan gratuit',
-          'Vous avez atteint la limite de <strong>3 sons</strong> pour le plan gratuit.<br>' +
-          'Passez à Premium ou Business Pro pour publier des sons illimités.',
-          'publication_musique'
-        );
-      } else {
-        _artisteOpenPostFormDo();
-      }
-    }, function() { _artisteOpenPostFormDo(); });
-    return;
-  }
-  _artisteOpenPostFormDo();
-}
-
-function _artisteOpenPostFormDo() {
-  _apAudioFile = null; _apCoverFile = null; _apCoverDataUrl = null;
-  var overlay = document.createElement('div');
-  overlay.id = 'artiste-post-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:#000c;z-index:10000;display:flex;align-items:flex-end';
-  overlay.innerHTML =
-    '<div id="ap-sheet" style="background:#0F172A;border-radius:20px 20px 0 0;width:100%;padding:20px 16px 36px;max-height:92vh;overflow-y:auto;box-sizing:border-box">' +
-      /* ── Header ── */
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">' +
-        '<h3 style="color:#F1F5F9;font-size:17px;margin:0;font-weight:700">🎵 Publier un son</h3>' +
-        '<button onclick="document.getElementById(\'artiste-post-overlay\').remove()" style="background:#1E293B;border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;color:#94A3B8;font-size:18px;line-height:1">×</button>' +
-      '</div>' +
-
-      /* ── Cover + Import audio côte à côte ── */
-      '<div style="display:flex;gap:12px;margin-bottom:16px">' +
-        /* Cover */
-        '<div style="flex-shrink:0">' +
-          '<div id="ap-cover-preview" onclick="_apPickCover()" style="width:90px;height:90px;border-radius:12px;background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;position:relative">' +
-            '<i class="fas fa-camera" style="color:#fff;font-size:22px;margin-bottom:4px"></i>' +
-            '<span style="color:#fff;font-size:10px;opacity:.8">Photo album</span>' +
-          '</div>' +
-          '<input id="ap-cover-input" type="file" accept="image/*" style="display:none" onchange="_apOnCoverChange(this)">' +
-        '</div>' +
-        /* Infos titre + artiste */
-        '<div style="flex:1;display:flex;flex-direction:column;gap:8px">' +
-          '<input id="ap-title" type="text" placeholder="Titre du son *" style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;box-sizing:border-box;transition:border-color .2s,transform .08s">' +
-          '<input id="ap-artist" type="text" placeholder="Nom d\'artiste *" style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;box-sizing:border-box;transition:border-color .2s,transform .08s">' +
-          '<input id="ap-genre" type="text" placeholder="Genre : Afrobeat, Trap… *" style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;box-sizing:border-box;transition:border-color .2s,transform .08s">' +
-        '</div>' +
-      '</div>' +
-
-      /* ── Import audio depuis le téléphone ── */
-      '<div style="margin-bottom:4px">' +
-        '<label style="color:#94A3B8;font-size:12px;font-weight:600;display:block;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Importer depuis votre téléphone</label>' +
-        '<div id="ap-audio-zone" onclick="_apPickAudio()" style="background:#1E293B;border:2px dashed #334155;border-radius:12px;padding:18px;text-align:center;cursor:pointer;transition:border-color .2s">' +
-          '<i class="fas fa-file-audio" style="color:#7C3AED;font-size:28px;display:block;margin-bottom:8px"></i>' +
-          '<div id="ap-audio-name" style="color:#F1F5F9;font-size:13px;font-weight:600">Appuyez pour importer un fichier audio</div>' +
-          '<div style="color:#64748B;font-size:11px;margin-top:4px">MP3 · AAC · M4A · WAV · OGG · FLAC · max 50 Mo</div>' +
-        '</div>' +
-        '<input id="ap-audio-input" type="file" accept="audio/mpeg,audio/mp3,audio/aac,audio/mp4,audio/x-m4a,audio/wav,audio/ogg,audio/flac,audio/*" style="display:none" onchange="_apOnAudioChange(this)">' +
-        '<div id="ap-audio-progress" style="display:none;margin-top:8px">' +
-          '<div style="background:#1E293B;border-radius:100px;height:6px;overflow:hidden">' +
-            '<div id="ap-audio-bar" style="background:linear-gradient(90deg,#7C3AED,#DB2777);height:100%;width:0%;transition:width .3s;border-radius:100px"></div>' +
-          '</div>' +
-          '<div id="ap-audio-pct" style="color:#A78BFA;font-size:11px;margin-top:4px;text-align:right">0%</div>' +
-        '</div>' +
-      '</div>' +
-
-      /* ── OU : lien externe ── */
-      '<div style="display:flex;align-items:center;gap:8px;margin:14px 0">' +
-        '<div style="flex:1;height:1px;background:#1E293B"></div>' +
-        '<span style="color:#475569;font-size:12px;white-space:nowrap">OU lien externe</span>' +
-        '<div style="flex:1;height:1px;background:#1E293B"></div>' +
-      '</div>' +
-      '<div style="margin-bottom:8px">' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' +
-          '<span style="background:#1DB95422;color:#1DB954;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:600">Spotify</span>' +
-          '<span style="background:#FF500022;color:#FF5500;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:600">SoundCloud</span>' +
-          '<span style="background:#FF000022;color:#FF4444;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:600">YouTube</span>' +
-          '<span style="background:#0057FF22;color:#5B8DEF;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:600">Deezer</span>' +
-          '<span style="background:#FF6B3522;color:#FF6B35;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:600">Boomplay</span>' +
-          '<span style="background:#3D9BE922;color:#3D9BE9;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:600">Audiomack</span>' +
-        '</div>' +
-        '<div style="position:relative">' +
-          '<i class="fas fa-link" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:#475569;font-size:13px"></i>' +
-          '<input id="ap-extlink" type="url" placeholder="Collez le lien de votre son…" style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px 10px 34px;color:#F1F5F9;font-size:14px;box-sizing:border-box">' +
-        '</div>' +
-      '</div>' +
-
-      /* ── Description ── */
-      '<div style="margin-bottom:20px">' +
-        '<textarea id="ap-desc" rows="2" placeholder="Description (optionnel) — parlez de votre son…" style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;box-sizing:border-box;resize:none"></textarea>' +
-      '</div>' +
-
-      /* ── Toggle téléchargement ── */
-      '<div onclick="_apToggleDl()" style="display:flex;align-items:center;justify-content:space-between;background:#1E293B;border-radius:12px;padding:12px 14px;margin-bottom:18px;cursor:pointer;user-select:none">' +
-        '<div>' +
-          '<div style="color:#F1F5F9;font-size:13px;font-weight:600"><i class="fas fa-download" style="color:#34D399;margin-right:6px"></i>Autoriser le téléchargement</div>' +
-          '<div style="color:#475569;font-size:11px;margin-top:2px">Les auditeurs pourront télécharger votre son</div>' +
-        '</div>' +
-        '<div id="ap-dl-track" style="position:relative;width:50px;height:28px;border-radius:100px;background:#334155;flex-shrink:0;transition:background .25s">' +
-          '<div id="ap-dl-knob" style="position:absolute;top:4px;left:4px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.35);transition:transform .25s"></div>' +
-        '</div>' +
-        '<input id="ap-allow-dl" type="checkbox" style="display:none">' +
-      '</div>' +
-
-      /* ── Bouton publier ── */
-      '<button id="ap-submit-btn" onclick="_artisteSubmitPost()" style="width:100%;background:linear-gradient(135deg,#7C3AED,#DB2777);border:none;border-radius:12px;padding:15px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">' +
-        '<i class="fas fa-paper-plane"></i> Publier mon son' +
-      '</button>' +
-    '</div>';
-  document.body.appendChild(overlay);
-}
-
-function _apShakeField(id) {
-  var el = document.getElementById(id);
-  if (!el) return;
-  el.style.borderColor = '#EF4444';
-  el.style.animation = 'none';
-  /* micro-shake */
-  el.style.transform = 'translateX(-4px)';
-  setTimeout(function() { el.style.transform = 'translateX(4px)'; }, 80);
-  setTimeout(function() { el.style.transform = 'translateX(-3px)'; }, 160);
-  setTimeout(function() { el.style.transform = 'translateX(0)'; }, 240);
-  setTimeout(function() { el.style.borderColor = '#334155'; }, 1500);
-  el.focus();
-}
-
-function _apToggleDl() {
-  var cb    = document.getElementById('ap-allow-dl');
-  var track = document.getElementById('ap-dl-track');
-  var knob  = document.getElementById('ap-dl-knob');
-  if (!cb) return;
-  cb.checked = !cb.checked;
-  if (track) track.style.background = cb.checked ? '#10B981' : '#334155';
-  if (knob)  knob.style.transform   = cb.checked ? 'translateX(22px)' : 'translateX(0)';
-}
-
-function _apPickCover() {
-  var inp = document.getElementById('ap-cover-input');
-  if (inp) inp.click();
-}
-function _apPickAudio() {
-  var inp = document.getElementById('ap-audio-input');
-  if (inp) inp.click();
-}
-
-function _apOnCoverChange(inp) {
-  var file = inp.files && inp.files[0];
-  if (!file) return;
-  inp.value = ''; /* permet de re-sélectionner le même fichier */
-  var reader = new FileReader();
-  reader.onload = function(e) { _apShowCropper(e.target.result); };
-  reader.readAsDataURL(file);
-}
-
-/* ═══════════════════════════════════════════════
-   RECADRAGE PHOTO DE COUVERTURE
-   ═══════════════════════════════════════════════ */
-var _apCropState = null;
-
-function _apShowCropper(dataUrl) {
-  var old = document.getElementById('ap-cropper-modal');
-  if (old) old.remove();
-
-  var DISP = Math.min(window.innerWidth - 48, 290); /* taille affichage carrée */
-  var OUT  = 500; /* taille de sortie en pixels */
-
-  var img = new Image();
-  img.onload = function() {
-    var minS = Math.max(DISP / img.width, DISP / img.height);
-    _apCropState = {
-      img: img, DISP: DISP, OUT: OUT,
-      scale: minS, minS: minS, maxS: minS * 4,
-      ox: 0, oy: 0,
-      drag: false, lx: 0, ly: 0,
-      pinch: false, ld: 0, lscale: minS
-    };
-
-    var modal = document.createElement('div');
-    modal.id = 'ap-cropper-modal';
-    modal.style.cssText =
-      'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.95);' +
-      'z-index:10005;display:flex;flex-direction:column;align-items:center;' +
-      'justify-content:center;padding:20px;overflow-y:auto';
-
-    modal.innerHTML =
-      '<div style="color:#F1F5F9;font-size:15px;font-weight:700;margin-bottom:14px">' +
-        '<i class="fas fa-crop-alt" style="color:#A78BFA;margin-right:8px"></i>Recadrer la photo</div>' +
-
-      /* Zone de recadrage */
-      '<div id="ap-crop-wrap" ' +
-        'style="position:relative;width:' + DISP + 'px;height:' + DISP + 'px;' +
-               'border-radius:12px;overflow:hidden;touch-action:none;user-select:none;cursor:grab;flex-shrink:0">' +
-        '<canvas id="ap-crop-canvas" width="' + DISP + '" height="' + DISP + '" style="display:block"></canvas>' +
-        /* Coins guides */
-        '<div style="position:absolute;inset:0;pointer-events:none;' +
-             'box-shadow:inset 0 0 0 1px rgba(167,139,250,.5)"></div>' +
-        '<div style="position:absolute;top:0;left:0;width:22px;height:22px;pointer-events:none;' +
-             'border-top:3px solid #A78BFA;border-left:3px solid #A78BFA;border-radius:3px 0 0 0"></div>' +
-        '<div style="position:absolute;top:0;right:0;width:22px;height:22px;pointer-events:none;' +
-             'border-top:3px solid #A78BFA;border-right:3px solid #A78BFA;border-radius:0 3px 0 0"></div>' +
-        '<div style="position:absolute;bottom:0;left:0;width:22px;height:22px;pointer-events:none;' +
-             'border-bottom:3px solid #A78BFA;border-left:3px solid #A78BFA;border-radius:0 0 0 3px"></div>' +
-        '<div style="position:absolute;bottom:0;right:0;width:22px;height:22px;pointer-events:none;' +
-             'border-bottom:3px solid #A78BFA;border-right:3px solid #A78BFA;border-radius:0 0 3px 0"></div>' +
-      '</div>' +
-
-      /* Slider zoom */
-      '<div style="width:' + DISP + 'px;margin-top:14px;display:flex;align-items:center;gap:10px">' +
-        '<i class="fas fa-search-minus" style="color:#475569;font-size:14px"></i>' +
-        '<input id="ap-crop-zoom" type="range" min="0" max="100" value="0" ' +
-               'oninput="_apCropSetZoom(this.value)" ' +
-               'style="flex:1;accent-color:#7C3AED;cursor:pointer">' +
-        '<i class="fas fa-search-plus" style="color:#A78BFA;font-size:14px"></i>' +
-      '</div>' +
-      '<p style="color:#475569;font-size:11px;margin:8px 0 18px;text-align:center">' +
-        'Glisser pour repositionner · Pincer ou slider pour zoomer</p>' +
-
-      /* Boutons */
-      '<div style="display:flex;gap:10px;width:' + DISP + 'px">' +
-        '<button onclick="_apCropCancel()" ' +
-          'style="flex:1;padding:13px;background:#1E293B;border:1px solid #334155;' +
-                 'border-radius:12px;color:#94A3B8;font-size:14px;cursor:pointer">Annuler</button>' +
-        '<button onclick="_apCropConfirm()" ' +
-          'style="flex:1;padding:13px;background:linear-gradient(135deg,#7C3AED,#DB2777);' +
-                 'border:none;border-radius:12px;color:#fff;font-size:14px;font-weight:700;cursor:pointer">' +
-          '<i class="fas fa-check"></i> Confirmer</button>' +
-      '</div>';
-
-    document.body.appendChild(modal);
-    _apCropDraw();
-
-    var wrap = document.getElementById('ap-crop-wrap');
-
-    /* ── Souris ── */
-    wrap.addEventListener('mousedown', function(e) {
-      e.preventDefault();
-      _apCropState.drag = true;
-      _apCropState.lx = e.clientX; _apCropState.ly = e.clientY;
-      wrap.style.cursor = 'grabbing';
-    });
-    document.addEventListener('mousemove', function(e) {
-      if (!_apCropState || !_apCropState.drag) return;
-      _apCropPan(e.clientX - _apCropState.lx, e.clientY - _apCropState.ly);
-      _apCropState.lx = e.clientX; _apCropState.ly = e.clientY;
-    });
-    document.addEventListener('mouseup', function() {
-      if (!_apCropState) return;
-      _apCropState.drag = false;
-      var w = document.getElementById('ap-crop-wrap');
-      if (w) w.style.cursor = 'grab';
-    });
-
-    /* ── Tactile ── */
-    wrap.addEventListener('touchstart', function(e) {
-      e.preventDefault();
-      if (e.touches.length === 1) {
-        _apCropState.drag = true; _apCropState.pinch = false;
-        _apCropState.lx = e.touches[0].clientX; _apCropState.ly = e.touches[0].clientY;
-      } else if (e.touches.length === 2) {
-        _apCropState.drag = false; _apCropState.pinch = true;
-        _apCropState.ld = _apCropPinchDist(e.touches);
-        _apCropState.lscale = _apCropState.scale;
-      }
-    }, { passive: false });
-
-    wrap.addEventListener('touchmove', function(e) {
-      e.preventDefault();
-      if (!_apCropState) return;
-      if (_apCropState.pinch && e.touches.length === 2) {
-        var d = _apCropPinchDist(e.touches);
-        var newS = Math.min(_apCropState.maxS,
-                   Math.max(_apCropState.minS, _apCropState.lscale * (d / (_apCropState.ld || 1))));
-        _apCropApplyScale(newS);
-      } else if (_apCropState.drag && e.touches.length === 1) {
-        _apCropPan(e.touches[0].clientX - _apCropState.lx,
-                   e.touches[0].clientY - _apCropState.ly);
-        _apCropState.lx = e.touches[0].clientX; _apCropState.ly = e.touches[0].clientY;
-      }
-    }, { passive: false });
-
-    wrap.addEventListener('touchend', function() {
-      if (_apCropState) { _apCropState.drag = false; _apCropState.pinch = false; }
-    });
-  };
-  img.src = dataUrl;
-}
-
-function _apCropPinchDist(touches) {
-  var dx = touches[0].clientX - touches[1].clientX;
-  var dy = touches[0].clientY - touches[1].clientY;
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-function _apCropPan(dx, dy) {
-  var s = _apCropState; if (!s) return;
-  s.ox += dx; s.oy += dy;
-  _apCropClamp(); _apCropDraw();
-}
-
-function _apCropClamp() {
-  var s = _apCropState; if (!s) return;
-  var iw = s.img.width  * s.scale;
-  var ih = s.img.height * s.scale;
-  var maxOx = Math.max(0, (iw - s.DISP) / 2);
-  var maxOy = Math.max(0, (ih - s.DISP) / 2);
-  s.ox = Math.max(-maxOx, Math.min(maxOx, s.ox));
-  s.oy = Math.max(-maxOy, Math.min(maxOy, s.oy));
-}
-
-function _apCropDraw() {
-  var s = _apCropState; if (!s) return;
-  var canvas = document.getElementById('ap-crop-canvas'); if (!canvas) return;
-  var ctx = canvas.getContext('2d');
-  var D = s.DISP;
-  ctx.clearRect(0, 0, D, D);
-  var iw = s.img.width  * s.scale;
-  var ih = s.img.height * s.scale;
-  ctx.drawImage(s.img, (D - iw) / 2 + s.ox, (D - ih) / 2 + s.oy, iw, ih);
-}
-
-function _apCropSetZoom(val) {
-  var s = _apCropState; if (!s) return;
-  var newS = s.minS + (val / 100) * (s.maxS - s.minS);
-  _apCropApplyScale(newS);
-}
-
-function _apCropApplyScale(newS) {
-  var s = _apCropState; if (!s) return;
-  s.scale = newS;
-  _apCropClamp(); _apCropDraw();
-  var sl = document.getElementById('ap-crop-zoom');
-  if (sl) sl.value = Math.round((s.scale - s.minS) / (s.maxS - s.minS) * 100);
-}
-
-function _apCropConfirm() {
-  var s = _apCropState; if (!s) return;
-  var ratio = s.OUT / s.DISP;
-  var off = document.createElement('canvas');
-  off.width = s.OUT; off.height = s.OUT;
-  var ctx = off.getContext('2d');
-  var iw = s.img.width  * s.scale * ratio;
-  var ih = s.img.height * s.scale * ratio;
-  ctx.drawImage(s.img, (s.OUT - iw) / 2 + s.ox * ratio, (s.OUT - ih) / 2 + s.oy * ratio, iw, ih);
-
-  var dataUrl = off.toDataURL('image/jpeg', 0.9);
-  _apCoverDataUrl = dataUrl;
-
-  off.toBlob(function(blob) {
-    _apCoverFile = new File([blob], 'cover.jpg', { type: 'image/jpeg' });
-  }, 'image/jpeg', 0.9);
-
-  var prev = document.getElementById('ap-cover-preview');
-  if (prev) prev.innerHTML = '<img src="' + dataUrl + '" style="width:100%;height:100%;object-fit:cover;border-radius:12px">';
-
-  _apCropCancel();
-  showToast('Photo recadrée ✓', 'ok');
-}
-
-function _apCropCancel() {
-  _apCropState = null;
-  var m = document.getElementById('ap-cropper-modal');
-  if (m) m.remove();
-}
-
-function _apOnAudioChange(inp) {
-  var file = inp.files && inp.files[0];
-  if (!file) return;
-  /* Vérification taille max 50 Mo */
-  if (file.size > 50 * 1024 * 1024) {
-    showToast('Fichier trop lourd (max 50 Mo)', 'err');
-    inp.value = '';
-    return;
-  }
-  _apAudioFile = file;
-  var nameEl = document.getElementById('ap-audio-name');
-  var zone   = document.getElementById('ap-audio-zone');
-  if (nameEl) nameEl.textContent = file.name;
-  if (zone)   zone.style.borderColor = '#7C3AED';
-}
-
-function _artisteSubmitPost() {
-  if (!_currentUser) { showToast('Connectez-vous d\'abord', 'err'); return; }
-  var title   = (document.getElementById('ap-title')   || {}).value || '';
-  var artist  = (document.getElementById('ap-artist')  || {}).value || '';
-  var genre   = (document.getElementById('ap-genre')   || {}).value || '';
-  var extlink  = (document.getElementById('ap-extlink')  || {}).value || '';
-  var desc     = (document.getElementById('ap-desc')     || {}).value || '';
-  var allowDl  = !!(document.getElementById('ap-allow-dl') || {}).checked;
-  /* ── Validation des champs obligatoires (AVANT d'activer le spinner) ── */
-  if (!title.trim())  { showToast('Le titre est obligatoire', 'err');        _apShakeField('ap-title');  return; }
-  if (!artist.trim()) { showToast('Le nom d\'artiste est obligatoire', 'err'); _apShakeField('ap-artist'); return; }
-  if (!genre.trim())  { showToast('Le genre musical est obligatoire', 'err'); _apShakeField('ap-genre');  return; }
-  if (!_apAudioFile && !extlink.trim()) {
-    showToast('Importe un fichier audio ou colle un lien', 'err');
-    return;
-  }
-
-  /* Désactiver le bouton pendant l'upload */
-  var btn = document.getElementById('ap-submit-btn');
-  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Publication…'; }
-
-  var post = {
-    title:         title.trim(),
-    artistName:    artist.trim(),
-    genre:         genre.trim(),
-    audioUrl:      '',
-    extLink:       extlink.trim(),
-    coverUrl:      '',
-    description:   desc.trim(),
-    allowDownload: allowDl,
-    userName:      _currentUser.displayName || _currentUser.email,
-    userKey:       _gwFbKey(_currentUser.email),
-    ts:            Date.now()
-  };
-
-  function _doSavePost() {
-    function _btnReset() {
-      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Publier mon son'; }
-    }
-    if (!_gwFbDB) { showToast('Firebase non initialisé', 'err'); _btnReset(); return; }
-    /* Timeout de 15 s — si ni then ni catch ne répond */
-    var _saveTimer = setTimeout(function() {
-      showToast('Délai dépassé — vérifiez votre connexion', 'err');
-      _btnReset();
-    }, 15000);
-    try {
-      _gwFbDB.ref('gw/artiste_posts').push(post)
-        .then(function() {
-          clearTimeout(_saveTimer);
-          showToast('Son publié ! 🎵', 'ok');
-          var ov = document.getElementById('artiste-post-overlay');
-          if (ov) ov.remove();
-          _artisteRefresh(null);
-        })
-        .catch(function(e) {
-          clearTimeout(_saveTimer);
-          var msg = (e && e.code) ? e.code : (e && e.message) ? e.message : String(e);
-          showToast('Erreur : ' + msg, 'err');
-          _btnReset();
-        });
-    } catch(ex) {
-      clearTimeout(_saveTimer);
-      showToast('Erreur : ' + (ex.message || ex), 'err');
-      _btnReset();
-    }
-  }
-
-  function _uploadCoverThenSave() {
-    /* Utilise le File directement (évite le freeze base64 sur grandes images) */
-    if (_apCoverFile && _gwFbStorage) {
-      var ext2 = (_apCoverFile.name.split('.').pop() || 'jpg').toLowerCase();
-      var coverPath = 'artiste_covers/' + _gwFbKey(_currentUser.email) + '_' + Date.now() + '.' + ext2;
-      _uploadBlobToStorage(coverPath, _apCoverFile, function(url) {
-        post.coverUrl = url;
-        _doSavePost();
-      }, function() {
-        /* Cover échouée → on publie quand même sans cover */
-        _doSavePost();
-      });
-    } else {
-      _doSavePost();
-    }
-  }
-
-  /* 1) Upload audio si fichier importé */
-  if (_apAudioFile && _gwFbStorage) {
-    var ext  = (_apAudioFile.name.split('.').pop() || 'mp3').toLowerCase();
-    var path = 'artiste_audio/' + _gwFbKey(_currentUser.email) + '_' + Date.now() + '.' + ext;
-    var prog = document.getElementById('ap-audio-progress');
-    var bar  = document.getElementById('ap-audio-bar');
-    var pct  = document.getElementById('ap-audio-pct');
-    if (prog) prog.style.display = '';
-    _uploadBlobToStorage(path, _apAudioFile,
-      function(url) {
-        post.audioUrl = url;
-        _uploadCoverThenSave();
-      },
-      function(e) {
-        showToast('Erreur upload audio', 'err');
-        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Publier mon son'; }
-      },
-      function(p) {
-        if (bar) bar.style.width = p + '%';
-        if (pct) pct.textContent = p + '%';
-      }
-    );
-  } else {
-    /* Pas de fichier audio, juste lien externe → upload cover puis save */
-    _uploadCoverThenSave();
   }
 }
 
@@ -25111,14 +20080,10 @@ function renderAchatServices() {
     /* Bouton d'action : "Contacter" pour les services, "Panier" pour les produits */
     var ownerSafe2 = ownerEmail.replace(/'/g,"\\'");
     var actionBtn = itemType === 'produit'
-      ? (_gwIsPaymentEnabled()
-          ? '<button class="achat-svc-contact-btn achat-svc-order-btn" ' +
-              'onclick="addToCart(' + svc.id + ',\'' + ownerSafe2 + '\')">' +
-              '<i class="fas fa-cart-shopping"></i> Ajouter au panier' +
-            '</button>'
-          : '<button class="achat-svc-contact-btn" disabled style="opacity:.45;cursor:not-allowed">' +
-              '<i class="fas fa-lock"></i> Paiement indisponible' +
-            '</button>')
+      ? '<button class="achat-svc-contact-btn achat-svc-order-btn" ' +
+          'onclick="addToCart(' + svc.id + ',\'' + ownerSafe2 + '\')">' +
+          '<i class="fas fa-cart-shopping"></i> Ajouter au panier' +
+        '</button>'
       : '<button class="achat-svc-contact-btn" ' +
           'onclick="_contactAboutService(' + svc.id + ',\'' + ownerSafe2 + '\')">' +
           '<i class="fas fa-paper-plane"></i> Contacter' +
@@ -25263,7 +20228,6 @@ function _updateCartBadge() {
 
 function addToCart(svcId, ownerEmail) {
   if (!_currentUser) { showToast('Connectez-vous pour acheter', 'err'); return; }
-  if (!_gwIsPaymentEnabled()) { showToast('Paiement en ligne temporairement indisponible', 'err'); return; }
   var svc = loadUserServices(ownerEmail).find(function(s) { return s.id === svcId; });
   if (!svc) return;
   if (svc.priceType === 'negotiate') {
@@ -25401,10 +20365,6 @@ function renderCartItems() {
 function _cartLoadPayPal(total) {
   var wrap = document.getElementById('cart-paypal-btn-container');
   if (!wrap) return;
-  if (!_gwIsPaymentEnabled()) {
-    wrap.innerHTML = '<div style="text-align:center;padding:14px;background:#FEF3C7;border-radius:10px;color:#92400E;font-size:13px"><i class="fas fa-lock" style="margin-right:6px"></i>Paiement en ligne temporairement indisponible.</div>';
-    return;
-  }
   wrap.innerHTML = '<div style="text-align:center;padding:10px;color:#94A3B8;font-size:12px"><i class="fas fa-spinner fa-spin"></i> Chargement PayPal…</div>';
 
   function _renderCartPayPalBtn() {
@@ -25885,19 +20845,6 @@ function srchOpenPost(postId) {
    DÉCONNEXION
 ══════════════════════════════════════════ */
 function doLogout() {
-  /* ── Suppression immédiate de la présence en ligne ── */
-  try {
-    if (_gwOnlineRef) {
-      _gwOnlineRef.onDisconnect().cancel(); /* annule le handler de déconnexion */
-      _gwOnlineRef.remove();               /* suppression immédiate dans Firebase */
-    }
-    if (_gwOnlineRef && _gwOnlineRef._heartbeat) {
-      clearInterval(_gwOnlineRef._heartbeat);
-      _gwOnlineRef._heartbeat = null;
-    }
-    _gwOnlineRef = null;
-  } catch(e){}
-
   /* Nettoyage listeners Firebase pour éviter accumulation */
   try {
     if (_gwFbDB) {
@@ -25908,27 +20855,15 @@ function doLogout() {
       _gwFbDB.ref('gw/group_msgs').off('child_added');
       _gwFbDB.ref('gw/group_msgs').off('child_changed');
       if (_currentUser) {
-        _gwFbDB.ref('gw/notifs/'     + _gwFbKey(_currentUser.email)).off();
-        _gwFbDB.ref('gw/followers/'  + _gwFbKey(_currentUser.email)).off();
-        _gwFbDB.ref('gw/milestones/' + _gwFbKey(_currentUser.email)).off();
+        _gwFbDB.ref('gw/notifs/' + _gwFbKey(_currentUser.email)).off();
       }
-      _gwMilestoneWatchEmail = null;
     }
   } catch(e){}
-  /* Réinitialise le verrou listener notifs pour permettre un re-login propre */
-  _gwNotifWatchEmail = null;
   /* Ferme le listener Firebase de la conversation DM active */
   _dmClose();
-  /* Arrête le timer de refresh du feed */
-  try { _feedStopAutoRefresh(); } catch(e){}
   /* Vider les conversations en mémoire — seront rechargées au prochain login */
   DEMO_CONVERSATIONS.length = 0;
-  /* Vider les posts en mémoire — seront rechargés depuis Firebase au prochain login */
-  DEMO_POSTS.length = 0;
-  PENDING_POSTS.length = 0;
   _currentUser = null;
-  /* Vider le cache profils — évite les données périmées entre sessions */
-  try { for (var _k in _profileCache) { if (_profileCache.hasOwnProperty(_k)) delete _profileCache[_k]; } } catch(e){}
   localStorage.removeItem('gw_session');
   _pickedImages = [];
   _clearVideo();
@@ -26290,10 +21225,6 @@ var _subPaypalLoading = false;
 function _subLoadPayPal() {
   var container = document.getElementById('sub-paypal-btn-container');
   if (!container) return;
-  if (!_gwIsPaymentEnabled()) {
-    container.innerHTML = '<div style="text-align:center;padding:14px;background:#FEF3C7;border-radius:10px;color:#92400E;font-size:13px"><i class="fas fa-lock" style="margin-right:6px"></i>Paiement en ligne temporairement indisponible.</div>';
-    return;
-  }
 
   /* Montant selon plan + billing */
   var _subAmounts = { premium: { month: 4.99, year: 49.99 }, business: { month: 14.99, year: 149.99 } };
@@ -27032,151 +21963,10 @@ function _renderDashboard() {
     }
   }
 
-  /* ── Bloc Artiste (rempli de façon asynchrone) ── */
-  html += '<div id="dash-artiste-block"></div>';
-
   html += '<div class="dash-footer">Données mises à jour en temps réel · Geniwork ' + new Date().getFullYear() + '</div>';
 
   var scroll = document.getElementById('dash-scroll');
-  if (scroll) {
-    scroll.innerHTML = html;
-    /* Charger les stats artiste après le rendu principal */
-    setTimeout(_dashLoadArtisteStats, 100);
-  }
-}
-
-/* ═══════════════════════════════════════════════
-   TABLEAU DE BORD ARTISTE — chargement asynchrone
-   ═══════════════════════════════════════════════ */
-function _dashLoadArtisteStats() {
-  if (!_currentUser || !_gwFbDB) return;
-  var block = document.getElementById('dash-artiste-block');
-  if (!block) return;
-
-  var uKey = _gwFbKey(_currentUser.email);
-
-  /* 1. Vérifier si l'utilisateur est un artiste approuvé */
-  _gwFbDB.ref('gw/artiste_verif_requests/' + uKey).once('value', function(verifSnap) {
-    var verif = verifSnap.val();
-    if (!verif || verif.status !== 'approved') return; /* Pas artiste → section cachée */
-
-    /* 2. Charger ses sons + stats + likes en parallèle */
-    var songsLoaded = false, statsLoaded = false, likesLoaded = false;
-    var mySongs = [], allStats = {}, allLikes = {};
-
-    function _tryRenderArtisteDash() {
-      if (!songsLoaded || !statsLoaded || !likesLoaded) return;
-      _dashRenderArtisteBlock(block, verif, mySongs, allStats, allLikes);
-    }
-
-    _gwFbDB.ref('gw/artiste_posts').orderByChild('userKey').equalTo(uKey).once('value', function(snap) {
-      mySongs = [];
-      snap.forEach(function(ch) { mySongs.push(Object.assign({ id: ch.key }, ch.val())); });
-      mySongs.reverse(); /* Plus récent en premier */
-      songsLoaded = true; _tryRenderArtisteDash();
-    }, function() { songsLoaded = true; _tryRenderArtisteDash(); });
-
-    _gwFbDB.ref('gw/artiste_stats').once('value', function(snap) {
-      allStats = snap.val() || {};
-      statsLoaded = true; _tryRenderArtisteDash();
-    }, function() { statsLoaded = true; _tryRenderArtisteDash(); });
-
-    _gwFbDB.ref('gw/artiste_likes').once('value', function(snap) {
-      allLikes = snap.val() || {};
-      likesLoaded = true; _tryRenderArtisteDash();
-    }, function() { likesLoaded = true; _tryRenderArtisteDash(); });
-  });
-}
-
-function _dashRenderArtisteBlock(block, verif, songs, stats, likes) {
-  /* ── Totaux ── */
-  var totalPlays = 0, totalDl = 0, totalLikes = 0, totalDislikes = 0;
-  songs.forEach(function(s) {
-    var st = stats[s.id] || {};
-    totalPlays    += st.plays     || 0;
-    totalDl       += st.downloads || 0;
-    var votesForSong = likes[s.id] || {};
-    Object.values(votesForSong).forEach(function(v) {
-      if (v === 'like') totalLikes++;
-      else if (v === 'dislike') totalDislikes++;
-    });
-  });
-
-  var artistName = escHtml(verif.artistName || _currentUser.nom || '');
-
-  var html =
-    /* ── En-tête section ── */
-    '<div style="margin:20px 0 12px;display:flex;align-items:center;gap:10px">' +
-      '<div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#7C3AED,#DB2777);' +
-           'display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
-        '<i class="fas fa-music" style="color:#fff;font-size:15px"></i>' +
-      '</div>' +
-      '<div>' +
-        '<div style="font-weight:700;font-size:15px">Espace Artiste</div>' +
-        '<div style="font-size:11px;color:#94A3B8">' + artistName +
-          ' · <span style="color:#10B981"><i class="fas fa-check-circle"></i> Vérifié</span></div>' +
-      '</div>' +
-    '</div>' +
-
-    /* ── KPI totaux ── */
-    '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px">' +
-      _dashArtisteKpi('fa-headphones-alt','#F5F3FF','#7C3AED', totalPlays,    'Écoutes totales') +
-      _dashArtisteKpi('fa-download',      '#ECFDF5','#10B981', totalDl,       'Téléchargements') +
-      _dashArtisteKpi('fa-thumbs-up',     '#EFF6FF','#3B82F6', totalLikes,    'J\'aime reçus') +
-      _dashArtisteKpi('fa-music',         '#FFF7ED','#F59E0B', songs.length,  'Sons publiés') +
-    '</div>';
-
-  /* ── Tableau par son ── */
-  if (songs.length) {
-    html +=
-      '<div style="background:var(--card-bg,#1E293B);border-radius:14px;overflow:hidden;margin-bottom:4px">' +
-        '<div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.06);font-size:11px;font-weight:700;' +
-             'color:#64748B;text-transform:uppercase;letter-spacing:.5px;display:grid;grid-template-columns:1fr 52px 52px 42px">' +
-          '<span>Son</span><span style="text-align:center"><i class="fas fa-headphones-alt"></i></span>' +
-          '<span style="text-align:center"><i class="fas fa-download"></i></span>' +
-          '<span style="text-align:center"><i class="fas fa-thumbs-up"></i></span>' +
-        '</div>';
-
-    songs.forEach(function(s) {
-      var st  = stats[s.id] || {};
-      var vts = likes[s.id] || {};
-      var lk  = Object.values(vts).filter(function(v){ return v === 'like'; }).length;
-      html +=
-        '<div style="padding:10px 14px;border-bottom:1px solid rgba(255,255,255,.04);' +
-             'display:grid;grid-template-columns:1fr 52px 52px 42px;align-items:center">' +
-          '<div style="min-width:0">' +
-            '<div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
-              escHtml(s.title || 'Sans titre') + '</div>' +
-            '<div style="font-size:10px;color:#64748B">' + escHtml(s.genre || '') + '</div>' +
-          '</div>' +
-          '<div style="text-align:center;font-size:13px;font-weight:700;color:#A78BFA">' + (st.plays || 0) + '</div>' +
-          '<div style="text-align:center;font-size:13px;font-weight:700;color:#34D399">' + (st.downloads || 0) + '</div>' +
-          '<div style="text-align:center;font-size:13px;font-weight:700;color:#60A5FA">' + lk + '</div>' +
-        '</div>';
-    });
-    html += '</div>';
-  } else {
-    html +=
-      '<div style="text-align:center;padding:20px;color:#475569;font-size:13px">' +
-        '<i class="fas fa-music" style="font-size:28px;display:block;margin-bottom:8px;color:#334155"></i>' +
-        'Aucun son publié pour l\'instant' +
-      '</div>';
-  }
-
-  block.innerHTML = html;
-}
-
-function _dashArtisteKpi(icon, bg, color, value, label) {
-  return '<div style="background:' + bg.replace('#','rgba(').replace(/^rgba\(([0-9A-Fa-f]{6})\)/,'') +
-    ';border-radius:12px;padding:12px 14px;background:var(--card-bg,#1E293B);border:1px solid rgba(255,255,255,.06)">' +
-    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
-      '<div style="width:28px;height:28px;border-radius:8px;background:' + bg + ';display:flex;align-items:center;justify-content:center">' +
-        '<i class="fas ' + icon + '" style="color:' + color + ';font-size:12px"></i>' +
-      '</div>' +
-      '<span style="font-size:10px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:.3px">' + label + '</span>' +
-    '</div>' +
-    '<div style="font-size:22px;font-weight:800;color:' + color + '">' + value + '</div>' +
-  '</div>';
+  if (scroll) scroll.innerHTML = html;
 }
 
 /* ─── Badge section (premium/business plans) ─── */
@@ -28056,52 +22846,15 @@ function _gwShowRestrictionAlert(action) {
 /* ── Helpers : configuration globale des plans ── */
 function _admGetPlansConfig() {
   try {
-    var defaults = { premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true, paymentsEnabled: true, ebookEnabled: true, collabEnabled: true, artisteEnabled: true, businessAiEnabled: true };
+    var defaults = { premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true };
     var stored   = JSON.parse(localStorage.getItem('gw_plans_config') || '{}');
     return Object.assign(defaults, stored);
   }
-  catch(e) { return { premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true, paymentsEnabled: true, ebookEnabled: true, collabEnabled: true, artisteEnabled: true, businessAiEnabled: true }; }
+  catch(e) { return { premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true }; }
 }
 function _admSavePlansConfig(cfg) {
   localStorage.setItem('gw_plans_config', JSON.stringify(cfg));
   _gwFbSet('plans_config', cfg); /* Sync Firebase → tous les appareils */
-}
-function _gwIsPaymentEnabled() { return _admGetPlansConfig().paymentsEnabled !== false; }
-
-/* Applique la visibilité des sections Marketplace + boutons héro selon la config admin */
-function _gwApplyMkSections() {
-  var cfg = _admGetPlansConfig();
-  var tabs   = { ebook: cfg.ebookEnabled !== false, collab: cfg.collabEnabled !== false, artiste: cfg.artisteEnabled !== false };
-  var sects  = { ebook: null, collab: 'mk-collab-section', artiste: 'mk-artiste-section' };
-
-  Object.keys(tabs).forEach(function(key) {
-    var show = tabs[key];
-    /* Tab button marketplace */
-    var btn = document.getElementById('mk-cat-btn-' + key);
-    if (btn) btn.style.display = show ? '' : 'none';
-    /* Section div (collab / artiste) */
-    if (sects[key]) {
-      var sec = document.getElementById(sects[key]);
-      if (sec && !show) sec.style.display = 'none';
-    }
-    /* Si l'onglet actif est désactivé → revenir sur Tous */
-    if (!show && btn && btn.classList.contains('active')) {
-      var firstBtn = document.querySelector('.mk-cat');
-      if (firstBtn) { setMkCat(firstBtn, 'all'); }
-    }
-  });
-
-  /* Ebook : masquer/afficher dans la liste d'annonces et dans le formulaire de création */
-  var ebookTypeBtn = document.getElementById('mk-type-ebook');
-  if (ebookTypeBtn) ebookTypeBtn.style.display = tabs.ebook ? '' : 'none';
-
-  /* ── Boutons héro entête ── */
-  /* Collaborateurs */
-  var heroCollab = document.querySelector('.feed-cat-collab');
-  if (heroCollab) heroCollab.style.display = (cfg.collabEnabled !== false) ? '' : 'none';
-  /* Business AI */
-  var heroAI = document.querySelector('.feed-cat-ai');
-  if (heroAI) heroAI.style.display = (cfg.businessAiEnabled !== false) ? '' : 'none';
 }
 
 /* ── Helpers : paiements ── */
@@ -28126,10 +22879,9 @@ function _admTogglePlan(plan) {
   cfg[key] = !cfg[key];
   _admSavePlansConfig(cfg);
   var state = cfg[key] ? 'activé ✅' : 'désactivé ⛔';
-  var labels = { premium: 'Premium', business: 'Business Pro', badge: 'Système de badges', banners: 'Bannières', payments: 'Paiements Marketplace', ebook: 'Section Ebook', collab: 'Section Collaboration', artiste: 'Section Artiste', businessAi: 'Bouton Business AI' };
+  var labels = { premium: 'Premium', business: 'Business Pro', badge: 'Système de badges', banners: 'Bannières' };
   _admLog('PLAN_TOGGLE', (labels[plan] || plan) + ' → ' + state);
   showToast((labels[plan] || plan) + ' ' + state, cfg[key] ? 'ok' : 'err');
-  _gwApplyMkSections();
   _admRender();
   /* Rafraîchit la page abonnements si ouverte */
   try {
@@ -28153,15 +22905,15 @@ var _admTapTimer  = null;
 */
 var _ADM_ROLE_PERMS = {
   'Super Admin': {
-    tabs:    ['dashboard','analytics','payments','reports','users','badges','artiste','team','publi','marketplace','notifs','settings','security'],
+    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','marketplace','notifs','settings','security'],
     actions: ['ban','unban','delete_post','delete_user','send_notif','publish','manage_team','manage_payments','change_settings','approve_badge','dismiss_report','warn_user','reset_password','change_role','approve_request']
   },
   'Admin': {
-    tabs:    ['dashboard','analytics','payments','reports','users','badges','artiste','publi','marketplace','notifs'],
+    tabs:    ['dashboard','analytics','payments','reports','users','badges','publi','marketplace','notifs'],
     actions: ['ban','unban','delete_post','send_notif','publish','approve_badge','dismiss_report','warn_user']
   },
   'Modérateur': {
-    tabs:    ['dashboard','reports','users','artiste'],
+    tabs:    ['dashboard','reports','users'],
     actions: ['ban','unban','dismiss_report','warn_user']
   },
   'Éditeur': {
@@ -28594,10 +23346,9 @@ function _admApplySidebarPerms() {
     dashboard:'adm-nav-dashboard', analytics:'adm-nav-analytics',
     payments:'adm-nav-payments',   reports:'adm-nav-reports',
     users:'adm-nav-users',         badges:'adm-nav-badges',
-    artiste:'adm-nav-artiste',     team:'adm-nav-team',
-    publi:'adm-nav-publi',         marketplace:'adm-nav-marketplace',
-    notifs:'adm-nav-notifs',       settings:'adm-nav-settings',
-    security:'adm-nav-security'
+    team:'adm-nav-team',           publi:'adm-nav-publi',
+    marketplace:'adm-nav-marketplace', notifs:'adm-nav-notifs',
+    settings:'adm-nav-settings',       security:'adm-nav-security'
   };
   Object.keys(tabNav).forEach(function(tab) {
     var el = document.getElementById(tabNav[tab]);
@@ -28606,7 +23357,7 @@ function _admApplySidebarPerms() {
   /* Masque les labels de section si tous leurs onglets sont cachés */
   var sectionMap = [
     ['dashboard','analytics'],
-    ['users','badges','artiste'],
+    ['users','badges'],
     ['publi','marketplace','reports'],
     ['payments'],
     ['notifs'],
@@ -28788,7 +23539,6 @@ function _admSwitchTab(tab) {
     reports     : 'Signalements',
     users       : 'Utilisateurs',
     badges      : 'Vérification des badges',
-    artiste     : 'Vérification Artistes',
     team        : 'Équipe & Tâches',
     publi       : 'Publications officielles',
     marketplace : 'Marketplace',
@@ -28882,20 +23632,11 @@ function _admUpdateNavBadges() {
   var pb  = document.getElementById('adm-badge-publi');
   var pyb = document.getElementById('adm-badge-payments');
   var tb  = document.getElementById('adm-badge-team');
-  var ab  = document.getElementById('adm-badge-artiste');
   if (rb)  { rb.textContent  = reports; rb.classList.toggle('hidden',  reports === 0); }
   if (bb)  { bb.textContent  = badges;  bb.classList.toggle('hidden',  badges  === 0); }
   if (pb)  { pb.textContent  = publis;  pb.classList.toggle('hidden',  publis  === 0); }
   if (pyb) { pyb.textContent = pays;    pyb.classList.toggle('hidden', pays    === 0); }
   if (tb)  { tb.textContent  = pending; tb.classList.toggle('hidden',  pending === 0); }
-  /* Badge artiste : chargé depuis Firebase de façon asynchrone */
-  if (ab && _gwFbDB) {
-    _gwFbDB.ref('gw/artiste_verif_requests').orderByChild('status').equalTo('pending')
-      .once('value', function(s) {
-        var cnt = 0; s.forEach(function() { cnt++; });
-        if (ab) { ab.textContent = cnt; ab.classList.toggle('hidden', cnt === 0); }
-      });
-  }
 }
 
 /* ── Rendu principal (dispatch selon onglet actif) ── */
@@ -28908,7 +23649,6 @@ function _admRender() {
   else if (_adminTab === 'reports')     content.innerHTML = _admBuildReports();
   else if (_adminTab === 'users')       content.innerHTML = _admBuildUsers('');
   else if (_adminTab === 'badges')      content.innerHTML = _admBuildBadges();
-  else if (_adminTab === 'artiste')     { content.innerHTML = '<div style="padding:20px;color:#94A3B8;text-align:center"><i class="fas fa-spinner fa-spin" style="font-size:24px"></i></div>'; _admBuildArtiste(); }
   else if (_adminTab === 'team')        content.innerHTML = _admBuildTeam();
   else if (_adminTab === 'publi')       content.innerHTML = _admBuildPubli();
   else if (_adminTab === 'marketplace') content.innerHTML = _admBuildMarketplace();
@@ -30295,25 +25035,13 @@ function _admBuildSettings() {
   /* ── Contrôle des plans ── */
   html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-sliders" style="color:#7C3AED;margin-right:6px"></i>Contrôle des abonnements</div>';
   html += '<div class="adm-settings-section">';
-  var _settingsToggleDesc = {
-    premium:  { on: '✓ Actif — Souscriptions Premium autorisées',    off: '✗ Inactif — Bouton Premium grisé' },
-    business: { on: '✓ Actif — Souscriptions Business autorisées',   off: '✗ Inactif — Bouton Business grisé' },
-    badge:    { on: '✓ Actif — Badges visibles sur les profils',      off: '✗ Inactif — Badges masqués' },
-    banners:  { on: '✓ Actif — Bannières affichées',                  off: '✗ Inactif — Bannières masquées' },
-    payments: { on: '✓ Actif — Boutons panier & PayPal visibles',     off: '✗ Désactivé — Boutons paiement masqués (annonces toujours publiables)' },
-    ebook:    { on: '✓ Visible — Onglet Ebook affiché dans le marketplace',         off: '✗ Masqué — Onglet Ebook invisible pour les utilisateurs' },
-    collab:      { on: '✓ Visible — Onglet Collaboration + bouton entête affichés',    off: '✗ Masqué — Onglet + bouton entête Collaboration masqués' },
-    artiste:     { on: '✓ Visible — Onglet Artiste affiché dans le marketplace',       off: '✗ Masqué — Onglet Artiste invisible pour les utilisateurs' },
-    businessAi:  { on: '✓ Visible — Bouton Business AI affiché dans l\'entête',        off: '✗ Masqué — Bouton Business AI masqué dans l\'entête' }
-  };
   function settingsToggleHtml(plan, label, icon, enabled) {
-    var desc = _settingsToggleDesc[plan] || { on: '✓ Actif', off: '✗ Inactif' };
     return '<div class="adm-settings-toggle-row">' +
       '<div style="display:flex;align-items:center;gap:10px">' +
         '<span style="font-size:20px">' + icon + '</span>' +
         '<div>' +
           '<div style="font-size:13px;font-weight:700;color:#0F172A">' + label + '</div>' +
-          '<div style="font-size:11px;color:' + (enabled ? '#16A34A' : '#EF4444') + '">' + (enabled ? desc.on : desc.off) + '</div>' +
+          '<div style="font-size:11px;color:' + (enabled ? '#16A34A' : '#EF4444') + '">' + (enabled ? '✓ Actif — Souscriptions autorisées' : '✗ Inactif — Bouton grisé pour les utilisateurs') + '</div>' +
         '</div>' +
       '</div>' +
       '<button class="adm-toggle-btn ' + (enabled ? 'on' : 'off') + '" onclick="_admTogglePlan(\'' + plan + '\')">' +
@@ -30328,24 +25056,8 @@ function _admBuildSettings() {
   /* ── Contrôle des fonctionnalités ── */
   html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-toggle-on" style="color:#16A34A;margin-right:6px"></i>Fonctionnalités</div>';
   html += '<div class="adm-settings-section">';
-  html += settingsToggleHtml('badge',    'Système de badges ✅',       '🏅', cfg.badgeEnabled);
-  html += settingsToggleHtml('banners',  'Bannières d\'usage 📊',       '🪧', cfg.bannersEnabled);
-  html += settingsToggleHtml('payments', 'Paiements Marketplace 💳',    '💳', cfg.paymentsEnabled !== false);
-  html += '</div>';
-
-  /* ── Sections Marketplace ── */
-  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-store" style="color:#F59E0B;margin-right:6px"></i>Sections Marketplace</div>';
-  html += '<div class="adm-settings-section">';
-  html += settingsToggleHtml('ebook',      'Section Ebook 📖',            '📖', cfg.ebookEnabled !== false);
-  html += settingsToggleHtml('collab',     'Section Collaboration 🤝',    '🤝', cfg.collabEnabled !== false);
-  html += settingsToggleHtml('artiste',    'Section Artiste 🎵',          '🎵', cfg.artisteEnabled !== false);
-  html += '</div>';
-
-  /* ── Boutons Entête ── */
-  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-home" style="color:#3B82F6;margin-right:6px"></i>Boutons Entête (Accueil)</div>';
-  html += '<div class="adm-settings-section">';
-  html += settingsToggleHtml('businessAi', 'Bouton Business AI 🤖',      '🤖', cfg.businessAiEnabled !== false);
-  html += settingsToggleHtml('collab',     'Bouton Collaborateurs 🤝',   '🤝', cfg.collabEnabled !== false);
+  html += settingsToggleHtml('badge',   'Système de badges ✅',   '🏅', cfg.badgeEnabled);
+  html += settingsToggleHtml('banners', 'Bannières d\'usage 📊',  '🪧', cfg.bannersEnabled);
   html += '</div>';
 
   /* ── Informations système ── */
@@ -30427,52 +25139,6 @@ function _admBuildSettings() {
         '</div>') +
   '</div>';
 
-  /* ── Sauvegarde & Restauration ── */
-  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-database" style="color:#0EA5E9;margin-right:6px"></i>Sauvegarde & Restauration</div>';
-  html += '<div class="adm-settings-section">';
-
-  /* Taille actuelle */
-  var backupRows = [
-    { ico:'fas fa-users',        lbl:'Utilisateurs',          val: users.length },
-    { ico:'fas fa-newspaper',    lbl:'Publications',          val: getAllPosts().length },
-    { ico:'fas fa-receipt',      lbl:'Transactions',          val: payments.length },
-    { ico:'fas fa-database',     lbl:'Taille totale données', val: totalKb + ' Ko' }
-  ];
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">';
-  backupRows.forEach(function(r) {
-    html += '<div style="background:#F8FAFC;border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:8px">' +
-      '<i class="' + r.ico + '" style="color:#6366F1;font-size:14px;width:16px"></i>' +
-      '<div><div style="font-size:10px;color:#64748B">' + r.lbl + '</div>' +
-      '<div style="font-size:15px;font-weight:800;color:#0F172A">' + r.val + '</div></div>' +
-    '</div>';
-  });
-  html += '</div>';
-
-  html +=
-    /* Exporter */
-    '<div class="adm-settings-danger-row" style="border-bottom:1px solid #F1F5F9;padding-bottom:12px;margin-bottom:12px">' +
-      '<div>' +
-        '<div style="font-size:13px;font-weight:700;color:#0F172A"><i class="fas fa-download" style="color:#10B981;margin-right:5px"></i>Exporter les données</div>' +
-        '<div style="font-size:11px;color:#6B7280">Télécharge toutes les données en fichier JSON (utilisateurs, posts, transactions, config…)</div>' +
-      '</div>' +
-      '<button class="adm-btn-sm" style="background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;padding:6px 12px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer" onclick="_admExportBackup()">' +
-        '<i class="fas fa-download"></i> Exporter' +
-      '</button>' +
-    '</div>' +
-    /* Importer */
-    '<div class="adm-settings-danger-row" style="border-bottom:1px solid #F1F5F9;padding-bottom:12px;margin-bottom:12px">' +
-      '<div>' +
-        '<div style="font-size:13px;font-weight:700;color:#0F172A"><i class="fas fa-upload" style="color:#6366F1;margin-right:5px"></i>Restaurer une sauvegarde</div>' +
-        '<div style="font-size:11px;color:#6B7280">Importe un fichier JSON exporté précédemment. Les données actuelles seront fusionnées.</div>' +
-      '</div>' +
-      '<button class="adm-btn-sm" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;padding:6px 12px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer" onclick="document.getElementById(\'adm-backup-inp\').click()">' +
-        '<i class="fas fa-upload"></i> Importer' +
-      '</button>' +
-      '<input type="file" id="adm-backup-inp" accept=".json" style="display:none" onchange="_admImportBackup(this)">' +
-    '</div>';
-
-  html += '</div>';
-
   /* ── Danger zone ── */
   html += '<div class="adm-dash-title" style="margin-top:20px;color:#EF4444"><i class="fas fa-triangle-exclamation" style="color:#EF4444;margin-right:6px"></i>Zone sensible</div>';
   html += '<div class="adm-settings-section adm-settings-danger">' +
@@ -30482,13 +25148,6 @@ function _admBuildSettings() {
         '<div style="font-size:11px;color:#6B7280">Supprime toutes les entrées du journal administrateur (irréversible).</div>' +
       '</div>' +
       '<button class="adm-btn-sm adm-btn-ban" onclick="_admClearLog()"><i class="fas fa-trash"></i> Effacer</button>' +
-    '</div>' +
-    '<div class="adm-settings-danger-row" style="margin-top:10px">' +
-      '<div>' +
-        '<div style="font-size:13px;font-weight:700;color:#DC2626">Réinitialiser toutes les données</div>' +
-        '<div style="font-size:11px;color:#6B7280">Supprime TOUTES les données Geniwork (utilisateurs, posts, config…). Irréversible — exportez d\'abord.</div>' +
-      '</div>' +
-      '<button class="adm-btn-sm adm-btn-ban" onclick="_admResetAllData()"><i class="fas fa-bomb"></i> Réinitialiser</button>' +
     '</div>' +
   '</div>';
 
@@ -30502,148 +25161,6 @@ function _admClearLog() {
   localStorage.removeItem('gw_admin_log');
   showToast('Journal effacé ✓', 'ok');
   _admRender();
-}
-
-/* ═══════════════════════════════════════════
-   SAUVEGARDE / RESTAURATION / RÉINITIALISATION
-   ═══════════════════════════════════════════ */
-
-/* Clés statiques prioritaires à inclure dans l'export */
-var _ADM_BACKUP_STATIC_KEYS = [
-  'gw_users','gw_admins','gw_sadmin','gw_bans','gw_payments','gw_plans_config',
-  'gw_admin_log','gw_admin_extra_perms','gw_badge_requests','gw_ban_appeals',
-  'gw_collab_requests','gw_mk_listings','gw_mk_txns','gw_official_posts',
-  'gw_publishers','gw_reports','gw_restrictions','gw_restriction_appeals',
-  'gw_support_threads','gw_deleted_ids','gw_security_events','gw_admin_tasks',
-  'gw_admin_requests','gw_official_logo','gw_online_count'
-];
-
-function _admExportBackup() {
-  if (!_adminUser || !_admHasAction('change_settings')) { showToast('Réservé au Super Admin', 'err'); return; }
-  showToast('Préparation de la sauvegarde…', 'ok');
-
-  var backup = {
-    _meta: {
-      version:    '1.0',
-      exportedAt: new Date().toISOString(),
-      exportedBy: _adminUser.email,
-      app:        'Geniwork'
-    },
-    localStorage: {}
-  };
-
-  /* Collecter TOUTES les clés gw_* */
-  try {
-    for (var k in localStorage) {
-      if (k.indexOf('gw_') === 0) {
-        try {
-          var raw = localStorage.getItem(k);
-          /* Tenter de parser en JSON, sinon garder la string brute */
-          try { backup.localStorage[k] = JSON.parse(raw); }
-          catch(e2) { backup.localStorage[k] = raw; }
-        } catch(e3){}
-      }
-    }
-  } catch(e) {}
-
-  /* Générer le fichier JSON */
-  var json = JSON.stringify(backup, null, 2);
-  var blob = new Blob([json], { type: 'application/json' });
-  var url  = URL.createObjectURL(blob);
-  var a    = document.createElement('a');
-  var date = new Date().toISOString().slice(0,10);
-  a.href     = url;
-  a.download = 'geniwork-backup-' + date + '.json';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-
-  _admLog('BACKUP_EXPORT', 'Export complet – ' + Object.keys(backup.localStorage).length + ' clés');
-  showToast('Sauvegarde téléchargée ✓', 'ok');
-}
-
-function _admImportBackup(input) {
-  if (!_adminUser || !_admHasAction('change_settings')) { showToast('Réservé au Super Admin', 'err'); return; }
-  var file = input && input.files && input.files[0];
-  if (!file) return;
-
-  var reader = new FileReader();
-  reader.onload = function(e) {
-    try {
-      var backup = JSON.parse(e.target.result);
-      if (!backup || !backup.localStorage) { showToast('Fichier invalide', 'err'); return; }
-
-      if (!confirm('Restaurer cette sauvegarde du ' + (backup._meta && backup._meta.exportedAt ? backup._meta.exportedAt.slice(0,10) : '?') + ' ?\n\nLes données existantes seront fusionnées (non effacées).')) {
-        input.value = '';
-        return;
-      }
-
-      var count = 0;
-      Object.keys(backup.localStorage).forEach(function(k) {
-        try {
-          var val = backup.localStorage[k];
-          localStorage.setItem(k, typeof val === 'string' ? val : JSON.stringify(val));
-          count++;
-        } catch(e2){}
-      });
-
-      /* Sync Firebase pour les clés prioritaires */
-      if (_gwFbReady && _gwFbDB) {
-        _ADM_BACKUP_STATIC_KEYS.forEach(function(k) {
-          try {
-            var raw = localStorage.getItem(k);
-            if (raw) {
-              var path = k.replace('gw_', '');
-              _gwFbSet(path, JSON.parse(raw));
-            }
-          } catch(e2){}
-        });
-      }
-
-      _admLog('BACKUP_IMPORT', 'Import – ' + count + ' clés restaurées depuis ' + file.name);
-      showToast(count + ' clés restaurées ✓  — Rechargement…', 'ok');
-      input.value = '';
-      setTimeout(function() { location.reload(); }, 1800);
-    } catch(err) {
-      showToast('Erreur de lecture : ' + err.message, 'err');
-    }
-  };
-  reader.readAsText(file);
-}
-
-function _admResetAllData() {
-  if (!_adminUser || !_admHasAction('change_settings')) { showToast('Réservé au Super Admin', 'err'); return; }
-  if (!confirm('⚠️ ATTENTION : Ceci supprimera TOUTES les données Geniwork sur TOUS les appareils.\n\nAssurez-vous d\'avoir exporté une sauvegarde avant de continuer.\n\nConfirmer la réinitialisation complète ?')) return;
-  if (!confirm('Dernière confirmation : supprimer TOUTES les données de TOUS les utilisateurs ? Cette action est IRRÉVERSIBLE.')) return;
-
-  var resetTs = Date.now();
-
-  /* 1. Écrire le signal dans Firebase EN PREMIER → tous les appareils en ligne le reçoivent immédiatement */
-  if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw_system/reset_at').set(resetTs).then(function() {
-      /* 2. Supprimer gw/ après que le signal est propagé */
-      _gwFbDB.ref('gw').remove().catch(function(){});
-    }).catch(function() {
-      /* Même si Firebase échoue, continuer en local */
-      _gwFbDB.ref('gw').remove().catch(function(){});
-    });
-  }
-
-  /* 3. Nettoyer le localStorage local (admin) */
-  var keep = ['gw_last_reset', 'gw_session', 'gw_lang', 'gw_dark_mode'];
-  var keys = [];
-  try {
-    for (var k in localStorage) {
-      if (k.indexOf('gw_') === 0 && keep.indexOf(k) === -1) keys.push(k);
-    }
-  } catch(e){}
-  keys.forEach(function(k) { try { localStorage.removeItem(k); } catch(e){} });
-  localStorage.setItem('gw_last_reset', String(resetTs));
-
-  _admLog('RESET_ALL_DATA', 'Réinitialisation complète par ' + _adminUser.email);
-  showToast('Réinitialisation envoyée à tous les appareils. Rechargement…', 'ok');
-  setTimeout(function() { location.reload(); }, 1800);
 }
 
 /* ══════════════════════════════════════════
@@ -31937,189 +26454,6 @@ function _admRejectBadge(id) {
 }
 
 /* ══════════════════════════════════════════
-   ONGLET — VÉRIFICATION ARTISTES
-══════════════════════════════════════════ */
-function _admBuildArtiste() {
-  if (!_gwFbDB) return;
-  _gwFbDB.ref('gw/artiste_verif_requests').orderByChild('ts').once('value', function(snap) {
-    var all = [];
-    snap.forEach(function(ch) { all.unshift(Object.assign({ _key: ch.key }, ch.val())); });
-    var pending  = all.filter(function(r){ return r.status === 'pending'; });
-    var reviewed = all.filter(function(r){ return r.status !== 'pending'; });
-
-    var cardStyle = 'background:#1E293B;border-radius:14px;padding:16px;margin-bottom:12px;border:1px solid #334155';
-
-    function _buildCard(r) {
-      var isPend = r.status === 'pending';
-      var isAppr = r.status === 'approved';
-      var statusCol  = isPend ? '#F59E0B' : (isAppr ? '#10B981' : '#EF4444');
-      var statusTxt  = isPend ? 'En attente' : (isAppr ? 'Approuvé' : 'Refusé');
-      var statusIco  = isPend ? 'fa-clock' : (isAppr ? 'fa-check-circle' : 'fa-times-circle');
-      var safeKey    = escHtml(r._key);
-      var safeEmail  = escHtml(r.userEmail || '');
-      var safeArtist = escHtml(r.artistName || r.userName || '');
-      var safeGenre  = escHtml(r.genre || '');
-      var safeBio    = escHtml(r.bio || '—');
-      var safeUser   = escHtml(r.userName || r.userEmail || '');
-      var dt         = r.ts ? new Date(r.ts).toLocaleDateString('fr-FR', {day:'2-digit',month:'short',year:'numeric'}) : '—';
-      return '<div style="' + cardStyle + '">' +
-        '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:10px">' +
-          '<div>' +
-            '<div style="font-weight:700;color:#F1F5F9;font-size:14px">' + safeArtist + '</div>' +
-            '<div style="color:#64748B;font-size:12px;margin-top:2px">' + safeUser + ' · ' + safeEmail + '</div>' +
-            '<div style="color:#A78BFA;font-size:11px;margin-top:2px"><i class="fas fa-music"></i> ' + safeGenre + '</div>' +
-          '</div>' +
-          '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">' +
-            '<span style="background:rgba(0,0,0,.3);color:' + statusCol + ';font-size:11px;font-weight:700;padding:3px 8px;border-radius:20px">' +
-              '<i class="fas ' + statusIco + '"></i> ' + statusTxt + '</span>' +
-            '<span style="color:#475569;font-size:10px">' + dt + '</span>' +
-          '</div>' +
-        '</div>' +
-        (r.bio ? '<div style="color:#94A3B8;font-size:12px;margin-bottom:12px;line-height:1.5">' + safeBio + '</div>' : '') +
-        '<div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:8px;padding:8px 10px;margin-bottom:12px">' +
-          '<span style="color:#34D399;font-size:11px"><i class="fas fa-check-circle"></i> A certifié que ses musiques seront originales</span>' +
-        '</div>' +
-        (isPend
-          ? '<div style="display:flex;gap:8px">' +
-              '<button onclick="_admRejectArtistePrompt(\'' + safeKey + '\',\'' + safeArtist + '\')" ' +
-                'style="flex:1;padding:10px;background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);border-radius:10px;color:#F87171;font-size:13px;font-weight:600;cursor:pointer">' +
-                '<i class="fas fa-times"></i> Refuser</button>' +
-              '<button onclick="_admApproveArtiste(\'' + safeKey + '\',\'' + safeEmail + '\',\'' + safeArtist + '\')" ' +
-                'style="flex:1;padding:10px;background:linear-gradient(135deg,#10B981,#059669);border:none;border-radius:10px;color:#fff;font-size:13px;font-weight:700;cursor:pointer">' +
-                '<i class="fas fa-check"></i> Approuver</button>' +
-            '</div>'
-          : (isAppr
-              ? '<button onclick="_admRevokeArtiste(\'' + safeKey + '\')" ' +
-                  'style="padding:8px 16px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:8px;color:#F87171;font-size:12px;cursor:pointer">' +
-                  '<i class="fas fa-ban"></i> Révoquer</button>'
-              : '<button onclick="_admApproveArtiste(\'' + safeKey + '\',\'' + safeEmail + '\',\'' + safeArtist + '\')" ' +
-                  'style="padding:8px 16px;background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);border-radius:8px;color:#34D399;font-size:12px;cursor:pointer">' +
-                  '<i class="fas fa-redo"></i> Approuver quand même</button>')) +
-      '</div>';
-    }
-
-    var html =
-      '<div class="adm-tab-header"><h2><i class="fas fa-music" style="color:#A78BFA;margin-right:8px"></i>Vérification Artistes</h2>' +
-      '<p>' + pending.length + ' en attente · ' + reviewed.length + ' traité(s)</p></div>' +
-      '<div class="adm-list-wrap">';
-
-    if (pending.length) {
-      html += '<h4 style="color:#F59E0B;font-size:12px;font-weight:700;text-transform:uppercase;margin:0 0 10px;letter-spacing:.5px">' +
-        '<i class="fas fa-clock"></i> En attente (' + pending.length + ')</h4>';
-      pending.forEach(function(r) { html += _buildCard(r); });
-    }
-    if (reviewed.length) {
-      html += '<h4 style="color:#64748B;font-size:12px;font-weight:700;text-transform:uppercase;margin:16px 0 10px;letter-spacing:.5px">Traités (' + reviewed.length + ')</h4>';
-      reviewed.forEach(function(r) { html += _buildCard(r); });
-    }
-    if (!all.length) {
-      html += '<div style="text-align:center;padding:40px 0;color:#475569">' +
-        '<i class="fas fa-music" style="font-size:36px;display:block;margin-bottom:12px"></i>' +
-        '<p style="margin:0">Aucune demande de vérification artiste</p></div>';
-    }
-    html += '</div>';
-
-    var content = document.getElementById('adm-panel-content');
-    if (content && _adminTab === 'artiste') content.innerHTML = html;
-    _admUpdateNavBadges();
-  });
-}
-
-function _admApproveArtiste(userKey, userEmail, artistName) {
-  if (!_gwFbDB) return;
-  _gwFbDB.ref('gw/artiste_verif_requests/' + userKey).update({
-    status: 'approved', reviewedBy: _adminUser.email, reviewedTs: Date.now()
-  }).then(function() {
-    showToast('Artiste approuvé ✓ — ' + artistName, 'ok');
-
-    /* ── Notification riche stockée dans Firebase (persistante) ── */
-    var notifMsg =
-      '🎉 Félicitations ' + artistName + ' ! Votre compte artiste a été vérifié.\n\n' +
-      'Vous pouvez désormais publier votre musique sur Geniwork.\n\n' +
-      '📜 CONDITIONS À RESPECTER :\n' +
-      '• Toute musique publiée doit être votre création originale\n' +
-      '• Vous ne pouvez pas publier des œuvres appartenant à d\'autres artistes\n' +
-      '• Vous êtes responsable des droits de chaque son mis en ligne\n\n' +
-      '⚠️ AVERTISSEMENT : Toute publication de musique ne vous appartenant pas entraînera un bannissement immédiat de la section Artiste et des poursuites possibles.';
-
-    var notifObj = {
-      type:    'artiste_approved',
-      title:   '🎵 Compte Artiste Vérifié',
-      msg:     notifMsg,
-      at:      Date.now(),
-      unread:  true,
-      id:      'artiste-appr-' + Date.now()
-    };
-
-    /* 1. Stockage Firebase → l'artiste le récupère à la prochaine ouverture */
-    _gwFbDB.ref('gw/artiste_pending_notifs/' + userKey).set(notifObj);
-
-    /* 2. Push FCM si l'artiste est sur mobile */
-    _gwSendPushNotif(userEmail,
-      '🎵 Compte Artiste Vérifié — Geniwork',
-      'Félicitations ! Vous pouvez maintenant publier votre musique.',
-      'artiste-approved');
-
-    _admBuildArtiste();
-  }).catch(function(e) { showToast('Erreur : ' + e.message, 'err'); });
-}
-
-function _admRejectArtistePrompt(userKey, artistName) {
-  var reason = prompt('Motif du refus (optionnel) :', '');
-  if (reason === null) return; /* Annulé */
-  _admRejectArtiste(userKey, artistName, reason);
-}
-
-function _admRejectArtiste(userKey, artistName, reason) {
-  if (!_gwFbDB) return;
-  _gwFbDB.ref('gw/artiste_verif_requests/' + userKey).update({
-    status: 'rejected',
-    rejectionReason: reason || '',
-    reviewedBy: _adminUser.email,
-    reviewedTs: Date.now()
-  }).then(function() {
-    showToast('Demande refusée — ' + artistName, 'ok');
-
-    var notifMsg =
-      '😔 Votre demande de vérification artiste a été examinée et n\'a pas pu être approuvée pour le moment.' +
-      (reason ? '\n\n📌 Motif : ' + reason : '') +
-      '\n\nVous pouvez soumettre une nouvelle demande en corrigeant les points mentionnés.';
-
-    var notifObj = {
-      type:   'artiste_rejected',
-      title:  '🎵 Demande Artiste Refusée',
-      msg:    notifMsg,
-      at:     Date.now(),
-      unread: true,
-      id:     'artiste-rej-' + Date.now()
-    };
-
-    _gwFbDB.ref('gw/artiste_pending_notifs/' + userKey).set(notifObj);
-
-    _gwSendPushNotif(userEmail,
-      '🎵 Demande Artiste — Geniwork',
-      'Votre demande n\'a pas été approuvée. Consultez vos notifications pour plus de détails.',
-      'artiste-rejected');
-
-    _admBuildArtiste();
-  }).catch(function(e) { showToast('Erreur : ' + e.message, 'err'); });
-}
-
-function _admRevokeArtiste(userKey) {
-  if (!_gwFbDB) return;
-  if (!confirm('Révoquer les droits de publication de cet artiste ?')) return;
-  _gwFbDB.ref('gw/artiste_verif_requests/' + userKey).update({
-    status: 'rejected',
-    rejectionReason: 'Droits révoqués par un administrateur',
-    reviewedBy: _adminUser.email,
-    reviewedTs: Date.now()
-  }).then(function() {
-    showToast('Artiste révoqué', 'ok');
-    _admBuildArtiste();
-  });
-}
-
-/* ══════════════════════════════════════════
    ONGLET 5 — ÉQUIPE
 ══════════════════════════════════════════ */
 function _admBuildTeam() {
@@ -32786,7 +27120,6 @@ function _offGetPosts()        { try { return JSON.parse(localStorage.getItem('g
 function _offSavePosts(list) {
   localStorage.setItem('gw_official_posts', JSON.stringify(list));
   if (!_gwFbSkip && _gwFbDB && _gwFbReady) {
-    _offLastPublishTs = Date.now(); /* marque l'instant d'écriture pour bloquer le feedback local */
     /* Strip les images base64 trop lourdes avant d'écrire dans Firebase
        (évite le dépassement de la limite 4 Mo qui ferait échouer le write) */
     var fbList = list.slice(0, 30).map(function(p) {
@@ -32896,11 +27229,7 @@ function _admBuildPubli() {
         '<input type="file" id="adm-off-vid-input"   accept="video/*" style="display:none" onchange="_admOffPreviewVideo(this)"/>' +
 
         /* Preview image */
-        '<div id="adm-off-img-wrap" style="display:none;position:relative;margin:6px 0">' +
-          '<img id="adm-off-img-preview" src="" alt="" style="width:100%;border-radius:10px;max-height:260px;object-fit:cover;display:block"/>' +
-          '<button onclick="_admOffRemoveImg()" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.65);color:#fff;border:none;border-radius:50%;width:28px;height:28px;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1"><i class="fas fa-times"></i></button>' +
-          '<button onclick="_admOpenCropModal(document.getElementById(\'adm-off-img-preview\').src)" style="position:absolute;top:6px;left:6px;background:rgba(99,102,241,.85);color:#fff;border:none;border-radius:8px;padding:4px 8px;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:4px"><i class="fas fa-crop-alt"></i> Recadrer</button>' +
-        '</div>' +
+        '<img id="adm-off-img-preview" src="" alt="" style="display:none;width:100%;border-radius:10px;max-height:200px;object-fit:cover;margin:6px 0"/>' +
 
         /* Preview vidéo */
         '<div id="adm-off-vid-preview-wrap" style="display:none;position:relative;margin:6px 0">' +
@@ -32977,153 +27306,8 @@ function _admBuildPubli() {
         '</div>';
     });
   }
-  html += '</div>' +
-
-  /* ── Services & Produits des membres ── */
-  (function() {
-    var allSvcs = [];
-    getUsers().forEach(function(u) {
-      loadUserServices(u.email).forEach(function(s) {
-        allSvcs.push(Object.assign({}, s, { _ownerEmail: u.email, _ownerNom: u.nom }));
-      });
-    });
-    var svSec = '<div style="margin-top:20px">' +
-      '<div class="adm-team-section-title" style="padding-bottom:8px">Services & Produits des membres (' + allSvcs.length + ')</div>';
-    if (!allSvcs.length) {
-      svSec += '<div class="adm-empty"><i class="fas fa-store"></i>Aucun service publié</div>';
-    } else {
-      allSvcs.slice(0, 60).forEach(function(s) {
-        var safeId    = String(s.id).replace(/'/g,"\\'");
-        var safeEmail = (s._ownerEmail || s.ownerEmail || '').replace(/'/g,"\\'");
-        var typeLabel = s.itemType === 'produit' ? '📦 Produit' : '🛠️ Service';
-        var price     = (s.priceType === 'negotiate') ? 'Sur devis' : (s.price ? s.price + '€' : 'Gratuit');
-        svSec +=
-          '<div class="adm-publi-hist-item">' +
-            '<div class="adm-publi-hist-text">' +
-              typeLabel + ' <strong>' + escHtml(s._ownerNom || s._ownerEmail || '?') + '</strong>' +
-              ' — ' + escHtml((s.title || '').slice(0, 60)) +
-            '</div>' +
-            '<div class="adm-publi-hist-meta">' +
-              '<span style="font-size:11px;color:#9CA3AF">' + escHtml(price) + '</span>' +
-              '<button class="adm-btn-sm adm-btn-del" style="padding:3px 8px" onclick="_admDeleteUserService(\'' + safeId + '\',\'' + safeEmail + '\')"><i class="fas fa-trash"></i></button>' +
-            '</div>' +
-          '</div>';
-      });
-    }
-    svSec += '</div>';
-    return svSec;
-  })() +
-
-  /* ── Toutes les publications utilisateurs ── */
-  (function() {
-    var allUserPosts = getAllPosts().filter(function(p) {
-      return !p._isOfficialInFeed && p.ownerEmail;
-    }).sort(function(a, b) { return b.id - a.id; });
-
-    var sec = '<div style="margin-top:20px">' +
-      '<div class="adm-team-section-title" style="padding-bottom:8px">Publications des utilisateurs (' + allUserPosts.length + ')</div>';
-
-    if (!allUserPosts.length) {
-      sec += '<div class="adm-empty"><i class="fas fa-users"></i>Aucune publication utilisateur</div>';
-    } else {
-      allUserPosts.slice(0, 50).forEach(function(p) {
-        var isVideo = !!(p.video && (p.video.url || p.video.idbId));
-        var hasImg  = !!(p.images && p.images.length);
-        var pType   = isVideo ? '🎬' : hasImg ? '📷' : '💬';
-        var preview = (p.text || '').slice(0, 80) + ((p.text || '').length > 80 ? '…' : '');
-        var safeId  = String(p.id).replace(/'/g,"\\'");
-        var d       = p.at ? new Date(p.at).toLocaleDateString('fr-FR') + ' ' + new Date(p.at).toLocaleTimeString('fr-FR', {hour:'2-digit',minute:'2-digit'}) : '';
-        sec +=
-          '<div class="adm-publi-hist-item">' +
-            '<div class="adm-publi-hist-text">' +
-              pType + ' <strong>' + escHtml(p.author || p.ownerEmail || '?') + '</strong>' +
-              (preview ? ' — ' + escHtml(preview) : ' (sans texte)') +
-            '</div>' +
-            '<div class="adm-publi-hist-meta">' +
-              '<span style="font-size:11px;color:#9CA3AF">' + escHtml(p.ownerEmail || '') + '</span>' +
-              '<span style="display:flex;gap:8px;align-items:center">' +
-                escHtml(d) +
-                ' <button class="adm-btn-sm adm-btn-del" style="padding:3px 8px" onclick="_admDeleteUserPost(\'' + safeId + '\')"><i class="fas fa-trash"></i></button>' +
-              '</span>' +
-            '</div>' +
-          '</div>';
-      });
-    }
-    sec += '</div>';
-    return sec;
-  })() +
-
-  '</div>';
+  html += '</div></div>';
   return html;
-}
-
-function _admDeleteUserPost(postId) {
-  if (!_adminUser || !_admHasAction('ban')) { showToast('Accès non autorisé', 'err'); return; }
-  if (!confirm('Supprimer cette publication utilisateur ?')) return;
-
-  var pid = String(postId);
-
-  /* 1. Tombstone local immédiat */
-  _gwMarkDeleted(pid);
-
-  /* 2. Retire de la mémoire et du DOM */
-  DEMO_POSTS    = DEMO_POSTS.filter(function(p)    { return String(p.id) !== pid; });
-  PENDING_POSTS = PENDING_POSTS.filter(function(p) { return String(p.id) !== pid; });
-  var card = document.getElementById('post-' + pid);
-  if (card) card.remove();
-
-  /* 3. Tombstone Firebase → propagé à TOUS les appareils en temps réel */
-  if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/deleted_posts/' + pid).set({ at: Date.now(), by: _adminUser.email }).catch(function(){});
-  }
-
-  /* 4. Met aussi à jour gw/posts/{ownerKey} pour les appareils hors-ligne */
-  var post = null; /* cherche aussi dans PENDING avant filtre */
-  /* Chercher l'email dans localStorage de tous les users */
-  try {
-    var users = getUsers();
-    users.forEach(function(u) {
-      if (!u.email) return;
-      var uPosts = loadPersistedUserPosts(u.email);
-      var found  = uPosts.find(function(p) { return String(p.id) === pid; });
-      if (found) {
-        post = found;
-        var filtered = uPosts.filter(function(p) { return String(p.id) !== pid; });
-        savePersistedUserPosts(u.email, filtered);
-      }
-    });
-  } catch(e){}
-
-  /* 5. Supprimer la vidéo si applicable */
-  if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/post_videos/' + pid).remove().catch(function(){});
-  }
-
-  _admLog('DELETE_USER_POST', pid + ' (' + ((post && post.ownerEmail) || '?') + ')');
-  showToast('Publication supprimée ✓', 'ok');
-  _admRender();
-}
-
-function _admDeleteUserService(svcId, ownerEmail) {
-  if (!_adminUser || !_admHasAction('ban')) { showToast('Accès non autorisé', 'err'); return; }
-  if (!confirm('Supprimer ce service/produit ?')) return;
-
-  var sid = String(svcId);
-
-  /* 1. Retirer du localStorage de l'owner */
-  var filtered = loadUserServices(ownerEmail).filter(function(s) { return String(s.id) !== sid; });
-
-  /* 2. Sauvegarder → déclenche child_changed sur Firebase → tous les appareils reçoivent la mise à jour */
-  saveUserServices(ownerEmail, filtered);
-
-  /* 3. Retirer du DOM marketplace si visible */
-  var card = document.getElementById('mk-lst-' + sid);
-  if (card) card.remove();
-
-  _admLog('DELETE_USER_SERVICE', sid + ' (' + ownerEmail + ')');
-  showToast('Service supprimé ✓', 'ok');
-  renderMarketplaceUserServices();
-  _admRender();
 }
 
 function _admPublisherCard(email, nom, grantedBy, canRevoke) {
@@ -33145,10 +27329,9 @@ function _admPublisherCard(email, nom, grantedBy, canRevoke) {
 function _admPublishOfficial() {
   var text    = _gwSanitize((document.getElementById('adm-off-text') || {}).value || '', 2000).trim();
   var imgPrev = document.getElementById('adm-off-img-preview');
-  var imgWrap = document.getElementById('adm-off-img-wrap');
   var vidPrev = document.getElementById('adm-off-vid-preview');
   var vidWrap = document.getElementById('adm-off-vid-preview-wrap');
-  var imgData = (imgWrap && imgWrap.style.display !== 'none' && imgPrev && imgPrev.src) ? imgPrev.src : null;
+  var imgData = (imgPrev && imgPrev.style.display !== 'none') ? imgPrev.src : null;
   var hasVid  = (vidPrev && vidWrap && vidWrap.style.display !== 'none' && vidPrev.src);
 
   if (!text && !imgData && !hasVid) { showToast('Écrivez un message ou ajoutez un média avant de publier', 'err'); return; }
@@ -33157,7 +27340,9 @@ function _admPublishOfficial() {
   function _resetAdmForm() {
     var ta = document.getElementById('adm-off-text');
     if (ta) ta.value = '';
-    _admOffRemoveImg();
+    if (imgPrev) { imgPrev.style.display = 'none'; imgPrev.src = ''; }
+    var imgInp = document.getElementById('adm-off-img-input');
+    if (imgInp) imgInp.value = '';
     _admOffRemoveVideo();
     showToast('Publication officielle envoyée ✓', 'ok');
     _admRender();
@@ -33211,241 +27396,14 @@ function _admPublishOfficial() {
 
 function _admOffPreviewImg(input) {
   if (!input.files || !input.files[0]) return;
+  /* Efface la vidéo si on choisit une image */
   _admOffRemoveVideo();
   var reader = new FileReader();
   reader.onload = function(e) {
-    _admOpenCropModal(e.target.result);
+    var prev = document.getElementById('adm-off-img-preview');
+    if (prev) { prev.src = e.target.result; prev.style.display = 'block'; }
   };
   reader.readAsDataURL(input.files[0]);
-}
-
-/* ── Supprime la preview image ── */
-function _admOffRemoveImg() {
-  var prev = document.getElementById('adm-off-img-preview');
-  var wrap = document.getElementById('adm-off-img-wrap');
-  if (prev) { prev.src = ''; }
-  if (wrap) { wrap.style.display = 'none'; }
-  var inp = document.getElementById('adm-off-img-input');
-  if (inp) inp.value = '';
-}
-
-/* ══════════════════════════════════════════
-   MODALE RECADRAGE IMAGE — PANEL ADMIN
-   Pan + zoom libre, export Canvas → dataURL
-══════════════════════════════════════════ */
-var _admCropCanvas   = null;
-var _offLastPublishTs = 0; /* timestamp du dernier publish officiel (évite double-render) */
-var _admCropCtx      = null;
-var _admCropNImg     = null;   /* Image native chargée */
-var _admCropScale    = 1;      /* Échelle courante */
-var _admCropMinScale = 1;      /* Échelle minimale (fit) */
-var _admCropOffX     = 0;      /* Centre visible X en pixels image */
-var _admCropOffY     = 0;      /* Centre visible Y en pixels image */
-var _admCropDragging = false;
-var _admCropLastMX   = 0;
-var _admCropLastMY   = 0;
-var _admCropTouchDist= null;
-
-function _admOpenCropModal(imgSrc) {
-  if (!imgSrc) return;
-  /* Ferme une éventuelle modale déjà ouverte */
-  var old = document.getElementById('adm-crop-overlay');
-  if (old) old.remove();
-
-  var overlay = document.createElement('div');
-  overlay.id = 'adm-crop-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
-
-  overlay.innerHTML =
-    '<div style="background:#1E293B;border-radius:16px;padding:20px;width:100%;max-width:560px;display:flex;flex-direction:column;gap:14px;box-shadow:0 20px 60px rgba(0,0,0,.6)">' +
-      '<div style="font-size:15px;font-weight:700;color:#fff;text-align:center">' +
-        '<i class="fas fa-crop-alt" style="margin-right:8px;color:#6366F1"></i>Recadrer / Zoomer l\'image' +
-      '</div>' +
-      '<canvas id="adm-crop-canvas" style="width:100%;border-radius:10px;cursor:grab;touch-action:none;border:2px solid #334155;display:block"></canvas>' +
-      '<div style="display:flex;align-items:center;gap:10px">' +
-        '<i class="fas fa-search-minus" style="color:#94A3B8;font-size:13px;flex-shrink:0"></i>' +
-        '<input type="range" id="adm-crop-zoom" min="100" max="500" step="1" value="100" style="flex:1;accent-color:#6366F1;cursor:pointer"/>' +
-        '<i class="fas fa-search-plus" style="color:#94A3B8;font-size:13px;flex-shrink:0"></i>' +
-      '</div>' +
-      '<div style="font-size:11px;color:#64748B;text-align:center">Glissez pour repositionner · Curseur ou pincement pour zoomer</div>' +
-      '<div style="display:flex;gap:10px">' +
-        '<button onclick="_admCropCancel()" style="flex:1;padding:12px;background:#374151;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer"><i class="fas fa-times" style="margin-right:6px"></i>Annuler</button>' +
-        '<button onclick="_admCropConfirm()" style="flex:1;padding:12px;background:linear-gradient(135deg,#6366F1,#4F46E5);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer"><i class="fas fa-check" style="margin-right:6px"></i>Valider</button>' +
-      '</div>' +
-    '</div>';
-
-  document.body.appendChild(overlay);
-
-  /* Chargement de l'image */
-  var img = new Image();
-  img.onload = function() {
-    _admCropNImg   = img;
-    var canvasEl   = document.getElementById('adm-crop-canvas');
-    if (!canvasEl) return;
-
-    /* Dimensions canvas : 4:3, 800×600 */
-    var CW = 800, CH = 600;
-    canvasEl.width  = CW;
-    canvasEl.height = CH;
-    _admCropCanvas  = canvasEl;
-    _admCropCtx     = canvasEl.getContext('2d');
-
-    /* Échelle minimale = remplir le cadre (cover) */
-    _admCropMinScale = Math.max(CW / img.naturalWidth, CH / img.naturalHeight);
-    _admCropScale    = _admCropMinScale;
-    _admCropOffX     = img.naturalWidth  / 2;
-    _admCropOffY     = img.naturalHeight / 2;
-    _admCropDragging = false;
-
-    _admCropDraw();
-    _admCropBindEvents(canvasEl);
-  };
-  img.src = imgSrc;
-}
-
-function _admCropDraw() {
-  var ctx = _admCropCtx, img = _admCropNImg, cv = _admCropCanvas;
-  if (!ctx || !img || !cv) return;
-  var W = cv.width, H = cv.height;
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, W, H);
-  /* Centre du canvas → _admCropOffX, _admCropOffY dans l'image */
-  var drawX = W / 2 - _admCropOffX * _admCropScale;
-  var drawY = H / 2 - _admCropOffY * _admCropScale;
-  ctx.drawImage(img, drawX, drawY, img.naturalWidth * _admCropScale, img.naturalHeight * _admCropScale);
-  /* Guideline en tirets */
-  ctx.strokeStyle = 'rgba(255,255,255,.25)';
-  ctx.lineWidth   = 1;
-  ctx.setLineDash([6, 4]);
-  var third = W / 3, thirdH = H / 3;
-  for (var i = 1; i < 3; i++) {
-    ctx.beginPath(); ctx.moveTo(i * third, 0); ctx.lineTo(i * third, H); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, i * thirdH); ctx.lineTo(W, i * thirdH); ctx.stroke();
-  }
-  ctx.setLineDash([]);
-}
-
-function _admCropClamp() {
-  var img = _admCropNImg, cv = _admCropCanvas;
-  if (!img || !cv) return;
-  var hw = cv.width  / 2 / _admCropScale;
-  var hh = cv.height / 2 / _admCropScale;
-  _admCropOffX = Math.max(hw, Math.min(img.naturalWidth  - hw, _admCropOffX));
-  _admCropOffY = Math.max(hh, Math.min(img.naturalHeight - hh, _admCropOffY));
-}
-
-function _admCropBindEvents(canvasEl) {
-  /* ── Souris ── */
-  canvasEl.addEventListener('mousedown', function(e) {
-    _admCropDragging = true;
-    _admCropLastMX = e.clientX;
-    _admCropLastMY = e.clientY;
-    canvasEl.style.cursor = 'grabbing';
-    e.preventDefault();
-  });
-  document.addEventListener('mousemove', function(e) {
-    if (!_admCropDragging || !_admCropCanvas) return;
-    var ratio = _admCropCanvas.width / _admCropCanvas.offsetWidth;
-    _admCropOffX -= (e.clientX - _admCropLastMX) * ratio / _admCropScale;
-    _admCropOffY -= (e.clientY - _admCropLastMY) * ratio / _admCropScale;
-    _admCropClamp();
-    _admCropDraw();
-    _admCropLastMX = e.clientX;
-    _admCropLastMY = e.clientY;
-  });
-  document.addEventListener('mouseup', function() {
-    if (_admCropDragging) {
-      _admCropDragging = false;
-      if (_admCropCanvas) _admCropCanvas.style.cursor = 'grab';
-    }
-  });
-  /* ── Molette souris (zoom) ── */
-  canvasEl.addEventListener('wheel', function(e) {
-    e.preventDefault();
-    var delta = e.deltaY > 0 ? 0.9 : 1.1;
-    _admCropScale = Math.max(_admCropMinScale, Math.min(_admCropMinScale * 5, _admCropScale * delta));
-    _admCropClamp();
-    _admCropDraw();
-    var sl = document.getElementById('adm-crop-zoom');
-    if (sl) sl.value = Math.round((_admCropScale / _admCropMinScale) * 100);
-  }, { passive: false });
-  /* ── Glissement curseur ── */
-  var sliderEl = document.getElementById('adm-crop-zoom');
-  if (sliderEl) {
-    sliderEl.addEventListener('input', function() {
-      _admCropScale = _admCropMinScale * (parseFloat(this.value) / 100);
-      _admCropClamp();
-      _admCropDraw();
-    });
-  }
-  /* ── Tactile ── */
-  canvasEl.addEventListener('touchstart', function(e) {
-    if (e.touches.length === 1) {
-      _admCropDragging = true;
-      _admCropLastMX = e.touches[0].clientX;
-      _admCropLastMY = e.touches[0].clientY;
-      _admCropTouchDist = null;
-    } else if (e.touches.length === 2) {
-      _admCropDragging = false;
-      var dx = e.touches[0].clientX - e.touches[1].clientX;
-      var dy = e.touches[0].clientY - e.touches[1].clientY;
-      _admCropTouchDist = Math.sqrt(dx * dx + dy * dy);
-    }
-    e.preventDefault();
-  }, { passive: false });
-  canvasEl.addEventListener('touchmove', function(e) {
-    if (!_admCropCanvas) return;
-    var ratio = _admCropCanvas.width / _admCropCanvas.offsetWidth;
-    if (e.touches.length === 1 && _admCropDragging) {
-      _admCropOffX -= (e.touches[0].clientX - _admCropLastMX) * ratio / _admCropScale;
-      _admCropOffY -= (e.touches[0].clientY - _admCropLastMY) * ratio / _admCropScale;
-      _admCropClamp();
-      _admCropDraw();
-      _admCropLastMX = e.touches[0].clientX;
-      _admCropLastMY = e.touches[0].clientY;
-    } else if (e.touches.length === 2 && _admCropTouchDist) {
-      var dx2 = e.touches[0].clientX - e.touches[1].clientX;
-      var dy2 = e.touches[0].clientY - e.touches[1].clientY;
-      var newDist = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-      _admCropScale = Math.max(_admCropMinScale, Math.min(_admCropMinScale * 5, _admCropScale * newDist / _admCropTouchDist));
-      _admCropClamp();
-      _admCropDraw();
-      _admCropTouchDist = newDist;
-      var sl2 = document.getElementById('adm-crop-zoom');
-      if (sl2) sl2.value = Math.round((_admCropScale / _admCropMinScale) * 100);
-    }
-    e.preventDefault();
-  }, { passive: false });
-  canvasEl.addEventListener('touchend', function() {
-    _admCropDragging = false;
-    _admCropTouchDist = null;
-  });
-}
-
-function _admCropConfirm() {
-  var cv = _admCropCanvas;
-  if (!cv) return;
-  try {
-    var dataUrl = cv.toDataURL('image/jpeg', 0.88);
-    var prev    = document.getElementById('adm-off-img-preview');
-    var wrap    = document.getElementById('adm-off-img-wrap');
-    if (prev) prev.src = dataUrl;
-    if (wrap) wrap.style.display = 'block';
-  } catch(e) {
-    showToast('Erreur lors du recadrage', 'err');
-  }
-  var ol = document.getElementById('adm-crop-overlay');
-  if (ol) ol.remove();
-  _admCropCanvas = null; _admCropCtx = null; _admCropNImg = null;
-}
-
-function _admCropCancel() {
-  var ol = document.getElementById('adm-crop-overlay');
-  if (ol) ol.remove();
-  var inp = document.getElementById('adm-off-img-input');
-  if (inp) inp.value = '';
-  _admCropCanvas = null; _admCropCtx = null; _admCropNImg = null;
 }
 
 /* Blob URL + File admin vidéo */
@@ -33478,7 +27436,10 @@ function _admOffPreviewVideo(input) {
   _admOffVidFile    = file;   /* ← gardé pour IndexedDB */
 
   /* Efface l'image si on choisit une vidéo */
-  _admOffRemoveImg();
+  var imgPrev = document.getElementById('adm-off-img-preview');
+  if (imgPrev) { imgPrev.style.display = 'none'; imgPrev.src = ''; }
+  var imgInp = document.getElementById('adm-off-img-input');
+  if (imgInp) imgInp.value = '';
 
   var vid  = document.getElementById('adm-off-vid-preview');
   var wrap = document.getElementById('adm-off-vid-preview-wrap');
@@ -33829,34 +27790,15 @@ function _buildOfficialCard(p) {
   var comments   = Array.isArray(p.comments) ? p.comments : [];
   var cmtCount   = comments.length;
 
-  /* Dislike + Save state */
-  var offDislikers = loadPostDislikers('off_' + p.id);
-  var offDisliked  = userEmail && offDislikers.indexOf(userEmail) !== -1;
-  var offDCount    = offDislikers.length;
-  var offFavId     = 'off_' + p.id;
-  var offSaved     = typeof getFavorites === 'function' && getFavorites().some(function(f){ return f.postId === offFavId; });
-  var offFavCount  = _getFavCount(offFavId);
-
-  /* Texte tronqué */
-  var rawText  = p.text || '';
-  var needMore = rawText.length > 200;
-  var shortTxt = needMore ? rawText.slice(0, 200) : rawText;
-  var textHtml = rawText
-    ? '<div class="post-official-text" id="off-ptxt-' + p.id + '">' +
-        _gwRenderTextWithHashtags(shortTxt) +
-        (needMore ? '… <button class="see-more" onclick="_offExpandPost(\'' + p.id + '\')">Voir plus</button>' : '') +
-      '</div>'
-    : '';
-
   var isFollowingOff = isFollowing(GW_OFFICIAL_KEY);
   card.innerHTML =
     '<div class="post-official-header" onclick="openOfficialProfile()" style="cursor:pointer" title="Voir le profil Geniwork">' +
       avatarHtml +
       '<div style="flex:1;min-width:0">' +
         '<div class="post-official-name">Geniwork' +
-          '<span class="badge-inline badge-inline-blue" title="Compte certifié Geniwork" style="margin-left:4px"><i class="fas fa-circle-check"></i></span>' +
+          '<span class="post-official-badge"><i class="fas fa-circle-check"></i> Officiel</span>' +
         '</div>' +
-        '<div class="post-official-sub">Publication officielle · ' + timeStr + '</div>' +
+        '<div class="post-official-sub">Compte certifié · ' + timeStr + '</div>' +
       '</div>' +
       /* Bouton Suivre / Abonné directement sur la card */
       '<button class="off-card-follow-btn' + (isFollowingOff ? ' following' : '') + '" id="off-card-follow-' + p.id + '"' +
@@ -33864,28 +27806,22 @@ function _buildOfficialCard(p) {
         (isFollowingOff ? '<i class="fas fa-check"></i> Abonné' : '<i class="fas fa-plus"></i> Suivre') +
       '</button>' +
     '</div>' +
-    textHtml +
+    (p.text ? '<div class="post-official-text">' + escHtml(p.text) + '</div>' : '') +
     imgHtml +
 
-    /* ── Footer : actions ── */
+    /* ── Footer : Like + Commentaire ── */
     '<div class="post-official-footer">' +
       '<div class="post-official-actions">' +
 
         /* Like */
-        '<button class="post-official-action-btn' + (liked ? ' liked' : '') + '" id="off-like-btn-' + p.id + '" onclick="_offToggleLike(\'' + p.id + '\',this)">' +
-          '<i class="' + (liked ? 'fas' : 'far') + ' fa-heart" style="color:' + (liked ? '#EF4444' : '#94A3B8') + '"></i>' +
+        '<button class="post-official-action-btn" id="off-like-btn-' + p.id + '" onclick="_offToggleLike(\'' + p.id + '\',this)">' +
+          '<i class="fas fa-heart' + (liked ? '' : '-o') + '" style="color:' + (liked ? '#EF4444' : '#94A3B8') + '"></i>' +
           ' <span id="off-likes-' + p.id + '">' + likeCount + '</span>' +
-        '</button>' +
-
-        /* Dislike */
-        '<button class="post-official-action-btn' + (offDisliked ? ' disliked' : '') + '" id="off-dislike-btn-' + p.id + '" onclick="_offToggleDislike(\'' + p.id + '\',this)">' +
-          '<i class="' + (offDisliked ? 'fas' : 'far') + ' fa-thumbs-down" style="color:' + (offDisliked ? '#EF4444' : '#94A3B8') + '"></i>' +
-          (offDCount > 0 ? ' <span id="off-dlikes-' + p.id + '">' + offDCount + '</span>' : ' <span id="off-dlikes-' + p.id + '" style="display:none">' + offDCount + '</span>') +
         '</button>' +
 
         /* Commentaire */
         '<button class="post-official-action-btn" onclick="_offToggleComments(\'' + p.id + '\')">' +
-          '<i class="far fa-comment" style="color:#6366F1"></i>' +
+          '<i class="fas fa-comment" style="color:#6366F1"></i>' +
           ' <span id="off-cmts-' + p.id + '">' + cmtCount + '</span>' +
         '</button>' +
 
@@ -33900,13 +27836,8 @@ function _buildOfficialCard(p) {
           '</button>';
         })() +
 
-        /* Sauvegarder */
-        '<button class="post-official-action-btn fav-btn' + (offSaved ? ' favorited' : '') + '" id="fav-btn-' + offFavId + '" onclick="toggleFavorite(\'' + offFavId + '\')">' +
-          '<i class="' + (offSaved ? 'fas' : 'far') + ' fa-bookmark" style="color:' + (offSaved ? '#F59E0B' : '#94A3B8') + '"></i>' +
-          '<span data-fav-cnt="' + offFavId + '" style="' + (offFavCount > 0 ? '' : 'display:none') + '">' + (offFavCount > 0 ? offFavCount : '0') + '</span>' +
-        '</button>' +
-
       '</div>' +
+      '<div class="post-official-powered"><i class="fas fa-shield-halved"></i> Geniwork</div>' +
     '</div>' +
 
     /* ── Section commentaires (masquée par défaut) ── */
@@ -34149,58 +28080,6 @@ function _offToggleLike(postId, btn) {
   }
 }
 
-/* Expand full text for official post "Voir plus" */
-function _offExpandPost(postId) {
-  var p = _offGetPosts().find(function(x) { return String(x.id) === String(postId); });
-  if (!p) return;
-  var el = document.getElementById('off-ptxt-' + postId);
-  if (el) el.innerHTML = _gwRenderTextWithHashtags(p.text);
-}
-
-/* Dislike toggle for official posts */
-function _offToggleDislike(postId, btn) {
-  if (!_currentUser) { showToast('Connectez-vous pour réagir', 'err'); return; }
-  var email    = _currentUser.email;
-  var dislikers = loadPostDislikers('off_' + postId);
-  var idx      = dislikers.indexOf(email);
-  if (idx === -1) {
-    dislikers.push(email);
-    /* Retire le like si présent */
-    var posts = _offGetPosts();
-    var p = posts.find(function(x) { return String(x.id) === String(postId); });
-    if (p) {
-      var likers = Array.isArray(p.likers) ? p.likers : [];
-      var likeIdx = likers.indexOf(email);
-      if (likeIdx !== -1) {
-        likers.splice(likeIdx, 1);
-        p.likers = likers;
-        _offSavePosts(posts);
-        var likeCount = (p.baseLikes || 0) + likers.length;
-        var likeEl = document.getElementById('off-likes-' + postId);
-        if (likeEl) likeEl.textContent = likeCount;
-        var likeBtn = document.getElementById('off-like-btn-' + postId);
-        if (likeBtn) {
-          likeBtn.classList.remove('liked');
-          var likeIco = likeBtn.querySelector('i');
-          if (likeIco) { likeIco.className = 'far fa-heart'; likeIco.style.color = '#94A3B8'; }
-        }
-      }
-    }
-  } else {
-    dislikers.splice(idx, 1);
-  }
-  savePostDislikers('off_' + postId, dislikers);
-  var disliked = dislikers.indexOf(email) !== -1;
-  var dcount   = dislikers.length;
-  if (btn) {
-    btn.classList.toggle('disliked', disliked);
-    var ico = btn.querySelector('i');
-    if (ico) { ico.className = (disliked ? 'fas' : 'far') + ' fa-thumbs-down'; ico.style.color = disliked ? '#EF4444' : '#94A3B8'; }
-    var cntEl = document.getElementById('off-dlikes-' + postId);
-    if (cntEl) { cntEl.textContent = dcount; cntEl.style.display = dcount > 0 ? '' : 'none'; }
-  }
-}
-
 /* ══════════════════════════════════════════
    COMPOSER OFFICIEL — CÔTÉ UTILISATEUR
    Accessible aux éditeurs autorisés depuis la sidebar
@@ -34339,7 +28218,7 @@ function _writeDMInbox(toEmail, fromEmail, fromName, fromRole, lastMsg) {
 
 /* Y vérifie son inbox Firebase et crée/met à jour les conversations
    Les messages ne sont PAS chargés ici — ils le sont dans _dmOpen() */
-function _checkDMInbox(showNotif) {
+function _checkDMInbox() {
   if (!_currentUser) return;
   var key = 'gw_dm_inbox_' + _currentUser.email;
   try {
@@ -34353,7 +28232,7 @@ function _checkDMInbox(showNotif) {
          Évite le faux "non lu" quand Firebase restaure une ancienne entrée inbox */
       var _readKey = 'gw_dmread_' + _currentUser.email + '_' + _gwFbKey(entry.fromEmail);
       var _readTs  = parseInt(localStorage.getItem(_readKey) || '0');
-      if (_readTs && entry.at && entry.at < (_readTs - 60000)) return; /* déjà lu → ignorer (60s de marge pour le décalage d'horloge inter-appareils) */
+      if (_readTs && entry.at && entry.at <= _readTs) return; /* déjà lu → ignorer */
 
       var existing = DEMO_CONVERSATIONS.find(function(c) {
         return !c.isGroup && c.email === entry.fromEmail;
@@ -34384,62 +28263,20 @@ function _checkDMInbox(showNotif) {
       } else {
         /* Conversation existante — mettre à jour lastMsg + badge non-lu */
         if (!existing.email) existing.email = entry.fromEmail;
-        /* La conv n'est "ouverte" (pas de badge) que si la page Messages est active
-           ET le chat-screen visible — sinon l'utilisateur a navigué ailleurs */
-        var _isMsgPageActive = (function() {
-          var pg = document.getElementById('p-messages');
-          var sc = document.getElementById('chat-screen');
-          return pg && pg.classList.contains('active') && sc && sc.classList.contains('open');
-        })();
-        var isOpen = _isMsgPageActive && _chatConvId === existing.id;
-        if (!isOpen) {
-          var _isNewMsg = entry.at && (!existing.lastAt || entry.at > existing.lastAt);
-          if (_isNewMsg) {
-            /* Nouveau message → incrémenter le compteur */
-            existing.lastMsg = entry.lastMsg || existing.lastMsg;
-            existing.lastAt  = entry.at;
-            existing.unread  = (existing.unread || 0) + 1;
-            changed = true;
-          } else if (existing.unread === 0) {
-            /* L'entrée inbox existe (message non lu) mais le compteur est à 0
-               (ex. après reload) → forcer à 1 */
-            existing.unread = 1;
-            if (entry.lastMsg) existing.lastMsg = entry.lastMsg;
-            changed = true;
-          }
+        var isOpen = _chatConvId === existing.id;
+        if (!isOpen && entry.at && (!existing.lastAt || entry.at > existing.lastAt)) {
+          existing.lastMsg = entry.lastMsg || existing.lastMsg;
+          existing.lastAt  = entry.at;
+          existing.unread  = (existing.unread || 0) + 1;
+          changed = true;
         }
       }
     });
     if (changed) {
       _saveDMConvList();
       renderConversations();
-      /* Failsafe : badge nav toujours mis à jour même si renderConversations échoue */
-      try {
-        var _tu = DEMO_CONVERSATIONS.reduce(function(s, c) { return s + (c.unread || 0); }, 0);
-        _updateMsgNavBadge(_tu);
-      } catch(e) {}
     }
   } catch(e) {}
-}
-
-/* ── Sync directe Firebase → localStorage → _checkDMInbox ────────────────────
-   Contourne le cache localStorage : utile quand le listener child_added a raté
-   un événement (reconnexion réseau, démarrage lent, etc.)                     */
-function _syncInboxNow() {
-  if (!_gwFbDB || !_currentUser) return;
-  var _sfbKey = _gwFbKey(_currentUser.email);
-  _gwFbDB.ref('gw/inboxes/' + _sfbKey).once('value').then(function(snap) {
-    if (!_currentUser) return;
-    var _raw = snap.val();
-    var _list = _raw ? (Array.isArray(_raw) ? _raw : Object.values(_raw)) : [];
-    try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(_list)); } catch(e){}
-    /* Affiche les toasts pour les nouvelles entrées détectées via ce fallback Firebase.
-       _showInboxToast est au niveau module → partage le dédup _dmToastedMap avec les listeners. */
-    _list.forEach(function(entry) {
-      try { _showInboxToast(entry); } catch(e){}
-    });
-    try { _checkDMInbox(true); } catch(e){}
-  }).catch(function(){});
 }
 
 function _globalMsgPoll() {
@@ -34448,16 +28285,8 @@ function _globalMsgPoll() {
   /* Vérifie les changements de profil (photo/nom) de tous les utilisateurs */
   _checkProfileChanges();
 
-  /* Vérifie l'inbox en premier — crée les convs manquantes.
-     _syncInboxNow() fait une lecture Firebase toutes les ~15s pour garantir
-     la fraîcheur même si le listener child_added a raté un événement. */
-  var _now2 = Date.now();
-  if (!_globalMsgPoll._lastFbSync || _now2 - _globalMsgPoll._lastFbSync > 8000) {
-    _globalMsgPoll._lastFbSync = _now2;
-    _syncInboxNow();
-  } else {
-    _checkDMInbox();
-  }
+  /* Vérifie l'inbox en premier — crée les convs manquantes */
+  _checkDMInbox();
 
   /* Vérifie l'inbox de groupe — crée les groupes reçus hors connexion */
   _checkGroupInbox();
@@ -34786,7 +28615,7 @@ function _mkSetType(type) {
     _mkToggleEl('mk-paypal-wrap', 'none');
     _mkSetEbookMode('free'); /* ebook gratuit par défaut */
   } else {
-    _mkToggleEl('mk-paypal-wrap', _gwIsPaymentEnabled() ? 'block' : 'none');
+    _mkToggleEl('mk-paypal-wrap', 'block');
   }
 }
 
@@ -34805,8 +28634,8 @@ function _mkSetEbookMode(mode) {
   if (freeBtn) freeBtn.style.cssText = mode==='free' ? grad : flat;
   if (paidBtn) paidBtn.style.cssText = mode==='paid' ? gradP : flat;
   if (paidFields) paidFields.style.display = mode==='paid' ? 'block' : 'none';
-  /* PayPal requis seulement en mode payant et si paiements activés */
-  _mkToggleEl('mk-paypal-wrap', (mode==='paid' && _gwIsPaymentEnabled()) ? 'block' : 'none');
+  /* PayPal requis seulement en mode payant */
+  _mkToggleEl('mk-paypal-wrap', mode==='paid' ? 'block' : 'none');
 }
 
 function _mkPickEbookCover(input) {
@@ -34894,10 +28723,8 @@ function _mkDetectLocation(silent) {
     navigator.geolocation.getCurrentPosition(function(pos) {
       var lat = pos.coords.latitude;
       var lng = pos.coords.longitude;
-      var _mkNomCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      var _mkNomTimer = _mkNomCtrl ? setTimeout(function() { _mkNomCtrl.abort(); }, 8000) : null;
-      fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat='+lat+'&lon='+lng+'&accept-language=fr', { signal: _mkNomCtrl ? _mkNomCtrl.signal : undefined })
-        .then(function(r){ if (_mkNomTimer) clearTimeout(_mkNomTimer); return r.json(); })
+      fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat='+lat+'&lon='+lng+'&accept-language=fr')
+        .then(function(r){ return r.json(); })
         .then(function(data) {
           var city    = data.address.city || data.address.town || data.address.village || '';
           var country = data.address.country || '';
@@ -34950,7 +28777,7 @@ function _mkPublishListing() {
   if (!price)   { showToast('Ajoutez un prix valide', 'err'); return; }
   if (!city)    { showToast('Ajoutez votre ville', 'err'); return; }
   if (!country) { showToast('Ajoutez votre pays', 'err'); return; }
-  if (_gwIsPaymentEnabled() && !paypal) { showToast('Ajoutez votre email PayPal', 'err'); return; }
+  if (!paypal)  { showToast('Ajoutez votre email PayPal', 'err'); return; }
 
   var plan       = _mkGetUserPlanKey(_currentUser.email);
   var limits     = _MK_PLAN_LIMITS[plan] || _MK_PLAN_LIMITS.free;
@@ -35018,7 +28845,7 @@ function _mkPublishEbook() {
   if (!title)   { showToast('Ajoutez un titre', 'err'); return; }
   if (!_mkEbookFile) { showToast('Sélectionnez un fichier ebook (PDF/EPUB)', 'err'); return; }
   if (isPaid && price <= 0) { showToast('Entrez un prix valide', 'err'); return; }
-  if (isPaid && _gwIsPaymentEnabled() && !paypal) { showToast('Ajoutez votre email PayPal', 'err'); return; }
+  if (isPaid && !paypal)    { showToast('Ajoutez votre email PayPal', 'err'); return; }
 
   /* Bouton → spinner */
   var pubBtn = document.querySelector('[onclick="_mkPublishListing()"]');
@@ -35671,7 +29498,6 @@ function _mkBuildFeedAdCard(listing) {
 /* ── Ajouter une annonce marketplace au panier ── */
 function _mkAddListingToCart(listingId) {
   if (!_currentUser) { showToast('Connectez-vous pour acheter', 'err'); return; }
-  if (!_gwIsPaymentEnabled()) { showToast('Paiement en ligne temporairement indisponible', 'err'); return; }
   var listing = _mkGetListings().find(function(l){ return l.id === listingId; });
   if (!listing) return;
   if (listing.sellerEmail === _currentUser.email) { showToast('Vous ne pouvez pas acheter votre propre annonce', 'err'); return; }
@@ -35742,13 +29568,6 @@ function _mkRenderSystemListings() {
       svcSection.parentNode.insertBefore(mkSection, svcSection.nextSibling);
     }
   }
-  /* Masquer si on est en mode Artiste */
-  var _activeMkCat = (document.querySelector('.mk-cat.active') || {}).textContent || '';
-  if (_activeMkCat.trim().toLowerCase().indexOf('artiste') !== -1) {
-    mkSection.style.display = 'none';
-    return;
-  }
-  mkSection.style.display = '';
 
   if (!mkListings.length) {
     mkSection.style.display = 'none';
@@ -35826,12 +29645,10 @@ function _mkRenderSystemListings() {
           'style="position:absolute;bottom:8px;right:8px;z-index:3;padding:5px 9px;background:rgba(99,102,241,.9);color:#fff;border:none;border-radius:8px;font-size:10px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:4px">'+
           '<i class="fas fa-cog"></i> Gérer'+
         '</button>'
-      : (_gwIsPaymentEnabled()
-          ? '<button onclick="event.stopPropagation();_mkAddListingToCart(\''+safeId+'\')" '+
-              'style="position:absolute;bottom:8px;right:8px;z-index:3;width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(99,102,241,.4)">'+
-              '<i class="fas fa-cart-plus"></i>'+
-            '</button>'
-          : '<div style="position:absolute;bottom:8px;right:8px;z-index:3;width:32px;height:32px;border-radius:50%;background:rgba(100,116,139,.5);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center" title="Paiement indisponible"><i class="fas fa-lock"></i></div>');
+      : '<button onclick="event.stopPropagation();_mkAddListingToCart(\''+safeId+'\')" '+
+          'style="position:absolute;bottom:8px;right:8px;z-index:3;width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(99,102,241,.4)">'+
+          '<i class="fas fa-cart-plus"></i>'+
+        '</button>';
 
     var liveName = getDisplayName(listing.sellerEmail, listing.sellerNom);
     card.innerHTML =
@@ -36780,9 +30597,7 @@ function _mkRefreshAllListings() {
                 '<div style="font-size:15px;font-weight:800;color:#0F172A">'+l.price.toFixed(2)+'€</div>' +
                 (isMine
                   ? '<button onclick="event.stopPropagation();_mkOpenMySales()" style="padding:5px 10px;background:#EEF2FF;color:#6366F1;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-cog" style="margin-right:3px"></i>Gérer</button>'
-                  : (_gwIsPaymentEnabled()
-                      ? '<button onclick="event.stopPropagation();_mkAddListingToCart(\''+safeId+'\')" style="padding:5px 10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-cart-plus" style="margin-right:3px"></i>Panier</button>'
-                      : '<span style="padding:4px 8px;background:#F1F5F9;color:#94A3B8;border-radius:8px;font-size:10px;font-weight:600"><i class="fas fa-lock" style="margin-right:3px"></i>Indisponible</span>')) +
+                  : '<button onclick="event.stopPropagation();_mkAddListingToCart(\''+safeId+'\')" style="padding:5px 10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-cart-plus" style="margin-right:3px"></i>Panier</button>') +
               '</div>' +
             '</div>' +
           '</div>';
