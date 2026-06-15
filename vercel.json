@@ -5,6 +5,7 @@
     { "source": "/p/:id",                    "destination": "/api/post?id=:id" },
     { "source": "/api/(.*)",                 "destination": "/api/$1" },
     { "source": "/firebase-messaging-sw.js", "destination": "/firebase-messaging-sw.js" },
+    { "source": "/__/auth/(.*)",             "destination": "https://geniwork-be35c.firebaseapp.com/__/auth/$1" },
     { "source": "/(.*)",                     "destination": "/index.html" }
   ],
   "headers": [
