@@ -431,7 +431,7 @@ function _gwFbSet(path, data) {
 
 /* VAPID key (Web Push) — à récupérer dans Firebase Console
    Project Settings → Cloud Messaging → Web Push certificates */
-var _GW_VAPID_KEY = 'YOUR_VAPID_KEY_HERE';
+var _GW_VAPID_KEY = 'BMrd6xRP5sJXq67RAm9I-PWObMijfmb45YzVSXI39ThlQoApXi_Cm7MpOJW1JJ48zJ5M0qXOZLyVc59tZduOAFk';
 
 var _gwFcmToken = null;
 
@@ -521,7 +521,7 @@ function _gwFbSyncStart() {
   /* ── Utilisateurs ── */
   _listen('users', 'gw_users', function() {
     /* Rafraîchit les avatars/photos de profil partout dans l'UI */
-    try { renderFeed(getAllPosts()); } catch(e){}
+    try { renderFeed(_getFeedPosts()); } catch(e){}
     try {
       if (_currentUser) {
         var updated = getUsers().find(function(u){ return u.email === _currentUser.email; });
@@ -560,7 +560,7 @@ function _gwFbSyncStart() {
       var email = snap.key.replace(/__d__/g, '.').replace(/__a__/g, '@');
       DEMO_POSTS = DEMO_POSTS.filter(function(p) { return p.ownerEmail !== email; });
       try { localStorage.removeItem(_userPostsKey(email)); } catch(e2){}
-      try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e2){}
+      try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e2){}
     } catch(e){}
   });
 
@@ -572,26 +572,62 @@ function _gwFbSyncStart() {
       if (!data || !data.url) return;
       /* Posts utilisateurs (IDs numériques) */
       var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(pid); });
-      if (post && post.video && !post.video.url) {
+      if (post && post.video && (!post.video.url || post.video.url.startsWith('blob:'))) {
         post.video.url = data.url;
+        /* Persiste l'URL dans localStorage pour éviter l'écran noir au prochain chargement */
+        if (post.ownerEmail) {
+          try {
+            var _pPosts = loadPersistedUserPosts(post.ownerEmail);
+            var _pIdx = _pPosts.findIndex(function(x){ return String(x.id) === String(pid); });
+            if (_pIdx !== -1 && _pPosts[_pIdx].video) {
+              _pPosts[_pIdx].video.url = data.url;
+              savePersistedUserPosts(post.ownerEmail, _pPosts);
+            }
+          } catch(e){}
+        }
         var vEl = document.getElementById('fv-' + pid);
-        if (vEl && !vEl.src)  vEl.src = data.url;
+        if (vEl && (!vEl.src || vEl.src.startsWith('blob:'))) {
+          vEl.src = data.url;
+          vEl.load();
+          vEl._gwThumbForced = false;
+          _gwForceVideoThumb(vEl);
+        }
         var wrap = document.getElementById('pvw-' + pid);
         if (wrap) {
           (function(u, d) {
             wrap.onclick = function() { _openVideoFromPost(String(pid), d); };
           })(data.url, data.dur || 0);
         }
+        /* Aussi mettre à jour les vidéos de repost qui citent ce post */
+        DEMO_POSTS.forEach(function(rp) {
+          if (rp.type === 'repost' && rp.repostOf && String(rp.repostOf.id) === String(pid)) {
+            if (rp.repostOf.video && (!rp.repostOf.video.url || rp.repostOf.video.url.startsWith('blob:'))) {
+              rp.repostOf.video.url = data.url;
+            }
+            var rpEl = document.getElementById('rp-fv-' + rp.id);
+            if (rpEl && (!rpEl.src || rpEl.src.startsWith('blob:'))) {
+              rpEl.src = data.url;
+              rpEl.load();
+              rpEl._gwThumbForced = false;
+              _gwForceVideoThumb(rpEl);
+            }
+          }
+        });
       }
       /* Posts officiels (IDs commençant par 'off_') */
       if (String(pid).indexOf('off_') === 0) {
         var offList = _offGetPosts();
         var offPost = offList.find(function(x) { return String(x.id) === String(pid); });
-        if (offPost && offPost.video && typeof offPost.video === 'object' && !offPost.video.url) {
+        if (offPost && offPost.video && typeof offPost.video === 'object' && (!offPost.video.url || offPost.video.url.startsWith('blob:'))) {
           offPost.video.url = data.url;
           try { localStorage.setItem('gw_official_posts', JSON.stringify(offList)); } catch(e2){}
           var offVEl = document.getElementById('off-fv-' + pid);
-          if (offVEl && !offVEl.src) offVEl.src = data.url;
+          if (offVEl && (!offVEl.src || offVEl.src.startsWith('blob:'))) {
+            offVEl.src = data.url;
+            offVEl.load();
+            offVEl._gwThumbForced = false;
+            _gwForceVideoThumb(offVEl);
+          }
         }
       }
     } catch(e){}
@@ -601,8 +637,12 @@ function _gwFbSyncStart() {
   function _gwMergeLikes(snap) {
     try {
       var postId = snap.key;
-      var likers = snap.val();
-      if (!Array.isArray(likers)) return;
+      var _lval  = snap.val();
+      var likers;
+      if (Array.isArray(_lval)) { likers = _lval; }
+      else if (_lval && typeof _lval === 'object') { likers = Object.values(_lval); }
+      else { return; }
+      _likersCache[String(postId)] = likers;
       localStorage.setItem('gw_likers_' + postId, JSON.stringify(likers));
       var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
       if (post) {
@@ -711,9 +751,12 @@ function _gwFbSyncStart() {
   /* ── Commentaires (temps réel entre appareils) ── */
   function _gwMergeComments(snap) {
     try {
-      var postId   = snap.key;
-      var comments = snap.val();
-      if (!Array.isArray(comments)) return;
+      var postId = snap.key;
+      var _cval  = snap.val();
+      var comments;
+      if (Array.isArray(_cval)) { comments = _cval; }
+      else if (_cval && typeof _cval === 'object') { comments = Object.values(_cval); }
+      else { comments = []; }
       localStorage.setItem('gw_comments_' + postId, JSON.stringify(comments));
       /* Rafraîchit le post ouvert si besoin */
       var openDetail = document.getElementById('post-detail-wrap');
@@ -787,7 +830,17 @@ function _gwFbSyncStart() {
   /* ── Publications officielles ── */
   _listen('official_posts', 'gw_official_posts', function(freshList) {
     if (document.getElementById('feed-list')) {
+      /* Feed visible : rebuild pool + inject immédiatement */
+      try { _feedPool = _buildMergedFeedPool(_getFeedPosts()); } catch(e){}
       try { _injectOfficialPosts(); } catch(e){}
+    } else {
+      /* Feed pas encore chargé : réessaie dans 1.5s */
+      setTimeout(function() {
+        if (document.getElementById('feed-list')) {
+          try { _feedPool = _buildMergedFeedPool(_getFeedPosts()); } catch(e){}
+          try { _injectOfficialPosts(); } catch(e){}
+        }
+      }, 1500);
     }
     /* Pour chaque post vidéo sans URL → query gw/post_videos/{id} en parallèle */
     if (!Array.isArray(freshList) || !_gwFbDB) return;
@@ -815,7 +868,7 @@ function _gwFbSyncStart() {
   /* ── Logo officiel ── */
   _listen('settings_logo', 'gw_official_logo', function() {
     /* Re-rendre partout où le logo officiel apparaît */
-    try { renderFeed(getAllPosts()); } catch(e){}
+    try { renderFeed(_getFeedPosts()); } catch(e){}
     try { _renderNotifList(); }       catch(e){}
     try { _renderOfficialProfile(); } catch(e){}
     /* Mettre à jour les balises <img> déjà dans le DOM */
@@ -922,6 +975,8 @@ function _gwFbSyncStart() {
       try { _subRenderCurrentPlan(); } catch(e) {}
     }
     _admSync('dashboard');
+    /* Appliquer immédiatement les sections activées/désactivées */
+    try { _gwApplyMkSections(); } catch(e) {}
   });
 
   /* ── Profils utilisateurs — changements visibles en temps réel dans l'admin ── */
@@ -932,10 +987,54 @@ function _gwFbSyncStart() {
       var email2 = snap.key.replace(/__d__/g,'.').replace(/__a__/g,'@');
       _invalidateProfileCache(email2);
     } catch(e){}
+    /* Sync temps réel : demande artiste ou recours modifié dans ce profil */
+    try {
+      var profileVal = snap.val();
+      if (profileVal && profileVal.artiste_request) {
+        var updReq = profileVal.artiste_request;
+        if (updReq && updReq.id) {
+          /* Mettre à jour le cache admin */
+          if (_admArtisteRequests) {
+            var idx = _admArtisteRequests.findIndex(function(r){ return r.id === updReq.id; });
+            if (idx >= 0) _admArtisteRequests[idx] = updReq;
+            else _admArtisteRequests.unshift(updReq);
+          } else {
+            _admArtisteRequests = [updReq];
+          }
+          /* Re-render si sur onglet artiste ou marketplace */
+          if (_adminTab === 'artiste' || _adminTab === 'marketplace' || _adminTab === 'dashboard') {
+            try { _admRender(); } catch(e){}
+          }
+          /* Mettre à jour badge */
+          try { _admUpdateNavBadges(); } catch(e){}
+        }
+      }
+    } catch(e){}
     if (_adminTab === 'users' || _adminTab === 'dashboard') {
       try { _admRender(); } catch(e){}
     }
   });
+
+  /* ── Sons artiste — sync temps réel pour le compteur admin ── */
+  _gwFbDB.ref('gw/artiste_posts').on('value', function(snap) {
+    var val = snap.val();
+    if (val) {
+      /* Injecter la clé Firebase comme id si absente (anciens posts sans champ id) */
+      _admArtisteSongs = Object.keys(val).map(function(fbKey) {
+        var s = val[fbKey];
+        if (!s) return null;
+        if (!s.id) s.id = fbKey;
+        return s;
+      }).filter(Boolean);
+    } else {
+      _admArtisteSongs = [];
+    }
+    /* Synchroniser le cache utilisateur en excluant les deleted */
+    _artistePosts = _admArtisteSongs.filter(function(s){ return !s.deleted; });
+    if (_adminTab === 'artiste') {
+      try { _admRender(); } catch(e){}
+    }
+  }, function() { if (!_admArtisteSongs) _admArtisteSongs = []; });
 
   /* ── Éditeurs officiels ── */
   _listen('publishers', 'gw_publishers', function() { _admSync('*'); });
@@ -974,7 +1073,7 @@ function _gwMergePost(snap) {
     if (had) {
       DEMO_POSTS = DEMO_POSTS.filter(function(p) { return p.ownerEmail !== email; });
       try { localStorage.removeItem(_userPostsKey(email)); } catch(e2){}
-      try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e2){}
+      try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e2){}
     }
     return;
   }
@@ -1018,7 +1117,7 @@ function _gwMergePost(snap) {
   if (changed) {
     DEMO_POSTS.sort(function(a, b){ return b.id - a.id; });
     try {
-      if (document.getElementById('feed-list')) renderFeed(getAllPosts());
+      if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
     } catch(e){}
   }
 }
@@ -1121,15 +1220,15 @@ function _gwSetOnlinePresence(user) {
   var ref   = _gwFbDB.ref('gw/online/' + fbKey);
   _gwOnlineRef = ref;
 
-  /* Écrit la présence */
+  /* Écrit la présence (peut échouer si auth pas encore établie → silencieux) */
   ref.set({
     nom:   user.nom   || user.email,
     email: user.email,
     at:    Date.now()
-  });
+  }).catch(function(){});
 
   /* Supprime automatiquement à la déconnexion */
-  ref.onDisconnect().remove();
+  ref.onDisconnect().remove().catch(function(){});
 
   /* Renouvelle la présence toutes les 2 minutes (keepalive) */
   if (_gwOnlineRef._heartbeat) clearInterval(_gwOnlineRef._heartbeat);
@@ -1204,7 +1303,22 @@ function _gwFbWatchUserNotifs(email) {
     var data = snap.val();
     if (data === null) return;
     _gwFbSkip = true;
-    localStorage.setItem('gw_notifs_' + email, JSON.stringify(data));
+    /* Firebase .push() stocke sous forme d'objet {pushKey: {...}} → normaliser en tableau */
+    var arr;
+    if (Array.isArray(data)) {
+      arr = data.filter(Boolean);
+    } else if (data && typeof data === 'object') {
+      arr = Object.keys(data).map(function(k) {
+        var n = data[k];
+        if (n && !n.id) n.id = k;
+        return n;
+      }).filter(Boolean);
+    } else {
+      arr = [];
+    }
+    /* Trier du plus récent au plus ancien */
+    arr.sort(function(a, b) { return (b.at || 0) - (a.at || 0); });
+    localStorage.setItem('gw_notifs_' + email, JSON.stringify(arr));
     _gwFbSkip = false;
     try { renderNotifs(); updateNotifBadge(); } catch(e){}
   });
@@ -1323,9 +1437,15 @@ function _decodeJWT(token) {
 /* ── Verrou anti-double-clic ── */
 var _gwGoogleRunning = false;
 
-/* Lance Google Sign-In via Firebase Auth (pas d'origin_mismatch, localhost autorisé par défaut) */
+/* Lance Google Sign-In via le compte natif Android quand l'app tourne en Capacitor
+   (Google bloque signInWithPopup/redirect dans une WebView embarquée depuis 2016) */
 function startGoogleSignIn() {
   if (_gwGoogleRunning) return;
+
+  if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+    _startGoogleSignInNative();
+    return;
+  }
 
   /* ── Vérifie que Firebase Auth est disponible ── */
   var authInstance = _gwFbAuth || (typeof firebase !== 'undefined' && firebase.apps && firebase.apps.length ? firebase.auth() : null);
@@ -1374,6 +1494,46 @@ function startGoogleSignIn() {
         return;
       }
       showToast('Erreur Google : ' + (error.message || error.code), 'err');
+    });
+}
+
+/* Lance Google Sign-In via le sélecteur de compte natif Android (@capacitor-firebase/authentication) */
+function _startGoogleSignInNative() {
+  var plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.FirebaseAuthentication;
+  if (!plugin) {
+    showToast('Service Google non disponible', 'err');
+    return;
+  }
+
+  _gwGoogleRunning = true;
+  _showGoogleLoading('Ouverture Google…');
+
+  plugin.signInWithGoogle()
+    .then(function(result) {
+      _gwGoogleRunning = false;
+      /* skipNativeAuth:true → result.user reste null, les infos sont dans le idToken (JWT) */
+      var idToken = result && result.credential && result.credential.idToken;
+      var claims  = idToken ? _decodeJWT(idToken) : null;
+      if (!claims || !claims.email) {
+        _hideGoogleLoading();
+        showToast('Impossible de récupérer le profil Google', 'err');
+        return;
+      }
+      _showGoogleLoading('Connexion en cours…');
+      _googleLogin({
+        googleId : claims.sub,
+        email    : claims.email,
+        nom      : claims.name    || claims.email,
+        photo    : claims.picture || null,
+        verified : claims.email_verified
+      });
+    })
+    .catch(function(error) {
+      _gwGoogleRunning = false;
+      _hideGoogleLoading();
+      /* Sélecteur fermé par l'utilisateur → silencieux */
+      if (error && (error.code === '12501' || /cancel/i.test(error.message || ''))) return;
+      showToast('Erreur Google : ' + ((error && error.message) || 'inconnue'), 'err');
     });
 }
 
@@ -1556,12 +1716,12 @@ function _gwPreloadUserData(user, callback) {
     _gwFbDB.ref('gw/inboxes/' + fbKey).once('value'),         /* 0 */
     _gwFbDB.ref('gw/notifs/' + fbKey).once('value'),          /* 1 */
     _gwFbDB.ref('gw/profiles/' + fbKey).once('value'),        /* 2 */
-    _gwFbDB.ref('gw/dms').once('value'),                      /* 3 */
+    Promise.resolve({val:function(){return null;}}),           /* 3 — gw/dms ancien chemin, ignoré */
     _gwFbDB.ref('gw/group_inboxes/' + fbKey).once('value'),   /* 4 */
     _gwFbDB.ref('gw/group_msgs').once('value'),               /* 5 */
     _gwFbDB.ref('gw/following/' + fbKey).once('value'),       /* 6 */
     _gwFbDB.ref('gw/follow_counts').once('value'),            /* 7 */
-    _gwFbDB.ref('gw/dm_msgs').once('value'),                  /* 8 */
+    Promise.resolve({val:function(){return null;}}),           /* 8 — dm_msgs chargé à l'ouverture de conv (_dmOpen) */
     _gwFbDB.ref('gw/projects/' + fbKey).once('value'),        /* 9 */
     _gwFbDB.ref('gw/services/' + fbKey).once('value'),        /* 10 */
     _gwFbDB.ref('gw/blocked/' + fbKey).once('value'),         /* 11 */
@@ -1759,14 +1919,20 @@ function _gwStartApp() {
     _gwPreloadUserData(bgUser, function() {
       /* Rafraîchit les badges et compteurs sans tout re-rendre */
       try { _gwSilentRefresh(bgUser); } catch(e) {}
+      /* Re-confirme la présence en ligne maintenant que l'auth est établie */
+      try { _gwSetOnlinePresence(bgUser); } catch(e) {}
+      try { _gwWatchOnlineUsers(); } catch(e) {}
     });
     return;
   }
 
   /* ── Chemin normal (premier lancement sans fast-path) ── */
   if (session) {
-    var storedUser = findUser(session.email);
-    if (storedUser && !_admIsBanned(session.email)) {
+    if (_admIsBanned(session.email)) {
+      localStorage.removeItem('gw_session');
+    } else {
+      /* findUser() peut échouer si Firebase n'a pas encore syncé → fallback sur la session */
+      var storedUser = findUser(session.email) || { nom: session.nom || session.email.split('@')[0], email: session.email, loginMethod: session.loginMethod || 'email' };
       _currentUser = { nom: storedUser.nom, email: storedUser.email, loginMethod: storedUser.loginMethod || 'email' };
       _gwCreateSession(_currentUser);
       _gwPreloadUserData(_currentUser, function() {
@@ -1774,11 +1940,8 @@ function _gwStartApp() {
         initApp(_currentUser);
         scheduleNewPosts();
         goTo('screen-app');
-        /* Deep link : ouvre la publication ciblée si ?p=ID est dans l'URL */
         setTimeout(_gwHandleDeepLink, 800);
       });
-    } else {
-      localStorage.removeItem('gw_session');
     }
   }
 }
@@ -1794,12 +1957,12 @@ function _gwInstantAutoLogin() {
   try {
     var ses = _gwLoadSession();
     if (!ses || !ses.email) return false;
-    var user = findUser(ses.email);
-    if (!user) return false;
     if (_admIsBanned(ses.email)) {
       localStorage.removeItem('gw_session');
       return false;
     }
+    /* findUser() peut échouer si gw_users a été vidé → fallback sur les données de session */
+    var user = findUser(ses.email) || { nom: ses.nom || ses.email.split('@')[0], email: ses.email, loginMethod: ses.loginMethod || 'email' };
     _gwAppStarted = true;
     _currentUser = { nom: user.nom, email: user.email, loginMethod: user.loginMethod || 'email' };
     _gwCreateSession(_currentUser);
@@ -1842,6 +2005,17 @@ function _gwSilentRefresh(user) {
 function _gwHandleDeepLink() {
   try {
     var params = new URLSearchParams(window.location.search);
+
+    /* ── Deep link musique : URL param OU sessionStorage (après login/signup) ── */
+    var songId = params.get('song') || sessionStorage.getItem('gw_pending_song');
+    if (songId) {
+      sessionStorage.removeItem('gw_pending_song');
+      try { var b = document.getElementById('gw-song-preview-banner'); if (b) b.remove(); } catch(e){}
+      window.history.replaceState({}, '', window.location.pathname);
+      _gwOpenDeepSong(songId);
+      return;
+    }
+
     var postId = params.get('p');
     var ptype  = params.get('pt') || 'post';
     if (!postId) return;
@@ -1895,6 +2069,81 @@ function _gwOpenDeepPost(post, ptype) {
       }
     } catch(e) {}
   }, 400);
+}
+
+/* ── Bannière de preview song pour les utilisateurs non connectés ── */
+function _gwShowSongPreviewBanner(songId) {
+  /* Afficher après un petit délai pour laisser l'écran de login s'afficher */
+  setTimeout(function() {
+    try {
+      /* Si l'utilisateur est déjà connecté, pas besoin de banner */
+      if (_currentUser) return;
+      var prev = document.getElementById('gw-song-preview-banner');
+      if (prev) prev.remove();
+
+      /* Charger les infos du son depuis Firebase (lecture publique) */
+      var dbUrl = _GW_FIREBASE_CONFIG.databaseURL + '/gw/artiste_posts/' + encodeURIComponent(songId) + '.json';
+      fetch(dbUrl)
+        .then(function(r){ return r.json(); })
+        .then(function(song) {
+          if (!song) return;
+          if (!song.id) song.id = songId;
+          var banner = document.createElement('div');
+          banner.id = 'gw-song-preview-banner';
+          banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:9999;padding:12px 16px 28px;background:linear-gradient(180deg,transparent 0%,#000 100%);pointer-events:none';
+          var card = document.createElement('div');
+          card.style.cssText = 'background:#0F172A;border:1px solid rgba(124,58,237,.4);border-radius:16px;padding:14px;display:flex;align-items:center;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.6);pointer-events:all;max-width:480px;margin:0 auto';
+          card.innerHTML =
+            '<div style="width:48px;height:48px;border-radius:10px;overflow:hidden;flex-shrink:0;background:linear-gradient(135deg,#7C3AED44,#DB277744);display:flex;align-items:center;justify-content:center">' +
+              (song.coverUrl ? '<img src="' + escHtml(song.coverUrl) + '" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display=\'none\'">' : '<i class="fas fa-music" style="color:#A78BFA;font-size:18px"></i>') +
+            '</div>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:13px;font-weight:800;color:#F1F5F9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(song.title||'Un son') + '</div>' +
+              '<div style="font-size:11px;color:#A78BFA;margin-top:2px">' + escHtml(song.artistName||song.userName||'Artiste') + ' · GeniWork</div>' +
+            '</div>' +
+            '<button onclick="goTo(\'screen-login\')" style="background:linear-gradient(135deg,#7C3AED,#DB2777);border:none;border-radius:10px;padding:8px 14px;color:#fff;font-size:12px;font-weight:700;cursor:pointer;flex-shrink:0;white-space:nowrap">Écouter →</button>';
+          banner.appendChild(card);
+          document.body.appendChild(banner);
+
+          /* Disparaît si l'utilisateur se connecte */
+          var _removeBannerIfLoggedIn = setInterval(function() {
+            if (_currentUser || !document.getElementById('gw-song-preview-banner')) {
+              clearInterval(_removeBannerIfLoggedIn);
+              try { banner.remove(); } catch(e){}
+            }
+          }, 1000);
+        }).catch(function(){});
+    } catch(e) {}
+  }, 1500);
+}
+
+/* ── Ouvre un son artiste en deep link (utilisateur déjà connecté) ── */
+function _gwOpenDeepSong(songId) {
+  /* Naviguer vers la section Musiques */
+  navTo(null, 'p-marketplace');
+  setTimeout(function() {
+    try {
+      var btn = document.getElementById('mk-cat-btn-artiste') || document.querySelector('.mk-cat[data-cat="artiste"]');
+      if (btn) setMkCat(btn, 'artiste');
+    } catch(e) {}
+    /* Chercher le son dans le cache */
+    var post = (_artistePosts || []).find(function(p){ return p.id === songId; });
+    if (post) {
+      setTimeout(function(){ _artisteOpenDetail(post.id); }, 400);
+    } else if (_gwFbDB) {
+      /* Pas en cache — charger depuis Firebase */
+      _gwFbDB.ref('gw/artiste_posts/' + songId).once('value', function(snap) {
+        var s = snap.val();
+        if (s) {
+          if (!s.id) s.id = songId;
+          _artistePosts = _artistePosts || [];
+          if (!_artistePosts.find(function(p){ return p.id === songId; })) _artistePosts.unshift(s);
+          _artisteRender();
+          setTimeout(function(){ _artisteOpenDetail(s.id); }, 400);
+        } else { showToast('Son introuvable', 'warn'); }
+      }, function(){ showToast('Son introuvable', 'warn'); });
+    }
+  }, 600);
 }
 
 /* Précharge toutes les données Firebase dans localStorage, PUIS lance l'app */
@@ -1994,6 +2243,21 @@ function _gwFbPreloadAndStart() {
 
 /* Lance l'initialisation GIS quand la page est prête */
 window.addEventListener('load', function() {
+  /* ── Capture deep link song AVANT tout (persiste après redirection login) ── */
+  (function() {
+    try {
+      var p = new URLSearchParams(window.location.search);
+      var sid = p.get('song');
+      if (sid) {
+        sessionStorage.setItem('gw_pending_song', sid);
+        /* Nettoyer l'URL immédiatement */
+        window.history.replaceState({}, '', window.location.pathname);
+        /* Si pas encore connecté → afficher la carte du son sur l'écran d'accueil */
+        _gwShowSongPreviewBanner(sid);
+      }
+    } catch(e) {}
+  })();
+
   /* ── IndexedDB vidéo ── */
   _gwInitVideoDB();
 
@@ -2002,10 +2266,13 @@ window.addEventListener('load', function() {
      → Lance l'app IMMÉDIATEMENT depuis localStorage (< 200 ms)
      → Firebase s'init en arrière-plan pour sync uniquement
   ══════════════════════════════════════════════════════════════ */
-  _gwInstantAutoLogin();
-
-  /* ── Firebase : init + auth + sync + preload (arrière-plan si fast-path actif) ── */
+  /* ── Firebase : init synchrone (DB + Auth) AVANT le fast-path
+     pour que _gwFbReady = true quand initApp() est appelé ci-dessous.
+     signInAnonymously() reste async → listeners retentés après auth. ── */
   _gwInitFirebase();
+
+  /* Fast-path : lance l'app depuis localStorage (< 200 ms) */
+  _gwInstantAutoLogin();
 
   /* GIS se charge de manière async — on attend qu'il soit dispo */
   var _gisTimer = setInterval(function() {
@@ -2212,6 +2479,8 @@ function _gwGetDeviceId() {
 }
 
 function _gwCreateSession(user) {
+  /* Efface le flag de déconnexion explicite → auto-login autorisé au prochain lancement */
+  localStorage.removeItem('gw_explicit_logout');
   var session = {
     token:       _gwToken(),
     email:       user.email,
@@ -2226,14 +2495,17 @@ function _gwCreateSession(user) {
 
 function _gwLoadSession() {
   try {
+    /* Si l'utilisateur a cliqué "Déconnexion" → ne pas auto-connecter */
+    if (localStorage.getItem('gw_explicit_logout') === '1') return null;
+
     var raw = localStorage.getItem('gw_session');
     if (!raw) return null;
     var s = JSON.parse(raw);
     if (!s || !s.token || !s.email || !s.expires) { localStorage.removeItem('gw_session'); return null; }
     /* Session expirée */
     if (Date.now() > s.expires) { localStorage.removeItem('gw_session'); return null; }
-    /* Vérifie que c'est le même appareil */
-    if (s.deviceId && s.deviceId !== _gwGetDeviceId()) { localStorage.removeItem('gw_session'); return null; }
+    /* NOTE: la vérification deviceId est intentionnellement supprimée —
+       elle causait des déconnexions sur mobile quand le storage était partiellement effacé */
     /* ── Renouvelle automatiquement la session à chaque ouverture ── */
     s.expires = Date.now() + 365 * 24 * 3600 * 1000;
     localStorage.setItem('gw_session', JSON.stringify(s));
@@ -2591,6 +2863,7 @@ function acceptCGU() {
       scheduleNewPosts();
     }
     goTo('screen-app');
+    setTimeout(_gwHandleDeepLink, 900);
   }, 1200);
 }
 
@@ -2931,15 +3204,52 @@ function initApp(user) {
   if (_gwFbReady && _gwFbDB && user.email) {
     var _myFbKey = _gwFbKey(user.email);
 
+    /* Suivi toast par expéditeur — évite les doublons et les problèmes de décalage d'horloge */
+    var _inboxFirstLoad = true;
+    var _dmToastedMap = {};  /* senderFbKey → dernier at toasté */
+
+    function _showInboxToast(entry) {
+      if (!entry || !entry.fromEmail || !_currentUser) return;
+      var _sk = _gwFbKey(entry.fromEmail);
+      if (entry.at && _dmToastedMap[_sk] && entry.at <= _dmToastedMap[_sk]) return;
+      var _msgPageActive = (function() {
+        var pg = document.getElementById('p-messages');
+        var sc = document.getElementById('chat-screen');
+        return pg && pg.classList.contains('active') && sc && sc.classList.contains('open');
+      })();
+      var _convOpen = _msgPageActive && _chatConvId && DEMO_CONVERSATIONS.find(function(c) {
+        return c.id === _chatConvId && !c.isGroup && c.email === entry.fromEmail;
+      });
+      if (_convOpen) return;
+      if (entry.at) _dmToastedMap[_sk] = entry.at;
+      var _senderName = entry.fromName || entry.fromEmail || 'Quelqu\'un';
+      var _preview    = (entry.lastMsg || '').slice(0, 35);
+      showToast('💬 ' + _senderName + (_preview ? ' : ' + _preview : ' vous a écrit'), 'ok');
+    }
+
     /* Inbox */
     var _inboxRef = _gwFbDB.ref('gw/inboxes/' + _myFbKey);
     _gwFbDB._prevInboxRef = _inboxRef;
+    console.log('[DM] 👂 Écoute inbox:', 'gw/inboxes/' + _myFbKey);
     _inboxRef.on('value', function(snap) {
       var inbox = snap.val();
+      console.log('[DM] 📬 inbox reçu:', inbox ? Object.keys(inbox).length + ' entrée(s)' : 'vide');
       if (!inbox || !_currentUser) return;
       var list = Array.isArray(inbox) ? inbox : Object.values(inbox);
-      try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(list)); } catch(e){}
-      try { _checkDMInbox(); } catch(e){}
+      if (_inboxFirstLoad) {
+        /* Premier chargement : pré-marquer tous les messages existants → pas de toast */
+        _inboxFirstLoad = false;
+        list.forEach(function(e) {
+          if (e && e.fromEmail && e.at) _dmToastedMap[_gwFbKey(e.fromEmail)] = e.at;
+        });
+        try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(list)); } catch(e){}
+        try { _checkDMInbox(); } catch(e){}
+      } else {
+        /* Mise à jour ultérieure : toast pour chaque nouveau message */
+        list.forEach(function(e) { try { _showInboxToast(e); } catch(e2){} });
+        try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(list)); } catch(e){}
+        try { _checkDMInbox(); } catch(e){}
+      }
     });
 
     /* DMs : gw/dm_msgs (per-message, atomique) est l'unique source de vérité désormais.
@@ -2980,7 +3290,7 @@ function initApp(user) {
           try { _subUpdateSidebarChip(merged2.planType || 'free'); } catch(e2){}
         }
         /* Rafraîchit le feed pour mettre à jour les avatars (debounce 300ms) */
-        if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e2){} }
+        if (document.getElementById('feed-list')) { try { renderFeed(_getFeedPosts()); } catch(e2){} }
       } catch(e){}
     }
     _gwFbDB.ref('gw/profiles').on('child_added',   _onProfileSnap);
@@ -3023,7 +3333,7 @@ function initApp(user) {
       });
       DEMO_POSTS.sort(function(a,b){ return b.id - a.id; });
       _persistedPostsLoaded = true;
-      try { if (document.getElementById('feed-list')) renderFeed(getAllPosts()); } catch(e){}
+      try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e){}
     }).catch(function(){});
   }
 
@@ -3058,7 +3368,7 @@ function initApp(user) {
   /* Rend les posts du feed — _buildMergedFeedPool intègre les posts officiels automatiquement */
   var _initAllPosts = getAllPosts();
   _feedLastPostCount = _initAllPosts.length;
-  renderFeed(_initAllPosts.length ? _initAllPosts : DEMO_POSTS);
+  renderFeed(_getFeedPosts());
 
   /* Démarre l'auto-refresh du feed toutes les 30s */
   _feedStartAutoRefresh();
@@ -3120,6 +3430,16 @@ function initApp(user) {
   setTimeout(function() {
     try { _gwInitNotifications(); } catch(e) {}
   }, 2000);
+
+  /* Appliquer les sections activées/désactivées par l'admin dès le chargement */
+  setTimeout(function() {
+    try { _gwApplyMkSections(); } catch(e) {}
+    /* Charger l'email PayPal depuis la config admin */
+    try {
+      var _cfg = _admGetPlansConfig();
+      if (_cfg.paypalEmail) _GW_PAYPAL_EMAIL = _cfg.paypalEmail;
+    } catch(e) {}
+  }, 300);
 }
 
 function getInitials(nom) {
@@ -3172,7 +3492,7 @@ function _syncUserRecord(email, newNom) {
   var u = users.find(function(x) { return x.email.toLowerCase() === email.toLowerCase(); });
   if (u) { u.nom = newNom; saveUsers(users); }
   /* Rafraîchit le feed (noms des posts), les notifs et les initiales */
-  if (document.getElementById('feed-list')) renderFeed(getAllPosts());
+  if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
   _refreshCurrentUserAvatars();
 }
 
@@ -3197,6 +3517,13 @@ function _refreshCurrentUserAvatars() {
     }
   });
 
+  /* Prénom dans la section héro — mis à jour automatiquement à chaque changement de profil */
+  var heroFirst = document.getElementById('hero-firstname');
+  if (heroFirst) {
+    var firstName = (_currentUser.nom || '').split(' ')[0] || 'Bienvenue';
+    heroFirst.textContent = firstName;
+  }
+
   /* Rafraîchit aussi le drawer sidebar */
   _refreshSidebar();
 
@@ -3211,7 +3538,7 @@ function _refreshCurrentUserAvatars() {
 function _onProfileSaved() {
   renderProfilePage();
   _refreshCurrentUserAvatars(); /* inclut déjà _refreshSidebar() */
-  if (document.getElementById('feed-list')) { try { renderFeed(getAllPosts()); } catch(e) {} }
+  if (document.getElementById('feed-list')) { try { renderFeed(_getFeedPosts()); } catch(e) {} }
   /* Rafraîchir les cartes Marketplace avec la nouvelle photo/nom/badge */
   try { renderMarketplaceUserServices(); } catch(e) {}
   try { _mkRenderSystemListings(); } catch(e) {}
@@ -3235,7 +3562,7 @@ function _checkProfileChanges() {
     var pageId = activePage ? activePage.id : '';
 
     if (pageId === 'p-home') {
-      try { renderFeed(getAllPosts()); } catch(e) {}
+      try { renderFeed(_getFeedPosts()); } catch(e) {}
     } else if (pageId === 'p-messages') {
       try { renderConversations(); } catch(e) {}
       /* Si chat de groupe ouvert, re-render les messages */
@@ -3362,7 +3689,7 @@ function _feedDoRefresh() {
   /* Re-render */
   var allPosts = getAllPosts();
   _feedLastPostCount = allPosts.length;
-  renderFeed(allPosts);
+  renderFeed(_getFeedPosts());
   /* Supprimer badge si présent */
   var badge = document.getElementById('feed-new-badge');
   if (badge) badge.remove();
@@ -3376,6 +3703,11 @@ function navTo(btn, pageId) {
   if (pageId === 'p-home' && previousPage === 'p-home') {
     _feedDoRefresh();
     return;
+  }
+
+  /* Ferme le chat si on quitte messages → _chatConvId ne reste pas actif */
+  if (previousPage === 'p-messages' && pageId !== 'p-messages' && _chatConvId) {
+    try { closeChat(); } catch(e) {}
   }
 
   /* Masque toutes les pages */
@@ -3398,6 +3730,7 @@ function navTo(btn, pageId) {
   /* Refresh feed au retour sur Accueil */
   if (pageId === 'p-home') {
     _feedDoRefresh();
+    try { _gwApplyMkSections(); } catch(e) {}
   }
 
   if (pageId === 'p-marketplace') {
@@ -3407,6 +3740,7 @@ function navTo(btn, pageId) {
     try { _updateCartBadge(); }             catch(e) {}
     try { _collabRender(); }                catch(e) {}
     try { _mkRenderTxTabs(); }              catch(e) {}
+    try { _gwApplyMkSections(); }           catch(e) {}
     /* Sync Firebase en arrière-plan → re-rendu automatique sans bouton */
     if (_gwFbReady && _gwFbDB) {
       Promise.all([
@@ -3540,7 +3874,7 @@ function openFavorisPage() {
     return;
   }
   var favIds = favs.map(function(f) { return f.postId; });
-  var filtered = getAllPosts().filter(function(p) { return favIds.indexOf(p.id) !== -1; });
+  var filtered = _getFeedPosts().filter(function(p) { return favIds.indexOf(p.id) !== -1; });
   renderFeed(filtered);
   showToast('Affichage de vos ' + filtered.length + ' favori(s)', 'ok');
 }
@@ -4373,7 +4707,7 @@ function _selectLang(code) {
   _closeGenericSheet('lang-picker');
   applyLang();
   /* Re-render les zones dynamiques qui utilisent t() */
-  if (document.getElementById('feed-list')) renderFeed(getAllPosts());
+  if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
   renderProfilePage();
   var l = _LANGUAGES.find(function(x) { return x.code === code; });
   showToast((l ? l.flag + ' ' + l.label : code), 'ok');
@@ -5053,7 +5387,7 @@ function switchFeedTab(btn, tab) {
     }
     var followedNames  = following.map(function(f) { return f.nom.toLowerCase(); });
     var followedEmails = following.filter(function(f) { return f.email; }).map(function(f) { return f.email; });
-    var filtered = getAllPosts().filter(function(p) {
+    var filtered = _getFeedPosts().filter(function(p) {
       return followedNames.indexOf((p.author || '').toLowerCase()) !== -1 ||
              (p.ownerEmail && followedEmails.indexOf(p.ownerEmail) !== -1);
     });
@@ -5068,7 +5402,7 @@ function switchFeedTab(btn, tab) {
     }
     renderFeed(filtered);
   } else {
-    renderFeed(DEMO_POSTS);
+    renderFeed(_getFeedPosts());
   }
 }
 
@@ -5141,7 +5475,26 @@ function _loadAllPersistedPosts() {
    HELPER — tous les posts
 ══════════════════════════════════════════ */
 function getAllPosts() {
-  return DEMO_POSTS.concat(PENDING_POSTS);
+  var seen = {};
+  return DEMO_POSTS.concat(PENDING_POSTS).filter(function(p) {
+    if (!p || !p.id) return false;
+    var key = String(p.id);
+    if (seen[key]) return false;
+    seen[key] = true;
+    return true;
+  });
+}
+
+/* Posts pour le FEED principal — exclut les Shorts (réservés à la section Short) */
+function _getFeedPosts() {
+  var seen = {};
+  return DEMO_POSTS.concat(PENDING_POSTS).filter(function(p) {
+    if (!p || !p.id) return false;
+    var key = String(p.id);
+    if (seen[key]) return false;
+    seen[key] = true;
+    return !(p.video && p.video.videoType === 'short');
+  });
 }
 
 /* Posts publiés par un auteur donné (email ou nom) */
@@ -5249,7 +5602,25 @@ function _initFeedVideoObserver() {
       vid._gwVidTracked = true;
       _feedVideoObserver.observe(vid);
     }
+    _gwForceVideoThumb(vid);
   });
+}
+
+/* ── Force l'affichage de la 1ère frame comme miniature (sinon écran noir tant qu'on n'a pas cliqué play) ── */
+function _gwForceVideoThumb(vid) {
+  if (!vid || vid._gwThumbForced) return;
+  vid._gwThumbForced = true;
+  var _seekThumb = function() {
+    if (!vid.paused) return; /* déjà en lecture → frame déjà visible */
+    try { vid.currentTime = 0.05; } catch(e) {}
+  };
+  if (vid.readyState >= 1) {
+    _seekThumb();
+  } else {
+    vid.addEventListener('loadedmetadata', _seekThumb, { once: true });
+  }
+  /* Si la src est posée plus tard (vidéo Firebase pas encore chargée), réessaie */
+  vid.addEventListener('loadstart', function() { vid._gwThumbForced = false; _gwForceVideoThumb(vid); }, { once: true });
 }
 
 /* ══════════════════════════════════════════
@@ -5287,7 +5658,7 @@ function _initPullToRefresh() {
     setTimeout(function() {
       _ptrRemove();
       /* Recharge le feed + posts officiels */
-      renderFeed(getAllPosts());
+      renderFeed(_getFeedPosts());
       var feedScroll = document.getElementById('feed-scroll');
       if (feedScroll) feedScroll.scrollTop = 0;
       showToast('Feed actualisé ✓', 'ok');
@@ -5338,10 +5709,11 @@ var _feedCycleOff       = 0;    /* décalage lors du recyclage infini      */
 var _feedBusy           = false;/* chargement en cours                    */
 var _feedInfObs         = null; /* IntersectionObserver (backup)          */
 var _feedScrollHandler  = null; /* listener scroll actif                  */
+var _feedGeneration     = 0;    /* compteur pour invalider les callbacks obsolètes */
 
 /* ── Mélange les posts officiels dans le feed régulier (1 officiel / 4 réguliers) ── */
 function _buildMergedFeedPool(regularPosts) {
-  var officialPosts = _offGetPosts();
+  var officialPosts = _offGetPosts().filter(function(p) { return !(p.video && p.video.videoType === 'short'); });
   if (!officialPosts.length) return regularPosts;
 
   /* Trie les posts officiels du plus récent au plus ancien */
@@ -5400,6 +5772,7 @@ function _renderFeedNow(posts) {
   });
 
   /* ── Réinitialise tout l'état ── */
+  _feedGeneration++;               /* invalide tous les callbacks _feedAppendBatch en attente */
   _feedPool     = _buildMergedFeedPool(posts); /* posts officiels mélangés toutes les 4 positions */
   _feedOffset   = 0;
   _feedCycleOff = 0;
@@ -5424,15 +5797,21 @@ function _renderFeedNow(posts) {
   list.appendChild(loader);
 
   /* ── Premier lot immédiat ── */
-  _feedAppendBatch(true);
+  _feedAppendBatch(true, _feedGeneration);
+
+  /* ── Injection posts officiels après rendu du 1er lot ── */
+  setTimeout(function() {
+    try { _injectOfficialPosts(); } catch(e){}
+  }, 400);
 
   /* ── Scroll listener sur le conteneur (méthode la plus fiable) ──
      Déclenche un nouveau lot dès qu'il reste < 400px avant le bas   */
+  var _scrollGen = _feedGeneration;
   if (feedScroll) {
     _feedScrollHandler = function() {
       var remaining = feedScroll.scrollHeight - feedScroll.scrollTop - feedScroll.clientHeight;
       if (remaining < 400 && !_feedBusy) {
-        _feedAppendBatch(false);
+        _feedAppendBatch(false, _scrollGen);
       }
     };
     feedScroll.addEventListener('scroll', _feedScrollHandler, { passive: true });
@@ -5442,7 +5821,7 @@ function _renderFeedNow(posts) {
   if ('IntersectionObserver' in window && feedScroll) {
     try {
       _feedInfObs = new IntersectionObserver(function(entries) {
-        if (entries[0].isIntersecting && !_feedBusy) _feedAppendBatch(false);
+        if (entries[0].isIntersecting && !_feedBusy) _feedAppendBatch(false, _scrollGen);
       }, { root: feedScroll, rootMargin: '300px', threshold: 0 });
       _feedInfObs.observe(loader);
     } catch(e) {}
@@ -5452,8 +5831,10 @@ function _renderFeedNow(posts) {
 }
 
 /* ── Ajoute le prochain lot de posts ── */
-function _feedAppendBatch(immediate) {
+function _feedAppendBatch(immediate, gen) {
   if (_feedBusy) return;
+  /* Callback périmé : un nouveau renderFeed a démarré */
+  if (gen !== undefined && gen !== _feedGeneration) return;
   var list   = document.getElementById('feed-list');
   var loader = document.getElementById('feed-inf-loader');
   if (!list) return;
@@ -5461,33 +5842,40 @@ function _feedAppendBatch(immediate) {
   /* Lot suivant dans le pool */
   var batch = _feedPool.slice(_feedOffset, _feedOffset + _FEED_PAGE);
 
-  /* Pool épuisé → recyclage infini avec nouveaux IDs */
+  /* Pool épuisé → fin du feed (pas de recyclage : on ne revoit pas les mêmes publications en boucle) */
   if (!batch.length) {
-    var base = _feedPool.length ? _feedPool : getAllPosts();
-    if (!base.length) return;
-    var start = _feedCycleOff % base.length;
-    batch = base.slice(start, start + _FEED_PAGE);
-    if (batch.length < _FEED_PAGE) {
-      batch = batch.concat(base.slice(0, _FEED_PAGE - batch.length));
+    if (loader) loader.style.display = 'none';
+    if (_feedInfObs) { _feedInfObs.disconnect(); _feedInfObs = null; }
+    if (_feedScrollHandler && document.getElementById('feed-scroll')) {
+      document.getElementById('feed-scroll').removeEventListener('scroll', _feedScrollHandler);
+      _feedScrollHandler = null;
     }
-    batch = batch.map(function(p) {
-      return Object.assign({}, p, {
-        id: 'inf_' + Date.now() + '_' + Math.floor(Math.random() * 9999)
-      });
-    });
-    _feedCycleOff += _FEED_PAGE;
+    if (list && !document.getElementById('feed-end-msg')) {
+      var endMsg = document.createElement('div');
+      endMsg.id = 'feed-end-msg';
+      endMsg.className = 'feed-end-msg';
+      endMsg.innerHTML = '<i class="fas fa-circle-check"></i> Vous avez vu toutes les publications';
+      if (loader && loader.parentNode === list) list.insertBefore(endMsg, loader);
+      else list.appendChild(endMsg);
+    }
+    return;
   }
-
-  if (!batch.length) return;
 
   _feedBusy = true;
   if (loader) loader.style.display = '';
 
+  var _batchGen = (gen !== undefined) ? gen : _feedGeneration;
   /* Délai minimal pour laisser le DOM respirer */
   setTimeout(function() {
+    /* Vérification finale : si un nouveau renderFeed a démarré entre-temps, abandon */
+    if (_batchGen !== _feedGeneration) { _feedBusy = false; return; }
     var frag = document.createDocumentFragment();
     batch.forEach(function(post) {
       try {
+        /* Sécurité finale : ne jamais afficher un Short dans le feed principal */
+        if (post.video && post.video.videoType === 'short') return;
+        /* Éviter les doublons : ignorer si la carte existe déjà dans le DOM */
+        if (document.getElementById('post-' + post.id)) return;
         if (post._isOfficialInFeed) {
           frag.appendChild(_buildOfficialCard(post));
         } else {
@@ -5511,7 +5899,7 @@ function _feedAppendBatch(immediate) {
     var feedScroll = document.getElementById('feed-scroll');
     if (feedScroll) {
       var remaining = feedScroll.scrollHeight - feedScroll.scrollTop - feedScroll.clientHeight;
-      if (remaining < 400 && !immediate) _feedAppendBatch(false);
+      if (remaining < 400 && !immediate) _feedAppendBatch(false, _batchGen);
     }
   }, immediate ? 0 : 120);
 }
@@ -5627,18 +6015,26 @@ function buildPostCard(post) {
                : (post.video.url ? escHtml(post.video.url) : '');
 
     var vViews = _getVideoViews(post.id);
+    /* Cadrage choisi par l'auteur dans l'éditeur (sinon centré par défaut) */
+    var vCrop  = (post.video.cropPos && typeof post.video.cropPos === 'object')
+      ? (post.video.cropPos.x || 50) + '% ' + (post.video.cropPos.y || 50) + '%'
+      : '50% 50%';
     /* Style portrait (short 9:16) vs paysage (video 16:9) */
     var wrapStyle = isShrt
       ? 'position:relative;overflow:hidden;border-radius:10px;max-width:240px;margin:0 auto;aspect-ratio:9/16;background:#000'
       : 'position:relative;overflow:hidden;border-radius:10px;aspect-ratio:16/9;background:#000';
-    var vidStyle  = 'width:100%;height:100%;object-fit:cover;display:block;pointer-events:none';
+    var vZoom  = (post.video.cropZoom && post.video.cropZoom > 1) ? post.video.cropZoom : 1;
+    var vidStyle  = 'width:100%;height:100%;object-fit:cover;object-position:' + vCrop + ';' +
+      (vZoom > 1 ? 'transform:scale(' + vZoom + ');transform-origin:center center;' : '') +
+      'display:block;pointer-events:none';
     var typeBadge = isShrt
       ? '<span class="post-video-type-badge post-video-type-short"><i class="fas fa-mobile-screen-button"></i> SHORT</span>'
       : '<span class="post-video-type-badge post-video-type-video"><i class="fas fa-video"></i> VIDÉO</span>';
 
+    var vPoster = post.video.poster ? ' poster="' + post.video.poster + '"' : '';
     videoHtml =
       '<div class="post-video-wrap" id="pvw-' + post.id + '" style="' + wrapStyle + '" onclick="_openVideoFromPost(\'' + post.id + '\',' + (post.video.duration || 0) + ')">' +
-        '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + ' preload="metadata" muted playsinline loop ' +
+        '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + vPoster + ' preload="auto" autoplay muted playsinline webkit-playsinline loop ' +
           'style="' + vidStyle + ';will-change:transform;transform:translateZ(0)"></video>' +
         '<div class="post-video-thumb-overlay" id="fvo-' + post.id + '">' +
           '<div class="post-video-play-ico"><i class="fas fa-play"></i></div>' +
@@ -5655,8 +6051,8 @@ function buildPostCard(post) {
         '</span>' +
       '</div>';
 
-    /* Si IndexedDB disponible + pas de blob URL valide → charge depuis IndexedDB */
-    if (post.video.idbId && !post.video.url) {
+    /* Si IndexedDB disponible + URL absente ou blob périmé → charge depuis IndexedDB */
+    if (post.video.idbId && (!post.video.url || post.video.url.startsWith('blob:'))) {
       (function(pid, idbId, dur) {
         _gwLoadVideoBlob(idbId, function(blob) {
           if (!blob) return;
@@ -5757,14 +6153,16 @@ function buildPostCard(post) {
     } else if (ro.video) {
       var roVidSrc = typeof ro.video === 'string' ? ro.video : (ro.video.url || ro.video.src || '');
       var roVidDur = (typeof ro.video === 'object' && ro.video.duration) ? ro.video.duration : 0;
+      var roVidPoster = (typeof ro.video === 'object' && ro.video.poster) ? ro.video.poster : '';
       var roVidOrigId = ro.id ? String(ro.id) : '';
       /* Vidéo cliquable → ouvre le lecteur plein écran */
       roMedia = '<div class="rp-orig-vid-wrap"' +
         ' data-orig-id="' + escHtml(roVidOrigId) + '"' +
         ' data-orig-dur="' + roVidDur + '"' +
         ' onclick="event.stopPropagation();_gwOpenRpVid(this)">' +
-        '<video id="rp-fv-' + post.id + '" class="rp-orig-video" muted playsinline preload="metadata"' +
-        (roVidSrc ? ' src="' + escHtml(roVidSrc) + '"' : '') + '></video>' +
+        '<video id="rp-fv-' + post.id + '" class="rp-orig-video" autoplay muted playsinline webkit-playsinline preload="auto"' +
+        (roVidSrc ? ' src="' + escHtml(roVidSrc) + '"' : '') +
+        (roVidPoster ? ' poster="' + roVidPoster + '"' : '') + '></video>' +
         '<div class="rp-vid-play-btn"><i class="fas fa-play"></i></div>' +
         '</div>';
     }
@@ -5813,7 +6211,12 @@ function buildPostCard(post) {
           '</div>' +
           '<i class="fas fa-chevron-right" style="margin-left:auto;color:#CBD5E1;font-size:11px"></i>' +
         '</div>' +
-        (ro.text ? '<p class="rp-orig-text">' + escHtml(ro.text.slice(0, 200)) + (ro.text.length > 200 ? '…' : '') + '</p>' : '') +
+        (ro.text ? '<p class="rp-orig-text" id="rp-orig-text-' + post.id + '" data-full="' + escHtml(ro.text) + '">' +
+          escHtml(ro.text.slice(0, 200)) +
+          (ro.text.length > 200
+            ? '… <span class="rp-voir-plus" style="color:#2563EB;cursor:pointer;font-weight:600" onclick="event.stopPropagation();expandRepostOrig(' + post.id + ')">Voir plus</span>'
+            : '') +
+        '</p>' : '') +
         roMedia + roDoc +
       '</div>';
   }
@@ -5929,9 +6332,32 @@ function escHtml(str) {
 /* Expand post text */
 function expandPost(postId) {
   var post = getAllPosts().find(function(p) { return p.id === postId; });
+  /* Si pas trouvé parmi les posts réguliers → cherche dans les posts officiels */
+  if (!post) {
+    post = _offGetPosts().find(function(p) {
+      var numId = parseInt(String(p.id).replace('off_', ''), 10);
+      return numId === postId || String(p.id) === String(postId);
+    });
+  }
   if (!post) return;
   var el = document.getElementById('ptxt-' + postId);
-  if (el) el.innerHTML = escHtml(post.text);
+  if (el) el.innerHTML = escHtml(post.text || '');
+}
+
+/* Expand le texte du post original cité dans un repost */
+function expandRepostOrig(postId) {
+  var el = document.getElementById('rp-orig-text-' + postId);
+  if (!el) return;
+  var full = el.getAttribute('data-full') || '';
+  el.textContent = full;
+}
+
+/* Expand le texte complet d'un commentaire tronqué */
+function expandComment(commentId) {
+  var el = document.getElementById('ctxt-' + commentId);
+  if (!el) return;
+  var full = el.getAttribute('data-full') || '';
+  el.textContent = full;
 }
 
 /* ══════════════════════════════════════════
@@ -5980,8 +6406,9 @@ function likePost(postId) {
     count.textContent = total;
   });
 
-  /* Persiste les likes dans localStorage */
+  /* Persiste les likes dans localStorage + Firebase per-child */
   savePostLikers(postId, post.likers);
+  _fbLikeWrite(postId, email, liked);
 
   /* Milestone likes */
   if (liked) {
@@ -6037,6 +6464,7 @@ function dislikePost(postId) {
         post.likers.splice(likeIdx, 1);
         var total = post.baseLikes + post.likers.length;
         savePostLikers(postId, post.likers);
+        _fbLikeWrite(postId, email, false);
         document.querySelectorAll('[id="like-btn-' + postId + '"]').forEach(function(b) {
           b.className = 'act-btn';
           var i = b.querySelector('i'); if (i) i.className = 'far fa-heart';
@@ -6235,7 +6663,7 @@ function archivePost(postId) {
     showToast('Publication archivée 📦', 'ok');
   } else {
     showToast('Publication restaurée ✓', 'ok');
-    renderFeed(getAllPosts().filter(function(p) { return !p.archived; }));
+    renderFeed(_getFeedPosts().filter(function(p) { return !p.archived; }));
   }
 }
 
@@ -6540,6 +6968,7 @@ function _openVideoClassic(post, duration) {
   var modal = document.getElementById('video-player-modal');
   var video  = document.getElementById('vp-video');
   if (modal) modal.style.display = 'flex';
+  if (video) video.poster = (post.video && post.video.poster) || '';
 
   /* Si URL déjà résolue → lecture directe */
   if (_gwVidUrlCache[postId] || post.video.url) {
@@ -6909,6 +7338,30 @@ function vpPlayNext() {
   }
 }
 
+/* ── Boutons gauche/droite : sauter à la vidéo précédente/suivante ── */
+function _vpGetSiblingPost(direction) {
+  if (!_vpCurrentPost) return null;
+  var all = _vdAllVideos();
+  var idx = all.findIndex(function(p) { return String(p.id) === String(_vpCurrentPost.id); });
+  if (idx === -1) return null;
+  var newIdx = idx + direction;
+  if (newIdx < 0) newIdx = all.length - 1;   /* boucle en fin de liste */
+  if (newIdx >= all.length) newIdx = 0;      /* boucle au début */
+  return all[newIdx] || null;
+}
+
+function vpGoPrevVideo() {
+  var p = _vpGetSiblingPost(-1);
+  if (!p) { showToast('Aucune autre vidéo', ''); return; }
+  _openVideoFromPost(String(p.id), p.video.duration || 0);
+}
+
+function vpGoNextVideo() {
+  var p = _vpGetSiblingPost(1);
+  if (!p) { showToast('Aucune autre vidéo', ''); return; }
+  _openVideoFromPost(String(p.id), p.video.duration || 0);
+}
+
 function vpCancelAutoNext() {
   _vpCancelAutoNextTimer();
   var panel = document.getElementById('vpd-autonext');
@@ -7074,11 +7527,15 @@ function loadPostLikers(postId) {
   return v;
 }
 function savePostLikers(postId, likers) {
-  _likersCache[String(postId)] = likers; /* met à jour le cache */
+  _likersCache[String(postId)] = likers;
   localStorage.setItem('gw_likers_' + postId, JSON.stringify(likers));
-  if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/likes/' + postId).set(likers).catch(function(){});
-  }
+}
+/* Écrit un like per-child — atomique, pas de race condition */
+function _fbLikeWrite(postId, email, liked) {
+  if (!_gwFbReady || !_gwFbDB) return;
+  var ref = _gwFbDB.ref('gw/likes/' + postId + '/' + _gwFbKey(email));
+  if (liked) { ref.set(email).catch(function(){}); }
+  else        { ref.remove().catch(function(){}); }
 }
 
 function loadUserComments(postId) {
@@ -7086,9 +7543,7 @@ function loadUserComments(postId) {
 }
 function saveUserComments(postId, comments) {
   localStorage.setItem('gw_comments_' + postId, JSON.stringify(comments));
-  if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/comments/' + postId).set(comments).catch(function(){});
-  }
+  /* Pas de .set(fullArray) — les writes individuels se font dans submitComment/deleteComment */
 }
 
 /* Récupère réactions d'un commentaire (👍/👎) */
@@ -7207,7 +7662,12 @@ function buildCommentEl(c, isReply) {
           (c.edited ? '<span class="edited-label">(modifié)</span>' : '') +
           ownBtns +
         '</div>' +
-        '<div class="comment-text" id="ctxt-' + c.id + '">' + escHtml(c.text) + '</div>' +
+        '<div class="comment-text" id="ctxt-' + c.id + '" data-full="' + escHtml(c.text || '') + '">' +
+          escHtml((c.text || '').length > 200 ? (c.text || '').slice(0, 200) : (c.text || '')) +
+          ((c.text || '').length > 200
+            ? '… <span class="rp-voir-plus" style="color:#2563EB;cursor:pointer;font-weight:600" onclick="expandComment(\'' + c.id + '\')">Voir plus</span>'
+            : '') +
+        '</div>' +
       '</div>' +
       '<div class="comment-actions">' +
         replyBtn +
@@ -7320,6 +7780,9 @@ function submitComment() {
   var comments = loadUserComments(_currentPostId);
   comments.push(newC);
   saveUserComments(_currentPostId, comments);
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/comments/' + _currentPostId + '/' + newC.id).set(newC).catch(function(){});
+  }
 
   input.value = '';
   cancelReply();
@@ -7401,9 +7864,15 @@ function saveEditComment(cid, postId) {
 /* ── SUPPRIMER UN COMMENTAIRE ── */
 function deleteComment(cid, postId) {
   var comments = loadUserComments(postId);
+  var toDelete = comments.filter(function(x) { return x.id === cid || x.parentId === cid; });
   /* Supprime le commentaire et ses réponses */
   comments = comments.filter(function(x) { return x.id !== cid && x.parentId !== cid; });
   saveUserComments(postId, comments);
+  if (_gwFbReady && _gwFbDB) {
+    toDelete.forEach(function(x) {
+      _gwFbDB.ref('gw/comments/' + postId + '/' + x.id).remove().catch(function(){});
+    });
+  }
 
   /* Supprime aussi les éléments DOM (commentaire + réponses) */
   var el = document.getElementById('comment-' + cid);
@@ -7809,6 +8278,8 @@ function notifyShare(post) {
   var newCount = _incShareCount(post.id);
   var sCnt = document.getElementById('vpd-share-cnt');
   if (sCnt) sCnt.textContent = _fmtViews(newCount);
+  var sCntVs = document.getElementById('vs-shares-' + post.id);
+  if (sCntVs) sCntVs.textContent = _fmtViews(newCount);
   if (!post.ownerEmail || !_currentUser || post.ownerEmail === _currentUser.email) return;
   var _shType    = post.video ? 'votre vidéo' : (post.images && post.images.length ? 'votre photo' : 'votre publication');
   var _shPreview = ((post.video && post.video.title) || post.text || '').slice(0, 60);
@@ -7951,7 +8422,7 @@ function doRepost(postId) {
   DEMO_POSTS.unshift(repostPost);
   persistNewPost(repostPost);
   _markReposted(postId);
-  renderFeed(DEMO_POSTS);
+  renderFeed(_getFeedPosts());
 
   /* Notif au propriétaire original */
   if (orig.ownerEmail && orig.ownerEmail !== _currentUser.email) {
@@ -8399,7 +8870,7 @@ function loadNewPosts() {
   });
   PENDING_POSTS.length = 0;
 
-  renderFeed(DEMO_POSTS);
+  renderFeed(_getFeedPosts());
 
   var scroll = document.getElementById('feed-scroll');
   if (scroll) scroll.scrollTop = 0;
@@ -8937,7 +9408,8 @@ var _ved = {
   filter: 'none', effects: {},
   trim: { start: 0, end: null },
   activeLayer: null, mode: 'trim',
-  textFont: 'sans-serif', textColor: '#FFFFFF', textSize: 28
+  textFont: 'sans-serif', textColor: '#FFFFFF', textSize: 28,
+  cropPos: { x: 50, y: 50 }, cropZoom: 1
 };
 var _VED_FILTERS = [
   { id:'normal',   name:'Normal',   css:'none' },
@@ -8981,6 +9453,8 @@ function _gwOpenVideoEditor() {
   /* Nouveaux états */
   _ved.cuts=[]; _ved.clips=[]; _ved.muted=true;
   _ved.zoom=null; _ved.zoomDur=2; _ved.intro=null; _ved.outro=null;
+  _ved.cropPos  = (_pickedVideo && _pickedVideo.cropPos) ? Object.assign({}, _pickedVideo.cropPos) : { x: 50, y: 50 };
+  _ved.cropZoom = (_pickedVideo && _pickedVideo.cropZoom) ? _pickedVideo.cropZoom : 1;
 
   var old = document.getElementById('gw-ved-ov');
   if (old) old.remove();
@@ -8988,9 +9462,13 @@ function _gwOpenVideoEditor() {
   var isShort = _pubVideoType === 'short';
   var ov = document.createElement('div');
   ov.id = 'gw-ved-ov';
-  ov.style.cssText = 'position:fixed;inset:0;z-index:3000;background:#0A0A0A;display:flex;flex-direction:column;overflow:hidden;font-family:sans-serif';
+  /* Fond plein écran centré — sur desktop (fenêtre large), l'éditeur reste une colonne
+     de largeur "mobile" (max 560px) au lieu de s'étirer sur toute la largeur, ce qui
+     évitait que la vidéo 16:9 devienne démesurément large/plate.                       */
+  ov.style.cssText = 'position:fixed;inset:0;z-index:3000;background:#000;display:flex;justify-content:center;font-family:sans-serif';
 
   ov.innerHTML =
+    '<div id="gw-ved-card" style="width:100%;max-width:560px;height:100%;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;background:#0A0A0A">' +
     /* Top bar */
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px 10px;background:#111;flex-shrink:0">' +
       '<button onclick="_gwVedCancel()" style="background:rgba(255,255,255,.1);border:none;color:#fff;font-size:13px;font-weight:600;padding:8px 14px;border-radius:20px;cursor:pointer">✕ Annuler</button>' +
@@ -9000,13 +9478,21 @@ function _gwOpenVideoEditor() {
 
     /* Zone vidéo + layers
        Short  → flex:1 (portrait 9:16 remplit l'espace disponible)
-       Vidéo  → aspect-ratio:16/9 fixe sur toute la largeur (0 px de noir autour) */
+       Vidéo  → aspect-ratio:16/9, mais plafonné en hauteur (max-height) pour ne JAMAIS
+                repousser la barre de trim / les onglets / le panneau hors de l'écran
+                — sinon sur desktop (fenêtre large) ou petit téléphone, ces contrôles
+                deviennent inaccessibles (overlay en overflow:hidden, pas de scroll).   */
     '<div id="gw-ved-mid" style="' + (isShort
         ? 'flex:1;display:flex;align-items:center;justify-content:center;background:#000;min-height:0;overflow:hidden'
-        : 'width:100%;aspect-ratio:16/9;flex:none;display:flex;align-items:stretch;justify-content:center;background:#000;overflow:hidden') + '">' +
+        : 'width:100%;aspect-ratio:16/9;max-height:38vh;flex:none;display:flex;align-items:stretch;justify-content:center;background:#000;overflow:hidden') + '">' +
     '<div id="gw-ved-wrap" style="position:relative;' + (isShort ? 'flex:none' : 'flex:1') + ';background:#000">' +
       '<video id="gw-ved-vid" src="' + _pickedVideo.url + '" ' +
-        'style="width:100%;height:100%;object-fit:cover;display:block" playsinline loop muted></video>' +
+        'style="width:100%;height:100%;object-fit:cover;object-position:' + _ved.cropPos.x + '% ' + _ved.cropPos.y + '%;' +
+        'transform:scale(' + _ved.cropZoom + ');transform-origin:center center;display:block" playsinline loop muted></video>' +
+      /* Icône de glissement (visible uniquement en mode Recadrer) */
+      '<div id="gw-ved-crophint" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:none;pointer-events:none;width:50px;height:50px;border-radius:50%;background:rgba(0,0,0,.45);align-items:center;justify-content:center;color:#fff;font-size:18px">' +
+        '<i class="fas fa-arrows-up-down-left-right"></i>' +
+      '</div>' +
       /* Overlay effets */
       '<div id="gw-ved-fg-vignette" style="position:absolute;inset:0;pointer-events:none;display:none;background:radial-gradient(ellipse at center,transparent 45%,rgba(0,0,0,.75) 100%)"></div>' +
       '<div id="gw-ved-fg-glow"     style="position:absolute;inset:0;pointer-events:none;display:none;background:radial-gradient(ellipse at center,rgba(255,255,255,.1) 0%,transparent 65%)"></div>' +
@@ -9039,6 +9525,7 @@ function _gwOpenVideoEditor() {
     /* Tabs */
     '<div id="gw-ved-tabs" style="display:flex;background:#111;border-top:1px solid #1E293B;flex-shrink:0;overflow-x:auto;-webkit-overflow-scrolling:touch">' +
       _vedTab('trim',    'fa-scissors',             'Couper',  true)  +
+      (isShort ? '' : _vedTab('crop', 'fa-crop-simple', 'Recadrer', false)) +
       _vedTab('filter',  'fa-sliders',              'Filtre',  false) +
       _vedTab('text',    'fa-font',                 'Texte',   false) +
       _vedTab('emoji',   'fa-face-smile',           'Emoji',   false) +
@@ -9046,7 +9533,8 @@ function _gwOpenVideoEditor() {
     '</div>' +
 
     /* Panel contenu */
-    '<div id="gw-ved-panel" style="background:#0F172A;flex-shrink:0;overflow-y:auto;min-height:110px;max-height:290px"></div>';
+    '<div id="gw-ved-panel" style="background:#0F172A;flex:1;overflow-y:auto;min-height:110px"></div>' +
+    '</div>';   /* fin gw-ved-card */
 
   document.body.appendChild(ov);
 
@@ -9107,7 +9595,66 @@ function _gwOpenVideoEditor() {
     if (e.target === wrap || e.target.id === 'gw-ved-vid') _gwVedDeselectAll();
   });
 
+  /* Glisser pour recadrer (mode Recadrer uniquement) */
+  wrap.addEventListener('pointerdown', _gwVedCropStart);
+  wrap.addEventListener('pointermove', _gwVedCropMove);
+  wrap.addEventListener('pointerup',   _gwVedCropEnd);
+  wrap.addEventListener('pointercancel', _gwVedCropEnd);
+
   _gwVedShowPanel('trim');
+}
+var _vedCropDrag = null;
+
+/* ── Recadrage vidéo : glisser pour déplacer la zone visible (object-position) ── */
+function _gwVedCropStart(e) {
+  if (_ved.mode !== 'crop') return;
+  var wrap = document.getElementById('gw-ved-wrap');
+  if (!wrap) return;
+  _vedCropDrag = {
+    startX: e.clientX, startY: e.clientY,
+    origX: _ved.cropPos.x, origY: _ved.cropPos.y,
+    w: wrap.clientWidth  || 1,
+    h: wrap.clientHeight || 1
+  };
+  try { wrap.setPointerCapture(e.pointerId); } catch(err) {}
+  e.preventDefault();
+}
+function _gwVedCropMove(e) {
+  if (!_vedCropDrag) return;
+  var dx = e.clientX - _vedCropDrag.startX;
+  var dy = e.clientY - _vedCropDrag.startY;
+  var nx = _vedCropDrag.origX - (dx / _vedCropDrag.w) * 100;
+  var ny = _vedCropDrag.origY - (dy / _vedCropDrag.h) * 100;
+  nx = Math.max(0, Math.min(100, nx));
+  ny = Math.max(0, Math.min(100, ny));
+  _ved.cropPos.x = nx;
+  _ved.cropPos.y = ny;
+  var v = document.getElementById('gw-ved-vid');
+  if (v) v.style.objectPosition = nx + '% ' + ny + '%';
+  e.preventDefault();
+}
+function _gwVedCropEnd() { _vedCropDrag = null; }
+
+/* ── Zoom (slider 100%–250%) ── */
+function _gwVedCropZoom(val) {
+  var z = Math.max(1, Math.min(2.5, val / 100));
+  _ved.cropZoom = z;
+  var v = document.getElementById('gw-ved-vid');
+  if (v) v.style.transform = 'scale(' + z + ')';
+  var lbl = document.getElementById('gw-ved-zoom-lbl');
+  if (lbl) lbl.textContent = Math.round(z * 100) + '%';
+}
+
+function _gwVedCropReset() {
+  _ved.cropPos  = { x: 50, y: 50 };
+  _ved.cropZoom = 1;
+  var v = document.getElementById('gw-ved-vid');
+  if (v) { v.style.objectPosition = '50% 50%'; v.style.transform = 'scale(1)'; }
+  var slider = document.getElementById('gw-ved-zoom');
+  var lbl    = document.getElementById('gw-ved-zoom-lbl');
+  if (slider) slider.value = 100;
+  if (lbl) lbl.textContent = '100%';
+  showToast('Cadrage réinitialisé', '');
 }
 var _vedSnapTimer = null;
 var _vedSnapDataUrl = null;
@@ -9125,6 +9672,67 @@ function _gwVedSnapFrame() {
       img.src = _vedSnapDataUrl;
     });
   } catch(e){}
+  /* Image de couverture (poster) en plus haute résolution — affichée dans le feed
+     même quand le navigateur ne lit pas la vidéo automatiquement, pour éviter
+     l'écran noir avant la lecture.                                            */
+  _gwVedCapturePoster();
+}
+
+var _vedPosterDataUrl = null;
+/* ── Capture une frame de la vidéo dans un canvas pour servir de poster.
+     v.videoWidth seul ne suffit PAS à garantir qu'une frame est décodée —
+     ça indique juste que les métadonnées sont connues. Sans frame réellement
+     décodée (readyState >= 2), drawImage produit une image noire/vide.
+     On force donc un seek explicite quand nécessaire et on attend 'seeked'.   */
+function _gwVedCapturePoster(callback) {
+  var v = document.getElementById('gw-ved-vid');
+  if (!v || !v.videoWidth) { if (callback) callback(); return; }
+
+  function doDraw() {
+    try {
+      var isShort = _pubVideoType === 'short';
+      var pw = isShort ? 360 : 640;
+      var ph = isShort ? 640 : 360;
+      var c = document.createElement('canvas');
+      c.width = pw; c.height = ph;
+      var ctx = c.getContext('2d');
+      /* Reproduit le cadrage/zoom choisi par l'utilisateur (cover + object-position + scale) */
+      var zoom = (_ved.cropZoom && _ved.cropZoom > 1) ? _ved.cropZoom : 1;
+      var cropX = (_ved.cropPos && _ved.cropPos.x) || 50;
+      var cropY = (_ved.cropPos && _ved.cropPos.y) || 50;
+      var vw = v.videoWidth, vh = v.videoHeight;
+      var srcRatio = vw / vh, dstRatio = pw / ph;
+      var sw, sh, sx, sy;
+      if (srcRatio > dstRatio) { sh = vh / zoom; sw = sh * dstRatio; }
+      else { sw = vw / zoom; sh = sw / dstRatio; }
+      sx = (vw - sw) * (cropX / 100);
+      sy = (vh - sh) * (cropY / 100);
+      ctx.drawImage(v, sx, sy, sw, sh, 0, 0, pw, ph);
+      var dataUrl = c.toDataURL('image/jpeg', .8);
+      /* Sécurité : un canvas jamais peint donne un JPEG quasi-vide (<1.5Ko) → on l'ignore */
+      if (dataUrl && dataUrl.length > 1500) _vedPosterDataUrl = dataUrl;
+    } catch(e){}
+    if (callback) callback();
+  }
+
+  if (v.readyState >= 2) {
+    doDraw();
+    return;
+  }
+
+  /* Pas encore de frame décodée → force un seek pour en obtenir une */
+  var done = false;
+  var onSeeked = function() {
+    if (done) return; done = true;
+    v.removeEventListener('seeked', onSeeked);
+    doDraw();
+  };
+  v.addEventListener('seeked', onSeeked);
+  try {
+    v.currentTime = (v.duration && isFinite(v.duration)) ? Math.min(0.15, v.duration / 2) : 0.1;
+  } catch(e) { onSeeked(); return; }
+  /* Garde-fou : si 'seeked' ne se déclenche jamais (cas rares), on capture quand même après 700ms */
+  setTimeout(function() { if (!done) onSeeked(); }, 700);
 }
 
 function _vedTab(mode, icon, label, active) {
@@ -9138,16 +9746,46 @@ function _vedTab(mode, icon, label, active) {
 
 /* ── Panel par mode ── */
 function _gwVedShowPanel(mode) {
+  if (mode === 'crop' && _pubVideoType === 'short') mode = 'trim'; /* Recadrage réservé au format Vidéo */
   _ved.mode = mode;
   /* Tabs */
-  ['trim','filter','text','emoji','effects'].forEach(function(m) {
+  ['trim','crop','filter','text','emoji','effects'].forEach(function(m) {
     var t = document.getElementById('gw-ved-tab-' + m);
     if (!t) return;
     t.style.color       = m === mode ? '#A78BFA' : '#64748B';
     t.style.borderBottom= m === mode ? '2px solid #7C3AED' : '2px solid transparent';
   });
+  /* Active/désactive le glisser-recadrer + son indice visuel */
+  var wrap = document.getElementById('gw-ved-wrap');
+  var hint = document.getElementById('gw-ved-crophint');
+  if (wrap) wrap.style.touchAction = (mode === 'crop') ? 'none' : '';
+  if (hint) hint.style.display = (mode === 'crop') ? 'flex' : 'none';
   var panel = document.getElementById('gw-ved-panel');
   if (!panel) return;
+
+  if (mode === 'crop') {
+    panel.innerHTML =
+      '<div style="min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px 16px;text-align:center;box-sizing:border-box">' +
+        '<div style="max-width:380px;width:100%">' +
+        '<i class="fas fa-crop-simple" style="color:#7C3AED;font-size:22px;margin-bottom:10px;display:block"></i>' +
+        '<p style="color:#94A3B8;font-size:13px;margin:0 0 14px;line-height:1.5">' +
+          'Glissez la vidéo avec le doigt (haut, bas, gauche, droite) pour choisir la partie visible dans le cadre 16:9, puis zoomez si besoin.' +
+        '</p>' +
+        /* Zoom */
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">' +
+          '<i class="fas fa-magnifying-glass-minus" style="color:#64748B;font-size:14px"></i>' +
+          '<input type="range" id="gw-ved-zoom" min="100" max="250" step="1" value="' + Math.round(_ved.cropZoom * 100) + '" ' +
+            'oninput="_gwVedCropZoom(this.value)" style="flex:1;accent-color:#7C3AED">' +
+          '<i class="fas fa-magnifying-glass-plus" style="color:#64748B;font-size:14px"></i>' +
+          '<span id="gw-ved-zoom-lbl" style="color:#A78BFA;font-size:12px;font-weight:700;min-width:38px;text-align:right">' + Math.round(_ved.cropZoom * 100) + '%</span>' +
+        '</div>' +
+        '<button onclick="_gwVedCropReset()" style="background:#1E293B;border:none;color:#fff;font-size:12px;font-weight:600;padding:8px 16px;border-radius:20px;cursor:pointer">' +
+          '<i class="fas fa-rotate-left" style="margin-right:6px"></i>Réinitialiser le cadrage' +
+        '</button>' +
+        '</div>' +
+      '</div>';
+    return;
+  }
 
   if (mode === 'trim') {
     /* ── Liste des portions supprimées ── */
@@ -9587,12 +10225,30 @@ function _gwVedApplyFilter(css, id) {
 }
 
 /* ── Texte — options ── */
+/* ── Applique un changement (police/couleur/taille) au layer texte actuellement
+     sélectionné, en plus de mettre à jour le réglage par défaut pour le prochain
+     texte ajouté. Sans ça, les boutons semblaient ne "rien faire" une fois le
+     texte déjà posé sur la vidéo.                                              */
+function _gwVedApplyTextStyle(prop, value) {
+  if (!_ved.activeLayer) return;
+  var layer = _ved.layers.find(function(l) { return l.id === _ved.activeLayer; });
+  if (!layer || layer.type !== 'text') return;
+  layer[prop] = value;
+  var el   = document.getElementById('gw-ved-lyr-' + _ved.activeLayer);
+  var span = el && el.querySelector('span');
+  if (!span) return;
+  if (prop === 'font')  span.style.fontFamily = value;
+  if (prop === 'color') span.style.color      = value;
+  if (prop === 'size')  span.style.fontSize   = value + 'px';
+}
+
 function _gwVedSetFont(css, id) {
   _ved.textFont = css;
   _VED_FONTS.forEach(function(f) {
     var b = document.getElementById('gw-ved-fn-' + f.id);
     if (b) b.style.background = f.id === id ? '#7C3AED' : '#1E293B';
   });
+  _gwVedApplyTextStyle('font', css);
 }
 function _gwVedSetColor(c) {
   _ved.textColor = c;
@@ -9600,11 +10256,13 @@ function _gwVedSetColor(c) {
     var b = document.getElementById('gw-ved-col-' + col.replace('#',''));
     if (b) b.style.borderColor = col === c ? '#fff' : 'rgba(255,255,255,.15)';
   });
+  _gwVedApplyTextStyle('color', c);
 }
 function _gwVedSetSize(val) {
   _ved.textSize = parseInt(val, 10);
   var el = document.getElementById('gw-ved-sval');
   if (el) el.textContent = val;
+  _gwVedApplyTextStyle('size', _ved.textSize);
 }
 
 /* ── Ajouter texte ── */
@@ -9665,14 +10323,17 @@ function _gwVedAddLayer(opts) {
     _gwVedSelectLayer(id);
     var wr   = wrap.getBoundingClientRect();
     var er   = el.getBoundingClientRect();
-    var ox   = ev.clientX - (er.left + er.width/2 - wr.left);
-    var oy   = ev.clientY - (er.top  + er.height/2 - wr.top);
+    /* Décalage entre le doigt/curseur et le centre du layer, en coordonnées écran cohérentes
+       (l'ancien calcul mélangeait coordonnées écran et coordonnées relatives au conteneur,
+       ce qui faisait "sauter" le texte vers la gauche/droite dès le 1er pixel de glissement). */
+    var ox   = ev.clientX - (er.left + er.width  / 2);
+    var oy   = ev.clientY - (er.top  + er.height / 2);
     el.setPointerCapture(ev.pointerId);
     el.style.cursor = 'grabbing';
 
     function mv(e) {
-      var nx = Math.max(0, Math.min(wr.width,  e.clientX - wr.left - ox));
-      var ny = Math.max(0, Math.min(wr.height, e.clientY - wr.top  - oy));
+      var nx = Math.max(0, Math.min(wr.width,  e.clientX - ox - wr.left));
+      var ny = Math.max(0, Math.min(wr.height, e.clientY - oy - wr.top));
       el.style.left = nx + 'px';
       el.style.top  = ny + 'px';
     }
@@ -9739,6 +10400,13 @@ function _gwVedToggleEffect(eid) {
 
 /* ── Confirmer et retourner à la page publish ── */
 function _gwVedConfirm() {
+  function _finishConfirm() {
+    _gwVedClose();
+    renderVideoPreview();
+    showToast('Vidéo prête ✓', 'ok');
+    if (_pubVideoType === 'video') { setTimeout(_showVidMetaSheet, 350); }
+  }
+
   /* Sauvegarde les métadonnées d'édition */
   if (_pickedVideo) {
     var wrap = document.getElementById('gw-ved-wrap');
@@ -9760,11 +10428,17 @@ function _gwVedConfirm() {
     };
     _pickedVideo.trimStart = _ved.trim.start > 0.1 ? _ved.trim.start : 0;
     _pickedVideo.trimEnd   = _ved.trim.end;
+    _pickedVideo.cropPos   = Object.assign({}, _ved.cropPos);
+    _pickedVideo.cropZoom  = _ved.cropZoom || 1;
+    /* Recapture la couverture avec le cadrage/zoom final — asynchrone car peut nécessiter
+       un seek explicite (forcer le décodage d'une frame) avant de fermer l'éditeur.        */
+    _gwVedCapturePoster(function() {
+      if (_vedPosterDataUrl) _pickedVideo.poster = _vedPosterDataUrl;
+      _finishConfirm();
+    });
+    return;
   }
-  _gwVedClose();
-  renderVideoPreview();
-  showToast('Vidéo prête ✓', 'ok');
-  if (_pubVideoType === 'video') { setTimeout(_showVidMetaSheet, 350); }
+  _finishConfirm();
 }
 
 /* ── Annuler ── */
@@ -9782,7 +10456,8 @@ function _gwVedClose() {
     if (v) { try { v.pause(); v.src = ''; } catch(e){} }
     ov.remove();
   }
-  _vedSnapDataUrl = null;
+  _vedSnapDataUrl   = null;
+  _vedPosterDataUrl = null;
 }
 
 /* ── Retourner caméra ── */
@@ -10023,9 +10698,21 @@ function renderVideoPreview() {
         '</div>';
     }
   }
+  /* Reflète le recadrage/zoom choisi dans l'éditeur (sinon le centrage par défaut) */
+  var _pvCrop = (_pickedVideo.cropPos && typeof _pickedVideo.cropPos === 'object') ? _pickedVideo.cropPos : { x: 50, y: 50 };
+  var _pvZoom = (_pickedVideo.cropZoom && _pickedVideo.cropZoom > 1) ? _pickedVideo.cropZoom : 1;
+  var _pvIsShort = _pickedVideo.videoType === 'short';
+  var _pvWrapStyle = _pvIsShort
+    ? 'position:relative;overflow:hidden;border-radius:10px;max-width:200px;margin:0 auto;aspect-ratio:9/16;background:#000'
+    : 'position:relative;overflow:hidden;border-radius:10px;aspect-ratio:16/9;background:#000';
+  var _pvVidStyle = 'width:100%;height:100%;display:block;object-fit:cover;object-position:' + _pvCrop.x + '% ' + _pvCrop.y + '%' +
+    (_pvZoom > 1 ? ';transform:scale(' + _pvZoom + ');transform-origin:center center' : '');
+
+  var _pvPoster = _pickedVideo.poster ? ' poster="' + _pickedVideo.poster + '"' : '';
   preview.innerHTML =
-    '<video src="' + _pickedVideo.url + '" controls playsinline webkit-playsinline ' +
-      'style="width:100%;max-height:260px;display:block"></video>' +
+    '<div style="' + _pvWrapStyle + '">' +
+      '<video src="' + _pickedVideo.url + '"' + _pvPoster + ' controls playsinline webkit-playsinline style="' + _pvVidStyle + '"></video>' +
+    '</div>' +
     '<button class="rm-video" onclick="removeVideo()"><i class="fas fa-times"></i></button>' +
     '<div class="pub-video-meta">' +
       '<span><i class="fas fa-clock"></i> ' + formatDuration(_pickedVideo.duration) + '</span>' +
@@ -10403,16 +11090,71 @@ var _vsObserver = null;
 var _vsEndTimer = null;
 var _vsCountN   = 10;
 var _vsRafId    = null;
+var _vsLikesRef = null;
 
 /* ── Collecte uniquement les Shorts (videoType='short'), tri plus récent → plus ancien ── */
 function _vsBuildList() {
-  return getAllPosts().filter(function(p) {
-    if (!p || !p.video) return false;
+  var result = [];
+  var seenIds = {};
+
+  getAllPosts().forEach(function(p) {
+    if (!p) return;
+    /* Repost d'une vidéo short : injecte la vidéo originale dans un clone léger */
+    if (p.type === 'repost' && p.repostOf) {
+      var rv = p.repostOf.video;
+      if (!rv || typeof rv !== 'object') return;
+      var hasRv = rv.url || rv.idbId;
+      if (!hasRv || rv.videoType !== 'short') return;
+      if (!seenIds[String(p.id)]) {
+        seenIds[String(p.id)] = true;
+        result.push({ id: p.id, author: p.author, role: p.role, at: p.at, time: p.time,
+                      text: p.text, images: p.images || [], video: rv, doc: p.doc,
+                      ownerEmail: p.ownerEmail, type: 'repost', repostOf: p.repostOf,
+                      baseLikes: p.baseLikes, likers: p.likers, comments: p.comments });
+      }
+      return;
+    }
+    if (!p.video) return;
     var hasMedia = (typeof p.video === 'string' && p.video) ||
                    (typeof p.video === 'object' && (p.video.url || p.video.idbId));
     var isShort  = p.video && p.video.videoType === 'short';
-    return hasMedia && isShort;
-  }).sort(function(a, b) { return (Number(b.id) || 0) - (Number(a.id) || 0); });
+    if (hasMedia && isShort && !seenIds[String(p.id)]) {
+      seenIds[String(p.id)] = true;
+      result.push(p);
+    }
+  });
+
+  /* Shorts officiels (publiés via le panel admin) */
+  _offGetPosts().forEach(function(p) {
+    if (!p || !p.video || typeof p.video !== 'object') return;
+    if (p.video.videoType !== 'short') return;
+    var hasMedia = p.video.url || p.video.idbId;
+    if (!hasMedia) return;
+    if (seenIds[String(p.id)]) return;
+    seenIds[String(p.id)] = true;
+    /* Adapte le format pour le player short */
+    result.push({
+      id:          p.id,
+      author:      p.publishedByNom || 'Geniwork',
+      role:        'Officiel',
+      at:          p.publishedAt ? new Date(p.publishedAt).getTime() : 0,
+      time:        _offTimeAgo(p.publishedAt),
+      text:        p.text || '',
+      images:      p.images || [],
+      video:       p.video,
+      ownerEmail:  p.publishedBy || '',
+      isOfficial:  true,
+      baseLikes:   p.baseLikes || 0,
+      likers:      p.likers || [],
+      comments:    p.comments || []
+    });
+  });
+
+  return result.sort(function(a, b) {
+    var ta = Number(b.id) || (b.at || 0);
+    var tb = Number(a.id) || (a.at || 0);
+    return ta - tb;
+  });
 }
 
 /* ── Ouvre le player scroll, commence sur la vidéo du post donné ── */
@@ -10490,6 +11232,20 @@ function openVideoScroll(startPostId) {
         });
       });
     });
+
+    /* ── Écoute les likes en temps réel pour tous les viewers ── */
+    if (_vsLikesRef) { _vsLikesRef.off(); _vsLikesRef = null; }
+    _vsLikesRef = _gwFbDB.ref('gw/likes');
+    _vsLikesRef.on('value', function(snap) {
+      var data = snap.val() || {};
+      _vsItems.forEach(function(item) {
+        var pid = item.postId;
+        var likerMap = data[pid] || {};
+        var cnt = Object.keys(likerMap).length;
+        var el = document.getElementById('vs-likes-' + pid);
+        if (el) el.textContent = _fmtViews(cnt);
+      });
+    });
   }
 }
 
@@ -10501,6 +11257,7 @@ function _vsCreateItem(post, idx) {
   var ownerKey = post.ownerEmail ? _gwFbKey(post.ownerEmail) : '';
   var followed = ownerKey ? isFollowing(ownerKey) : false;
   var isOwn    = _currentUser && post.ownerEmail === _currentUser.email;
+  var isRepost = post.type === 'repost';
 
   var likers  = loadPostLikers(post.id);
   var likes   = likers.length;
@@ -10531,13 +11288,14 @@ function _vsCreateItem(post, idx) {
     '<div class="vs-author-row">' +
       avHtml +
       '<div style="display:flex;flex-direction:column;gap:2px;min-width:0">' +
+        (isRepost ? '<span style="font-size:11px;background:rgba(255,255,255,.15);border-radius:4px;padding:1px 6px;color:rgba(255,255,255,.85);align-self:flex-start">🔁 Republié</span>' : '') +
         '<span class="vs-author">@' + escHtml(nom) + '</span>' +
         (caption ? '<span class="vs-caption">' + escHtml(caption) + '</span>' : '') +
       '</div>' +
       (!isOwn
         ? '<button class="vs-follow-btn" id="vs-follow-' + postIdStr + '"' +
           ' onclick="vsFollow(\'' + postIdStr + '\',\'' + escHtml(post.ownerEmail || '') + '\',\'' + escHtml(ownerKey) + '\');event.stopPropagation()">' +
-          (followed ? '✓ Abonné' : '+ Suivre') + '</button>'
+          (followed ? 'Suivi' : '+ Suivre') + '</button>'
         : '') +
     '</div>' +
 
@@ -10559,7 +11317,9 @@ function _vsCreateItem(post, idx) {
     '</button>' +
     /* Partager */
     '<button class="vs-side-btn" onclick="sharePost(\'' + postIdStr + '\');event.stopPropagation()">' +
-    '<i class="fas fa-share-nodes"></i><span>Partager</span></button>' +
+    '<i class="fas fa-share-nodes"></i><span>Partager</span>' +
+    '<span id="vs-shares-' + postIdStr + '" style="font-size:11px;color:rgba(255,255,255,.7)">' +
+    (_getShareCount(postIdStr) > 0 ? _fmtViews(_getShareCount(postIdStr)) : '') + '</span></button>' +
     /* Vues */
     '<div class="vs-side-btn" style="pointer-events:none">' +
     '<i class="fas fa-eye"></i><span id="vs-views-' + postIdStr + '">' + _fmtViews(_getVideoViews(postIdStr)) + '</span></div>' +
@@ -10816,7 +11576,7 @@ function vsFollow(postId, ownerEmail, ownerKey) {
   var btn = document.getElementById('vs-follow-' + postId);
   if (btn) {
     var nowFollowed = isFollowing(ownerKey);
-    btn.textContent = nowFollowed ? '✓ Abonné' : '+ Suivre';
+    btn.textContent = nowFollowed ? 'Suivi' : '+ Suivre';
     btn.classList.toggle('vs-following', nowFollowed);
   }
 }
@@ -10928,6 +11688,7 @@ function closeVideoScroll() {
   _vsClearEndTimer();
   if (_vsRafId) { cancelAnimationFrame(_vsRafId); _vsRafId = null; }
   if (_vsObserver) { _vsObserver.disconnect(); _vsObserver = null; }
+  if (_vsLikesRef) { _vsLikesRef.off(); _vsLikesRef = null; }
   _vsItems.forEach(function(item) {
     try { item.videoEl.pause(); item.videoEl.src = ''; item.videoEl.load(); } catch(e){}
   });
@@ -10971,6 +11732,1556 @@ function openVideosDiscover() {
 function vdOnSearch(inp) {
   _vdSearchQuery = (inp.value || '').trim().toLowerCase();
   _vdRenderContent();
+}
+
+/* ══════════════════════════════════════════
+   ARTISTE — SECTION SONS & MUSIQUES
+══════════════════════════════════════════ */
+var _artisteStats       = {};   /* { postId: { plays:N, downloads:N } } */
+var _artistePosts       = [];
+var _artisteSearch      = '';
+var _artistePlayedSet   = {};   /* postId → bool (session, non connecté) */
+var _artisteWeeklyPlays = {};   /* { postId: N } — écoutes semaine courante */
+var _artisteLikesCache    = {};   /* { postId: { userKey: email } } */
+var _artisteDislikesCache = {};   /* { postId: { userKey: email } } */
+
+function _getArtisteWeekKey() {
+  var d = new Date();
+  var jan1 = new Date(d.getFullYear(), 0, 1);
+  var wk = Math.ceil(((d - jan1) / 86400000 + jan1.getDay() + 1) / 7);
+  return d.getFullYear() + '-W' + (wk < 10 ? '0' + wk : wk);
+}
+
+function _artisteFmt(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1).replace('.0','') + 'M';
+  if (n >= 1000)    return (n / 1000).toFixed(1).replace('.0','') + 'K';
+  return String(n || 0);
+}
+
+function _artisteLoad() {
+  if (!_gwFbReady || !_gwFbDB) { _artisteRender(); return; }
+  var loaded = 0;
+  var _tryRender = function() { if (++loaded >= 5) _artisteRender(); };
+
+  /* Posts artiste — injecter la clé Firebase comme id si absente, exclure les deleted */
+  _gwFbDB.ref('gw/artiste_posts').once('value', function(snap) {
+    var val = snap.val();
+    _artistePosts = val ? Object.keys(val).map(function(k){ var s=val[k]; if(!s)return null; if(!s.id)s.id=k; return s; }).filter(function(p){ return p && !p.deleted; }) : [];
+    _artistePosts.sort(function(a,b){ return (b.publishedAt||b.ts||0)-(a.publishedAt||a.ts||0); });
+    _tryRender();
+  }, function() { _tryRender(); });
+
+  /* Stats globales */
+  _gwFbDB.ref('gw/artiste_stats').once('value', function(snap) {
+    _artisteStats = snap.val() || {};
+    _tryRender();
+  }, function() { _tryRender(); });
+
+  /* Écoutes semaine courante */
+  _gwFbDB.ref('gw/artiste_weekly_plays/' + _getArtisteWeekKey()).once('value', function(snap) {
+    _artisteWeeklyPlays = snap.val() || {};
+    _tryRender();
+  }, function() { _artisteWeeklyPlays = {}; _tryRender(); });
+
+  /* Likes */
+  _gwFbDB.ref('gw/artiste_likes').once('value', function(snap) {
+    var val = snap.val() || {};
+    _artisteLikesCache = {};
+    Object.keys(val).forEach(function(pid) {
+      _artisteLikesCache[pid] = (val[pid] && typeof val[pid] === 'object') ? val[pid] : {};
+    });
+    _tryRender();
+  }, function() { _tryRender(); });
+
+  /* Dislikes */
+  _gwFbDB.ref('gw/artiste_dislikes').once('value', function(snap) {
+    var val = snap.val() || {};
+    _artisteDislikesCache = {};
+    Object.keys(val).forEach(function(pid) {
+      _artisteDislikesCache[pid] = (val[pid] && typeof val[pid] === 'object') ? val[pid] : {};
+    });
+    _tryRender();
+  }, function() { _tryRender(); });
+}
+
+function _artisteRefresh(btn) {
+  if (btn) { btn.classList.add('spinning'); setTimeout(function(){ btn.classList.remove('spinning'); }, 1200); }
+  _artisteLoad();
+}
+
+function _artisteOnSearch(val) {
+  _artisteSearch = (val || '').toLowerCase().trim();
+  _artisteRender();
+}
+
+function _artisteFilteredPosts() {
+  var q = _artisteSearch;
+  var list = q
+    ? _artistePosts.filter(function(p) {
+        return (p.title||'').toLowerCase().indexOf(q) !== -1 ||
+               (p.artistName||'').toLowerCase().indexOf(q) !== -1 ||
+               (p.genre||'').toLowerCase().indexOf(q) !== -1;
+      })
+    : _artistePosts.slice();
+  list.sort(function(a,b) { return (_artisteWeeklyPlays[b.id]||0) - (_artisteWeeklyPlays[a.id]||0); });
+  return list;
+}
+
+function _artCol() {
+  var d = document.body.classList.contains('dark-mode');
+  return {
+    title:'#F1F5F9', artist:'#94A3B8', genre:'#A78BFA', header:'#475569',
+    border:'#1E293B', num:'#475569',
+    countVal: d ? '#F1F5F9' : '#0F172A', countLbl: d ? '#64748B' : '#475569',
+    badge:'rgba(124,58,237,.15)', badgeTxt:'#A78BFA',
+    badgeDl:'rgba(16,185,129,.15)', badgeDlTxt:'#34D399',
+    extBg:'#0F172A', noResult:'#475569',
+  };
+}
+
+function _artisteRender() {
+  var wrap = document.getElementById('artiste-list-wrap');
+  if (!wrap) return;
+  var filtered = _artisteFilteredPosts();
+  var c = _artCol();
+  var _wkLabel = _getArtisteWeekKey();
+  var myKey = _currentUser ? _gwFbKey(_currentUser.email) : null;
+
+  if (!_artistePosts.length) {
+    wrap.innerHTML = '<div style="text-align:center;padding:40px 0">' +
+      '<div style="font-size:56px;margin-bottom:12px">🎵</div>' +
+      '<p style="color:' + c.countLbl + ';font-size:14px;margin:0 0 16px">Aucun son publié encore.<br>Soyez le premier à partager votre musique !</p>' +
+      '<button onclick="_artisteOpenPost()" style="background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;border:none;border-radius:12px;padding:10px 22px;font-size:13px;font-weight:700;cursor:pointer"><i class="fas fa-plus" style="margin-right:6px"></i>Publier un son</button>' +
+      '</div>';
+    return;
+  }
+  if (!filtered.length) {
+    wrap.innerHTML = '<div style="text-align:center;padding:28px 0">' +
+      '<i class="fas fa-search" style="font-size:32px;color:' + c.border + ';display:block;margin-bottom:10px"></i>' +
+      '<p style="color:' + c.noResult + ';font-size:13px;margin:0">Aucun résultat pour "<b>' + escHtml(_artisteSearch) + '</b>"</p>' +
+      '</div>';
+    return;
+  }
+
+  var html =
+    '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;' +
+         'background:linear-gradient(135deg,rgba(124,58,237,.15),rgba(219,39,119,.1));' +
+         'border-radius:12px;border:1px solid rgba(124,58,237,.2)">' +
+      '<span style="font-size:18px">🔥</span>' +
+      '<div style="flex:1">' +
+        '<div style="font-size:12px;font-weight:700;color:#A78BFA">Classement — Semaine ' + _wkLabel.split('-W')[1] + '</div>' +
+        '<div style="font-size:10px;color:#64748B">Trié par écoutes cette semaine</div>' +
+      '</div>' +
+    '</div>';
+
+  filtered.forEach(function(p, i) {
+    var stats      = _artisteStats[p.id] || {};
+    var weekPlaysN = _artisteWeeklyPlays[p.id] || 0;
+    var likesObj      = _artisteLikesCache[p.id] || {};
+    var likesCount    = Object.keys(likesObj).length;
+    var iLiked        = myKey && !!likesObj[myKey];
+    var dislikesObj   = _artisteDislikesCache[p.id] || {};
+    var dislikesCount = Object.keys(dislikesObj).length;
+    var iDisliked     = myKey && !!dislikesObj[myKey];
+    var rankNum    = i + 1;
+    var medal      = rankNum === 1 ? '🥇' : rankNum === 2 ? '🥈' : rankNum === 3 ? '🥉' : '';
+
+    html +=
+      '<div style="background:#0F172A;border-radius:14px;margin-bottom:8px;overflow:hidden;border:1px solid ' + c.border + '">' +
+        /* Ligne principale cliquable */
+        '<div onclick="_artisteOpenDetail(\'' + p.id + '\')" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer">' +
+          /* Rang */
+          '<div style="width:22px;text-align:center;flex-shrink:0;font-size:' + (medal ? '16px' : '11px') + ';font-weight:700;color:' + c.num + '">' +
+            (medal || rankNum) +
+          '</div>' +
+          /* Cover */
+          '<div style="width:44px;height:44px;border-radius:10px;flex-shrink:0;overflow:hidden;background:linear-gradient(135deg,#7C3AED44,#DB277744);display:flex;align-items:center;justify-content:center">' +
+            (p.coverUrl
+              ? '<img src="' + escHtml(p.coverUrl) + '" style="width:100%;height:100%;object-fit:cover">'
+              : '<i class="fas fa-music" style="color:#A78BFA;font-size:16px"></i>') +
+          '</div>' +
+          /* Texte */
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:700;color:' + c.title + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(p.title||'Sans titre') + '</div>' +
+            '<div style="font-size:11px;color:' + c.artist + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(p.artistName||p.userName||'Artiste') + (p.genre ? ' · <span style="color:#A78BFA">' + escHtml(p.genre) + '</span>' : '') + '</div>' +
+          '</div>' +
+          /* Plays */
+          '<div style="text-align:right;flex-shrink:0">' +
+            '<div style="font-size:12px;font-weight:700;color:' + (weekPlaysN > 0 ? '#F97316' : c.countLbl) + '">' + (weekPlaysN > 0 ? '🔥 ' : '') + _artisteFmt(weekPlaysN) + '</div>' +
+            '<div style="font-size:9px;color:' + c.countLbl + '">écoutes</div>' +
+          '</div>' +
+          /* Play btn */
+          '<button onclick="event.stopPropagation();' + (p.audioUrl ? '_artistePlay(\'' + p.id + '\')' : '') + '" ' +
+            'style="background:' + (p.audioUrl ? 'linear-gradient(135deg,#7C3AED,#DB2777)' : '#1E293B') + ';border:none;border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:' + (p.audioUrl ? 'pointer' : 'default') + ';flex-shrink:0">' +
+            '<i class="fas fa-play" style="color:' + (p.audioUrl ? '#fff' : '#475569') + ';font-size:12px;margin-left:2px"></i>' +
+          '</button>' +
+        '</div>' +
+        /* Barre d'actions */
+        '<div style="display:flex;align-items:center;gap:4px;padding:6px 12px 8px;border-top:1px solid ' + c.border + '">' +
+          /* Like */
+          '<button onclick="event.stopPropagation();_artisteLike(\'' + p.id + '\')" id="artiste-like-btn-' + p.id + '" ' +
+            'style="background:none;border:none;cursor:pointer;display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:20px;' +
+            'color:' + (iLiked ? '#F43F5E' : '#64748B') + '">' +
+            '<i class="fas fa-heart" style="font-size:13px;opacity:' + (iLiked ? '1' : '0.4') + '"></i>' +
+            '<span id="artiste-like-count-' + p.id + '" style="font-size:12px;font-weight:700">' + _artisteFmt(likesCount) + '</span>' +
+          '</button>' +
+          /* Dislike */
+          '<button onclick="event.stopPropagation();_artisteDislike(\'' + p.id + '\')" id="artiste-dislike-btn-' + p.id + '" ' +
+            'style="background:none;border:none;cursor:pointer;display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:20px;' +
+            'color:' + (iDisliked ? '#6B7BF7' : '#64748B') + '">' +
+            '<i class="fas fa-heart-crack" style="font-size:13px;opacity:' + (iDisliked ? '1' : '0.4') + '"></i>' +
+            '<span id="artiste-dislike-count-' + p.id + '" style="font-size:12px;font-weight:700">' + (dislikesCount > 0 ? _artisteFmt(dislikesCount) : '') + '</span>' +
+          '</button>' +
+          /* Partager */
+          (p.allowShare !== false
+            ? '<button onclick="event.stopPropagation();_artisteShare(\'' + p.id + '\')" style="background:none;border:none;cursor:pointer;display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:20px;color:#64748B">' +
+                '<i class="fas fa-share-nodes" style="font-size:13px"></i>' +
+                '<span style="font-size:12px">Partager</span>' +
+              '</button>'
+            : '') +
+          /* Télécharger */
+          (p.allowDownload && p.audioUrl
+            ? '<button onclick="event.stopPropagation();_artisteDownload(\'' + p.id + '\')" style="background:none;border:none;cursor:pointer;display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:20px;color:#34D399">' +
+                '<i class="fas fa-download" style="font-size:13px"></i>' +
+                '<span style="font-size:12px">' + _artisteFmt(stats.downloads||0) + '</span>' +
+              '</button>'
+            : '') +
+          '<div style="flex:1"></div>' +
+          /* Supprimer (propre post) */
+          (_currentUser && p.userEmail === _currentUser.email
+            ? '<button onclick="event.stopPropagation();_artisteDeletePost(\'' + p.id + '\')" style="background:none;border:none;cursor:pointer;color:#475569;padding:4px 8px;border-radius:20px;font-size:12px"><i class="fas fa-trash"></i></button>'
+            : '') +
+        '</div>' +
+      '</div>';
+  });
+
+  wrap.innerHTML = html;
+}
+
+/* Fiche détail d'un son (liens, description, écouter, etc.) */
+function _artisteOpenDetail(postId) {
+  var post = _artistePosts.find(function(p) { return p.id === postId; });
+  if (!post) return;
+  var myKey         = _currentUser ? _gwFbKey(_currentUser.email) : null;
+  var likesObj      = _artisteLikesCache[postId] || {};
+  var likesCount    = Object.keys(likesObj).length;
+  var iLiked        = myKey && !!likesObj[myKey];
+  var dislikesObj   = _artisteDislikesCache[postId] || {};
+  var dislikesCount = Object.keys(dislikesObj).length;
+  var iDisliked     = myKey && !!dislikesObj[myKey];
+
+  /* Liens externes */
+  var linksHtml = '';
+  var el = post.extLinks || {};
+  var linkDefs = [
+    { key:'spotify',    icon:'fab fa-spotify',   color:'#1DB954', label:'Spotify' },
+    { key:'soundcloud', icon:'fab fa-soundcloud', color:'#FF5500', label:'SoundCloud' },
+    { key:'youtube',    icon:'fab fa-youtube',    color:'#FF0000', label:'YouTube' },
+    { key:'apple',      icon:'fab fa-apple',      color:'#FC3C44', label:'Apple Music' },
+    { key:'deezer',     icon:'fas fa-music',      color:'#EF5466', label:'Deezer' },
+    { key:'other',      icon:'fas fa-link',       color:'#60A5FA', label:'Autre lien' },
+  ];
+  linkDefs.forEach(function(ld) {
+    if (el[ld.key]) {
+      linksHtml += '<a href="' + escHtml(el[ld.key]) + '" target="_blank" ' +
+        'style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#1E293B;border-radius:10px;text-decoration:none;color:#F1F5F9">' +
+        '<i class="' + ld.icon + '" style="color:' + ld.color + ';font-size:18px;width:22px;text-align:center"></i>' +
+        '<span style="font-size:13px;font-weight:600">' + ld.label + '</span>' +
+        '<i class="fas fa-arrow-right" style="margin-left:auto;color:#475569;font-size:11px"></i>' +
+        '</a>';
+    }
+  });
+  /* Lien legacy */
+  if (!linksHtml && post.extLink) {
+    linksHtml = '<a href="' + escHtml(post.extLink) + '" target="_blank" ' +
+      'style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#1E293B;border-radius:10px;text-decoration:none;color:#F1F5F9">' +
+      '<i class="fas fa-link" style="color:#60A5FA;font-size:18px;width:22px;text-align:center"></i>' +
+      '<span style="font-size:13px;font-weight:600">Écouter en ligne</span>' +
+      '<i class="fas fa-arrow-right" style="margin-left:auto;color:#475569;font-size:11px"></i>' +
+      '</a>';
+  }
+
+  var existing = document.getElementById('artiste-detail-overlay');
+  if (existing) existing.remove();
+  var ov = document.createElement('div');
+  ov.id = 'artiste-detail-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:#000a;z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+  ov.onclick = function(e) { if (e.target === ov) ov.remove(); };
+  ov.innerHTML =
+    '<div style="background:#0F172A;border-radius:24px 24px 0 0;width:100%;max-width:520px;max-height:85vh;overflow-y:auto;padding:20px 16px 32px">' +
+      /* Handle */
+      '<div style="width:40px;height:4px;background:#334155;border-radius:4px;margin:0 auto 16px"></div>' +
+      /* Header */
+      '<div style="display:flex;gap:14px;align-items:center;margin-bottom:16px">' +
+        '<div style="width:72px;height:72px;border-radius:14px;flex-shrink:0;overflow:hidden;background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;align-items:center;justify-content:center">' +
+          (post.coverUrl ? '<img src="' + escHtml(post.coverUrl) + '" style="width:100%;height:100%;object-fit:cover">' : '<i class="fas fa-music" style="color:#fff;font-size:28px"></i>') +
+        '</div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:17px;font-weight:800;color:#F1F5F9;margin-bottom:2px">' + escHtml(post.title||'Sans titre') + '</div>' +
+          '<div style="font-size:13px;color:#94A3B8">' + escHtml(post.artistName||post.userName||'Artiste') + '</div>' +
+          (post.genre ? '<span style="background:rgba(124,58,237,.2);color:#A78BFA;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;display:inline-block;margin-top:4px">' + escHtml(post.genre) + '</span>' : '') +
+        '</div>' +
+      '</div>' +
+      /* Description */
+      (post.description ? '<p style="font-size:13px;color:#94A3B8;line-height:1.6;margin:0 0 16px">' + escHtml(post.description) + '</p>' : '') +
+      /* Actions principales */
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">' +
+        (post.audioUrl
+          ? '<button onclick="document.getElementById(\'artiste-detail-overlay\').remove();_artistePlay(\'' + postId + '\')" style="background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;border:none;border-radius:12px;padding:12px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="fas fa-play"></i> Écouter</button>'
+          : '<div></div>') +
+        (post.allowDownload && post.audioUrl
+          ? '<button onclick="_artisteDownload(\'' + postId + '\')" style="background:#0F3460;color:#34D399;border:1px solid #34D39930;border-radius:12px;padding:12px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="fas fa-download"></i> Télécharger</button>'
+          : '') +
+      '</div>' +
+      /* Like + Dislike + Partager */
+      '<div style="display:flex;gap:8px;margin-bottom:16px">' +
+        '<button id="artiste-detail-like-' + postId + '" onclick="_artisteLike(\'' + postId + '\');_artisteOpenDetail(\'' + postId + '\')" ' +
+          'style="flex:1;background:' + (iLiked ? 'rgba(244,63,94,.15)' : '#1E293B') + ';color:' + (iLiked ? '#F43F5E' : '#94A3B8') + ';border:1px solid ' + (iLiked ? '#F43F5E40' : '#334155') + ';border-radius:12px;padding:11px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px">' +
+          '<i class="fas fa-heart" style="opacity:' + (iLiked ? '1' : '0.5') + '"></i> ' + (iLiked ? 'Aimé' : 'J\'aime') + ' · <span>' + _artisteFmt(likesCount) + '</span>' +
+        '</button>' +
+        '<button id="artiste-detail-dislike-' + postId + '" onclick="_artisteDislike(\'' + postId + '\');_artisteOpenDetail(\'' + postId + '\')" ' +
+          'style="flex:1;background:' + (iDisliked ? 'rgba(107,123,247,.15)' : '#1E293B') + ';color:' + (iDisliked ? '#6B7BF7' : '#94A3B8') + ';border:1px solid ' + (iDisliked ? '#6B7BF740' : '#334155') + ';border-radius:12px;padding:11px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px">' +
+          '<i class="fas fa-heart-crack" style="opacity:' + (iDisliked ? '1' : '0.5') + '"></i> ' + (iDisliked ? 'Pas aimé' : 'J\'aime pas') +
+        '</button>' +
+        (post.allowShare !== false
+          ? '<button onclick="_artisteShare(\'' + postId + '\')" style="flex:1;background:#1E293B;color:#94A3B8;border:1px solid #334155;border-radius:12px;padding:11px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="fas fa-share-nodes"></i> Partager</button>'
+          : '') +
+      '</div>' +
+      /* Liens externes */
+      (linksHtml
+        ? '<div style="margin-bottom:16px"><div style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Retrouver sur</div><div style="display:flex;flex-direction:column;gap:8px">' + linksHtml + '</div></div>'
+        : '') +
+      /* Fermer */
+      '<button onclick="document.getElementById(\'artiste-detail-overlay\').remove()" style="width:100%;background:#1E293B;border:none;border-radius:12px;padding:12px;color:#64748B;font-size:13px;cursor:pointer">Fermer</button>' +
+    '</div>';
+  document.body.appendChild(ov);
+}
+
+function _artisteRowClick(postId) {
+  _artisteOpenDetail(postId);
+}
+
+function _artisteIncrStat(postId, field) {
+  if (!_gwFbDB || !postId) return;
+  try {
+    _gwFbDB.ref('gw/artiste_stats/' + postId + '/' + field)
+      .transaction(function(v) { return (v || 0) + 1; });
+    if (field === 'plays') {
+      var _wk = _getArtisteWeekKey();
+      _gwFbDB.ref('gw/artiste_weekly_plays/' + _wk + '/' + postId)
+        .transaction(function(v) { return (v || 0) + 1; });
+      _artisteWeeklyPlays[postId] = (_artisteWeeklyPlays[postId] || 0) + 1;
+    }
+    if (!_artisteStats[postId]) _artisteStats[postId] = {};
+    _artisteStats[postId][field] = (_artisteStats[postId][field] || 0) + 1;
+    /* Re-trier la liste pour que le classement reflète la nouvelle écoute */
+    if (field === 'plays') {
+      try { _artisteRender(); } catch(e) {}
+    } else {
+      var dlEl = document.getElementById('artiste-dl-' + postId);
+      if (dlEl) {
+        var _c = _artCol();
+        dlEl.innerHTML = '<div style="color:' + _c.countVal + ';font-size:12px;font-weight:700">' + _artisteFmt(_artisteStats[postId].downloads) + '</div><div style="color:' + _c.countLbl + ';font-size:9px">téléch.</div>';
+      }
+    }
+  } catch(e) {}
+}
+
+function _artistePlay(postId) {
+  var post = _artistePosts.find(function(p) { return p.id === postId; });
+  if (!post || !post.audioUrl) { showToast('Aucun audio disponible', 'err'); return; }
+  var existing = document.getElementById('artiste-mini-player');
+  if (existing) existing.remove();
+  var pl = document.createElement('div');
+  pl.id = 'artiste-mini-player';
+  pl.style.cssText = 'position:fixed;bottom:70px;left:12px;right:12px;background:#1E293B;border-radius:16px;padding:12px 14px;z-index:9999;box-shadow:0 12px 40px #0009;border:1px solid #334155';
+  pl.innerHTML =
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+      '<div style="width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,#7C3AED,#DB2777);flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center">' +
+        (post.coverUrl ? '<img src="' + escHtml(post.coverUrl) + '" style="width:100%;height:100%;object-fit:cover">' : '<i class="fas fa-music" style="color:#fff;font-size:16px"></i>') +
+      '</div>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-weight:700;color:#F1F5F9;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(post.title||'Sans titre') + '</div>' +
+        '<div style="color:#94A3B8;font-size:11px">' + escHtml(post.artistName||post.userName||'Artiste') + '</div>' +
+      '</div>' +
+      '<button id="artiste-pl-btn" onclick="_artisteTogglePlay()" style="background:#7C3AED;border:none;border-radius:50%;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0">' +
+        '<i class="fas fa-pause" style="color:#fff;font-size:14px"></i>' +
+      '</button>' +
+      '<button onclick="document.getElementById(\'artiste-mini-player\').remove()" style="background:#0F172A;border:none;border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0">' +
+        '<i class="fas fa-times" style="color:#64748B;font-size:12px"></i>' +
+      '</button>' +
+    '</div>' +
+    '<div id="artiste-pl-bar-wrap" style="background:#0F172A;border-radius:100px;height:4px;cursor:pointer" onclick="_artisteSeek(event)">' +
+      '<div id="artiste-pl-bar" style="background:linear-gradient(90deg,#7C3AED,#DB2777);height:100%;width:0%;border-radius:100px;transition:width .5s linear"></div>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:space-between;margin-top:4px">' +
+      '<span id="artiste-pl-cur" style="color:#64748B;font-size:10px">0:00</span>' +
+      '<span id="artiste-pl-dur" style="color:#64748B;font-size:10px">--:--</span>' +
+    '</div>' +
+    '<audio id="artiste-audio-el" src="' + escHtml(post.audioUrl) + '" autoplay style="display:none"></audio>';
+  document.body.appendChild(pl);
+
+  /* Compter l'écoute (1 fois par user par 24h) */
+  var _now = Date.now(), _DAY = 86400000;
+  if (_currentUser && _gwFbDB) {
+    var _uKey = _gwFbKey(_currentUser.email);
+    _gwFbDB.ref('gw/artiste_played/' + postId + '/' + _uKey).once('value', function(snap) {
+      if (_now - (snap.val() || 0) >= _DAY) {
+        _gwFbDB.ref('gw/artiste_played/' + postId + '/' + _uKey).set(_now);
+        _artisteIncrStat(postId, 'plays');
+      }
+    });
+  } else if (!_artistePlayedSet[postId]) {
+    _artistePlayedSet[postId] = true;
+    _artisteIncrStat(postId, 'plays');
+  }
+
+  /* Barre de progression */
+  var audio = document.getElementById('artiste-audio-el');
+  if (audio) {
+    audio.ontimeupdate = function() {
+      var bar = document.getElementById('artiste-pl-bar');
+      var cur = document.getElementById('artiste-pl-cur');
+      if (bar && audio.duration) bar.style.width = (audio.currentTime / audio.duration * 100) + '%';
+      if (cur) { var m = Math.floor(audio.currentTime/60); var s = Math.floor(audio.currentTime%60); cur.textContent = m + ':' + (s<10?'0':'')+s; }
+    };
+    audio.onloadedmetadata = function() {
+      var dur = document.getElementById('artiste-pl-dur');
+      if (dur) { var m = Math.floor(audio.duration/60); var s = Math.floor(audio.duration%60); dur.textContent = m + ':' + (s<10?'0':'')+s; }
+    };
+  }
+}
+
+function _artisteTogglePlay() {
+  var audio = document.getElementById('artiste-audio-el');
+  var btn   = document.getElementById('artiste-pl-btn');
+  if (!audio || !btn) return;
+  if (audio.paused) {
+    audio.play();
+    btn.innerHTML = '<i class="fas fa-pause" style="color:#fff;font-size:14px"></i>';
+  } else {
+    audio.pause();
+    btn.innerHTML = '<i class="fas fa-play" style="color:#fff;font-size:14px"></i>';
+  }
+}
+
+function _artisteSeek(event) {
+  var audio = document.getElementById('artiste-audio-el');
+  var wrap  = document.getElementById('artiste-pl-bar-wrap');
+  if (!audio || !wrap || !audio.duration) return;
+  var rect = wrap.getBoundingClientRect();
+  audio.currentTime = ((event.clientX - rect.left) / rect.width) * audio.duration;
+}
+
+function _artisteDownload(postId) {
+  var post = _artistePosts.find(function(p) { return p.id === postId; });
+  if (!post || !post.audioUrl) return;
+  if (!post.allowDownload) { showToast('Téléchargement non autorisé', 'err'); return; }
+  var a = document.createElement('a');
+  a.href = post.audioUrl; a.download = (post.title||'son') + '.mp3'; a.target = '_blank';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  _artisteIncrStat(postId, 'downloads');
+  showToast('Téléchargement lancé ⬇', 'ok');
+}
+
+/* ── Like ── */
+function _artisteLike(postId) {
+  if (!_currentUser) { showToast('Connectez-vous pour aimer', 'err'); return; }
+  if (!_gwFbDB) return;
+  var uKey  = _gwFbKey(_currentUser.email);
+  var ref   = _gwFbDB.ref('gw/artiste_likes/' + postId + '/' + uKey);
+  var liked = !!((_artisteLikesCache[postId] || {})[uKey]);
+  if (liked) {
+    ref.remove().catch(function(){});
+    if (_artisteLikesCache[postId]) delete _artisteLikesCache[postId][uKey];
+  } else {
+    ref.set(_currentUser.email).catch(function(){});
+    if (!_artisteLikesCache[postId]) _artisteLikesCache[postId] = {};
+    _artisteLikesCache[postId][uKey] = _currentUser.email;
+    /* Retirer le dislike si existant */
+    var refDis2 = _gwFbDB.ref('gw/artiste_dislikes/' + postId + '/' + uKey);
+    if ((_artisteDislikesCache[postId] || {})[uKey]) {
+      refDis2.remove().catch(function(){});
+      if (_artisteDislikesCache[postId]) delete _artisteDislikesCache[postId][uKey];
+      var disBtn2 = document.getElementById('artiste-dislike-btn-' + postId);
+      if (disBtn2) {
+        disBtn2.style.color = '#64748B';
+        var di2 = disBtn2.querySelector('i'); if (di2) { di2.className = 'fas fa-heart-crack'; di2.style.opacity = '0.4'; }
+        var ddc = document.getElementById('artiste-dislike-count-' + postId); if (ddc) ddc.textContent = '';
+      }
+    }
+  }
+  /* Mise à jour immédiate des compteurs dans la liste */
+  var likesNow = Object.keys(_artisteLikesCache[postId] || {}).length;
+  var likedNow = !!(_artisteLikesCache[postId] || {})[uKey];
+  var listBtn  = document.getElementById('artiste-like-btn-' + postId);
+  if (listBtn) {
+    listBtn.style.color = likedNow ? '#F43F5E' : '#64748B';
+    var ico = listBtn.querySelector('i'); if (ico) { ico.className = 'fas fa-heart'; ico.style.opacity = likedNow ? '1' : '0.4'; }
+    var countEl = document.getElementById('artiste-like-count-' + postId);
+    if (countEl) countEl.textContent = _artisteFmt(likesNow);
+  }
+}
+
+/* ── Dislike (cœur brisé) ── */
+function _artisteDislike(postId) {
+  if (!_currentUser) { showToast('Connectez-vous pour réagir', 'err'); return; }
+  if (!_gwFbDB) return;
+  var uKey     = _gwFbKey(_currentUser.email);
+  var refDis   = _gwFbDB.ref('gw/artiste_dislikes/' + postId + '/' + uKey);
+  var disliked = !!((_artisteDislikesCache[postId] || {})[uKey]);
+
+  if (disliked) {
+    /* Retirer le dislike */
+    refDis.remove().catch(function(){});
+    if (_artisteDislikesCache[postId]) delete _artisteDislikesCache[postId][uKey];
+  } else {
+    /* Ajouter le dislike */
+    refDis.set(_currentUser.email).catch(function(){});
+    if (!_artisteDislikesCache[postId]) _artisteDislikesCache[postId] = {};
+    _artisteDislikesCache[postId][uKey] = _currentUser.email;
+    /* Retirer le like si existant */
+    var refLike = _gwFbDB.ref('gw/artiste_likes/' + postId + '/' + uKey);
+    if ((_artisteLikesCache[postId] || {})[uKey]) {
+      refLike.remove().catch(function(){});
+      if (_artisteLikesCache[postId]) delete _artisteLikesCache[postId][uKey];
+      var likesNow2 = Object.keys(_artisteLikesCache[postId] || {}).length;
+      var likeBtn2  = document.getElementById('artiste-like-btn-' + postId);
+      if (likeBtn2) {
+        likeBtn2.style.color = '#64748B';
+        var likeIco2 = likeBtn2.querySelector('i'); if (likeIco2) likeIco2.className = 'far fa-heart';
+        var lc2 = document.getElementById('artiste-like-count-' + postId); if (lc2) lc2.textContent = _artisteFmt(likesNow2);
+      }
+    }
+  }
+
+  /* Mise à jour immédiate dans la liste */
+  var dislikesNow  = Object.keys(_artisteDislikesCache[postId] || {}).length;
+  var dislikedNow  = !!(_artisteDislikesCache[postId] || {})[uKey];
+  var listDisBtn   = document.getElementById('artiste-dislike-btn-' + postId);
+  if (listDisBtn) {
+    listDisBtn.style.color = dislikedNow ? '#6B7BF7' : '#64748B';
+    var ico = listDisBtn.querySelector('i'); if (ico) { ico.className = 'fas fa-heart-crack'; ico.style.opacity = dislikedNow ? '1' : '0.4'; }
+    var dc  = document.getElementById('artiste-dislike-count-' + postId); if (dc) dc.textContent = dislikesNow > 0 ? _artisteFmt(dislikesNow) : '';
+  }
+}
+
+/* Données de partage en cours — évite les problèmes d'échappement dans les onclick */
+var _gwShareData = { url: '', text: '' };
+
+/* ── Partager ── */
+function _artisteShare(postId) {
+  var post = (_artistePosts || []).find(function(p) { return p.id === postId; });
+  if (!post) return;
+
+  var origin   = window.location.origin || 'https://geniwork.vercel.app';
+  _gwShareData.url  = origin + '/s/' + encodeURIComponent(postId);
+  _gwShareData.text = '🎵 ' + (post.title || 'Un son') + ' — ' + (post.artistName || post.userName || 'Artiste') + '\nÉcouter sur GeniWork : ' + _gwShareData.url;
+
+  /* Supprimer modal précédent */
+  var prev = document.getElementById('artiste-share-modal');
+  if (prev) prev.remove();
+
+  var modal = document.createElement('div');
+  modal.id  = 'artiste-share-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:#000b;z-index:99999;display:flex;align-items:flex-end;justify-content:center;padding:0';
+
+  var inner = document.createElement('div');
+  inner.style.cssText = 'background:#0F172A;border-radius:24px 24px 0 0;width:100%;max-width:520px;padding:20px 16px 40px';
+
+  /* Handle */
+  var handle = document.createElement('div');
+  handle.style.cssText = 'width:40px;height:4px;background:#334155;border-radius:4px;margin:0 auto 20px';
+  inner.appendChild(handle);
+
+  /* Cover + titre */
+  var songRow = document.createElement('div');
+  songRow.style.cssText = 'display:flex;align-items:center;gap:12px;padding:0 4px;margin-bottom:20px';
+  var thumb = document.createElement('div');
+  thumb.style.cssText = 'width:52px;height:52px;border-radius:10px;overflow:hidden;flex-shrink:0;background:linear-gradient(135deg,#7C3AED44,#DB277744);display:flex;align-items:center;justify-content:center';
+  if (post.coverUrl) {
+    var img = document.createElement('img');
+    img.src = post.coverUrl; img.style.cssText = 'width:100%;height:100%;object-fit:cover';
+    thumb.appendChild(img);
+  } else {
+    thumb.innerHTML = '<i class="fas fa-music" style="color:#A78BFA;font-size:18px"></i>';
+  }
+  var songInfo = document.createElement('div');
+  songInfo.style.cssText = 'flex:1;min-width:0';
+  songInfo.innerHTML = '<div style="font-size:15px;font-weight:800;color:#F1F5F9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(post.title||'Sans titre') + '</div>' +
+    '<div style="font-size:12px;color:#64748B;margin-top:2px">' + escHtml(post.artistName||post.userName||'') + '</div>';
+  songRow.appendChild(thumb); songRow.appendChild(songInfo);
+  inner.appendChild(songRow);
+
+  /* Grille boutons réseaux */
+  var grid = document.createElement('div');
+  grid.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px';
+
+  function makeBtn(iconClass, bg, label, onClick) {
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:6px';
+    var btn = document.createElement('button');
+    btn.style.cssText = 'width:52px;height:52px;border-radius:14px;background:' + bg + ';border:none;cursor:pointer;display:flex;align-items:center;justify-content:center';
+    btn.innerHTML = '<i class="' + iconClass + '" style="color:#fff;font-size:20px"></i>';
+    btn.addEventListener('click', onClick);
+    var lbl = document.createElement('span');
+    lbl.style.cssText = 'font-size:11px;color:#64748B';
+    lbl.textContent = label;
+    wrap.appendChild(btn); wrap.appendChild(lbl);
+    return wrap;
+  }
+
+  grid.appendChild(makeBtn('fab fa-whatsapp',   '#25D366', 'WhatsApp', function() {
+    window.open('https://wa.me/?text=' + encodeURIComponent(_gwShareData.text), '_blank');
+  }));
+  grid.appendChild(makeBtn('fab fa-facebook-f', '#1877F2', 'Facebook', function() {
+    window.open('https://www.facebook.com/sharer/sharer.php?u=' + encodeURIComponent(_gwShareData.url), '_blank');
+  }));
+  grid.appendChild(makeBtn('fab fa-x-twitter',  '#000000', 'Twitter', function() {
+    window.open('https://twitter.com/intent/tweet?text=' + encodeURIComponent(_gwShareData.text), '_blank');
+  }));
+  grid.appendChild(makeBtn('fas fa-link',        '#6366F1', 'Copier', function() {
+    _artisteCopyLink(_gwShareData.url);
+  }));
+  inner.appendChild(grid);
+
+  /* Lien copiable */
+  var linkRow = document.createElement('div');
+  linkRow.style.cssText = 'background:#1E293B;border:1px solid #334155;border-radius:12px;padding:10px 12px;display:flex;align-items:center;gap:10px';
+  var linkSpan = document.createElement('span');
+  linkSpan.style.cssText = 'flex:1;font-size:12px;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+  linkSpan.textContent = _gwShareData.url;
+  var copyBtn = document.createElement('button');
+  copyBtn.textContent = 'Copier';
+  copyBtn.style.cssText = 'background:#334155;border:none;border-radius:8px;padding:6px 12px;color:#CBD5E1;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0';
+  copyBtn.addEventListener('click', function(){ _artisteCopyLink(_gwShareData.url); });
+  linkRow.appendChild(linkSpan); linkRow.appendChild(copyBtn);
+  inner.appendChild(linkRow);
+
+  /* Annuler */
+  var cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Annuler';
+  cancelBtn.style.cssText = 'width:100%;background:#1E293B;border:none;border-radius:12px;padding:12px;color:#64748B;font-size:13px;font-weight:700;cursor:pointer;margin-top:12px';
+  cancelBtn.addEventListener('click', function(){ modal.remove(); });
+  inner.appendChild(cancelBtn);
+
+  modal.appendChild(inner);
+  modal.addEventListener('click', function(e){ if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+
+function _artisteCopyLink(url) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(function(){ showToast('Lien copié ✓', 'ok'); }).catch(function(){ _artisteCopyFallback(url); });
+  } else { _artisteCopyFallback(url); }
+}
+function _artisteCopyFallback(url) {
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+    document.body.removeChild(ta); showToast('Lien copié ✓', 'ok');
+  } catch(e) { showToast('Impossible de copier', 'err'); }
+}
+
+/* ── Supprimer son propre son ── */
+function _artisteDeletePost(postId) {
+  if (!_currentUser || !_gwFbDB) return;
+  var post = _artistePosts.find(function(p) { return p.id === postId; });
+  if (!post || post.userEmail !== _currentUser.email) { showToast('Non autorisé', 'err'); return; }
+  if (!window.confirm) {
+    /* Capacitor — pas de confirm() natif */
+    _artisteConfirmDelete(postId);
+    return;
+  }
+  if (!confirm('Supprimer ce son ?')) return;
+  _artisteConfirmDelete(postId);
+}
+function _artisteConfirmDelete(postId) {
+  _gwFbDB.ref('gw/artiste_posts/' + postId).remove().catch(function(){});
+  _gwFbDB.ref('gw/artiste_stats/' + postId).remove().catch(function(){});
+  _gwFbDB.ref('gw/artiste_likes/' + postId).remove().catch(function(){});
+  _artistePosts = _artistePosts.filter(function(p) { return p.id !== postId; });
+  delete _artisteStats[postId];
+  delete _artisteLikesCache[postId];
+  delete _artisteWeeklyPlays[postId];
+  var ov = document.getElementById('artiste-detail-overlay');
+  if (ov) ov.remove();
+  _artisteRender();
+  showToast('Son supprimé', 'ok');
+}
+
+/* ── Accès artiste — vérification ── */
+var _artisteAccessCache = null; /* null=non vérifié, true/false */
+
+function _artisteShowPendingScreen(status, req) {
+  var isPending  = status === 'pending';
+  var isRejected = status === 'rejected';
+  var existing = document.getElementById('artiste-status-overlay');
+  if (existing) existing.remove();
+  var ov = document.createElement('div');
+  ov.id = 'artiste-status-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:#000c;z-index:10001;display:flex;align-items:flex-end;justify-content:center';
+  var dt = req && req.requestedAt ? new Date(req.requestedAt).toLocaleDateString('fr-FR', {day:'2-digit',month:'long',year:'numeric'}) : '';
+  ov.innerHTML =
+    '<div style="background:#0F172A;border-radius:24px 24px 0 0;width:100%;max-width:520px;padding:24px 20px 40px;box-sizing:border-box">' +
+      '<div style="width:40px;height:4px;background:#334155;border-radius:4px;margin:0 auto 20px"></div>' +
+      /* Icône status */
+      '<div style="text-align:center;margin-bottom:16px">' +
+        '<div style="width:72px;height:72px;border-radius:50%;background:' + (isPending ? 'rgba(245,158,11,.15)' : 'rgba(239,68,68,.15)') + ';display:flex;align-items:center;justify-content:center;margin:0 auto;border:2px solid ' + (isPending ? '#F59E0B44' : '#EF444444') + '">' +
+          '<span style="font-size:32px">' + (isPending ? '⏳' : '❌') + '</span>' +
+        '</div>' +
+      '</div>' +
+      /* Titre */
+      '<h3 style="text-align:center;margin:0 0 8px;font-size:18px;font-weight:800;color:#F1F5F9">' +
+        (isPending ? 'Demande en cours d\'examen' : 'Demande refusée') +
+      '</h3>' +
+      '<p style="text-align:center;color:#64748B;font-size:13px;margin:0 0 20px;line-height:1.6">' +
+        (isPending
+          ? 'Votre demande d\'accès artiste a bien été envoyée.<br>L\'administrateur va l\'examiner et vous répondre bientôt.'
+          : 'L\'administrateur a refusé votre demande.' + (req && req.rejectReason ? '<br><span style="color:#EF4444">Raison : ' + escHtml(req.rejectReason) + '</span>' : '<br>Contactez l\'administrateur pour plus d\'informations.')) +
+      '</p>' +
+      /* Infos demande */
+      (req ? '<div style="background:#1E293B;border-radius:14px;padding:14px 16px;margin-bottom:20px">' +
+        (req.stageName ? '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #334155"><span style="font-size:12px;color:#64748B">Nom artiste</span><span style="font-size:12px;font-weight:700;color:#F1F5F9">' + escHtml(req.stageName) + '</span></div>' : '') +
+        (req.genre     ? '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #334155"><span style="font-size:12px;color:#64748B">Genre</span><span style="font-size:12px;font-weight:700;color:#A78BFA">' + escHtml(req.genre) + '</span></div>' : '') +
+        (dt            ? '<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="font-size:12px;color:#64748B">Soumise le</span><span style="font-size:12px;color:#F1F5F9">' + dt + '</span></div>' : '') +
+        '<div style="display:flex;justify-content:space-between;padding:6px 0;margin-top:4px"><span style="font-size:12px;color:#64748B">Statut</span>' +
+          '<span style="font-size:11px;font-weight:700;padding:2px 10px;border-radius:20px;' + (isPending ? 'background:rgba(245,158,11,.2);color:#F59E0B' : 'background:rgba(239,68,68,.2);color:#EF4444') + '">' + (isPending ? '⏳ En attente' : '✗ Refusé') + '</span>' +
+        '</div>' +
+      '</div>' : '') +
+      /* Recours déjà envoyé ? */
+      (isPending && req && req.recours
+        ? '<div style="background:#0C1627;border:1px solid #7C3AED44;border-radius:12px;padding:12px 14px;margin-bottom:16px">' +
+            '<div style="font-size:11px;font-weight:700;color:#A78BFA;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px"><i class="fas fa-flag" style="margin-right:5px"></i>Recours envoyé</div>' +
+            '<p style="font-size:12px;color:#CBD5E1;margin:0 0 4px;line-height:1.5">' + escHtml(req.recours) + '</p>' +
+            (req.recoursAt ? '<div style="font-size:10px;color:#475569">' + new Date(req.recoursAt).toLocaleDateString('fr-FR',{day:'2-digit',month:'long',year:'numeric'}) + '</div>' : '') +
+          '</div>'
+        : '') +
+      /* Zone recours (formulaire inline, affiché par JS) */
+      (isPending && req && !req.recours
+        ? '<div id="artiste-recours-zone" style="margin-bottom:16px">' +
+            '<button onclick="_artisteToggleRecoursForm()" style="background:#1E293B;border:1px solid #334155;color:#94A3B8;border:none;border-radius:12px;padding:11px 14px;font-size:13px;cursor:pointer;width:100%;text-align:left">' +
+              '<i class="fas fa-flag" style="margin-right:8px;color:#A78BFA"></i>Faire un recours' +
+            '</button>' +
+            '<div id="artiste-recours-form" style="display:none;margin-top:8px">' +
+              '<textarea id="artiste-recours-txt" placeholder="Expliquez votre situation à l\'administrateur…" rows="3" ' +
+                'style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:12px;padding:12px;color:#F1F5F9;font-size:13px;resize:none;box-sizing:border-box;line-height:1.5"></textarea>' +
+              '<button onclick="_artisteSubmitRecours(\'' + (req.id||'') + '\',\'' + (req.userKey||(_currentUser?_gwFbKey(_currentUser.email):'')) + '\')" ' +
+                'style="margin-top:8px;width:100%;background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;border:none;border-radius:12px;padding:12px;font-size:13px;font-weight:800;cursor:pointer">' +
+                '<i class="fas fa-paper-plane" style="margin-right:6px"></i>Envoyer le recours' +
+              '</button>' +
+            '</div>' +
+          '</div>'
+        : '') +
+      /* Boutons */
+      '<div style="display:flex;flex-direction:column;gap:10px">' +
+        (isRejected
+          ? '<button onclick="document.getElementById(\'artiste-status-overlay\').remove();_artisteOpenRequest()" style="background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;border:none;border-radius:14px;padding:14px;font-size:14px;font-weight:800;cursor:pointer"><i class="fas fa-redo" style="margin-right:8px"></i>Soumettre une nouvelle demande</button>'
+          : '') +
+        '<button onclick="document.getElementById(\'artiste-status-overlay\').remove()" style="background:#1E293B;color:#94A3B8;border:none;border-radius:14px;padding:13px;font-size:13px;cursor:pointer">Fermer</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+}
+
+function _artisteToggleRecoursForm() {
+  var f = document.getElementById('artiste-recours-form');
+  if (f) f.style.display = f.style.display === 'none' ? '' : 'none';
+}
+
+function _artisteSubmitRecours(reqId, uKey) {
+  var txt = (document.getElementById('artiste-recours-txt') || {}).value || '';
+  if (!txt.trim()) { showToast('Écrivez votre recours d\'abord', 'err'); return; }
+  if (!_currentUser || !_gwFbDB) { showToast('Connexion requise', 'err'); return; }
+  if (!uKey) uKey = _gwFbKey(_currentUser.email);
+
+  var recoursData = { recours: txt.trim(), recoursAt: Date.now() };
+
+  /* Sauvegarder dans le profil (chemin garanti) */
+  _gwFbDB.ref('gw/profiles/' + uKey + '/artiste_request').update(recoursData)
+    .then(function() {
+      /* Aussi mettre à jour localStorage */
+      try {
+        var lsKey = 'gw_artiste_req_' + uKey;
+        var lsReq = JSON.parse(localStorage.getItem(lsKey) || '{}');
+        lsReq.recours   = recoursData.recours;
+        lsReq.recoursAt = recoursData.recoursAt;
+        localStorage.setItem(lsKey, JSON.stringify(lsReq));
+      } catch(e) {}
+      /* Notifier l'admin */
+      _gwFbDB.ref('gw/artiste_requests/' + reqId).update(recoursData).catch(function(){});
+      showToast('Recours envoyé à l\'administrateur ✓', 'ok');
+      /* Fermer et ré-ouvrir l'écran avec les nouvelles données */
+      var ov = document.getElementById('artiste-status-overlay');
+      if (ov) ov.remove();
+      /* Simuler req mis à jour */
+      try {
+        var lsKey2 = 'gw_artiste_req_' + uKey;
+        var updReq = JSON.parse(localStorage.getItem(lsKey2) || 'null');
+        if (updReq) _artisteShowPendingScreen('pending', updReq);
+      } catch(e) {}
+    })
+    .catch(function() {
+      showToast('Erreur d\'envoi, réessayez', 'err');
+    });
+}
+
+function _artisteCheckAccess(cb) {
+  if (!_currentUser) { cb(false, null); return; }
+  if (!_gwFbDB) { cb(false, null); return; }
+  var uKey = _gwFbKey(_currentUser.email);
+  /* Vérifier d'abord le chemin dédié, puis le profil comme fallback garanti */
+  _gwFbDB.ref('gw/artiste_approved/' + uKey).once('value', function(snap) {
+    var val = snap.val();
+    if (val) { _artisteAccessCache = true; cb(true, val); return; }
+    /* Fallback : vérifier dans le profil utilisateur */
+    _gwFbDB.ref('gw/profiles/' + uKey + '/artiste_approved').once('value', function(snap2) {
+      var val2 = snap2.val();
+      _artisteAccessCache = !!val2;
+      cb(!!val2, val2);
+    }, function() { cb(false, null); });
+  }, function() {
+    /* gw/artiste_approved inaccessible → vérifier dans le profil */
+    _gwFbDB.ref('gw/profiles/' + uKey + '/artiste_approved').once('value', function(snap2) {
+      var val2 = snap2.val();
+      _artisteAccessCache = !!val2;
+      cb(!!val2, val2);
+    }, function() { cb(false, null); });
+  });
+}
+
+/* ── Demande d'accès artiste ── */
+var _TC_TEXT = [
+  '1. ORIGINALITÉ DES ŒUVRES\n' +
+  'En soumettant vos sons sur GeniWork, vous certifiez que vous êtes l\'auteur ou co-auteur des œuvres publiées et que celles-ci sont des créations originales vous appartenant en propre.',
+
+  '2. DROITS D\'AUTEUR & PROPRIÉTÉ INTELLECTUELLE\n' +
+  'Vous garantissez détenir tous les droits nécessaires (composition, paroles, interprétation, samples éventuels) sur les œuvres publiées. L\'utilisation de samples, boucles ou extraits tiers doit être dûment autorisée par le titulaire des droits. GeniWork décline toute responsabilité en cas de litige lié aux droits d\'auteur.',
+
+  '3. CONTENU INTERDIT\n' +
+  'Sont strictement interdits : les contenus haineux, discriminatoires, racistes, pornographiques, diffamatoires, violents ou portant atteinte à la dignité humaine. Tout contenu incitant à des actes illégaux sera immédiatement supprimé et entraînera la suspension du compte.',
+
+  '4. LICENCE D\'UTILISATION ACCORDÉE À GENIWORK\n' +
+  'En publiant sur GeniWork, vous accordez à la plateforme une licence mondiale, non exclusive et gratuite lui permettant d\'afficher, promouvoir et diffuser vos œuvres auprès des membres de la communauté, dans le seul but du fonctionnement de la plateforme.',
+
+  '5. MODÉRATION & RETRAIT\n' +
+  'GeniWork se réserve le droit de retirer tout contenu ne respectant pas les présentes conditions, sans préavis ni indemnité. L\'accès à la publication peut être suspendu ou révoqué à tout moment en cas de manquement répété.',
+
+  '6. RESPONSABILITÉ\n' +
+  'GeniWork agit en tant qu\'hébergeur de contenu au sens de la réglementation en vigueur. La plateforme ne saurait être tenue responsable du contenu publié par les artistes. L\'artiste assume l\'entière responsabilité légale de ses publications.',
+
+  '7. DONNÉES PERSONNELLES\n' +
+  'Les informations de votre profil artiste (nom de scène, genre, biographie) seront affichées publiquement sur GeniWork. Conformément au RGPD, vous pouvez demander la suppression de vos données à tout moment via le support.',
+].join('\n\n');
+
+function _artisteOpenRequest() {
+  var existing = document.getElementById('artiste-request-overlay');
+  if (existing) existing.remove();
+  var ov = document.createElement('div');
+  ov.id = 'artiste-request-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:#000c;z-index:10001;display:flex;align-items:flex-end;justify-content:center;overflow:hidden';
+  ov.innerHTML =
+    '<div style="background:#0F172A;border-radius:24px 24px 0 0;width:100%;max-width:520px;max-height:93vh;overflow-y:auto;padding:20px 16px 40px;box-sizing:border-box">' +
+      '<div style="width:40px;height:4px;background:#334155;border-radius:4px;margin:0 auto 16px"></div>' +
+      /* Titre */
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
+        '<div style="width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+          '<i class="fas fa-microphone-alt" style="color:#fff;font-size:18px"></i>' +
+        '</div>' +
+        '<div>' +
+          '<h3 style="margin:0;font-size:16px;font-weight:800;color:#F1F5F9">Devenir Artiste GeniWork</h3>' +
+          '<div style="font-size:11px;color:#64748B">Demande d\'accès à la publication musicale</div>' +
+        '</div>' +
+      '</div>' +
+
+      /* Intro */
+      '<div style="background:rgba(124,58,237,.1);border:1px solid rgba(124,58,237,.25);border-radius:12px;padding:12px 14px;margin:14px 0;font-size:12px;color:#A78BFA;line-height:1.6">' +
+        '<i class="fas fa-info-circle" style="margin-right:6px"></i>' +
+        'La première publication est soumise à l\'approbation de l\'administrateur. Remplissez ce formulaire et acceptez les conditions pour soumettre votre demande.' +
+      '</div>' +
+
+      /* Nom de scène */
+      '<div style="margin-bottom:14px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Nom de scène / Nom artiste <span style="color:#EF4444">*</span></label>' +
+        '<input id="ar-stage-name" type="text" placeholder="Ex: MC Lumière, Dj Wax…" maxlength="60" ' +
+          'style="width:100%;box-sizing:border-box;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;outline:none">' +
+      '</div>' +
+
+      /* Genre */
+      '<div style="margin-bottom:14px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Genre musical principal <span style="color:#EF4444">*</span></label>' +
+        '<select id="ar-genre" style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;outline:none;appearance:none">' +
+          '<option value="">— Sélectionner —</option>' +
+          ['Afrobeats','Afrotrap','Amapiano','Bikutsi','Bongo Flava','Coupé-décalé','Gospel / Gospel Urbain','Hip-Hop / Rap','Highlife','Jazz','Kuduro','Makossa','Ndombolo','Pop','R&B / Soul','Reggae / Dancehall','Rock','Rumba','Zouk / Kompa','Autre'].map(function(g){ return '<option value="' + g + '">' + g + '</option>'; }).join('') +
+        '</select>' +
+      '</div>' +
+
+      /* Bio */
+      '<div style="margin-bottom:14px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Biographie courte <span style="color:#EF4444">*</span></label>' +
+        '<textarea id="ar-bio" placeholder="Présentez-vous en quelques phrases : qui vous êtes, votre style, vos influences…" maxlength="500" rows="4" ' +
+          'style="width:100%;box-sizing:border-box;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:13px;outline:none;resize:vertical;font-family:inherit;line-height:1.5"></textarea>' +
+      '</div>' +
+
+      /* Lien portfolio */
+      '<div style="margin-bottom:20px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Lien portfolio / réseaux <span style="color:#64748B;font-weight:400">(optionnel)</span></label>' +
+        '<input id="ar-link" type="url" placeholder="https://soundcloud.com/monprofil ou lien YouTube…" ' +
+          'style="width:100%;box-sizing:border-box;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;outline:none">' +
+      '</div>' +
+
+      /* Conditions */
+      '<div style="margin-bottom:16px">' +
+        '<div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px"><i class="fas fa-file-contract" style="margin-right:6px;color:#A78BFA"></i>Conditions de publication</div>' +
+        '<div id="ar-tc-box" style="background:#070D1A;border:1px solid #1E293B;border-radius:12px;padding:14px;height:200px;overflow-y:auto;font-size:11.5px;color:#94A3B8;line-height:1.75;white-space:pre-wrap;font-family:inherit">' +
+          _TC_TEXT.replace(/</g,'&lt;').replace(/>/g,'&gt;') +
+        '</div>' +
+        '<div id="ar-tc-read-hint" style="font-size:10px;color:#EF4444;text-align:center;margin-top:6px;display:none"><i class="fas fa-arrow-down" style="margin-right:4px"></i>Faites défiler jusqu\'en bas pour valider</div>' +
+      '</div>' +
+
+      /* Checkboxes */
+      '<div id="ar-checks" style="display:none">' +
+        _arCheckHtml('ar-chk-original', '✍️ Je certifie que mes œuvres sont originales et que j\'en suis l\'auteur ou co-auteur.') +
+        _arCheckHtml('ar-chk-droits',   '⚖️ J\'accepte les droits d\'auteur et les conditions générales de publication de GeniWork.') +
+        _arCheckHtml('ar-chk-age',      '🎂 Je certifie avoir au moins 16 ans ou disposer de l\'accord de mon représentant légal.') +
+      '</div>' +
+
+      '<div id="ar-err" style="color:#EF4444;font-size:12px;text-align:center;margin-bottom:10px;display:none"></div>' +
+      '<div style="display:grid;grid-template-columns:1fr 2fr;gap:10px">' +
+        '<button onclick="document.getElementById(\'artiste-request-overlay\').remove()" style="background:#1E293B;color:#94A3B8;border:none;border-radius:12px;padding:13px;font-size:13px;cursor:pointer">Annuler</button>' +
+        '<button id="ar-submit-btn" onclick="_artisteSubmitRequest()" style="background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;border:none;border-radius:12px;padding:13px;font-size:14px;font-weight:800;cursor:pointer"><i class="fas fa-paper-plane" style="margin-right:6px"></i>Envoyer la demande</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  /* Détecter quand l'utilisateur a scrollé jusqu'en bas des CGU */
+  setTimeout(function() {
+    var box = document.getElementById('ar-tc-box');
+    var hint = document.getElementById('ar-tc-read-hint');
+    var checks = document.getElementById('ar-checks');
+    if (!box) return;
+    /* Montrer le hint immédiatement */
+    if (hint) hint.style.display = '';
+    box.addEventListener('scroll', function() {
+      if (box.scrollTop + box.clientHeight >= box.scrollHeight - 10) {
+        if (checks) checks.style.display = '';
+        if (hint) hint.style.display = 'none';
+      }
+    });
+  }, 300);
+
+  /* Pré-remplir le nom de scène */
+  try {
+    var sn = document.getElementById('ar-stage-name');
+    if (sn && _currentUser) sn.value = _currentUser.nom || '';
+  } catch(e) {}
+}
+
+function _arCheckHtml(id, label) {
+  return '<label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:#1E293B;border-radius:10px;margin-bottom:8px;cursor:pointer">' +
+    '<input type="checkbox" id="' + id + '" style="width:18px;height:18px;margin-top:1px;accent-color:#7C3AED;flex-shrink:0;cursor:pointer">' +
+    '<span style="font-size:12px;color:#E2E8F0;line-height:1.5">' + label + '</span>' +
+  '</label>';
+}
+
+function _artisteSubmitRequest() {
+  var stageName = (document.getElementById('ar-stage-name') || {}).value || '';
+  var genre     = (document.getElementById('ar-genre')      || {}).value || '';
+  var bio       = (document.getElementById('ar-bio')        || {}).value || '';
+  var link      = (document.getElementById('ar-link')       || {}).value || '';
+  var errEl     = document.getElementById('ar-err');
+
+  if (!stageName.trim()) { if (errEl) { errEl.textContent='Le nom de scène est requis.'; errEl.style.display=''; } return; }
+  if (!genre)            { if (errEl) { errEl.textContent='Sélectionnez un genre musical.'; errEl.style.display=''; } return; }
+  if (!bio.trim())       { if (errEl) { errEl.textContent='La biographie est requise.'; errEl.style.display=''; } return; }
+
+  var checksEl = document.getElementById('ar-checks');
+  if (checksEl && checksEl.style.display === 'none') {
+    if (errEl) { errEl.textContent='Veuillez d\'abord lire les conditions jusqu\'en bas.'; errEl.style.display=''; } return;
+  }
+  var c1 = document.getElementById('ar-chk-original');
+  var c2 = document.getElementById('ar-chk-droits');
+  var c3 = document.getElementById('ar-chk-age');
+  if (!c1 || !c1.checked) { if (errEl) { errEl.textContent='Veuillez certifier l\'originalité de vos œuvres.'; errEl.style.display=''; } return; }
+  if (!c2 || !c2.checked) { if (errEl) { errEl.textContent='Veuillez accepter les conditions de publication.'; errEl.style.display=''; } return; }
+  if (!c3 || !c3.checked) { if (errEl) { errEl.textContent='Veuillez certifier votre âge.'; errEl.style.display=''; } return; }
+
+  if (!_gwFbDB || !_currentUser) { showToast('Connexion Firebase requise', 'err'); return; }
+
+  var btn = document.getElementById('ar-submit-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Envoi…'; }
+
+  var reqId = 'areq_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
+  var uKey  = _gwFbKey(_currentUser.email);
+  var req = {
+    id:          reqId,
+    userEmail:   _currentUser.email,
+    userName:    _currentUser.nom || _currentUser.email,
+    userKey:     uKey,
+    stageName:   stageName.trim(),
+    genre:       genre,
+    bio:         bio.trim(),
+    link:        link.trim(),
+    status:      'pending',
+    requestedAt: Date.now(),
+  };
+
+  function _onRequestSent() {
+    var ov = document.getElementById('artiste-request-overlay');
+    if (ov) ov.remove();
+    var wrap = document.getElementById('artiste-list-wrap');
+    if (wrap) wrap.innerHTML =
+      '<div style="text-align:center;padding:36px 16px">' +
+        '<div style="font-size:52px;margin-bottom:12px">⏳</div>' +
+        '<h3 style="color:#F1F5F9;margin:0 0 8px;font-size:16px">Demande envoyée !</h3>' +
+        '<p style="color:#64748B;font-size:13px;margin:0;line-height:1.6">Votre demande d\'accès artiste est en attente de validation.<br>Vous recevrez une notification dès que l\'administrateur aura répondu.</p>' +
+      '</div>';
+    showToast('Demande envoyée ! L\'admin va vérifier 🎵', 'ok');
+  }
+
+  /* Sauvegarder localement dans tous les cas (backup) */
+  try {
+    var _lsKey = 'gw_artiste_req_' + uKey;
+    localStorage.setItem(_lsKey, JSON.stringify(req));
+  } catch(e) {}
+
+  /* Chemin principal garanti : profil utilisateur (gw/profiles est toujours accessible) */
+  _gwFbDB.ref('gw/profiles/' + uKey).update({ artiste_request: req })
+    .then(function() {
+      /* Aussi essayer le chemin dédié (peut échouer si règles manquantes, sans impact) */
+      _gwFbDB.ref('gw/artiste_requests/' + reqId).set(req).catch(function(){});
+      _onRequestSent();
+    })
+    .catch(function() {
+      /* Si même les profils échouent, essayer le chemin dédié */
+      _gwFbDB.ref('gw/artiste_requests/' + reqId).set(req)
+        .then(function() { _onRequestSent(); })
+        .catch(function() {
+          /* Dernier recours : localStorage uniquement */
+          _onRequestSent();
+          console.warn('[GW Artiste] Demande sauvée localement uniquement.');
+        });
+    });
+}
+
+/* ── Formulaire de publication ── */
+var _artistePublishState = { coverUrl: '', audioUrl: '', uploading: false };
+
+function _artisteOpenPost() {
+  if (!_currentUser) { showToast('Connectez-vous pour publier', 'err'); return; }
+  /* Vérifier si demande en attente */
+  var uKey = _gwFbKey(_currentUser.email);
+
+  /* Vérifier statut depuis localStorage en premier (fallback sans règles Firebase) */
+  function _checkLocalReq() {
+    try {
+      var lsReq = JSON.parse(localStorage.getItem('gw_artiste_req_' + uKey) || 'null');
+      if (lsReq && lsReq.status === 'pending')  { _artisteShowPendingScreen('pending',  lsReq); return; }
+      if (lsReq && lsReq.status === 'rejected') { _artisteShowPendingScreen('rejected', lsReq); return; }
+    } catch(e) {}
+    _artisteCheckAccess(function(approved) {
+      if (approved) { _artisteOpenPublishForm(); }
+      else          { _artisteOpenRequest(); }
+    });
+  }
+
+  if (!_gwFbDB) { _artisteOpenPublishForm(); return; }
+
+  /* Vérifier dans le profil utilisateur (chemin garanti, toujours accessible) */
+  _gwFbDB.ref('gw/profiles/' + uKey + '/artiste_request').once('value', function(snap) {
+    var req = snap.val();
+    if (req && req.status === 'pending')  { _artisteShowPendingScreen('pending',  req); return; }
+    if (req && req.status === 'rejected') { _artisteShowPendingScreen('rejected', req); return; }
+    if (req && req.status === 'approved') {
+      /* Demande approuvée via profil → ouvrir formulaire */
+      _artisteOpenPublishForm(); return;
+    }
+    /* Aussi vérifier le chemin dédié si accessible */
+    _gwFbDB.ref('gw/artiste_requests').orderByChild('userKey').equalTo(uKey).limitToLast(1).once('value', function(snap2) {
+      var val2 = snap2.val();
+      if (val2) {
+        var r2 = Object.values(val2)[0];
+        if (r2 && r2.status === 'pending')  { _artisteShowPendingScreen('pending',  r2); return; }
+        if (r2 && r2.status === 'rejected') { _artisteShowPendingScreen('rejected', r2); return; }
+      }
+      _checkLocalReq();
+    }, function() { _checkLocalReq(); });
+  }, function() { _checkLocalReq(); });
+}
+
+function _artisteOpenPublishForm() {
+  _artistePublishState = { coverUrl: '', audioUrl: '', uploading: false };
+  var existing = document.getElementById('artiste-publish-overlay');
+  if (existing) existing.remove();
+  var ov = document.createElement('div');
+  ov.id = 'artiste-publish-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:#000b;z-index:10000;display:flex;align-items:flex-end;justify-content:center;overflow:hidden';
+  ov.innerHTML =
+    '<div style="background:#0F172A;border-radius:24px 24px 0 0;width:100%;max-width:520px;max-height:92vh;overflow-y:auto;padding:20px 16px 40px">' +
+      /* Handle */
+      '<div style="width:40px;height:4px;background:#334155;border-radius:4px;margin:0 auto 16px"></div>' +
+      /* Titre */
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">' +
+        '<h3 style="margin:0;font-size:17px;font-weight:800;color:#F1F5F9"><i class="fas fa-music" style="color:#A78BFA;margin-right:8px"></i>Publier un son</h3>' +
+        '<button onclick="document.getElementById(\'artiste-publish-overlay\').remove()" style="background:#1E293B;border:none;border-radius:50%;width:32px;height:32px;color:#64748B;cursor:pointer;font-size:14px">✕</button>' +
+      '</div>' +
+
+      /* Cover */
+      '<div style="margin-bottom:16px">' +
+        '<div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Pochette (optionnel)</div>' +
+        '<div style="display:flex;align-items:center;gap:12px">' +
+          '<div id="ap-cover-prev" onclick="document.getElementById(\'ap-cover-file\').click()" ' +
+            'style="width:64px;height:64px;border-radius:12px;background:linear-gradient(135deg,#7C3AED44,#DB277744);border:2px dashed #334155;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;flex-shrink:0">' +
+            '<i class="fas fa-image" style="color:#475569;font-size:20px"></i>' +
+          '</div>' +
+          '<div>' +
+            '<button onclick="document.getElementById(\'ap-cover-file\').click()" style="background:#1E293B;color:#A78BFA;border:1px solid #7C3AED44;border-radius:10px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;display:block;margin-bottom:6px"><i class="fas fa-upload" style="margin-right:6px"></i>Choisir image</button>' +
+            '<div style="font-size:10px;color:#475569">PNG, JPG — max 5 Mo</div>' +
+          '</div>' +
+        '</div>' +
+        '<input type="file" id="ap-cover-file" accept="image/*" style="display:none" onchange="_artistePickCover(this)">' +
+        '<div id="ap-cover-progress" style="display:none;margin-top:8px">' +
+          '<div style="height:3px;background:#1E293B;border-radius:3px"><div id="ap-cover-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#7C3AED,#DB2777);border-radius:3px;transition:width .2s"></div></div>' +
+        '</div>' +
+      '</div>' +
+
+      /* Titre du son */
+      '<div style="margin-bottom:14px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Titre du son <span style="color:#EF4444">*</span></label>' +
+        '<input id="ap-title" type="text" placeholder="Ex: Mon chef-d\'œuvre" maxlength="80" ' +
+          'style="width:100%;box-sizing:border-box;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;outline:none">' +
+      '</div>' +
+
+      /* Nom artiste */
+      '<div style="margin-bottom:14px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Nom de l\'artiste <span style="color:#EF4444">*</span></label>' +
+        '<input id="ap-artist" type="text" placeholder="Ex: DJ Wax, Mimi Lova…" maxlength="60" ' +
+          'style="width:100%;box-sizing:border-box;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;outline:none">' +
+      '</div>' +
+
+      /* Genre */
+      '<div style="margin-bottom:14px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Genre musical</label>' +
+        '<select id="ap-genre" style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;outline:none;appearance:none">' +
+          '<option value="">— Sélectionner —</option>' +
+          ['Afrobeats','Afrotrap','Amapiano','Bikutsi','Bongo Flava','Coupé-décalé','Gospel / Gospel Urbain','Hip-Hop / Rap','Highlife','Jazz','Kuduro','Makossa','Ndombolo','Pop','R&B / Soul','Reggae / Dancehall','Rock','Rumba','Zouk / Kompa','Autre'].map(function(g){ return '<option value="' + g + '">' + g + '</option>'; }).join('') +
+        '</select>' +
+      '</div>' +
+
+      /* Description */
+      '<div style="margin-bottom:14px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Description</label>' +
+        '<textarea id="ap-desc" placeholder="Parlez de votre son, de l\'histoire derrière…" maxlength="400" rows="3" ' +
+          'style="width:100%;box-sizing:border-box;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;outline:none;resize:vertical;font-family:inherit"></textarea>' +
+      '</div>' +
+
+      /* Audio */
+      '<div style="margin-bottom:14px">' +
+        '<div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Fichier audio</div>' +
+        /* Onglets */
+        '<div style="display:flex;gap:6px;margin-bottom:10px">' +
+          '<button id="ap-audio-tab-file" onclick="_apAudioTab(\'file\')" style="flex:1;padding:7px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:700;background:#7C3AED;color:#fff">Uploader fichier</button>' +
+          '<button id="ap-audio-tab-link" onclick="_apAudioTab(\'link\')" style="flex:1;padding:7px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:700;background:#1E293B;color:#94A3B8">Lien externe</button>' +
+        '</div>' +
+        '<div id="ap-audio-file-zone">' +
+          '<div id="ap-audio-name" style="font-size:11px;color:#64748B;margin-bottom:6px">Aucun fichier choisi</div>' +
+          '<button onclick="document.getElementById(\'ap-audio-file\').click()" style="background:#1E293B;color:#34D399;border:1px solid #34D39944;border-radius:10px;padding:9px 16px;font-size:12px;font-weight:700;cursor:pointer;width:100%"><i class="fas fa-file-audio" style="margin-right:6px"></i>Choisir MP3 / WAV</button>' +
+          '<input type="file" id="ap-audio-file" accept="audio/*" style="display:none" onchange="_artistePickAudio(this)">' +
+          '<div id="ap-audio-progress" style="display:none;margin-top:8px">' +
+            '<div style="height:3px;background:#1E293B;border-radius:3px"><div id="ap-audio-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#34D399,#059669);border-radius:3px;transition:width .2s"></div></div>' +
+            '<div id="ap-audio-pct" style="font-size:10px;color:#64748B;margin-top:4px">0%</div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="ap-audio-link-zone" style="display:none">' +
+          '<input id="ap-audio-link-input" type="url" placeholder="https://soundcloud.com/…" ' +
+            'style="width:100%;box-sizing:border-box;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:10px 12px;color:#F1F5F9;font-size:14px;outline:none" ' +
+            'oninput="_artistePublishState.audioUrl=this.value">' +
+        '</div>' +
+      '</div>' +
+
+      /* Liens plateformes */
+      '<div style="margin-bottom:14px">' +
+        '<div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Liens plateformes (optionnel)</div>' +
+        '<div style="display:flex;flex-direction:column;gap:8px">' +
+          _artisteLinkField('spotify',    'fab fa-spotify',   '#1DB954', 'Lien Spotify') +
+          _artisteLinkField('soundcloud', 'fab fa-soundcloud','#FF5500', 'Lien SoundCloud') +
+          _artisteLinkField('youtube',    'fab fa-youtube',   '#FF0000', 'Lien YouTube') +
+          _artisteLinkField('apple',      'fab fa-apple',     '#FC3C44', 'Lien Apple Music') +
+          _artisteLinkField('deezer',     'fas fa-music',     '#EF5466', 'Lien Deezer') +
+          _artisteLinkField('other',      'fas fa-link',      '#60A5FA', 'Autre lien') +
+        '</div>' +
+      '</div>' +
+
+      /* Options */
+      '<div style="margin-bottom:20px">' +
+        '<div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Options</div>' +
+        _artisteOptionToggle('ap-opt-download', 'Autoriser le téléchargement', 'fas fa-download', '#34D399', true) +
+        _artisteOptionToggle('ap-opt-share',    'Autoriser le partage',        'fas fa-share-nodes', '#60A5FA', true) +
+      '</div>' +
+
+      /* Boutons */
+      '<div id="ap-err" style="color:#EF4444;font-size:12px;text-align:center;margin-bottom:10px;display:none"></div>' +
+      '<div style="display:grid;grid-template-columns:1fr 2fr;gap:10px">' +
+        '<button onclick="document.getElementById(\'artiste-publish-overlay\').remove()" style="background:#1E293B;color:#94A3B8;border:none;border-radius:12px;padding:13px;font-size:13px;cursor:pointer">Annuler</button>' +
+        '<button id="ap-submit-btn" onclick="_artisteSubmitPost()" style="background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;border:none;border-radius:12px;padding:13px;font-size:14px;font-weight:800;cursor:pointer"><i class="fas fa-paper-plane" style="margin-right:6px"></i>Publier</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+  /* Pré-remplir nom artiste */
+  try {
+    var ai = document.getElementById('ap-artist');
+    if (ai && _currentUser) ai.value = _currentUser.nom || '';
+  } catch(e) {}
+}
+
+function _artisteLinkField(key, icon, color, placeholder) {
+  return '<div style="display:flex;align-items:center;gap:8px;background:#1E293B;border:1px solid #334155;border-radius:10px;padding:8px 12px">' +
+    '<i class="' + icon + '" style="color:' + color + ';font-size:16px;width:18px;text-align:center;flex-shrink:0"></i>' +
+    '<input type="url" id="ap-link-' + key + '" placeholder="' + placeholder + '" ' +
+      'style="flex:1;background:none;border:none;color:#F1F5F9;font-size:12px;outline:none;min-width:0">' +
+  '</div>';
+}
+
+function _artisteOptionToggle(id, label, icon, color, checked) {
+  var on = checked !== false;
+  return '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#1E293B;border-radius:10px;margin-bottom:8px">' +
+    '<div style="display:flex;align-items:center;gap:8px">' +
+      '<i class="' + icon + '" style="color:' + color + ';width:16px;text-align:center"></i>' +
+      '<span style="font-size:13px;color:#E2E8F0">' + label + '</span>' +
+    '</div>' +
+    /* Toggle visuel géré par JS */
+    '<div id="' + id + '-wrap" onclick="_apToggle(\'' + id + '\')" data-on="' + (on?'1':'0') + '" ' +
+      'style="position:relative;width:44px;height:24px;border-radius:12px;cursor:pointer;flex-shrink:0;' +
+      'background:' + (on ? '#7C3AED' : '#334155') + ';transition:background .2s">' +
+      '<div id="' + id + '-knob" style="position:absolute;top:3px;left:' + (on?'23':'3') + 'px;width:18px;height:18px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 3px #0004"></div>' +
+    '</div>' +
+    /* Checkbox cachée pour lecture de valeur */
+    '<input type="checkbox" id="' + id + '" ' + (on ? 'checked' : '') + ' style="display:none">' +
+  '</div>';
+}
+function _apToggle(id) {
+  var wrap  = document.getElementById(id + '-wrap');
+  var knob  = document.getElementById(id + '-knob');
+  var chk   = document.getElementById(id);
+  if (!wrap || !knob || !chk) return;
+  var nowOn = wrap.getAttribute('data-on') !== '1';
+  wrap.setAttribute('data-on', nowOn ? '1' : '0');
+  wrap.style.background = nowOn ? '#7C3AED' : '#334155';
+  knob.style.left = nowOn ? '23px' : '3px';
+  chk.checked = nowOn;
+}
+
+function _apAudioTab(tab) {
+  var fileZone = document.getElementById('ap-audio-file-zone');
+  var linkZone = document.getElementById('ap-audio-link-zone');
+  var fileBtn  = document.getElementById('ap-audio-tab-file');
+  var linkBtn  = document.getElementById('ap-audio-tab-link');
+  if (!fileZone || !linkZone) return;
+  if (tab === 'file') {
+    fileZone.style.display = ''; linkZone.style.display = 'none';
+    fileBtn.style.background = '#7C3AED'; fileBtn.style.color = '#fff';
+    linkBtn.style.background = '#1E293B'; linkBtn.style.color = '#94A3B8';
+  } else {
+    fileZone.style.display = 'none'; linkZone.style.display = '';
+    linkBtn.style.background = '#7C3AED'; linkBtn.style.color = '#fff';
+    fileBtn.style.background = '#1E293B'; fileBtn.style.color = '#94A3B8';
+    _artistePublishState.audioUrl = document.getElementById('ap-audio-link-input').value || '';
+  }
+}
+
+/* ── Cropper canvas pour la pochette ── */
+function _artisteCropOpen(dataUrl, onDone) {
+  var existing = document.getElementById('artiste-crop-overlay');
+  if (existing) existing.remove();
+
+  var CROP = 260, CW = 320, CH = 340;
+  var img = new Image();
+  img.onload = function() {
+    var minZ = Math.max(CROP / img.naturalWidth, CROP / img.naturalHeight);
+    var zoom = minZ, ox = 0, oy = 0;
+    var dragging = false, lx = 0, ly = 0, ltDist = 0;
+
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+    function constrainOff() {
+      var mX = Math.max(0, (img.naturalWidth  * zoom - CROP) / 2);
+      var mY = Math.max(0, (img.naturalHeight * zoom - CROP) / 2);
+      ox = clamp(ox, -mX, mX); oy = clamp(oy, -mY, mY);
+    }
+
+    var ov = document.createElement('div');
+    ov.id = 'artiste-crop-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:#000d;z-index:10002;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;box-sizing:border-box';
+
+    var title = document.createElement('div');
+    title.innerHTML = '<div style="color:#F1F5F9;font-size:15px;font-weight:800;margin-bottom:4px;text-align:center">📷 Recadrer la pochette</div>' +
+      '<div style="color:#64748B;font-size:11px;margin-bottom:14px;text-align:center">Glisser · Pincer · Zoomer</div>';
+
+    var canvas = document.createElement('canvas');
+    canvas.width = CW; canvas.height = CH;
+    canvas.style.cssText = 'width:' + CW + 'px;height:' + CH + 'px;max-width:100%;cursor:grab;border-radius:12px;display:block;touch-action:none';
+    var ctx = canvas.getContext('2d');
+
+    function draw() {
+      ctx.clearRect(0, 0, CW, CH);
+      ctx.fillStyle = '#0A0F1E'; ctx.fillRect(0, 0, CW, CH);
+      var cx = CW/2 + ox, cy = CH/2 + oy;
+      var iw = img.naturalWidth * zoom, ih = img.naturalHeight * zoom;
+      ctx.drawImage(img, cx - iw/2, cy - ih/2, iw, ih);
+      /* Assombrir les zones hors cadre */
+      var fx = (CW - CROP)/2, fy = (CH - CROP)/2;
+      ctx.fillStyle = 'rgba(0,0,0,.6)';
+      ctx.fillRect(0, 0, CW, fy);
+      ctx.fillRect(0, fy + CROP, CW, CH - fy - CROP);
+      ctx.fillRect(0, fy, fx, CROP);
+      ctx.fillRect(fx + CROP, fy, CW - fx - CROP, CROP);
+      /* Cadre blanc */
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+      ctx.strokeRect(fx, fy, CROP, CROP);
+      /* Lignes de tiers */
+      ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = .7;
+      for (var i = 1; i < 3; i++) {
+        ctx.beginPath(); ctx.moveTo(fx + CROP*i/3, fy); ctx.lineTo(fx + CROP*i/3, fy + CROP); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(fx, fy + CROP*i/3); ctx.lineTo(fx + CROP, fy + CROP*i/3); ctx.stroke();
+      }
+      /* Poignées coins */
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+      var H = 18;
+      [[fx,fy,1,1],[fx+CROP,fy,-1,1],[fx,fy+CROP,1,-1],[fx+CROP,fy+CROP,-1,-1]].forEach(function(p) {
+        ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(p[0]+p[2]*H, p[1]); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(p[0], p[1]+p[3]*H); ctx.stroke();
+      });
+    }
+
+    /* Mouse */
+    canvas.addEventListener('mousedown', function(e) { dragging=true; lx=e.clientX; ly=e.clientY; canvas.style.cursor='grabbing'; });
+    window.addEventListener('mousemove', function(e) {
+      if (!dragging) return;
+      ox += e.clientX-lx; oy += e.clientY-ly; lx=e.clientX; ly=e.clientY;
+      constrainOff(); draw();
+    });
+    window.addEventListener('mouseup', function() { dragging=false; canvas.style.cursor='grab'; });
+    canvas.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      zoom *= e.deltaY < 0 ? 1.08 : 0.93;
+      zoom = clamp(zoom, minZ, minZ*6);
+      constrainOff(); draw();
+      slider.value = Math.round(zoom/minZ*100);
+    }, { passive:false });
+
+    /* Touch */
+    canvas.addEventListener('touchstart', function(e) {
+      e.preventDefault();
+      if (e.touches.length === 1) { lx=e.touches[0].clientX; ly=e.touches[0].clientY; }
+      else if (e.touches.length === 2) { ltDist = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY); }
+    }, { passive:false });
+    canvas.addEventListener('touchmove', function(e) {
+      e.preventDefault();
+      if (e.touches.length === 1) {
+        ox += e.touches[0].clientX-lx; oy += e.touches[0].clientY-ly;
+        lx=e.touches[0].clientX; ly=e.touches[0].clientY;
+        constrainOff(); draw();
+      } else if (e.touches.length === 2) {
+        var d = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+        if (ltDist) { zoom *= d/ltDist; zoom=clamp(zoom,minZ,minZ*6); constrainOff(); draw(); slider.value=Math.round(zoom/minZ*100); }
+        ltDist = d;
+      }
+    }, { passive:false });
+    canvas.addEventListener('touchend', function() { ltDist=0; });
+
+    /* Slider zoom */
+    var slider = document.createElement('input');
+    slider.type='range'; slider.min='100'; slider.max='600'; slider.value='100';
+    slider.style.cssText='width:80%;max-width:260px;margin:12px 0;accent-color:#7C3AED;cursor:pointer';
+    slider.oninput = function() {
+      zoom = minZ * parseFloat(slider.value)/100;
+      constrainOff(); draw();
+    };
+
+    /* Boutons */
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText='display:flex;gap:12px;margin-top:8px';
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.textContent='Annuler';
+    cancelBtn.style.cssText='background:#1E293B;color:#94A3B8;border:none;border-radius:12px;padding:11px 22px;font-size:13px;cursor:pointer;font-weight:700';
+    cancelBtn.onclick = function() { ov.remove(); };
+
+    var confirmBtn = document.createElement('button');
+    confirmBtn.innerHTML='<i class="fas fa-check" style="margin-right:6px"></i>Recadrer';
+    confirmBtn.style.cssText='background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;border:none;border-radius:12px;padding:11px 24px;font-size:13px;font-weight:800;cursor:pointer';
+    confirmBtn.onclick = function() {
+      var ec = document.createElement('canvas');
+      ec.width = CROP; ec.height = CROP;
+      var ectx = ec.getContext('2d');
+      var fx=(CW-CROP)/2, fy=(CH-CROP)/2;
+      var cx=CW/2+ox, cy=CH/2+oy;
+      var iw=img.naturalWidth*zoom, ih=img.naturalHeight*zoom;
+      var srcX=(fx-(cx-iw/2))/zoom, srcY=(fy-(cy-ih/2))/zoom;
+      var srcW=CROP/zoom, srcH=CROP/zoom;
+      ectx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, CROP, CROP);
+      var result = ec.toDataURL('image/jpeg', 0.92);
+      ov.remove();
+      onDone(result);
+    };
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(confirmBtn);
+
+    ov.appendChild(title); ov.appendChild(canvas); ov.appendChild(slider); ov.appendChild(btnRow);
+    document.body.appendChild(ov);
+    draw();
+  };
+  img.src = dataUrl;
+}
+
+function _artistePickCover(input) {
+  var file = input.files[0];
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) { showToast('Image trop lourde (max 10 Mo)', 'err'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    _artisteCropOpen(e.target.result, function(croppedDataUrl) {
+      /* Mettre à jour l'aperçu */
+      var prev = document.getElementById('ap-cover-prev');
+      if (prev) prev.innerHTML = '<img src="' + croppedDataUrl + '" style="width:100%;height:100%;object-fit:cover">';
+      /* Upload Firebase Storage */
+      if (!_gwFbStorage || !_currentUser) {
+        _artistePublishState.coverUrl = croppedDataUrl;
+        return;
+      }
+      var prog = document.getElementById('ap-cover-progress');
+      var bar  = document.getElementById('ap-cover-bar');
+      if (prog) prog.style.display = '';
+      var path = 'artiste_covers/' + _currentUser.email.replace(/[.@]/g,'_') + '_' + Date.now() + '.jpg';
+      _uploadToStorage(path, croppedDataUrl, function(url) {
+        _artistePublishState.coverUrl = url;
+        if (bar) bar.style.width = '100%';
+        setTimeout(function(){ if (prog) prog.style.display = 'none'; }, 600);
+        showToast('Pochette uploadée ✓', 'ok');
+      }, function() {
+        _artistePublishState.coverUrl = croppedDataUrl;
+        if (prog) prog.style.display = 'none';
+        showToast('Pochette enregistrée localement', 'err');
+      });
+    });
+  };
+  reader.readAsDataURL(file);
+}
+
+function _artistePickAudio(input) {
+  var file = input.files[0];
+  if (!file) return;
+  var nameEl = document.getElementById('ap-audio-name');
+  var prog   = document.getElementById('ap-audio-progress');
+  var bar    = document.getElementById('ap-audio-bar');
+  var pct    = document.getElementById('ap-audio-pct');
+  if (nameEl) nameEl.textContent = file.name + ' (' + (file.size / (1024*1024)).toFixed(1) + ' Mo)';
+  if (!_gwFbStorage || !_currentUser) { showToast('Firebase Storage non disponible', 'err'); return; }
+  if (prog) prog.style.display = '';
+  _artistePublishState.uploading = true;
+  var path = 'artiste_audio/' + _currentUser.email.replace(/[.@]/g,'_') + '_' + Date.now() + '.' + (file.name.split('.').pop() || 'mp3');
+  _uploadBlobToStorage(path, file,
+    function(url) {
+      _artistePublishState.audioUrl = url;
+      _artistePublishState.uploading = false;
+      if (bar) bar.style.width = '100%';
+      if (pct) pct.textContent = '✓ Upload terminé';
+      showToast('Audio uploadé ✓', 'ok');
+    },
+    function() {
+      _artistePublishState.uploading = false;
+      if (prog) prog.style.display = 'none';
+      showToast('Upload audio échoué', 'err');
+    },
+    function(p) {
+      if (bar) bar.style.width = p + '%';
+      if (pct) pct.textContent = p + '%';
+    }
+  );
+}
+
+function _artisteSubmitPost() {
+  if (_artistePublishState.uploading) { showToast('Upload en cours, patientez…', 'err'); return; }
+  var title   = (document.getElementById('ap-title')  || {}).value || '';
+  var artist  = (document.getElementById('ap-artist') || {}).value || '';
+  var genre   = (document.getElementById('ap-genre')  || {}).value || '';
+  var desc    = (document.getElementById('ap-desc')   || {}).value || '';
+  var errEl   = document.getElementById('ap-err');
+
+  if (!title.trim()) { if (errEl) { errEl.textContent = 'Le titre est requis.'; errEl.style.display=''; } return; }
+  if (!artist.trim()) { if (errEl) { errEl.textContent = 'Le nom de l\'artiste est requis.'; errEl.style.display=''; } return; }
+  var audioUrl = _artistePublishState.audioUrl;
+  /* Vérifier aussi le lien externe si l'onglet lien est actif */
+  var linkInput = document.getElementById('ap-audio-link-input');
+  if (!audioUrl && linkInput && linkInput.style.display !== 'none' && linkInput.value) {
+    audioUrl = linkInput.value.trim();
+  }
+
+  /* Liens plateformes */
+  var extLinks = {};
+  ['spotify','soundcloud','youtube','apple','deezer','other'].forEach(function(k) {
+    var el = document.getElementById('ap-link-' + k);
+    if (el && el.value.trim()) extLinks[k] = el.value.trim();
+  });
+
+  var allowDownload = (document.getElementById('ap-opt-download') || {}).checked !== false;
+  var allowShare    = (document.getElementById('ap-opt-share')    || {}).checked !== false;
+
+  var postId = 'art_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
+  var post = {
+    id:          postId,
+    title:       title.trim(),
+    artistName:  artist.trim(),
+    genre:       genre,
+    description: desc.trim(),
+    audioUrl:    audioUrl,
+    coverUrl:    _artistePublishState.coverUrl || '',
+    extLinks:    extLinks,
+    allowDownload: allowDownload,
+    allowShare:    allowShare,
+    userEmail:   _currentUser.email,
+    userName:    _currentUser.nom || _currentUser.email,
+    publishedAt: Date.now(),
+  };
+
+  var btn = document.getElementById('ap-submit-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Publication…'; }
+
+  if (_gwFbDB) {
+    _gwFbDB.ref('gw/artiste_posts/' + postId).set(post)
+      .then(function() {
+        _artistePosts.unshift(post);
+        var ov = document.getElementById('artiste-publish-overlay');
+        if (ov) ov.remove();
+        _artisteRender();
+        showToast('Son publié ! 🎵', 'ok');
+      })
+      .catch(function(e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Publier'; }
+        if (errEl) { errEl.textContent = 'Erreur: ' + (e.message || 'Réessayez'); errEl.style.display=''; }
+      });
+  } else {
+    /* Offline fallback */
+    _artistePosts.unshift(post);
+    var ov2 = document.getElementById('artiste-publish-overlay');
+    if (ov2) ov2.remove();
+    _artisteRender();
+    showToast('Son publié localement 🎵', 'ok');
+  }
+}
+
+/* ══════════════════════════════════════════ */
+
+function openMarketplaceCollab() {
+  var navBtn = document.querySelector('[data-page="p-marketplace"]');
+  navTo(navBtn, 'p-marketplace');
+  renderMarketplaceUserServices();
+  setTimeout(function() {
+    var collabBtn = document.getElementById('mk-cat-btn-collab');
+    if (collabBtn) setMkCat(collabBtn, 'collab');
+    var collabSec = document.getElementById('mk-collab-section');
+    if (collabSec) collabSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 150);
 }
 
 /* vidType chip keys vs category card keys */
@@ -11864,7 +14175,10 @@ function publierPost() {
         videoType: _pickedVideo.videoType || 'video',
         vidType:  (_pubVidMeta && _pubVidMeta.vidType)  || '',
         category: (_pubVidMeta && _pubVidMeta.category) || '',
-        title:    (_pubVidMeta && _pubVidMeta.title)    || '' }
+        title:    (_pubVidMeta && _pubVidMeta.title)    || '',
+        cropPos:  _pickedVideo.cropPos  || { x: 50, y: 50 },
+        cropZoom: _pickedVideo.cropZoom || 1,
+        poster:   _pickedVideo.poster   || '' }
     : null;
 
   /* Document : idbId + url courante + métadonnées */
@@ -11930,7 +14244,7 @@ function publierPost() {
   /* Affichage immédiat local avec les base64 */
   DEMO_POSTS.unshift(newPost);
   if (_currentUser) _incDailyCount('posts', _currentUser.email);
-  renderFeed(DEMO_POSTS);
+  renderFeed(_getFeedPosts());
 
   /* ── Upload médias vers Firebase Storage puis sauvegarde définitive ── */
   function _finalizePost(finalImages, finalVideoUrl, finalDocUrl) {
@@ -11966,7 +14280,7 @@ function publierPost() {
       if (finalVideoUrl && dp.video) dp.video.url = finalVideoUrl;
       if (finalDocUrl   && dp.doc)   dp.doc.url   = finalDocUrl;
     }
-    renderFeed(DEMO_POSTS);
+    renderFeed(_getFeedPosts());
   }
 
   if (_gwFbStorage && (_imagesSnapshot.length > 0 || videoBlob || docBlob)) {
@@ -12279,12 +14593,12 @@ function markAllRead() {
 })();
 
 function getNotifIcon(type) {
-  var icons = { like: 'fa-heart', comment: 'fa-comment', share: 'fa-share-nodes', follow: 'fa-user-plus', system: 'fa-bell', milestone: 'fa-trophy', bug_report: 'fa-bug', plan_limit: 'fa-lock', official: 'fa-bullhorn' };
+  var icons = { like: 'fa-heart', comment: 'fa-comment', share: 'fa-share-nodes', follow: 'fa-user-plus', system: 'fa-bell', milestone: 'fa-trophy', bug_report: 'fa-bug', plan_limit: 'fa-lock', official: 'fa-bullhorn', artiste_approved: 'fa-microphone', artiste_copyright_notice: 'fa-scale-balanced' };
   return icons[type] || 'fa-bell';
 }
 
 function getNotifBadgeCls(type) {
-  var cls = { like: 'nb-like', comment: 'nb-comment', share: 'nb-share', follow: 'nb-follow', system: 'nb-system', milestone: 'nb-milestone', bug_report: 'nb-system', plan_limit: 'nb-system', official: 'nb-system' };
+  var cls = { like: 'nb-like', comment: 'nb-comment', share: 'nb-share', follow: 'nb-follow', system: 'nb-system', milestone: 'nb-milestone', bug_report: 'nb-system', plan_limit: 'nb-system', official: 'nb-system', artiste_approved: 'nb-milestone', artiste_copyright_notice: 'nb-system' };
   return cls[type] || 'nb-system';
 }
 
@@ -12366,20 +14680,24 @@ function _openNotifDetail(notif) {
 
     /* ─ Boutons d'action ─ */
     '<div class="ndd-actions">' +
-      (notif.postId
-        ? '<button class="ndd-btn-primary" onclick="_nddGoPost(' + notif.postId + ')">' +
-            '<i class="fas fa-arrow-right"></i> Voir la publication' +
+      (notif.type === 'artiste_approved'
+        ? '<button class="ndd-btn-primary" onclick="_closeGenericSheet(\'notif-detail\');setMkCat(\'artiste\');setTimeout(function(){_artisteOpenPublishForm();},300)">' +
+            '<i class="fas fa-microphone"></i> Publier un son' +
           '</button>'
-        : (notif.fromUser
-            ? (function(){
-                var _nEmail = (notif.fromUser.email||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-                var _nNom   = (notif.fromUser.nom  ||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-                var _nRole  = (notif.fromUser.role ||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-                return '<button class="ndd-btn-primary" onclick="_nddGoProfile(\'' + _nEmail + '\',\'' + _nNom + '\',\'' + _nRole + '\')">' +
-                  '<i class="fas fa-user"></i> Voir le profil' +
-                '</button>';
-              })()
-            : '')) +
+        : notif.postId
+          ? '<button class="ndd-btn-primary" onclick="_nddGoPost(' + notif.postId + ')">' +
+              '<i class="fas fa-arrow-right"></i> Voir la publication' +
+            '</button>'
+          : (notif.fromUser
+              ? (function(){
+                  var _nEmail = (notif.fromUser.email||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+                  var _nNom   = (notif.fromUser.nom  ||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+                  var _nRole  = (notif.fromUser.role ||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+                  return '<button class="ndd-btn-primary" onclick="_nddGoProfile(\'' + _nEmail + '\',\'' + _nNom + '\',\'' + _nRole + '\')">' +
+                    '<i class="fas fa-user"></i> Voir le profil' +
+                  '</button>';
+                })()
+              : '')) +
       '<button class="ndd-btn-secondary" onclick="_closeGenericSheet(\'notif-detail\')">Fermer</button>' +
     '</div>';
 
@@ -13157,7 +15475,7 @@ function openEditDomain() {
       saveUserProfile(_currentUser.email, p);
       renderProfilePage();
       /* Le domaine apparaît dans les posts → re-render feed */
-      if (document.getElementById('feed-list')) renderFeed(getAllPosts());
+      if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
       showToast('Domaine mis à jour ✓', 'ok');
       return true;
     }
@@ -14289,34 +16607,148 @@ function _renderOfficialProfilePosts(container) {
 /* ══════════════════════════════════════════
    PUBLICATIONS SUR LE PROFIL
 ══════════════════════════════════════════ */
+/* ── Catégorise un post pour l'onglet Publications ── */
+function _postPubCategory(p) {
+  if (!p) return 'text';
+  var vid = p.video || (p.repostOf && p.repostOf.video);
+  if (!vid) return 'text';
+  if (typeof vid === 'string' && vid) return 'video';
+  if (typeof vid === 'object') {
+    if (vid.videoType === 'short') return 'short';
+    if (vid.url || vid.idbId)     return 'video';
+  }
+  return 'text';
+}
+
 function renderProfilPosts(email, nom, container) {
   if (!container) return;
   container.innerHTML = '';
 
-  function _doRenderPosts(posts) {
+  function _doRenderPosts(allPosts) {
     container.innerHTML = '';
-    if (!posts.length) {
-      container.innerHTML =
+
+    /* Tri */
+    allPosts = allPosts.slice().sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
+
+    var textPosts  = allPosts.filter(function(p) { return _postPubCategory(p) === 'text'; });
+    var videoPosts = allPosts.filter(function(p) { return _postPubCategory(p) === 'video'; });
+    var shortPosts = allPosts.filter(function(p) { return _postPubCategory(p) === 'short'; });
+
+    /* ── Sous-onglets ── */
+    var subtabs = document.createElement('div');
+    subtabs.className = 'pp-subtab-bar';
+    subtabs.innerHTML =
+      '<button class="pp-subtab active" data-cat="all">' +
+        '<i class="fas fa-grid-2"></i> Tout <span class="pp-subtab-badge">' + allPosts.length + '</span>' +
+      '</button>' +
+      '<button class="pp-subtab" data-cat="text">' +
+        '<i class="fas fa-image"></i> Texte/Image <span class="pp-subtab-badge">' + textPosts.length + '</span>' +
+      '</button>' +
+      '<button class="pp-subtab" data-cat="video">' +
+        '<i class="fas fa-video"></i> Vidéo <span class="pp-subtab-badge">' + videoPosts.length + '</span>' +
+      '</button>' +
+      '<button class="pp-subtab" data-cat="short">' +
+        '<i class="fas fa-play-circle"></i> Short <span class="pp-subtab-badge">' + shortPosts.length + '</span>' +
+      '</button>';
+    container.appendChild(subtabs);
+
+    /* Zone de contenu sous les sous-onglets */
+    var body = document.createElement('div');
+    body.className = 'pp-subtab-body';
+    container.appendChild(body);
+
+    function _renderSubCat(cat) {
+      /* Met à jour les boutons actifs */
+      subtabs.querySelectorAll('.pp-subtab').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.cat === cat);
+      });
+
+      body.innerHTML = '';
+      var list = cat === 'all'   ? allPosts
+               : cat === 'text'  ? textPosts
+               : cat === 'video' ? videoPosts
+               :                   shortPosts;
+
+      if (!list.length) {
+        body.innerHTML =
+          '<div class="profil-posts-empty">' +
+            '<i class="fas fa-' + (cat === 'short' ? 'play-circle' : cat === 'video' ? 'video' : 'pen-to-square') + '"></i>' +
+            '<p>Aucune ' + (cat === 'short' ? 'vidéo short' : cat === 'video' ? 'vidéo' : 'publication') + ' pour l\'instant</p>' +
+          '</div>';
+        return;
+      }
+
+      /* Grille pour les Shorts */
+      if (cat === 'short') {
+        var grid = document.createElement('div');
+        grid.className = 'pp-shorts-grid';
+        list.forEach(function(post) {
+          var vid     = post.video || (post.repostOf && post.repostOf.video);
+          var thumbSrc = (post.images && post.images[0]) || '';
+          var vidUrl  = vid ? (typeof vid === 'string' ? vid : (vid.url || '')) : '';
+          var idbId   = vid && typeof vid === 'object' ? (vid.idbId || '') : '';
+          var cell = document.createElement('div');
+          cell.className = 'pp-short-cell';
+          cell.setAttribute('onclick', 'openVideoScroll("' + String(post.id) + '")');
+          cell.innerHTML =
+            '<div class="pp-short-thumb">' +
+              (thumbSrc
+                ? '<img src="' + escHtml(thumbSrc) + '" alt="" loading="lazy" style="width:100%;height:100%;object-fit:cover">'
+                : '<video id="ppsh-' + post.id + '" src="' + escHtml(vidUrl) + '" preload="metadata"' +
+                  (idbId ? ' data-idbid="' + idbId + '"' : '') +
+                  ' style="width:100%;height:100%;object-fit:cover;pointer-events:none" muted playsinline></video>') +
+              '<div class="pp-short-overlay">' +
+                '<i class="fas fa-play" style="font-size:22px;color:rgba(255,255,255,.9)"></i>' +
+              '</div>' +
+              (post.type === 'repost' ? '<span class="pp-short-repost-badge">🔁</span>' : '') +
+            '</div>' +
+            '<div class="pp-short-meta">' +
+              (post.text ? '<span>' + escHtml(post.text.slice(0, 30)) + (post.text.length > 30 ? '…' : '') + '</span>' : '') +
+            '</div>';
+          /* Forcer la première frame si video element */
+          if (!thumbSrc) {
+            setTimeout(function() {
+              var v = document.getElementById('ppsh-' + post.id);
+              if (v && !v.src && idbId) {
+                _gwGetVideoBlob(idbId, function(blob) {
+                  if (blob) { v.src = URL.createObjectURL(blob); _gwForceVideoThumb(v); }
+                });
+              } else if (v && v.src) {
+                _gwForceVideoThumb(v);
+              }
+            }, 100);
+          }
+          grid.appendChild(cell);
+        });
+        body.appendChild(grid);
+        return;
+      }
+
+      /* Liste de cartes pour Tout / Texte / Vidéo */
+      list.forEach(function(post) {
+        var card = buildPostCard(post);
+        var followBtn = card.querySelector('.post-follow-btn');
+        if (followBtn) followBtn.remove();
+        body.appendChild(card);
+      });
+    }
+
+    /* Clic sur sous-onglet */
+    subtabs.querySelectorAll('.pp-subtab').forEach(function(btn) {
+      btn.addEventListener('click', function() { _renderSubCat(btn.dataset.cat); });
+    });
+
+    /* Affichage par défaut */
+    if (!allPosts.length) {
+      body.innerHTML =
         '<div class="profil-posts-empty">' +
           '<i class="fas fa-pen-to-square"></i>' +
           '<p>Aucune publication pour l\'instant</p>' +
           '<small>Les publications apparaîtront ici</small>' +
         '</div>';
-      return;
+    } else {
+      _renderSubCat('all');
     }
-    /* Compteur */
-    var header = document.createElement('div');
-    header.className = 'profil-posts-count';
-    header.innerHTML = '<i class="fas fa-newspaper"></i> ' + posts.length +
-      ' publication' + (posts.length > 1 ? 's' : '');
-    container.appendChild(header);
-
-    posts.forEach(function(post) {
-      var card = buildPostCard(post);
-      var followBtn = card.querySelector('.post-follow-btn');
-      if (followBtn) followBtn.remove();
-      container.appendChild(card);
-    });
   }
 
   var posts = getPostsByAuthor(email, nom);
@@ -14332,7 +16764,6 @@ function renderProfilPosts(email, nom, container) {
     _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).once('value').then(function(snap) {
       var fbPosts = snap.val();
       if (fbPosts && Array.isArray(fbPosts) && fbPosts.length) {
-        /* Intègre dans DEMO_POSTS pour le reste de la session */
         fbPosts.forEach(function(p) {
           if (!p || !p.id) return;
           if (!p.images) p.images = [];
@@ -14342,7 +16773,7 @@ function renderProfilPosts(email, nom, container) {
           }
         });
         try { localStorage.setItem('gw_userposts_' + email, JSON.stringify(fbPosts)); } catch(e){}
-        _doRenderPosts(fbPosts.sort(function(a, b) { return b.id - a.id; }));
+        _doRenderPosts(fbPosts);
       } else {
         _doRenderPosts([]);
       }
@@ -16774,6 +19205,7 @@ function _dmOpen(conv) {
   var ref     = _gwFbDB.ref('gw/dm_msgs/' + fbKey);
   _dmRef      = ref;
   _dmRefKey   = fbKey;
+  console.log('[DM] 👂 Écoute messages:', 'gw/dm_msgs/' + fbKey);
 
   /* Vide la boîte de messages pour afficher proprement */
   var box = document.getElementById('chat-messages');
@@ -16941,7 +19373,10 @@ function _dmRenderMsg(msg, ref, fbKey) {
 
 /* ── Écrit un message dans Firebase + met à jour l'inbox du destinataire ── */
 function _dmWriteMsg(conv, msg) {
-  if (!_gwFbDB || !msg || !conv || !conv.email || !_currentUser) return Promise.resolve();
+  if (!_gwFbDB)        { console.error('[DM] ❌ _gwFbDB non initialisé'); return Promise.resolve(); }
+  if (!_currentUser)   { console.error('[DM] ❌ _currentUser null'); return Promise.resolve(); }
+  if (!conv || !conv.email) { console.error('[DM] ❌ conv.email manquant', conv); return Promise.resolve(); }
+  if (!msg)            { console.error('[DM] ❌ msg null'); return Promise.resolve(); }
 
   var fbKey   = _dmFbKey(_currentUser.email, conv.email);
   var toFbKey = _gwFbKey(conv.email);
@@ -16951,8 +19386,11 @@ function _dmWriteMsg(conv, msg) {
       : msg.type === 'video' ? '🎥 Vidéo'
       : '📎 ' + (msg.fileName || 'Fichier'));
 
+  console.log('[DM] ✉️ Envoi → fbKey:', fbKey, '| msg.id:', msg.id, '| to:', conv.email);
+
   return _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + msg.id).set(msg)
     .then(function() {
+      console.log('[DM] ✅ dm_msgs écrit OK → mise à jour inbox de', conv.email);
       return _gwFbDB.ref('gw/inboxes/' + toFbKey + '/' + myFbKey).set({
         fromEmail: _currentUser.email,
         fromName:  _currentUser.nom  || _currentUser.email,
@@ -16961,8 +19399,11 @@ function _dmWriteMsg(conv, msg) {
         at:        msg.at || Date.now()
       });
     })
+    .then(function() {
+      console.log('[DM] ✅ inbox écrit OK pour', conv.email);
+    })
     .catch(function(err) {
-      console.error('[DM] ❌ Erreur envoi:', err && err.code, err && err.message);
+      console.error('[DM] ❌ Erreur envoi:', err && err.code, err && err.message, '| path: gw/dm_msgs/' + fbKey);
       showToast('Erreur d\'envoi — vérifiez votre connexion', 'err');
     });
 }
@@ -17472,12 +19913,22 @@ function handleChatAttach(input) {
   }
 
   if (isImage) {
-    /* Compression Canvas → JPEG ≤ 280 Ko base64 → passe dans Firebase RTDB */
+    /* Compresse pour limiter la bande passante, puis envoie via Firebase Storage —
+       fini la limite artificielle de 280 Ko qui forçait une qualité dégradée et
+       pouvait échouer pour les photos lourdes (avant : base64 direct dans RTDB). */
+    if (!_gwFbStorage) { showToast('Storage non disponible — reconnectez-vous', 'err'); return; }
     var reader = new FileReader();
     reader.onload = function(e) {
-      _compressImageForChat(e.target.result, 280000, function(compressed) {
-        _incDailyCount('photos', _currentUser.email);
-        _dispatchChatMedia(compressed, false);
+      _compressImageForChat(e.target.result, 700000, function(compressed) {
+        var blob;
+        try { blob = _gwDataUrlToBlob(compressed); } catch(err) { showToast('Erreur préparation de la photo', 'err'); return; }
+        var _imMsgId = Date.now();
+        _uploadBlobToStorage(
+          'chat_images/' + _imMsgId + '_' + _gwFbKey(_currentUser.email) + '.jpg',
+          blob,
+          function(url) { _incDailyCount('photos', _currentUser.email); _dispatchChatMedia(url, true); },
+          function()    { showToast('Erreur envoi de la photo', 'err'); }
+        );
       });
     };
     reader.readAsDataURL(file);
@@ -17498,16 +19949,31 @@ function handleChatAttach(input) {
       function()    { showToast('Erreur upload vidéo', 'err'); }
     );
 
-  } else if (file.size > 280000) {
-    /* Fichiers lourds (>280 Ko) : trop grand pour Firebase RTDB sans Storage */
-    showToast('Fichier trop volumineux pour être synchronisé entre appareils (max ~200 Ko). Les petits fichiers (PDF, docs) fonctionnent.', 'err');
-
   } else {
-    /* Petits fichiers (<280 Ko) → base64 direct dans RTDB */
-    var reader2 = new FileReader();
-    reader2.onload = function(e) { _incDailyCount('docs', _currentUser.email); _dispatchChatMedia(e.target.result, false); };
-    reader2.readAsDataURL(file);
+    /* Documents (PDF, Word, Excel…) → toujours Firebase Storage, quelle que soit la taille
+       (sous réserve de la limite globale de 8 Mo vérifiée plus haut). Avant : échec silencieux
+       au-delà de 280 Ko car embarqué en base64 dans Firebase RTDB.                            */
+    if (!_gwFbStorage) { showToast('Storage non disponible — reconnectez-vous', 'err'); return; }
+    showToast('Envoi du fichier en cours…', '');
+    var _dMsgId = Date.now();
+    var _dExt   = (file.name || '').split('.').pop() || 'bin';
+    _uploadBlobToStorage(
+      'chat_docs/' + _dMsgId + '_' + _gwFbKey(_currentUser.email) + '.' + _dExt,
+      file,
+      function(url) { showToast('Fichier envoyé ✓', 'ok'); _incDailyCount('docs', _currentUser.email); _dispatchChatMedia(url, true); },
+      function()    { showToast('Erreur envoi du fichier', 'err'); }
+    );
   }
+}
+
+/* ── Convertit une dataURL (base64) en Blob — pour upload Storage ── */
+function _gwDataUrlToBlob(dataUrl) {
+  var parts  = dataUrl.split(',');
+  var mime   = (parts[0].match(/:(.*?);/) || ['', 'image/jpeg'])[1];
+  var binary = atob(parts[1] || parts[0]);
+  var bytes  = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
 }
 
 function sendChatMessage() {
@@ -17517,6 +19983,7 @@ function sendChatMessage() {
   if (!text) return;
   if (!_currentUser) { showToast('Reconnectez-vous pour envoyer des messages', 'err'); return; }
   if (!_chatConvId)  { showToast('Conversation introuvable — réouvrez la discussion', 'err'); return; }
+  console.log('[DM] 📤 sendChatMessage → convId:', _chatConvId, '| user:', _currentUser && _currentUser.email);
 
   /* ── Vérification restriction ── */
   if (_gwIsRestricted(_currentUser.email)) {
@@ -19073,7 +21540,11 @@ function _rebuildSvcFormInner(svc) {
         '<div class="svc-price-row">' +
           '<input id="svc-price" class="svc-input svc-price-input" type="number" min="0" ' +
                  'placeholder="0" value="' + (svc && svc.price ? svc.price : '') + '"/>' +
-          '<span class="svc-currency">€</span>' +
+          '<select id="svc-currency" class="svc-input" style="flex:0 0 auto;min-width:90px">' +
+            '<option value="EUR"' + (svc && svc.currency === 'USD' ? '' : svc && svc.currency === 'XOF' ? '' : ' selected') + '>€ EUR</option>' +
+            '<option value="USD"' + (svc && svc.currency === 'USD' ? ' selected' : '') + '>$ USD</option>' +
+            '<option value="XOF"' + (svc && svc.currency === 'XOF' ? ' selected' : '') + '>FCFA (XOF)</option>' +
+          '</select>' +
         '</div>' +
       '</div>' +
 
@@ -19165,6 +21636,7 @@ function _submitService() {
   var cat      = (document.getElementById('svc-cat')     || {}).value;
   var desc     = (document.getElementById('svc-desc')    || {}).value.trim();
   var price    = parseFloat((document.getElementById('svc-price') || {}).value) || 0;
+  var currency = (document.getElementById('svc-currency') || {}).value || 'EUR';
   var pTypeEl  = document.querySelector('.svc-price-chip.active');
   var priceType = pTypeEl ? pTypeEl.dataset.ptype : 'from';
   var itemType  = _svcItemType || 'service';
@@ -19200,7 +21672,7 @@ function _submitService() {
     if (idx !== -1) {
       list[idx] = Object.assign(list[idx], {
         title: title, category: cat, description: desc,
-        price: price, priceType: priceType, itemType: itemType,
+        price: price, currency: currency, priceType: priceType, itemType: itemType,
         showInMarketplace: showMk, photos: _svcPickedImages.slice()
       });
     }
@@ -19213,6 +21685,7 @@ function _submitService() {
       category:        cat,
       description:     desc,
       price:           price,
+      currency:        currency,
       priceType:       priceType,
       itemType:        itemType,           /* 'service' | 'produit' */
       showInMarketplace: showMk,
@@ -19384,6 +21857,12 @@ function _deleteSvc(svcId) {
   showToast(isProd ? 'Produit supprimé' : 'Service supprimé', 'ok');
 }
 
+/* Retourne true si la section Musiques (artiste) est active — empêche les sections commerce de s'afficher */
+function _mkIsArtisteMode() {
+  var btn = document.getElementById('mk-cat-btn-artiste');
+  return !!(btn && btn.classList.contains('active'));
+}
+
 /* ── Rendu dans la Marketplace ── */
 function renderMarketplaceUserServices() {
   var section = document.getElementById('mk-user-services-section');
@@ -19424,7 +21903,7 @@ function renderMarketplaceUserServices() {
   if (_mkFilters.sort === 'price_desc') filtered.sort(function(a,b) { return (b.price||0) - (a.price||0); });
   /* 'recent' = ordre naturel (déjà le plus récent en tête grâce à unshift) */
 
-  if (!filtered.length) {
+  if (!filtered.length || _mkIsArtisteMode()) {
     section.style.display = 'none';
     return;
   }
@@ -19517,37 +21996,132 @@ function _mkHideEmptyRows() {
 }
 
 function setMkCat(btn, cat) {
+  /* Vérif admin : section désactivée ? */
+  var cfg = _admGetPlansConfig();
+  var gated = { ebook: cfg.ebookEnabled !== false, collab: cfg.collabEnabled !== false, artiste: cfg.artisteEnabled !== false };
+  if (gated[cat] === false) { showToast('Section indisponible', 'err'); return; }
+
   document.querySelectorAll('.mk-cat').forEach(function(b) { b.classList.remove('active'); });
   btn.classList.add('active');
 
-  /* ── Filtre par type de contenu ── */
-  document.querySelectorAll('.mk-service-card').forEach(function(c) {
-    if (cat === 'all') { c.style.display = ''; return; }
+  var isArtiste = (cat === 'artiste');
 
-    var cardType = (c.dataset.type || c.dataset.listingType || '').toLowerCase();
-    var isCollab  = cardType === 'collab' || c.classList.contains('mk-collab-card');
-    var isEbook   = cardType === 'ebook';
-    var isProduct = cardType === 'product' || cardType === 'produit';
-    var isService = !isCollab && !isEbook && !isProduct;
+  /* ── Header : swap entre "Marketplace" et "Musiques" ── */
+  var mkTopbar  = document.querySelector('.mk-topbar');
+  var mkCatsRow = document.querySelector('.mk-cats-row');
 
-    var show = false;
-    if (cat === 'service')  show = isService;
-    if (cat === 'product')  show = isProduct;
-    if (cat === 'ebook')    show = isEbook;
-    if (cat === 'collab')   show = isCollab;
-
-    c.style.display = show ? '' : 'none';
-  });
-
-  /* Cache les lignes vides après filtrage */
-  if (cat !== 'all') _mkHideEmptyRows();
-  else document.querySelectorAll('.mk-cards-row').forEach(function(r){ r.style.display = ''; });
-
-  /* Afficher/masquer la section "Offres de collaboration" */
-  var collabSection = document.getElementById('mk-collab-section');
-  if (collabSection) {
-    collabSection.style.display = (cat === 'all' || cat === 'collab') ? '' : 'none';
+  /* Créer le header artiste s'il n'existe pas encore */
+  var artisteHeader = document.getElementById('mk-artiste-header');
+  if (!artisteHeader && mkTopbar && mkTopbar.parentNode) {
+    artisteHeader = document.createElement('div');
+    artisteHeader.id = 'mk-artiste-header';
+    artisteHeader.style.cssText = 'display:none;align-items:center;gap:12px;padding:14px 16px 10px;position:sticky;top:0;z-index:10;background:var(--bg-page,#0F172A)';
+    artisteHeader.innerHTML =
+      '<button onclick="setMkCat(document.querySelector(\'.mk-cat\'),\'all\')" ' +
+        'style="background:#1E293B;border:none;border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;color:#94A3B8;font-size:15px">' +
+        '<i class="fas fa-arrow-left"></i>' +
+      '</button>' +
+      '<div style="flex:1;display:flex;align-items:center;gap:10px">' +
+        '<div style="width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+          '<i class="fas fa-music" style="color:#fff;font-size:13px"></i>' +
+        '</div>' +
+        '<span style="font-size:18px;font-weight:800;color:#F1F5F9">Musiques</span>' +
+      '</div>';
+    mkTopbar.parentNode.insertBefore(artisteHeader, mkTopbar);
   }
+
+  if (mkTopbar)    mkTopbar.style.display    = isArtiste ? 'none' : '';
+  if (mkCatsRow)   mkCatsRow.style.display   = isArtiste ? 'none' : '';
+  if (artisteHeader) artisteHeader.style.display = isArtiste ? 'flex' : 'none';
+
+  /* Barre de recherche + Filtres : masqués en mode Artiste */
+  var mkSearchRow = document.querySelector('.mk-search-row');
+  if (mkSearchRow) mkSearchRow.style.display = isArtiste ? 'none' : '';
+
+  /* Section Commerce */
+  var mkCommerce = document.getElementById('mk-commerce-section');
+  if (mkCommerce) mkCommerce.style.display = isArtiste ? 'none' : '';
+
+  /* Annonces membres + section annonces dynamique */
+  var mkUserSrv = document.getElementById('mk-user-services-section');
+  if (mkUserSrv) mkUserSrv.style.display = isArtiste ? 'none' : '';
+  var mkAnnonces = document.getElementById('mk-annonces-section');
+  if (mkAnnonces) mkAnnonces.style.display = isArtiste ? 'none' : '';
+
+  /* Bouton flottant Vendre — masqué en mode Artiste */
+  var mkFab = document.getElementById('mk-sell-fab');
+  if (mkFab) mkFab.style.display = isArtiste ? 'none' : '';
+
+  /* Section Artiste */
+  var artisteSection = document.getElementById('mk-artiste-section');
+  if (artisteSection) {
+    artisteSection.style.display = isArtiste ? '' : 'none';
+    if (isArtiste) {
+      _artisteSearch = '';
+      var si = document.getElementById('artiste-search-input');
+      if (si) si.value = '';
+      _artisteLoad();
+    }
+  }
+
+  /* ── MutationObserver : empêche définitivement les sections commerce de réapparaître en mode artiste ── */
+  if (window._mkArtisteObserver) {
+    window._mkArtisteObserver.disconnect();
+    window._mkArtisteObserver = null;
+  }
+  if (isArtiste) {
+    var _sectionsToWatch = ['mk-user-services-section','mk-annonces-section','mk-commerce-section','mk-sell-fab','mk-collab-section'];
+    var _observer = new MutationObserver(function(mutations) {
+      if (!_mkIsArtisteMode()) { _observer.disconnect(); window._mkArtisteObserver = null; return; }
+      mutations.forEach(function(m) {
+        if (m.type === 'attributes' && m.attributeName === 'style') {
+          var el = m.target;
+          if (el && el.style.display !== 'none') { el.style.display = 'none'; }
+        } else if (m.type === 'childList') {
+          m.addedNodes.forEach(function(node) {
+            if (node.nodeType === 1) {
+              var id = node.id || '';
+              if (_sectionsToWatch.indexOf(id) >= 0) { node.style.display = 'none'; }
+            }
+          });
+        }
+      });
+    });
+    _sectionsToWatch.forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) _observer.observe(el, { attributes: true, attributeFilter: ['style'] });
+    });
+    /* Observer le conteneur parent pour les sections créées dynamiquement */
+    var mkWrap = document.getElementById('mk-artiste-section') && document.getElementById('mk-artiste-section').parentNode;
+    if (mkWrap) _observer.observe(mkWrap, { childList: true });
+    window._mkArtisteObserver = _observer;
+  }
+
+  if (!isArtiste) {
+    /* Réafficher le bouton FAB quand on quitte le mode Artiste */
+    if (mkFab) mkFab.style.display = '';
+    /* Filtre par type de contenu */
+    document.querySelectorAll('.mk-service-card').forEach(function(c) {
+      if (cat === 'all') { c.style.display = ''; return; }
+      var cardType = (c.dataset.type || c.dataset.listingType || '').toLowerCase();
+      var isCollab  = cardType === 'collab' || c.classList.contains('mk-collab-card');
+      var isEbook   = cardType === 'ebook';
+      var isProduct = cardType === 'product' || cardType === 'produit';
+      var isService = !isCollab && !isEbook && !isProduct;
+      var show = false;
+      if (cat === 'service') show = isService;
+      if (cat === 'product') show = isProduct;
+      if (cat === 'ebook')   show = isEbook;
+      if (cat === 'collab')  show = isCollab;
+      c.style.display = show ? '' : 'none';
+    });
+    if (cat !== 'all') _mkHideEmptyRows();
+    else document.querySelectorAll('.mk-cards-row').forEach(function(r){ r.style.display = ''; });
+  }
+
+  /* Section Collaboration */
+  var collabSection = document.getElementById('mk-collab-section');
+  if (collabSection) collabSection.style.display = (isArtiste ? 'none' : (cat === 'all' || cat === 'collab') ? '' : 'none');
 }
 
 function filterMarketplace(q) {
@@ -19874,7 +22448,7 @@ function _mkOpenMySales() {
             imgHtml +
             '<div style="flex:1;min-width:0">' +
               '<div style="font-size:13.5px;font-weight:800;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(l.title) + '</div>' +
-              '<div style="font-size:11px;color:#64748B;margin-top:2px">' + escHtml(catLabel) + ' · ' + l.price.toFixed(2) + ' €</div>' +
+              '<div style="font-size:11px;color:#64748B;margin-top:2px">' + escHtml(catLabel) + ' · ' + _gwFmtPrice(l.price, l.currency) + '</div>' +
               '<div style="display:flex;align-items:center;gap:6px;margin-top:5px">' +
                 '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;' + statusCss + '">' + statusLbl + '</span>' +
                 (nbOrders ? '<span style="font-size:10px;color:#6366F1;font-weight:700"><i class="fas fa-shopping-cart" style="margin-right:3px"></i>' + nbOrders + ' commande(s)</span>' : '') +
@@ -19936,13 +22510,13 @@ function _mkEditListingPrice(listingId) {
   var l = listings.find(function(x){ return x.id === listingId; });
   if (!l) return;
 
-  var newPrice = prompt('Nouveau prix pour "' + l.title + '" (actuel : ' + l.price + ' €) :');
+  var newPrice = prompt('Nouveau prix pour "' + l.title + '" (actuel : ' + _gwFmtPrice(l.price, l.currency) + ') :');
   if (!newPrice) return;
   var p = parseFloat(newPrice);
   if (isNaN(p) || p < 0) { showToast('Prix invalide', 'err'); return; }
   l.price = p;
   _mkSaveListings(listings);
-  showToast('Prix mis à jour : ' + p.toFixed(2) + ' €', 'ok');
+  showToast('Prix mis à jour : ' + _gwFmtPrice(p, l.currency), 'ok');
   /* Rafraîchir l'écran */
   _mkCloseScreen('mk-sales-screen');
   setTimeout(_mkOpenMySales, 300);
@@ -20247,6 +22821,7 @@ function addToCart(svcId, ownerEmail) {
       ownerEmail: ownerEmail,
       title:      svc.title,
       price:      svc.price || 0,
+      currency:   svc.currency || 'EUR',
       priceType:  svc.priceType || 'fixed',
       itemType:   svc.itemType || 'produit',
       qty:        1,
@@ -20290,7 +22865,7 @@ function closeCartScreen() {
   setTimeout(function() { screen.classList.add('hidden'); }, 280);
 }
 
-function renderCartItems() {
+async function renderCartItems() {
   var wrap     = document.getElementById('cart-list-wrap');
   var footer   = document.getElementById('cart-footer');
   var countLbl = document.getElementById('cart-count-label');
@@ -20317,7 +22892,11 @@ function renderCartItems() {
 
   if (footer) footer.classList.remove('hidden');
 
-  var subtotal   = cart.reduce(function(acc, i) { return acc + (i.price || 0) * (i.qty || 1); }, 0);
+  /* Convertit chaque article en EUR (devise de facturation PayPal) avant de sommer */
+  var eurAmounts = await Promise.all(cart.map(function(i) {
+    return _gwConvertToEUR((i.price || 0) * (i.qty || 1), i.currency || 'EUR');
+  }));
+  var subtotal   = eurAmounts.reduce(function(acc, v) { return acc + v; }, 0);
   var commission = Math.round(subtotal * _GW_COMMISSION_RATE * 100) / 100; /* 1% Geniwork */
   var total      = Math.round((subtotal + commission) * 100) / 100;
 
@@ -20336,7 +22915,7 @@ function renderCartItems() {
       : '<div class="cart-item-img cart-item-img-ph"><i class="fas fa-' +
           (item.itemType === 'produit' ? 'box-open' : 'concierge-bell') +
         '"></i></div>';
-    var subtotalItem = ((item.price || 0) * (item.qty || 1)).toFixed(2);
+    var subtotalItem = _gwFmtPrice((item.price || 0) * (item.qty || 1), item.currency || 'EUR');
     return '<div class="cart-item">' +
       mediaHtml +
       '<div class="cart-item-body">' +
@@ -20348,7 +22927,7 @@ function renderCartItems() {
             '<span>' + (item.qty || 1) + '</span>' +
             '<button onclick="updateCartQty('+item.id+',1);renderCartItems()"><i class="fas fa-plus"></i></button>' +
           '</div>' +
-          '<span class="cart-item-price">' + subtotalItem + ' €</span>' +
+          '<span class="cart-item-price">' + subtotalItem + '</span>' +
         '</div>' +
       '</div>' +
       '<button class="cart-item-remove" onclick="removeFromCart('+item.id+');renderCartItems()">' +
@@ -20357,7 +22936,7 @@ function renderCartItems() {
     '</div>';
   }).join('');
 
-  /* Charger le bouton PayPal pour le panier */
+  /* Charger le bouton PayPal pour le panier (montant déjà converti en EUR) */
   _cartLoadPayPal(total);
 }
 
@@ -20365,6 +22944,22 @@ function renderCartItems() {
 function _cartLoadPayPal(total) {
   var wrap = document.getElementById('cart-paypal-btn-container');
   if (!wrap) return;
+
+  /* Vérifier si les paiements PayPal sont activés par l'admin */
+  var cfg = _admGetPlansConfig();
+  if (!cfg.paypalEnabled) {
+    wrap.innerHTML =
+      '<div style="background:linear-gradient(135deg,#FEF3C720,#FDE68A20);border:1px solid #FCD34D;border-radius:14px;padding:16px;text-align:center">' +
+        '<div style="font-size:22px;margin-bottom:8px">🔒</div>' +
+        '<div style="font-size:13px;font-weight:700;color:#92400E;margin-bottom:4px">Paiements temporairement désactivés</div>' +
+        '<div style="font-size:11px;color:#B45309;line-height:1.5">Les paiements en ligne sont momentanément indisponibles sur GeniWork.<br>Contactez directement le vendeur pour finaliser votre achat.</div>' +
+      '</div>';
+    return;
+  }
+
+  /* Utiliser l'email PayPal enregistré dans la config admin si disponible */
+  if (cfg.paypalEmail) _GW_PAYPAL_EMAIL = cfg.paypalEmail;
+
   wrap.innerHTML = '<div style="text-align:center;padding:10px;color:#94A3B8;font-size:12px"><i class="fas fa-spinner fa-spin"></i> Chargement PayPal…</div>';
 
   function _renderCartPayPalBtn() {
@@ -20373,10 +22968,11 @@ function _cartLoadPayPal(total) {
       return;
     }
     wrap.innerHTML = '<div id="cart-paypal-buttons"></div>';
-    var cart = loadCart();
-    var subtotal   = cart.reduce(function(acc, i) { return acc + (i.price || 0) * (i.qty || 1); }, 0);
-    var commission = Math.round(subtotal * _GW_COMMISSION_RATE * 100) / 100;
-    var grand      = (subtotal + commission).toFixed(2);
+    var cart  = loadCart();
+    /* `total` est déjà converti en EUR (toutes devises confondues) par renderCartItems() */
+    var grand      = (total || 0).toFixed(2);
+    var subtotalEur = (total || 0) / (1 + _GW_COMMISSION_RATE);
+    var commission  = Math.round((total - subtotalEur) * 100) / 100;
 
     if (parseFloat(grand) <= 0) {
       wrap.innerHTML = '<div style="font-size:12px;color:#EF4444;text-align:center;padding:8px">Le montant doit être supérieur à 0 € pour payer.</div>';
@@ -20865,6 +23461,8 @@ function doLogout() {
   DEMO_CONVERSATIONS.length = 0;
   _currentUser = null;
   localStorage.removeItem('gw_session');
+  /* Marque la déconnexion explicite → bloque l'auto-login au prochain lancement */
+  localStorage.setItem('gw_explicit_logout', '1');
   _pickedImages = [];
   _clearVideo();
   closeSidebar();
@@ -22322,13 +24920,14 @@ function _gwSightengineCheck(blob) {
           if (done) return; done = true;
           if (!data || data.status !== 'success') { resolve(null); return; }
           var n = data.nudity || {};
-          /* raw = nudité explicite (pénis, vagin, seins nus, fesses nues, acte sexuel)
-             partial = semi-nudité (seins partiellement couverts, lingerie explicite) */
-          var rawScore     = n.raw     || 0;
-          var partialScore = n.partial || 0;
-          /* Seuils : raw > 25% OU partial > 50% → bloqué */
-          var flagged = rawScore > 0.25 || partialScore > 0.50;
-          var score   = Math.max(rawScore, partialScore * 0.7);
+          /* raw = nudité EXPLICITE uniquement (pénis, vagin, seins entièrement nus, fesses nues, acte sexuel)
+             partial = semi-nudité (décolleté, lingerie, bras, jambes) → on ne bloque PAS cette catégorie
+             Seuil élevé volontairement : seul le contenu clairement explicite est bloqué.
+             Bras, jambes, sport, maillots de bain → pas bloqués. */
+          var rawScore = n.raw || 0;
+          /* Seuil raw : 0.65 → seulement nudité très explicite (pas de faux positifs sport/bras/jambes) */
+          var flagged = rawScore > 0.65;
+          var score   = rawScore;
           resolve({
             flagged: flagged,
             score:   score,
@@ -22383,8 +24982,10 @@ function _gwSkinRatio(drawable) {
     }
     var rF=tA>0?sA/tA:0, rC=tC>0?sC/tC:0, rL=tL>0?sL/tL:0, rM=tM>0?sM/tM:0;
     var score = rF*.20 + rC*.35 + rL*.25 + rM*.20;
-    var flagged = score>0.42 || (rF>0.50&&rC>0.45) || rC>0.60 || rL>0.65 || rM>0.62
-               || (rF>0.45&&rM>0.50) || (rL>0.55&&rC>0.50);
+    /* Seuils relevés : bras, jambes, sport = beaucoup de peau mais pas de nudité.
+       On ne bloque que si la peau couvre quasi tout l'écran (score > 0.72)
+       ET que la zone centrale est aussi très élevée. */
+    var flagged = score > 0.72 && rC > 0.70 && rM > 0.68;
     return { full:rF, center:rC, lower:rL, mid:rM, score:score, flagged:flagged };
   } catch(e) {
     return { full:0, center:0, lower:0, mid:0, score:0, flagged:false };
@@ -22572,7 +25173,7 @@ function _gwHandleNsfwDetection(result, postId) {
   /* 1. Retire du feed local */
   try {
     DEMO_POSTS=DEMO_POSTS.filter(function(p){return String(p.id)!==String(postId);});
-    renderFeed(DEMO_POSTS);
+    renderFeed(_getFeedPosts());
   } catch(e){}
 
   /* 2. Retire du localStorage */
@@ -22846,15 +25447,89 @@ function _gwShowRestrictionAlert(action) {
 /* ── Helpers : configuration globale des plans ── */
 function _admGetPlansConfig() {
   try {
-    var defaults = { premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true };
-    var stored   = JSON.parse(localStorage.getItem('gw_plans_config') || '{}');
+    var defaults = {
+      premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true,
+      paymentsEnabled: true, ebookEnabled: true, collabEnabled: true, artisteEnabled: true,
+      businessAiEnabled: true,
+      paypalEnabled: false, paypalEmail: ''
+    };
+    var stored = JSON.parse(localStorage.getItem('gw_plans_config') || '{}');
     return Object.assign(defaults, stored);
   }
-  catch(e) { return { premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true }; }
+  catch(e) {
+    return {
+      premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true,
+      paymentsEnabled: true, ebookEnabled: true, collabEnabled: true, artisteEnabled: true,
+      businessAiEnabled: true,
+      paypalEnabled: false, paypalEmail: ''
+    };
+  }
+}
+
+/* Applique la visibilité des sections Marketplace + boutons héro selon la config admin */
+function _gwApplyMkSections() {
+  var cfg = _admGetPlansConfig();
+  var tabs = {
+    ebook:   cfg.ebookEnabled   !== false,
+    collab:  cfg.collabEnabled  !== false,
+    artiste: cfg.artisteEnabled !== false
+  };
+
+  Object.keys(tabs).forEach(function(key) {
+    var show = tabs[key];
+    /* Bouton onglet marketplace */
+    var btn = document.getElementById('mk-cat-btn-' + key);
+    if (btn) btn.style.display = show ? '' : 'none';
+
+    /* Si l'onglet actif est désactivé → revenir à "Tous" */
+    if (!show && btn && btn.classList.contains('active')) {
+      var firstBtn = document.querySelector('.mk-cat');
+      if (firstBtn) { try { setMkCat(firstBtn, 'all'); } catch(e) {} }
+    }
+
+    /* Masquer / montrer les sections de contenu correspondantes */
+    if (key === 'collab') {
+      var collabSec = document.getElementById('mk-collab-section');
+      if (collabSec) collabSec.style.display = show ? '' : 'none';
+    }
+    if (key === 'artiste') {
+      var artisteSec = document.getElementById('mk-artiste-section');
+      /* La section artiste est normalement masquée sauf si l'onglet est actif ;
+         on la cache uniquement si désactivée ET qu'elle était visible */
+      if (artisteSec && !show) artisteSec.style.display = 'none';
+    }
+    if (key === 'ebook') {
+      /* Masquer toutes les cartes ebook dans la liste si désactivé */
+      document.querySelectorAll('.mk-service-card[data-type="ebook"]').forEach(function(c) {
+        c.style.display = show ? '' : 'none';
+      });
+    }
+  });
+
+  /* Boutons entête héro (page Accueil) */
+  var heroCollab = document.querySelector('.feed-cat-collab');
+  if (heroCollab) heroCollab.style.display = (cfg.collabEnabled !== false) ? '' : 'none';
+  var heroAI = document.querySelector('.feed-cat-ai');
+  if (heroAI) heroAI.style.display = (cfg.businessAiEnabled !== false) ? '' : 'none';
 }
 function _admSavePlansConfig(cfg) {
   localStorage.setItem('gw_plans_config', JSON.stringify(cfg));
   _gwFbSet('plans_config', cfg); /* Sync Firebase → tous les appareils */
+}
+
+function openBusinessAI() {
+  if (!_currentUser || !_currentUser.email) {
+    alert('Connecte-toi pour utiliser Business AI.');
+    return;
+  }
+  var url = window.location.origin + '/business-ai.html?email=' + encodeURIComponent(_currentUser.email);
+  if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+    if (window.Capacitor.Plugins && window.Capacitor.Plugins.Browser) {
+      window.Capacitor.Plugins.Browser.open({ url: url });
+      return;
+    }
+  }
+  window.open(url, '_blank');
 }
 
 /* ── Helpers : paiements ── */
@@ -22879,7 +25554,10 @@ function _admTogglePlan(plan) {
   cfg[key] = !cfg[key];
   _admSavePlansConfig(cfg);
   var state = cfg[key] ? 'activé ✅' : 'désactivé ⛔';
-  var labels = { premium: 'Premium', business: 'Business Pro', badge: 'Système de badges', banners: 'Bannières' };
+  var labels = {
+    premium: 'Premium', business: 'Business Pro', badge: 'Système de badges', banners: 'Bannières',
+    ebook: 'Ebook', collab: 'Collaborateurs', artiste: 'Artiste / Musique', businessAi: 'Business AI'
+  };
   _admLog('PLAN_TOGGLE', (labels[plan] || plan) + ' → ' + state);
   showToast((labels[plan] || plan) + ' ' + state, cfg[key] ? 'ok' : 'err');
   _admRender();
@@ -22888,6 +25566,36 @@ function _admTogglePlan(plan) {
     var ss = document.getElementById('sub-screen');
     if (ss && ss.classList.contains('open')) _subRenderCurrentPlan();
   } catch(e) {}
+  /* Applique immédiatement les sections marketplace + boutons hero */
+  try { _gwApplyMkSections(); } catch(e) {}
+}
+
+/* ── Activer/désactiver les paiements PayPal ── */
+function _admTogglePaypal() {
+  if (!_adminUser || !_admHasAction('change_settings')) { showToast('Réservé au Super Admin', 'err'); return; }
+  var cfg = _admGetPlansConfig();
+  cfg.paypalEnabled = !cfg.paypalEnabled;
+  _admSavePlansConfig(cfg);
+  var state = cfg.paypalEnabled ? 'activés ✅' : 'désactivés ⛔';
+  _admLog('PAYPAL_TOGGLE', 'Paiements PayPal → ' + state);
+  showToast('Paiements PayPal ' + state, cfg.paypalEnabled ? 'ok' : 'err');
+  _admRender();
+}
+
+/* ── Sauvegarder l'email PayPal admin ── */
+function _admSavePaypalEmail() {
+  if (!_adminUser || !_admHasAction('change_settings')) { showToast('Réservé au Super Admin', 'err'); return; }
+  var input = document.getElementById('adm-paypal-email-input');
+  if (!input) return;
+  var email = (input.value || '').trim();
+  if (!email || !email.includes('@')) { showToast('Email PayPal invalide', 'err'); return; }
+  var cfg = _admGetPlansConfig();
+  cfg.paypalEmail = email;
+  _admSavePlansConfig(cfg);
+  /* Met aussi à jour la variable globale utilisée par le bouton PayPal */
+  _GW_PAYPAL_EMAIL = email;
+  _admLog('PAYPAL_EMAIL', 'Email PayPal → ' + email);
+  showToast('Email PayPal enregistré ✓', 'ok');
 }
 
 /* ── État admin ── */
@@ -22905,7 +25613,7 @@ var _admTapTimer  = null;
 */
 var _ADM_ROLE_PERMS = {
   'Super Admin': {
-    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','marketplace','notifs','settings','security'],
+    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','artiste','marketplace','notifs','settings','security','backup'],
     actions: ['ban','unban','delete_post','delete_user','send_notif','publish','manage_team','manage_payments','change_settings','approve_badge','dismiss_report','warn_user','reset_password','change_role','approve_request']
   },
   'Admin': {
@@ -23526,6 +26234,11 @@ function _admSwitchTab(tab) {
     tab = 'dashboard';
   }
   _adminTab = tab;
+  /* Réinitialiser les caches artiste quand on arrive sur artiste ou marketplace */
+  if (tab === 'artiste' || tab === 'marketplace') {
+    _admArtisteRequests = null;
+    _admArtisteSongs    = null;
+  }
   /* Désactiver tous les items de la sidebar */
   document.querySelectorAll('.adm-sidebar-item').forEach(function(b) { b.classList.remove('active'); });
   /* Activer l'item courant */
@@ -23544,7 +26257,8 @@ function _admSwitchTab(tab) {
     marketplace : 'Marketplace',
     notifs      : 'Notifications & Communication',
     settings    : 'Paramètres système',
-    security    : 'Sécurité & Maintenance'
+    security    : 'Sécurité & Maintenance',
+    backup      : 'Sauvegarde des données'
   };
   var titleEl = document.getElementById('adm-topbar-title');
   if (titleEl) titleEl.textContent = titles[tab] || tab;
@@ -23632,11 +26346,49 @@ function _admUpdateNavBadges() {
   var pb  = document.getElementById('adm-badge-publi');
   var pyb = document.getElementById('adm-badge-payments');
   var tb  = document.getElementById('adm-badge-team');
+  var ab  = document.getElementById('adm-badge-artiste');
   if (rb)  { rb.textContent  = reports; rb.classList.toggle('hidden',  reports === 0); }
   if (bb)  { bb.textContent  = badges;  bb.classList.toggle('hidden',  badges  === 0); }
   if (pb)  { pb.textContent  = publis;  pb.classList.toggle('hidden',  publis  === 0); }
   if (pyb) { pyb.textContent = pays;    pyb.classList.toggle('hidden', pays    === 0); }
   if (tb)  { tb.textContent  = pending; tb.classList.toggle('hidden',  pending === 0); }
+  /* Badge demandes artiste — lit depuis profils (garanti) + recours en surbrillance */
+  if (ab && _gwFbDB) {
+    _gwFbDB.ref('gw/profiles').once('value', function(snap) {
+      var val = snap.val() || {};
+      var n = 0;
+      Object.values(val).forEach(function(p) {
+        if (p && p.artiste_request && p.artiste_request.status === 'pending') n++;
+      });
+      /* Fallback chemin dédié */
+      _gwFbDB.ref('gw/artiste_requests').orderByChild('status').equalTo('pending').once('value', function(snap2) {
+        var val2 = snap2.val() || {};
+        Object.keys(val2).forEach(function(k) { /* déduplication par id impossible ici, on garde le max */ });
+        var n2 = Object.keys(val2).length;
+        var total = Math.max(n, n2);
+        ab.textContent = total;
+        ab.classList.toggle('hidden', total === 0);
+        /* Bordure orange si recours en attente */
+        var sidebarBtn = document.getElementById('adm-nav-artiste');
+        if (sidebarBtn) {
+          var hasRecours = Object.values(val).some(function(p) {
+            return p && p.artiste_request && p.artiste_request.status === 'pending' && p.artiste_request.recours;
+          });
+          sidebarBtn.style.borderLeft = hasRecours ? '3px solid #F59E0B' : '';
+        }
+      }, function() {
+        ab.textContent = n;
+        ab.classList.toggle('hidden', n === 0);
+      });
+    }, function() {
+      /* Fallback chemin dédié si profils inaccessibles */
+      _gwFbDB.ref('gw/artiste_requests').orderByChild('status').equalTo('pending').once('value', function(snap2) {
+        var n2 = snap2.val() ? Object.keys(snap2.val()).length : 0;
+        ab.textContent = n2;
+        ab.classList.toggle('hidden', n2 === 0);
+      }, function() {});
+    });
+  }
 }
 
 /* ── Rendu principal (dispatch selon onglet actif) ── */
@@ -23651,10 +26403,12 @@ function _admRender() {
   else if (_adminTab === 'badges')      content.innerHTML = _admBuildBadges();
   else if (_adminTab === 'team')        content.innerHTML = _admBuildTeam();
   else if (_adminTab === 'publi')       content.innerHTML = _admBuildPubli();
+  else if (_adminTab === 'artiste')     content.innerHTML = _admBuildArtiste();
   else if (_adminTab === 'marketplace') content.innerHTML = _admBuildMarketplace();
   else if (_adminTab === 'notifs')      content.innerHTML = _admBuildNotifs();
   else if (_adminTab === 'settings')    content.innerHTML = _admBuildSettings();
   else if (_adminTab === 'security')    { content.innerHTML = _admBuildSecurity(); _admSecurityListen(); }
+  else if (_adminTab === 'backup')      content.innerHTML = _admBuildBackup();
   _admUpdateNavBadges();
 }
 
@@ -24127,9 +26881,58 @@ function _admBuildDashboard() {
   }
   html += '</div>';
 
+  /* ── Demandes artiste en attente (chargées en async) ── */
+  var artistePending = _admArtisteRequests ? _admArtisteRequests.filter(function(r){ return r.status === 'pending'; }) : null;
+  if (artistePending === null) {
+    /* Première fois : charger en arrière-plan et mettre à jour */
+    _admLoadArtisteRequests(function(list) {
+      var n = list.filter(function(r){ return r.status==='pending'; }).length;
+      var el = document.getElementById('adm-dash-artiste-block');
+      if (!el) return;
+      if (n === 0) { el.style.display='none'; return; }
+      el.innerHTML = _admArtisteAlertHtml(list.filter(function(r){ return r.status==='pending'; }));
+    });
+    html += '<div id="adm-dash-artiste-block" style="margin-bottom:16px"></div>';
+  } else if (artistePending.length > 0) {
+    html += '<div id="adm-dash-artiste-block" style="margin-bottom:16px">' + _admArtisteAlertHtml(artistePending) + '</div>';
+  }
+
   /* Wrapper global */
   return '<div class="adm-tab-header"><h2>Tableau de bord</h2><p>' + _admRoleSubtitle() + '</p></div>' +
          '<div class="adm-dash">' + html + '</div>';
+}
+
+function _admArtisteAlertHtml(pending) {
+  var html =
+    '<div style="background:linear-gradient(135deg,rgba(124,58,237,.15),rgba(219,39,119,.1));border:1px solid rgba(124,58,237,.3);border-radius:16px;padding:16px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">' +
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<div style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;align-items:center;justify-content:center">' +
+            '<i class="fas fa-microphone-alt" style="color:#fff;font-size:16px"></i>' +
+          '</div>' +
+          '<div>' +
+            '<div style="font-size:14px;font-weight:800;color:#F1F5F9">' + pending.length + ' demande' + (pending.length>1?'s':'') + ' artiste en attente</div>' +
+            '<div style="font-size:11px;color:#A78BFA">Approbation requise pour accès à la publication</div>' +
+          '</div>' +
+        '</div>' +
+        '<button onclick="_admSwitchTab(\'marketplace\')" style="background:#7C3AED;color:#fff;border:none;border-radius:10px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer">Voir tout</button>' +
+      '</div>';
+  pending.slice(0,3).forEach(function(req) {
+    var dt = req.requestedAt ? new Date(req.requestedAt).toLocaleDateString('fr-FR',{day:'2-digit',month:'short'}) : '';
+    html +=
+      '<div style="background:#0F172A;border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:13px;font-weight:700;color:#F1F5F9">' + escHtml(req.stageName||req.userName||req.userEmail) + '</div>' +
+          '<div style="font-size:11px;color:#64748B">' + escHtml(req.userEmail) + (req.genre ? ' · ' + escHtml(req.genre) : '') + ' · ' + dt + '</div>' +
+        '</div>' +
+        '<div style="display:flex;gap:6px;flex-shrink:0">' +
+          '<button onclick="_admArtisteReject(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\')" style="background:rgba(239,68,68,.15);color:#EF4444;border:none;border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-times"></i></button>' +
+          '<button onclick="_admArtisteApprove(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\',\'' + escHtml(req.userEmail) + '\',\'' + escHtml(req.stageName||'') + '\')" style="background:rgba(22,163,74,.2);color:#16A34A;border:none;border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-check"></i></button>' +
+        '</div>' +
+      '</div>';
+  });
+  html += '</div>';
+  return html;
 }
 
 /* ── Export dashboard CSV ── */
@@ -24658,6 +27461,489 @@ function _admBuildAnalytics() {
 /* ══════════════════════════════════════════
    ONGLET MARKETPLACE
 ══════════════════════════════════════════ */
+/* ── Admin : approuver / rejeter une demande artiste ── */
+function _admArtisteApprove(reqId, userKey, userEmail, stageName) {
+  if (!_gwFbDB) return;
+  var now = Date.now();
+  var reviewer = _currentUser ? _currentUser.email : 'admin';
+  /* Mettre à jour dans le profil utilisateur (chemin garanti) */
+  _gwFbDB.ref('gw/profiles/' + userKey + '/artiste_request').update({
+    status: 'approved', reviewedAt: now, reviewedBy: reviewer
+  }).catch(function(){});
+  /* Aussi mettre à jour le chemin dédié si accessible */
+  ['gw/artiste_requests/' + reqId].forEach(function(path) {
+    _gwFbDB.ref(path + '/status').set('approved').catch(function(){});
+    _gwFbDB.ref(path + '/reviewedAt').set(now).catch(function(){});
+    _gwFbDB.ref(path + '/reviewedBy').set(reviewer).catch(function(){});
+  });
+  _gwFbDB.ref('gw/artiste_approved/' + userKey).set({ approvedAt: now, approvedBy: reviewer, stageName: stageName }).catch(function(){});
+  /* Marquer également dans le profil pour que _artisteCheckAccess fonctionne sans règles supplémentaires */
+  _gwFbDB.ref('gw/profiles/' + userKey).update({ artiste_approved: { approvedAt: now, approvedBy: reviewer, stageName: stageName } }).catch(function(){});
+  /* Notifier l'utilisateur — 2 notifications */
+  try {
+    var notifsRef = _gwFbDB.ref('gw/notifs/' + userKey);
+    /* 1. Message de bienvenue */
+    notifsRef.push({
+      type: 'artiste_approved',
+      msg: '🎉 Félicitations, vous êtes maintenant artiste GeniWork !\n\nVotre demande de vérification a été approuvée par notre équipe. Vous avez désormais accès à l\'espace artiste et pouvez publier vos sons pour toute la communauté.\n\n✅ Ce que vous pouvez faire :\n• Publier vos sons et musiques\n• Apparaître dans le classement des artistes\n• Être découvert par la communauté GeniWork\n• Partager vos liens (Spotify, YouTube, SoundCloud…)\n\nBienvenue dans la famille des artistes GeniWork ! 🎵',
+      at: now,
+      unread: true,
+      read: false,
+    });
+    /* 2. Rappel conditions droits d\'auteur (décalé d\'1 ms pour l\'ordre) */
+    notifsRef.push({
+      type: 'artiste_copyright_notice',
+      msg: '⚖️ Rappel important — Droits d\'auteur\n\nEn tant qu\'artiste GeniWork, vous vous engagez à ne publier que vos propres créations originales.\n\n🚫 Il est strictement interdit de :\n• Publier la musique d\'autres artistes sans autorisation\n• Utiliser des samples sans licence valide\n• Reproduire des œuvres protégées par le droit d\'auteur\n\n✅ Vous devez uniquement publier :\n• Vos compositions 100 % originales\n• Des œuvres pour lesquelles vous détenez tous les droits\n• Des créations libres de droits autorisées à la distribution\n\nTout contenu signalé pour violation sera supprimé et pourra entraîner la révocation de votre accès artiste.\n\nMerci de respecter le travail de vos confrères. 🙏',
+      at: now + 1,
+      unread: true,
+      read: false,
+    });
+  } catch(e) {}
+  showToast('Artiste approuvé ✓', 'ok');
+  _admRender();
+}
+
+function _admArtisteReject(reqId, userKey) {
+  if (!_gwFbDB) return;
+  var reason = prompt ? (prompt('Raison du refus (optionnel) :') || '') : '';
+  var now = Date.now();
+  var reviewer = _currentUser ? _currentUser.email : 'admin';
+  /* Mettre à jour dans le profil utilisateur (chemin garanti) */
+  var rejUpdate = { status: 'rejected', reviewedAt: now, reviewedBy: reviewer };
+  if (reason) rejUpdate.rejectReason = reason;
+  _gwFbDB.ref('gw/profiles/' + userKey + '/artiste_request').update(rejUpdate).catch(function(){});
+  /* Aussi mettre à jour le chemin dédié si accessible */
+  ['gw/artiste_requests/' + reqId].forEach(function(path) {
+    _gwFbDB.ref(path + '/status').set('rejected').catch(function(){});
+    _gwFbDB.ref(path + '/reviewedAt').set(now).catch(function(){});
+    _gwFbDB.ref(path + '/reviewedBy').set(reviewer).catch(function(){});
+    if (reason) _gwFbDB.ref(path + '/rejectReason').set(reason).catch(function(){});
+  });
+  /* Notifier */
+  try {
+    _gwFbDB.ref('gw/notifs/' + userKey).push({
+      type: 'artiste_rejected',
+      msg: '⚠️ Votre demande artiste a été refusée.' + (reason ? ' Raison : ' + reason : ' Contactez l\'administrateur pour plus d\'informations.'),
+      at: now,
+      read: false,
+    });
+  } catch(e) {}
+  showToast('Demande refusée', 'err');
+  _admRender();
+}
+
+var _admArtisteRequests  = null; /* cache pour les demandes chargées */
+var _admArtisteSongs     = null; /* cache des sons publiés (admin) */
+var _admPendingDeleteSong = null; /* son en cours de suppression {id, title, authorKey, authorEmail} */
+
+function _admLoadArtisteRequests(cb) {
+  var combined = {};
+
+  function _mergeList(val) {
+    if (!val) return;
+    Object.values(val).filter(Boolean).forEach(function(r) {
+      if (r.id) combined[r.id] = r;
+    });
+  }
+
+  function _mergeProfiles(val) {
+    /* Extraire les artiste_request depuis chaque profil utilisateur */
+    if (!val) return;
+    Object.values(val).filter(Boolean).forEach(function(profile) {
+      var r = profile.artiste_request;
+      if (r && r.id) combined[r.id] = r;
+    });
+  }
+
+  function _finish() {
+    var list = Object.values(combined).filter(Boolean);
+    list.sort(function(a,b){ return (b.requestedAt||0)-(a.requestedAt||0); });
+    _admArtisteRequests = list;
+    cb(list);
+  }
+
+  if (!_gwFbDB) { _finish(); return; }
+
+  var done = 0;
+  function _tryDone() { if (++done >= 2) _finish(); }
+
+  /* Source primaire : profils utilisateurs (gw/profiles est toujours accessible par l'admin) */
+  _gwFbDB.ref('gw/profiles').once('value', function(snap) {
+    _mergeProfiles(snap.val());
+    _tryDone();
+  }, function() { _tryDone(); });
+
+  /* Source secondaire : chemin dédié artiste_requests (si règles Firebase configurées) */
+  _gwFbDB.ref('gw/artiste_requests').once('value', function(snap) {
+    _mergeList(snap.val());
+    _tryDone();
+  }, function() { _tryDone(); });
+}
+
+function _admBuildArtisteRequests() {
+  if (!_admArtisteRequests) {
+    _admLoadArtisteRequests(function() { _admRender(); });
+    return '<div style="text-align:center;padding:20px;color:#64748B;font-size:13px"><i class="fas fa-spinner fa-spin" style="margin-right:8px"></i>Chargement…</div>';
+  }
+  var list = _admArtisteRequests;
+  var pending  = list.filter(function(r){ return r.status === 'pending'; });
+  var approved = list.filter(function(r){ return r.status === 'approved'; });
+  var rejected = list.filter(function(r){ return r.status === 'rejected'; });
+
+  var html = '<div class="adm-dash-title" style="margin-top:0">' +
+    '<i class="fas fa-microphone-alt" style="color:#A78BFA;margin-right:6px"></i>Demandes Artiste' +
+    (pending.length ? ' <span style="background:#EF4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;margin-left:6px">' + pending.length + ' en attente</span>' : '') +
+    '<button onclick="_admArtisteRequests=null;_admRender()" style="float:right;background:none;border:1px solid #334155;border-radius:8px;padding:4px 10px;color:#64748B;cursor:pointer;font-size:11px"><i class="fas fa-sync-alt"></i></button>' +
+  '</div>';
+
+  if (!list.length) {
+    html += '<div style="text-align:center;padding:24px;color:#475569;font-size:13px"><i class="fas fa-inbox" style="display:block;font-size:32px;margin-bottom:8px"></i>Aucune demande artiste pour le moment</div>';
+    return html;
+  }
+
+  /* Onglets mini */
+  html += '<div style="display:flex;gap:8px;margin-bottom:14px">' +
+    '<span style="font-size:12px;font-weight:700;color:#EF4444;background:rgba(239,68,68,.1);border-radius:8px;padding:4px 10px">⏳ ' + pending.length + ' en attente</span>' +
+    '<span style="font-size:12px;font-weight:700;color:#16A34A;background:rgba(22,163,74,.1);border-radius:8px;padding:4px 10px">✓ ' + approved.length + ' approuvés</span>' +
+    '<span style="font-size:12px;font-weight:700;color:#64748B;background:#1E293B;border-radius:8px;padding:4px 10px">✗ ' + rejected.length + ' refusés</span>' +
+  '</div>';
+
+  /* Demandes en attente en premier */
+  var toShow = pending.concat(approved.slice(0,5)).concat(rejected.slice(0,5));
+  toShow.forEach(function(req) {
+    var isPending  = req.status === 'pending';
+    var isApproved = req.status === 'approved';
+    var hasRecours = isPending && !!req.recours;
+    var dt = req.requestedAt ? new Date(req.requestedAt).toLocaleDateString('fr-FR', { day:'2-digit', month:'short', year:'numeric' }) : '';
+    var dtRecours = req.recoursAt ? new Date(req.recoursAt).toLocaleDateString('fr-FR', { day:'2-digit', month:'short', year:'numeric' }) : '';
+    html +=
+      '<div style="background:#0F172A;border:1px solid ' + (hasRecours ? 'rgba(245,158,11,.5)' : isPending ? 'rgba(239,68,68,.3)' : '#1E293B') + ';border-radius:14px;padding:14px;margin-bottom:10px">' +
+        /* Badge recours */
+        (hasRecours
+          ? '<div style="background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.3);border-radius:8px;padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px">' +
+              '<i class="fas fa-flag" style="color:#F59E0B;font-size:12px"></i>' +
+              '<span style="font-size:11px;font-weight:800;color:#F59E0B;text-transform:uppercase;letter-spacing:.4px">Recours reçu</span>' +
+            '</div>'
+          : '') +
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+          '<div style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<i class="fas fa-music" style="color:#fff;font-size:14px"></i>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:700;color:#F1F5F9">' + escHtml(req.stageName || req.userName || req.userEmail) + '</div>' +
+            '<div style="font-size:11px;color:#64748B">' + escHtml(req.userEmail) + (req.genre ? ' · <span style="color:#A78BFA">' + escHtml(req.genre) + '</span>' : '') + '</div>' +
+          '</div>' +
+          '<div style="text-align:right;flex-shrink:0">' +
+            '<div style="font-size:10px;padding:3px 8px;border-radius:20px;font-weight:700;' +
+              (isPending ? 'background:rgba(239,68,68,.15);color:#EF4444' : isApproved ? 'background:rgba(22,163,74,.15);color:#16A34A' : 'background:#1E293B;color:#475569') + '">' +
+              (isPending ? '⏳ En attente' : isApproved ? '✓ Approuvé' : '✗ Refusé') +
+            '</div>' +
+            '<div style="font-size:9px;color:#475569;margin-top:4px">' + dt + '</div>' +
+          '</div>' +
+        '</div>' +
+        (req.bio ? '<p style="font-size:12px;color:#94A3B8;margin:0 0 10px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + escHtml(req.bio) + '</p>' : '') +
+        (req.link ? '<a href="' + escHtml(req.link) + '" target="_blank" style="font-size:11px;color:#60A5FA;display:block;margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><i class="fas fa-link" style="margin-right:4px"></i>' + escHtml(req.link) + '</a>' : '') +
+        /* Message du recours */
+        (hasRecours
+          ? '<div style="background:#0C1627;border-left:3px solid #F59E0B;border-radius:0 10px 10px 0;padding:10px 12px;margin-bottom:12px">' +
+              '<div style="font-size:10px;font-weight:700;color:#F59E0B;margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px">Message du recours' + (dtRecours ? ' · ' + dtRecours : '') + '</div>' +
+              '<p style="font-size:12px;color:#CBD5E1;margin:0;line-height:1.5">' + escHtml(req.recours) + '</p>' +
+            '</div>'
+          : '') +
+        (isPending
+          ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
+              '<button onclick="_admArtisteReject(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\')" style="background:#1E293B;color:#EF4444;border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:9px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-times" style="margin-right:4px"></i>Refuser</button>' +
+              '<button onclick="_admArtisteApprove(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\',\'' + escHtml(req.userEmail) + '\',\'' + escHtml(req.stageName||'') + '\')" style="background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:10px;padding:9px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-check" style="margin-right:4px"></i>Approuver</button>' +
+            '</div>'
+          : (req.rejectReason
+              ? '<div style="font-size:11px;color:#EF4444;background:rgba(239,68,68,.08);border-radius:8px;padding:6px 10px">Raison du refus : ' + escHtml(req.rejectReason) + '</div>'
+              : '')) +
+      '</div>';
+  });
+
+  return html;
+}
+
+/* ══════════════════════════════════════════
+   ONGLET ARTISTE — DEMANDES & SONS PUBLIÉS
+══════════════════════════════════════════ */
+function _admBuildArtiste() {
+  var pending  = (_admArtisteRequests || []).filter(function(r){ return r.status === 'pending'; });
+  var approved = (_admArtisteRequests || []).filter(function(r){ return r.status === 'approved'; });
+  var rejected = (_admArtisteRequests || []).filter(function(r){ return r.status === 'rejected'; });
+  var withRecours = pending.filter(function(r){ return !!r.recours; });
+
+  /* Sons : utiliser le cache admin dédié — exclure les soft-deletes */
+  var _rawSongs = _admArtisteSongs !== null ? _admArtisteSongs : _artistePosts || [];
+  var songs = _rawSongs.filter(function(s){ return !s.deleted; });
+
+  /* Déclencher le chargement des sons si pas encore fait */
+  if (_admArtisteSongs === null && _gwFbDB) {
+    _gwFbDB.ref('gw/artiste_posts').once('value', function(snap) {
+      var val = snap.val();
+      _admArtisteSongs = val ? Object.keys(val).map(function(k){ var s=val[k]; if(!s)return null; if(!s.id)s.id=k; return s; }).filter(Boolean) : [];
+      if (_adminTab === 'artiste') { try { _admRender(); } catch(e){} }
+    }, function(){ _admArtisteSongs = []; });
+  }
+
+  var html = '<div class="adm-tab-header"><h2>Artistes</h2><p>Gestion des demandes artiste et des publications musicales</p></div>' +
+    '<div class="adm-dash">';
+
+  /* Stats */
+  html += '<div class="adm-stats-grid">' +
+    _admStatCard('#FDF4FF','#9333EA','fas fa-hourglass-half', pending.length,  'En attente') +
+    _admStatCard('#F0FDF4','#16A34A','fas fa-circle-check',   approved.length, 'Approuvés') +
+    _admStatCard('#FFF7ED','#EA580C','fas fa-music',           songs.length,    'Sons publiés') +
+  '</div>';
+
+  /* Alerte recours en attente */
+  if (withRecours.length) {
+    html += '<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px">' +
+      '<i class="fas fa-flag" style="color:#F59E0B;font-size:18px;flex-shrink:0"></i>' +
+      '<div style="flex:1">' +
+        '<div style="font-size:13px;font-weight:800;color:#F59E0B">' + withRecours.length + ' recours reçu' + (withRecours.length > 1 ? 's' : '') + '</div>' +
+        '<div style="font-size:11px;color:#94A3B8">Des artistes ont soumis un recours en attente de votre réponse</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  /* Bouton refresh */
+  html += '<div style="text-align:right;margin-bottom:16px">' +
+    '<button onclick="_admArtisteRequests=null;_admArtisteSongs=null;_admRender()" style="background:#1E293B;border:1px solid #334155;border-radius:10px;padding:8px 16px;color:#94A3B8;cursor:pointer;font-size:12px;font-weight:700"><i class="fas fa-sync-alt" style="margin-right:6px"></i>Actualiser</button>' +
+  '</div>';
+
+  /* Section demandes */
+  html += '<div class="adm-dash-title"><i class="fas fa-microphone-alt" style="color:#A78BFA;margin-right:6px"></i>Demandes en attente' +
+    (pending.length ? ' <span style="background:#EF4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;margin-left:6px">' + pending.length + '</span>' : '') +
+    (withRecours.length ? ' <span style="background:#F59E0B;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;margin-left:4px"><i class="fas fa-flag"></i> ' + withRecours.length + ' recours</span>' : '') +
+  '</div>';
+
+  if (!_admArtisteRequests) {
+    /* Pas encore chargé → charger et re-render */
+    _admLoadArtisteRequests(function() { _admRender(); });
+    html += '<div style="text-align:center;padding:24px;color:#64748B;font-size:13px"><i class="fas fa-spinner fa-spin" style="margin-right:8px"></i>Chargement des demandes…</div>';
+  } else if (!pending.length) {
+    html += '<div style="text-align:center;padding:24px;background:#0F172A;border-radius:14px;margin-bottom:16px">' +
+      '<i class="fas fa-check-circle" style="font-size:32px;color:#16A34A;display:block;margin-bottom:8px"></i>' +
+      '<div style="color:#64748B;font-size:13px">Aucune demande en attente</div>' +
+    '</div>';
+  } else {
+    pending.forEach(function(req) {
+      var dt = req.requestedAt ? new Date(req.requestedAt).toLocaleDateString('fr-FR',{day:'2-digit',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+      html +=
+        '<div style="background:#0F172A;border:1px solid rgba(124,58,237,.3);border-radius:14px;padding:16px;margin-bottom:12px">' +
+          '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">' +
+            '<div style="width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+              '<i class="fas fa-microphone-alt" style="color:#fff;font-size:18px"></i>' +
+            '</div>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:15px;font-weight:800;color:#F1F5F9">' + escHtml(req.stageName || req.userName || req.userEmail) + '</div>' +
+              '<div style="font-size:12px;color:#64748B">' + escHtml(req.userEmail) + (req.genre ? ' · <span style="color:#A78BFA">' + escHtml(req.genre) + '</span>' : '') + '</div>' +
+            '</div>' +
+            '<span style="font-size:10px;font-weight:700;padding:4px 10px;border-radius:20px;background:rgba(245,158,11,.2);color:#F59E0B;flex-shrink:0">⏳ En attente</span>' +
+          '</div>' +
+          (req.bio ? '<div style="font-size:12px;color:#94A3B8;background:#1E293B;border-radius:10px;padding:10px 12px;margin-bottom:12px;line-height:1.6">' + escHtml(req.bio) + '</div>' : '') +
+          (req.link ? '<a href="' + escHtml(req.link) + '" target="_blank" style="font-size:11px;color:#60A5FA;display:block;margin-bottom:10px"><i class="fas fa-link" style="margin-right:4px"></i>' + escHtml(req.link) + '</a>' : '') +
+          /* Recours reçu */
+          (req.recours
+            ? '<div style="background:#0C1627;border-left:3px solid #F59E0B;border-radius:0 10px 10px 0;padding:10px 12px;margin-bottom:12px">' +
+                '<div style="font-size:10px;font-weight:800;color:#F59E0B;margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px"><i class="fas fa-flag" style="margin-right:4px"></i>Recours de l\'artiste' + (req.recoursAt ? ' · ' + new Date(req.recoursAt).toLocaleDateString('fr-FR',{day:'2-digit',month:'short',year:'numeric'}) : '') + '</div>' +
+                '<p style="font-size:12px;color:#CBD5E1;margin:0;line-height:1.6">' + escHtml(req.recours) + '</p>' +
+              '</div>'
+            : '') +
+          '<div style="font-size:10px;color:#475569;margin-bottom:12px"><i class="fas fa-clock" style="margin-right:4px"></i>Soumise le ' + dt + '</div>' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+            '<button onclick="_admArtisteReject(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\')" ' +
+              'style="background:rgba(239,68,68,.1);color:#EF4444;border:1px solid rgba(239,68,68,.3);border-radius:12px;padding:12px;font-size:13px;font-weight:700;cursor:pointer">' +
+              '<i class="fas fa-times" style="margin-right:6px"></i>Refuser</button>' +
+            '<button onclick="_admArtisteApprove(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\',\'' + escHtml(req.userEmail) + '\',\'' + escHtml(req.stageName||'') + '\')" ' +
+              'style="background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:12px;padding:12px;font-size:13px;font-weight:700;cursor:pointer">' +
+              '<i class="fas fa-check" style="margin-right:6px"></i>Approuver</button>' +
+          '</div>' +
+        '</div>';
+    });
+  }
+
+  /* Artistes approuvés */
+  if (approved.length) {
+    html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-circle-check" style="color:#16A34A;margin-right:6px"></i>Artistes approuvés (' + approved.length + ')</div>';
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">';
+    approved.forEach(function(req) {
+      var dt = req.reviewedAt ? new Date(req.reviewedAt).toLocaleDateString('fr-FR',{day:'2-digit',month:'short'}) : '';
+      var songCount = songs.filter(function(s){ return s.userEmail === req.userEmail; }).length;
+      html +=
+        '<div style="background:#0F172A;border:1px solid #1E293B;border-radius:12px;padding:14px">' +
+          '<div style="font-size:13px;font-weight:700;color:#F1F5F9;margin-bottom:2px">' + escHtml(req.stageName||req.userName||req.userEmail) + '</div>' +
+          '<div style="font-size:11px;color:#64748B;margin-bottom:6px">' + escHtml(req.userEmail) + '</div>' +
+          (req.genre ? '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;background:rgba(124,58,237,.2);color:#A78BFA;display:inline-block;margin-bottom:6px">' + escHtml(req.genre) + '</span>' : '') +
+          '<div style="font-size:10px;color:#475569">✓ Approuvé le ' + dt + '</div>' +
+          '<div style="font-size:10px;color:#F97316;margin-top:2px"><i class="fas fa-music" style="margin-right:3px"></i>' + songCount + ' son' + (songCount>1?'s':'') + ' publié' + (songCount>1?'s':'') + '</div>' +
+          '<button onclick="_admArtisteRevoke(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\')" style="background:#1E293B;color:#EF4444;border:none;border-radius:8px;padding:5px 10px;font-size:10px;cursor:pointer;margin-top:8px;width:100%"><i class="fas fa-ban" style="margin-right:4px"></i>Révoquer accès</button>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* Sons publiés */
+  if (songs.length) {
+    html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-music" style="color:#F97316;margin-right:6px"></i>Sons publiés (' + songs.length + ')</div>';
+    songs.slice(0,20).forEach(function(s) {
+      var dt = s.publishedAt ? new Date(s.publishedAt).toLocaleDateString('fr-FR',{day:'2-digit',month:'short',year:'numeric'}) : '';
+      var stats = _artisteStats[s.id] || {};
+      html +=
+        '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#0F172A;border:1px solid #1E293B;border-radius:12px;margin-bottom:8px">' +
+          '<div style="width:40px;height:40px;border-radius:8px;overflow:hidden;flex-shrink:0;background:linear-gradient(135deg,#7C3AED44,#DB277744);display:flex;align-items:center;justify-content:center">' +
+            (s.coverUrl ? '<img src="' + escHtml(s.coverUrl) + '" style="width:100%;height:100%;object-fit:cover">' : '<i class="fas fa-music" style="color:#A78BFA;font-size:14px"></i>') +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:700;color:#F1F5F9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(s.title||'Sans titre') + '</div>' +
+            '<div style="font-size:11px;color:#64748B">' + escHtml(s.artistName||s.userName||'') + (s.genre ? ' · <span style="color:#A78BFA">' + escHtml(s.genre) + '</span>' : '') + ' · ' + dt + '</div>' +
+          '</div>' +
+          '<div style="text-align:right;flex-shrink:0">' +
+            '<div style="font-size:12px;font-weight:700;color:#F97316">' + _artisteFmt(stats.plays||0) + ' <i class="fas fa-headphones-alt" style="font-size:10px"></i></div>' +
+            '<div style="font-size:10px;color:#64748B">' + _artisteFmt(stats.downloads||0) + ' <i class="fas fa-download" style="font-size:9px"></i></div>' +
+          '</div>' +
+          '<button onclick="_admArtisteDeleteSong(\'' + escHtml(s.id) + '\')" style="background:rgba(239,68,68,.1);color:#EF4444;border:none;border-radius:8px;padding:6px 10px;font-size:11px;cursor:pointer;flex-shrink:0"><i class="fas fa-trash"></i></button>' +
+        '</div>';
+    });
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function _admArtisteRevoke(reqId, userKey) {
+  if (!_gwFbDB) return;
+  _gwFbDB.ref('gw/artiste_approved/' + userKey).remove().catch(function(){});
+  ['gw/artiste_requests/' + reqId, 'gw/user_artiste_req/' + userKey].forEach(function(path) {
+    _gwFbDB.ref(path + '/status').set('revoked').catch(function(){});
+  });
+  showToast('Accès artiste révoqué', 'err');
+  _admArtisteRequests = null;
+  _admRender();
+}
+
+function _admArtisteDeleteSong(songId) {
+  if (!_gwFbDB) return;
+
+  /* Stocker les infos dans une variable globale pour éviter les problèmes d'échappement dans onclick */
+  var song = (_admArtisteSongs || _artistePosts || []).find(function(s){ return s.id === songId; });
+  _admPendingDeleteSong = {
+    id:          songId,
+    title:       song ? (song.title || 'Sans titre') : 'Son inconnu',
+    authorEmail: song ? (song.userEmail || '') : '',
+    authorKey:   song && song.userEmail ? _gwFbKey(song.userEmail) : ''
+  };
+
+  /* Supprimer le modal précédent si existant */
+  var prev = document.getElementById('adm-del-song-modal');
+  if (prev) prev.remove();
+
+  /* Créer le modal de confirmation avec motif */
+  var modal = document.createElement('div');
+  modal.id = 'adm-del-song-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:#000c;z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box';
+  modal.innerHTML =
+    '<div style="background:#0F172A;border:1px solid #334155;border-radius:20px;padding:24px;width:100%;max-width:420px;box-shadow:0 20px 60px #000a">' +
+      '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">' +
+        '<div style="width:44px;height:44px;border-radius:12px;background:rgba(239,68,68,.15);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+          '<i class="fas fa-trash" style="color:#EF4444;font-size:18px"></i>' +
+        '</div>' +
+        '<div>' +
+          '<div style="font-size:15px;font-weight:800;color:#F1F5F9">Supprimer ce son</div>' +
+          '<div style="font-size:12px;color:#64748B;margin-top:2px">' + escHtml(_admPendingDeleteSong.title) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<p style="font-size:13px;color:#94A3B8;margin:0 0 14px;line-height:1.5">L\'artiste recevra une notification avec le motif de suppression.</p>' +
+      '<label style="font-size:12px;font-weight:700;color:#94A3B8;display:block;margin-bottom:6px">Motif de suppression <span style="color:#EF4444">*</span></label>' +
+      '<textarea id="adm-del-song-reason" rows="3" placeholder="Ex : Contenu non conforme aux règles de la communauté…" ' +
+        'style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:12px;padding:12px;color:#F1F5F9;font-size:13px;resize:none;box-sizing:border-box;line-height:1.5"></textarea>' +
+      '<div id="adm-del-song-err" style="display:none;color:#EF4444;font-size:12px;margin-top:6px;background:rgba(239,68,68,.1);border-radius:8px;padding:8px"></div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px">' +
+        '<button onclick="document.getElementById(\'adm-del-song-modal\').remove();_admPendingDeleteSong=null" ' +
+          'style="background:#1E293B;color:#94A3B8;border:1px solid #334155;border-radius:12px;padding:12px;font-size:13px;font-weight:700;cursor:pointer">Annuler</button>' +
+        '<button id="adm-del-song-btn" onclick="_admArtisteDeleteSongConfirm()" ' +
+          'style="background:linear-gradient(135deg,#DC2626,#B91C1C);color:#fff;border:none;border-radius:12px;padding:12px;font-size:13px;font-weight:800;cursor:pointer">' +
+          '<i class="fas fa-trash" style="margin-right:6px"></i>Supprimer</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(modal);
+  setTimeout(function(){ var ta = document.getElementById('adm-del-song-reason'); if(ta) ta.focus(); }, 100);
+}
+
+function _admArtisteDeleteSongConfirm() {
+  if (!_admPendingDeleteSong || !_gwFbDB) return;
+
+  var reason = ((document.getElementById('adm-del-song-reason') || {}).value || '').trim();
+  var errEl  = document.getElementById('adm-del-song-err');
+
+  function _showErr(msg) {
+    if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+    var btn = document.getElementById('adm-del-song-btn');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-trash" style="margin-right:6px"></i>Supprimer'; }
+  }
+
+  if (!reason) { _showErr('Le motif est obligatoire.'); return; }
+
+  var btn = document.getElementById('adm-del-song-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right:6px"></i>Suppression…'; }
+
+  var info = _admPendingDeleteSong;
+
+  /* ── Fonction appelée après suppression réussie ── */
+  function _onDeleted() {
+    /* Supprimer données associées (best effort) */
+    _gwFbDB.ref('gw/artiste_stats/' + info.id).remove().catch(function(){});
+    _gwFbDB.ref('gw/artiste_likes/' + info.id).remove().catch(function(){});
+
+    /* Notifier l'artiste */
+    if (info.authorKey) {
+      _gwFbDB.ref('gw/notifs/' + info.authorKey).push({
+        type: 'song_deleted',
+        msg:  'Votre son "' + info.title + '" a été supprimé par l\'administrateur. Motif : ' + reason,
+        at:   Date.now(),
+        read: false
+      }).catch(function(){});
+    }
+
+    /* Forcer le rechargement depuis Firebase pour avoir la liste à jour */
+    _admPendingDeleteSong = null;
+    _gwFbDB.ref('gw/artiste_posts').once('value', function(snap) {
+      var val = snap.val();
+      _admArtisteSongs = val ? Object.keys(val).map(function(k){ var s=val[k]; if(!s)return null; if(!s.id)s.id=k; return s; }).filter(Boolean) : [];
+      _artistePosts    = _admArtisteSongs.filter(function(s){ return !s.deleted; });
+      var modal = document.getElementById('adm-del-song-modal');
+      if (modal) modal.remove();
+      showToast('Son supprimé et artiste notifié ✓', 'ok');
+      _admRender();
+    }, function() {
+      /* Même en cas d'erreur de lecture, retirer localement */
+      _admArtisteSongs = (_admArtisteSongs || []).filter(function(s){ return s.id !== info.id; });
+      _artistePosts    = (_artistePosts   || []).filter(function(p){ return p.id !== info.id; });
+      var modal = document.getElementById('adm-del-song-modal');
+      if (modal) modal.remove();
+      showToast('Son supprimé ✓', 'ok');
+      _admRender();
+    });
+  }
+
+  /* ── Tentative 1 : suppression directe ── */
+  _gwFbDB.ref('gw/artiste_posts/' + info.id).remove()
+    .then(_onDeleted)
+    .catch(function(e) {
+      /* ── Tentative 2 : marquer comme supprimé (soft-delete) si remove() est refusé ── */
+      _gwFbDB.ref('gw/artiste_posts/' + info.id).update({
+        deleted:       true,
+        deletedAt:     Date.now(),
+        deletedReason: reason
+      })
+      .then(_onDeleted)
+      .catch(function(e2) {
+        _showErr('Erreur Firebase : ' + (e2.message || e.message || 'Permission refusée'));
+      });
+    });
+}
+
 function _admBuildMarketplace() {
   var users    = getUsers();
   var allSvcs  = [];
@@ -24681,8 +27967,11 @@ function _admBuildMarketplace() {
   var usersWithSvc = users.filter(function(u){ return (loadUserServices(u.email)||[]).length > 0; }).length;
   var avgSvcs      = users.length ? (totalSvcs / users.length).toFixed(1) : 0;
 
-  var html = '<div class="adm-tab-header"><h2>Marketplace</h2><p>Tous les services et offres publiés sur la plateforme</p></div>' +
-    '<div class="adm-dash">';
+  var html = '<div class="adm-tab-header"><h2>Marketplace</h2><p>Services, offres et demandes artiste</p></div>' +
+    '<div class="adm-dash">' +
+    /* ── Section Demandes Artiste ── */
+    '<div style="margin-bottom:24px">' + _admBuildArtisteRequests() + '</div>' +
+    '<hr style="border:none;border-top:1px solid #1E293B;margin-bottom:20px">';
 
   /* ── Stats rapides ── */
   html += '<div class="adm-stats-grid">' +
@@ -25058,6 +28347,53 @@ function _admBuildSettings() {
   html += '<div class="adm-settings-section">';
   html += settingsToggleHtml('badge',   'Système de badges ✅',   '🏅', cfg.badgeEnabled);
   html += settingsToggleHtml('banners', 'Bannières d\'usage 📊',  '🪧', cfg.bannersEnabled);
+  html += '</div>';
+
+  /* ── Sections Marketplace ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-store" style="color:#F97316;margin-right:6px"></i>Sections Marketplace</div>';
+  html += '<div class="adm-settings-section">';
+  html += settingsToggleHtml('ebook',      'Ebook 📚',                    '📚', cfg.ebookEnabled !== false);
+  html += settingsToggleHtml('collab',     'Collaborateurs 🤝',           '🤝', cfg.collabEnabled !== false);
+  html += settingsToggleHtml('artiste',    'Artiste / Musique 🎵',        '🎵', cfg.artisteEnabled !== false);
+  html += settingsToggleHtml('businessAi', 'Business AI 🤖',              '🤖', cfg.businessAiEnabled !== false);
+  html += '</div>';
+
+  /* ── Paiements PayPal ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fab fa-paypal" style="color:#003087;margin-right:6px"></i>Paiements PayPal</div>';
+  html += '<div class="adm-settings-section">';
+  /* Toggle activation */
+  html += '<div class="adm-settings-toggle-row">' +
+    '<div style="display:flex;align-items:center;gap:10px">' +
+      '<span style="font-size:20px">💳</span>' +
+      '<div>' +
+        '<div style="font-size:13px;font-weight:700;color:#0F172A">Paiements entre utilisateurs</div>' +
+        '<div style="font-size:11px;color:' + (cfg.paypalEnabled ? '#16A34A' : '#EF4444') + '">' +
+          (cfg.paypalEnabled
+            ? '✓ Actif — Les transactions PayPal sont activées (commission 1% GeniWork)'
+            : '✗ Inactif — Les prix sont visibles mais aucun paiement n\'est traité') +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<button class="adm-toggle-btn ' + (cfg.paypalEnabled ? 'on' : 'off') + '" onclick="_admTogglePaypal()">' +
+      '<span class="adm-toggle-knob"></span>' +
+    '</button>' +
+  '</div>';
+  /* Champ email PayPal — visible uniquement si activé */
+  html += '<div id="adm-paypal-email-section" style="margin-top:12px;' + (cfg.paypalEnabled ? '' : 'display:none') + '">' +
+    '<div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px"><i class="fab fa-paypal" style="color:#003087;margin-right:4px"></i>Compte PayPal GeniWork (reçoit la commission de 1%)</div>' +
+    '<div style="display:flex;gap:8px">' +
+      '<input type="email" id="adm-paypal-email-input" placeholder="email@paypal.com" value="' + escHtml(cfg.paypalEmail || '') + '" ' +
+        'style="flex:1;padding:10px 12px;border:1px solid #D1D5DB;border-radius:10px;font-size:13px;outline:none">' +
+      '<button onclick="_admSavePaypalEmail()" style="background:linear-gradient(135deg,#003087,#009cde);color:#fff;border:none;border-radius:10px;padding:10px 16px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">' +
+        '<i class="fas fa-save"></i> Enregistrer' +
+      '</button>' +
+    '</div>' +
+    '<div style="font-size:11px;color:#6B7280;margin-top:6px">⚠️ Cet email recevra automatiquement 1% de chaque transaction effectuée sur la plateforme.</div>' +
+  '</div>';
+  /* Explication si désactivé */
+  html += '<div id="adm-paypal-disabled-info" style="margin-top:10px;background:#FEF3C7;border-radius:10px;padding:10px 12px;font-size:12px;color:#92400E;' + (cfg.paypalEnabled ? 'display:none' : '') + '">' +
+    '💡 En mode désactivé, les utilisateurs peuvent fixer des prix sur leurs produits/services/e-books, mais le bouton de paiement n\'apparaît pas. Activez pour débloquer les transactions PayPal avec commission automatique de 1%.' +
+  '</div>';
   html += '</div>';
 
   /* ── Informations système ── */
@@ -27247,6 +30583,36 @@ function _admBuildPubli() {
       '</div>' +
     '</div>' +
 
+    /* ── Composer Short officiel ── */
+    '<div class="adm-publi-composer" style="border-top:2px solid #F1F5F9;margin-top:4px;padding-top:4px">' +
+      '<div class="adm-publi-composer-head" style="background:linear-gradient(135deg,#7C3AED,#4F46E5)">' +
+        '<i class="fas fa-play-circle"></i> Publier un Short Officiel' +
+      '</div>' +
+      '<div class="adm-publi-composer-body">' +
+        '<textarea class="adm-publi-textarea" id="adm-off-short-text" placeholder="Légende du short (optionnel)…" style="min-height:60px"></textarea>' +
+
+        '<input type="file" id="adm-off-short-vid-input" accept="video/*" style="display:none" onchange="_admOffShortPreviewVideo(this)"/>' +
+        '<input type="file" id="adm-off-short-thumb-input" accept="image/*" style="display:none" onchange="_admOffShortPreviewThumb(this)"/>' +
+
+        /* Preview vignette */
+        '<img id="adm-off-short-thumb-preview" src="" alt="" style="display:none;width:80px;height:120px;border-radius:8px;object-fit:cover;margin:6px 6px 0 0;vertical-align:top"/>' +
+
+        /* Preview vidéo */
+        '<div id="adm-off-short-vid-preview-wrap" style="display:none;position:relative;margin:6px 0">' +
+          '<video id="adm-off-short-vid-preview" controls playsinline style="width:100%;border-radius:10px;max-height:280px;background:#000"></video>' +
+          '<button onclick="_admOffRemoveShort()" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:50%;width:28px;height:28px;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>' +
+        '</div>' +
+
+        '<div class="adm-publi-composer-footer">' +
+          '<div style="display:flex;gap:8px">' +
+            '<button class="adm-publi-img-btn adm-publi-vid-btn" title="Ajouter une vidéo courte" onclick="document.getElementById(\'adm-off-short-vid-input\').click()"><i class="fas fa-video"></i></button>' +
+            '<button class="adm-publi-img-btn" title="Ajouter une vignette" onclick="document.getElementById(\'adm-off-short-thumb-input\').click()"><i class="fas fa-image"></i></button>' +
+          '</div>' +
+          '<button class="adm-publi-send-btn" style="background:linear-gradient(135deg,#7C3AED,#4F46E5)" onclick="_admPublishOfficialShort()"><i class="fas fa-play-circle"></i> Publier le Short</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+
     /* ── Envoyer une notification ── */
     '<div class="adm-notif-composer">' +
       '<div class="adm-notif-composer-head"><i class="fas fa-bell"></i> Envoyer une notification</div>' +
@@ -27289,13 +30655,16 @@ function _admBuildPubli() {
   '<div>' +
     '<div class="adm-team-section-title" style="padding-bottom:8px">Historique des publications (' + posts.length + ')</div>';
 
+  var regularPosts = posts.filter(function(p) { return !p.video || p.video.videoType !== 'short'; });
+  var shortPosts   = posts.filter(function(p) { return p.video && p.video.videoType === 'short'; });
+
   if (!posts.length) {
     html += '<div class="adm-empty"><i class="fas fa-newspaper"></i>Aucune publication pour l\'instant</div>';
   } else {
-    posts.slice().reverse().slice(0,15).forEach(function(p) {
+    regularPosts.slice().reverse().slice(0,10).forEach(function(p) {
       html +=
         '<div class="adm-publi-hist-item">' +
-          '<div class="adm-publi-hist-text">' + escHtml(p.text || '') + '</div>' +
+          '<div class="adm-publi-hist-text">' + escHtml(p.text || '') + (p.images && p.images.length ? ' 🖼️' : '') + '</div>' +
           '<div class="adm-publi-hist-meta">' +
             '<span>par ' + escHtml(p.publishedByNom || '?') + '</span>' +
             '<span style="display:flex;gap:8px;align-items:center">' +
@@ -27305,6 +30674,25 @@ function _admBuildPubli() {
           '</div>' +
         '</div>';
     });
+    if (shortPosts.length) {
+      html += '<div style="font-size:12px;font-weight:700;color:#7C3AED;margin:10px 0 6px;display:flex;align-items:center;gap:6px"><i class="fas fa-play-circle"></i> Shorts officiels (' + shortPosts.length + ')</div>';
+      shortPosts.slice().reverse().slice(0,5).forEach(function(p) {
+        html +=
+          '<div class="adm-publi-hist-item" style="border-left:3px solid #7C3AED">' +
+            '<div style="display:flex;align-items:center;gap:8px">' +
+              '<i class="fas fa-play-circle" style="color:#7C3AED;font-size:16px"></i>' +
+              '<div class="adm-publi-hist-text" style="flex:1">' + escHtml(p.text || 'Short sans légende') + '</div>' +
+            '</div>' +
+            '<div class="adm-publi-hist-meta">' +
+              '<span>par ' + escHtml(p.publishedByNom || '?') + '</span>' +
+              '<span style="display:flex;gap:8px;align-items:center">' +
+                _offTimeAgo(p.publishedAt) +
+                ' <button class="adm-btn-sm adm-btn-del" style="padding:3px 8px" onclick="_admDeleteOfficialPost(\'' + p.id + '\')"><i class="fas fa-trash"></i></button>' +
+              '</span>' +
+            '</div>' +
+          '</div>';
+      });
+    }
   }
   html += '</div></div>';
   return html;
@@ -27327,6 +30715,7 @@ function _admPublisherCard(email, nom, grantedBy, canRevoke) {
 
 /* ── Publier un post officiel depuis le panneau admin ── */
 function _admPublishOfficial() {
+  if (!_adminUser || !_admHasAction('publish')) { showToast('Accès non autorisé', 'err'); return; }
   var text    = _gwSanitize((document.getElementById('adm-off-text') || {}).value || '', 2000).trim();
   var imgPrev = document.getElementById('adm-off-img-preview');
   var vidPrev = document.getElementById('adm-off-vid-preview');
@@ -27394,21 +30783,215 @@ function _admPublishOfficial() {
   _resetAdmForm();
 }
 
+/* ══════════════════════════════════════════
+   ÉDITEUR IMAGE ADMIN (recadrage + texte)
+══════════════════════════════════════════ */
+var _admImgEditorSrc    = null;  /* dataURL de l'image originale */
+var _admImgEditorRatio  = 'free';/* rapport d'aspect choisi      */
+var _admImgEditorTarget = 'post';/* 'post' ou 'short'            */
+
 function _admOffPreviewImg(input) {
   if (!input.files || !input.files[0]) return;
-  /* Efface la vidéo si on choisit une image */
   _admOffRemoveVideo();
   var reader = new FileReader();
   reader.onload = function(e) {
-    var prev = document.getElementById('adm-off-img-preview');
-    if (prev) { prev.src = e.target.result; prev.style.display = 'block'; }
+    _admImgEditorSrc    = e.target.result;
+    _admImgEditorTarget = 'post';
+    _admOpenImgEditor();
   };
   reader.readAsDataURL(input.files[0]);
+}
+
+function _admOpenImgEditor() {
+  /* Supprime un ancien modal si présent */
+  var old = document.getElementById('adm-img-editor-modal');
+  if (old) old.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'adm-img-editor-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;display:flex;align-items:center;justify-content:center;padding:12px';
+
+  modal.innerHTML =
+    '<div style="background:#fff;border-radius:16px;width:min(520px,100%);max-height:92vh;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<h3 style="margin:0;font-size:16px;font-weight:700;color:#0F172A"><i class="fas fa-crop-simple" style="color:#6366F1;margin-right:6px"></i>Modifier la photo</h3>' +
+        '<button onclick="_admCloseImgEditor()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748B">×</button>' +
+      '</div>' +
+
+      /* Canvas preview */
+      '<div style="position:relative;text-align:center;background:#0F172A;border-radius:10px;overflow:hidden;min-height:200px;display:flex;align-items:center;justify-content:center">' +
+        '<canvas id="adm-img-editor-canvas" style="max-width:100%;max-height:300px;display:block;margin:auto"></canvas>' +
+      '</div>' +
+
+      /* Recadrage */
+      '<div>' +
+        '<div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px">Recadrage</div>' +
+        '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+          '<button class="adm-crop-btn active" data-ratio="free"  onclick="_admSetCropRatio(this,\'free\')"  style="flex:1;padding:6px;border:2px solid #6366F1;background:#EEF2FF;color:#6366F1;border-radius:8px;font-size:11px;font-weight:600;cursor:pointer">Libre</button>' +
+          '<button class="adm-crop-btn"        data-ratio="1:1"   onclick="_admSetCropRatio(this,\'1:1\')"   style="flex:1;padding:6px;border:2px solid #E5E7EB;background:#fff;color:#374151;border-radius:8px;font-size:11px;font-weight:600;cursor:pointer">1:1</button>' +
+          '<button class="adm-crop-btn"        data-ratio="4:3"   onclick="_admSetCropRatio(this,\'4:3\')"   style="flex:1;padding:6px;border:2px solid #E5E7EB;background:#fff;color:#374151;border-radius:8px;font-size:11px;font-weight:600;cursor:pointer">4:3</button>' +
+          '<button class="adm-crop-btn"        data-ratio="16:9"  onclick="_admSetCropRatio(this,\'16:9\')"  style="flex:1;padding:6px;border:2px solid #E5E7EB;background:#fff;color:#374151;border-radius:8px;font-size:11px;font-weight:600;cursor:pointer">16:9</button>' +
+          '<button class="adm-crop-btn"        data-ratio="9:16"  onclick="_admSetCropRatio(this,\'9:16\')"  style="flex:1;padding:6px;border:2px solid #E5E7EB;background:#fff;color:#374151;border-radius:8px;font-size:11px;font-weight:600;cursor:pointer">9:16</button>' +
+        '</div>' +
+      '</div>' +
+
+      /* Texte sur la photo */
+      '<div>' +
+        '<div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px">Texte sur la photo</div>' +
+        '<input id="adm-img-overlay-text" placeholder="Ajouter un texte…" oninput="_admUpdateImgEditor()" style="width:100%;padding:8px 10px;border:1.5px solid #E5E7EB;border-radius:8px;font-size:13px;box-sizing:border-box;margin-bottom:8px">' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+          /* Taille */
+          '<div style="flex:1;min-width:120px">' +
+            '<label style="font-size:11px;color:#64748B;display:block;margin-bottom:4px">Taille</label>' +
+            '<input type="range" id="adm-img-font-size" min="16" max="80" value="32" oninput="_admUpdateImgEditor()" style="width:100%">' +
+          '</div>' +
+          /* Couleur */
+          '<div>' +
+            '<label style="font-size:11px;color:#64748B;display:block;margin-bottom:4px">Couleur</label>' +
+            '<div style="display:flex;gap:5px">' +
+              '<button onclick="_admSetTextColor(this,\'#FFFFFF\')" style="width:26px;height:26px;background:#fff;border:2px solid #6366F1;border-radius:50%;cursor:pointer" title="Blanc"></button>' +
+              '<button onclick="_admSetTextColor(this,\'#000000\')" style="width:26px;height:26px;background:#000;border:2px solid #E5E7EB;border-radius:50%;cursor:pointer" title="Noir"></button>' +
+              '<button onclick="_admSetTextColor(this,\'#FACC15\')" style="width:26px;height:26px;background:#FACC15;border:2px solid #E5E7EB;border-radius:50%;cursor:pointer" title="Jaune"></button>' +
+              '<button onclick="_admSetTextColor(this,\'#EF4444\')" style="width:26px;height:26px;background:#EF4444;border:2px solid #E5E7EB;border-radius:50%;cursor:pointer" title="Rouge"></button>' +
+            '</div>' +
+          '</div>' +
+          /* Position */
+          '<div>' +
+            '<label style="font-size:11px;color:#64748B;display:block;margin-bottom:4px">Position</label>' +
+            '<select id="adm-img-text-pos" onchange="_admUpdateImgEditor()" style="padding:5px 8px;border:1.5px solid #E5E7EB;border-radius:8px;font-size:12px">' +
+              '<option value="top">Haut</option>' +
+              '<option value="center">Centre</option>' +
+              '<option value="bottom" selected>Bas</option>' +
+            '</select>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+
+      /* Boutons */
+      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">' +
+        '<button onclick="_admCloseImgEditor()" style="padding:10px 20px;border:1.5px solid #E5E7EB;border-radius:8px;background:#fff;color:#374151;font-size:13px;font-weight:600;cursor:pointer">Annuler</button>' +
+        '<button onclick="_admConfirmImgEditor()" style="padding:10px 20px;border:none;border-radius:8px;background:linear-gradient(135deg,#6366F1,#4F46E5);color:#fff;font-size:13px;font-weight:600;cursor:pointer"><i class="fas fa-check" style="margin-right:6px"></i>Confirmer</button>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(modal);
+
+  /* Variables d'état internes */
+  modal._textColor = '#FFFFFF';
+
+  /* Rendu initial */
+  setTimeout(function() { _admRenderImgEditorCanvas(); }, 50);
+}
+
+function _admCloseImgEditor() {
+  var m = document.getElementById('adm-img-editor-modal');
+  if (m) m.remove();
+  /* Réinitialise l'input */
+  var inp = document.getElementById('adm-off-img-input');
+  if (inp) inp.value = '';
+}
+
+function _admSetCropRatio(btn, ratio) {
+  document.querySelectorAll('.adm-crop-btn').forEach(function(b) {
+    b.style.borderColor = '#E5E7EB';
+    b.style.background  = '#fff';
+    b.style.color       = '#374151';
+  });
+  btn.style.borderColor = '#6366F1';
+  btn.style.background  = '#EEF2FF';
+  btn.style.color       = '#6366F1';
+  _admImgEditorRatio = ratio;
+  _admRenderImgEditorCanvas();
+}
+
+function _admSetTextColor(btn, color) {
+  var modal = document.getElementById('adm-img-editor-modal');
+  if (modal) modal._textColor = color;
+  _admUpdateImgEditor();
+}
+
+function _admUpdateImgEditor() {
+  _admRenderImgEditorCanvas();
+}
+
+function _admRenderImgEditorCanvas() {
+  var canvas = document.getElementById('adm-img-editor-canvas');
+  if (!canvas || !_admImgEditorSrc) return;
+  var ctx = canvas.getContext('2d');
+  var img = new Image();
+  img.onload = function() {
+    /* Calcul du crop en crop centré */
+    var sw = img.width, sh = img.height;
+    var sx = 0, sy = 0;
+    if (_admImgEditorRatio !== 'free') {
+      var parts = _admImgEditorRatio.split(':');
+      var rw = Number(parts[0]), rh = Number(parts[1]);
+      var targetAR = rw / rh;
+      var imgAR    = sw / sh;
+      if (imgAR > targetAR) {
+        /* Trop large → crop horizontal */
+        sw = Math.round(sh * targetAR);
+        sx = Math.round((img.width - sw) / 2);
+      } else {
+        /* Trop haut → crop vertical */
+        sh = Math.round(sw / targetAR);
+        sy = Math.round((img.height - sh) / 2);
+      }
+    }
+    /* Canvas output : largeur max 480px pour preview */
+    var scale  = Math.min(1, 480 / sw);
+    canvas.width  = Math.round(sw * scale);
+    canvas.height = Math.round(sh * scale);
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+    /* Texte overlay */
+    var text = (document.getElementById('adm-img-overlay-text') || {}).value || '';
+    if (text.trim()) {
+      var modal     = document.getElementById('adm-img-editor-modal');
+      var color     = modal ? (modal._textColor || '#FFFFFF') : '#FFFFFF';
+      var fontSize  = parseInt((document.getElementById('adm-img-font-size') || {}).value || '32', 10);
+      var pos       = (document.getElementById('adm-img-text-pos') || {}).value || 'bottom';
+      var scaledFs  = Math.round(fontSize * scale);
+      ctx.font       = 'bold ' + scaledFs + 'px Arial, sans-serif';
+      ctx.textAlign  = 'center';
+      ctx.lineWidth  = scaledFs * 0.1;
+      ctx.strokeStyle = color === '#FFFFFF' ? 'rgba(0,0,0,.7)' : 'rgba(255,255,255,.5)';
+      var x = canvas.width / 2;
+      var y = pos === 'top'    ? scaledFs + 8
+            : pos === 'center' ? canvas.height / 2
+            :                    canvas.height - 12;
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = color;
+      ctx.fillText(text, x, y);
+    }
+  };
+  img.src = _admImgEditorSrc;
+}
+
+function _admConfirmImgEditor() {
+  var canvas = document.getElementById('adm-img-editor-canvas');
+  if (!canvas) return;
+  /* Export haute qualité */
+  var result = canvas.toDataURL('image/jpeg', 0.92);
+  var m = document.getElementById('adm-img-editor-modal');
+  if (m) m.remove();
+
+  if (_admImgEditorTarget === 'post') {
+    var prev = document.getElementById('adm-off-img-preview');
+    if (prev) { prev.src = result; prev.style.display = 'block'; }
+  } else if (_admImgEditorTarget === 'short') {
+    var sprev = document.getElementById('adm-off-short-thumb-preview');
+    if (sprev) { sprev.src = result; sprev.style.display = 'block'; sprev._editedData = result; }
+  }
 }
 
 /* Blob URL + File admin vidéo */
 var _admOffVidBlobUrl = null;
 var _admOffVidFile    = null;   /* Fichier réel → IndexedDB */
+
+/* Blob URL + File admin Short officiel */
+var _admOffShortVidBlobUrl = null;
+var _admOffShortVidFile    = null;
 
 function _admOffPreviewVideo(input) {
   if (!input.files || !input.files[0]) return;
@@ -27460,6 +31043,101 @@ function _admOffRemoveVideo() {
   if (inp)  { inp.value = ''; }
 }
 
+/* ── Préview vidéo Short officiel ── */
+function _admOffShortPreviewVideo(input) {
+  if (!input.files || !input.files[0]) return;
+  var file = input.files[0];
+  var ext = (file.name || '').split('.').pop().toLowerCase();
+  var allowedExts = ['mp4','mov','m4v','mkv','avi','webm','3gp','ts','wmv','flv'];
+  if (!file.type.startsWith('video/') && allowedExts.indexOf(ext) === -1) {
+    showToast('Format non supporté. Utilisez MP4, MOV, MKV…', 'err');
+    input.value = ''; return;
+  }
+  if (file.size > 500 * 1024 * 1024) {
+    showToast('Fichier trop lourd — maximum 500 Mo', 'err');
+    input.value = ''; return;
+  }
+  if (_admOffShortVidBlobUrl) URL.revokeObjectURL(_admOffShortVidBlobUrl);
+  _admOffShortVidBlobUrl = URL.createObjectURL(file);
+  _admOffShortVidFile    = file;
+  var vid  = document.getElementById('adm-off-short-vid-preview');
+  var wrap = document.getElementById('adm-off-short-vid-preview-wrap');
+  if (vid && wrap) { vid.src = _admOffShortVidBlobUrl; wrap.style.display = 'block'; }
+}
+
+function _admOffShortPreviewThumb(input) {
+  if (!input.files || !input.files[0]) return;
+  _admImgEditorSrc    = null;
+  _admImgEditorTarget = 'short';
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    _admImgEditorSrc = e.target.result;
+    _admOpenImgEditor();
+  };
+  reader.readAsDataURL(input.files[0]);
+}
+
+function _admOffRemoveShort() {
+  if (_admOffShortVidBlobUrl) { URL.revokeObjectURL(_admOffShortVidBlobUrl); _admOffShortVidBlobUrl = null; }
+  _admOffShortVidFile = null;
+  var vid  = document.getElementById('adm-off-short-vid-preview');
+  var wrap = document.getElementById('adm-off-short-vid-preview-wrap');
+  var inp  = document.getElementById('adm-off-short-vid-input');
+  var thumb = document.getElementById('adm-off-short-thumb-preview');
+  if (vid)   { vid.src = ''; }
+  if (wrap)  { wrap.style.display = 'none'; }
+  if (inp)   { inp.value = ''; }
+  if (thumb) { thumb.src = ''; thumb.style.display = 'none'; delete thumb._editedData; }
+}
+
+/* ── Publie un Short officiel ── */
+function _admPublishOfficialShort() {
+  if (!_adminUser || !_admHasAction('publish')) { showToast('Accès non autorisé', 'err'); return; }
+  if (!_admOffShortVidFile) { showToast('Sélectionnez une vidéo pour le short', 'err'); return; }
+
+  var text     = _gwSanitize((document.getElementById('adm-off-short-text') || {}).value || '', 500).trim();
+  var thumbEl  = document.getElementById('adm-off-short-thumb-preview');
+  var thumbData = (thumbEl && thumbEl.style.display !== 'none' && thumbEl._editedData) ? thumbEl._editedData : null;
+  var shortId  = 'off_short_' + Date.now();
+  var vidFile  = _admOffShortVidFile;
+  var idbId    = 'vid_off_short_' + Date.now();
+  var nom      = _adminUser ? _adminUser.nom : 'Geniwork';
+
+  function _resetShortForm() {
+    var ta = document.getElementById('adm-off-short-text');
+    if (ta) ta.value = '';
+    _admOffRemoveShort();
+    showToast('Short officiel publié ✓', 'ok');
+    _admRender();
+  }
+
+  /* Upload vidéo vers Storage */
+  _gwSaveVideoBlob(idbId, vidFile, function() {});
+  if (_gwFbStorage) {
+    var vExt = (vidFile.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
+    _showVideoProgress(0);
+    _uploadBlobToStorage('videos/' + shortId + vExt, vidFile,
+      function(url) {
+        _hideVideoProgress();
+        _offPublishPost(text, thumbData, nom, { idbId: idbId, url: url, videoType: 'short' }, shortId);
+        if (_gwFbReady && _gwFbDB) {
+          _gwFbDB.ref('gw/post_videos/' + shortId).set({ url: url, dur: 0 }).catch(function(){});
+        }
+        _resetShortForm();
+      },
+      function() {
+        _hideVideoProgress();
+        _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
+        _resetShortForm();
+      },
+      function(pct) { _showVideoProgress(pct); }
+    );
+  } else {
+    _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
+    _resetShortForm();
+  }
+}
+
 /* ── Publie un post officiel (partagé entre admin panel + user composer) ── */
 function _offPublishPost(text, imgData, publisherNom, videoData, presetId) {
   var posts = _offGetPosts();
@@ -27500,7 +31178,7 @@ function _offPublishPost(text, imgData, publisherNom, videoData, presetId) {
 
   /* ── Rebuild le feed pour intégrer le nouveau post officiel dans le pool ── */
   if (document.getElementById('feed-list')) {
-    renderFeed(getAllPosts());
+    renderFeed(_getFeedPosts());
   }
 
   /* ── Si un utilisateur est connecté → refresh notifs + bannière ── */
@@ -27557,7 +31235,7 @@ function _admDeleteOfficialPost(id) {
   _admLog('DELETE_OFFICIAL_POST', id);
   showToast('Post supprimé', 'ok');
   /* Rebuild le feed pour retirer le post du pool */
-  if (_currentUser && document.getElementById('feed-list')) renderFeed(getAllPosts());
+  if (_currentUser && document.getElementById('feed-list')) renderFeed(_getFeedPosts());
   _admRender();
 }
 
@@ -27734,7 +31412,8 @@ function _buildOfficialCard(p) {
           ' onclick="_openOfficialVideo(\'' + p.id + '\')">' +
         '<video class="off-post-video" id="off-fv-' + p.id + '"' +
           (vidSrc ? ' src="' + escHtml(vidSrc) + '"' : '') +
-          ' muted playsinline preload="metadata" loop' +
+          ((p.video && typeof p.video === 'object' && p.video.poster) ? ' poster="' + p.video.poster + '"' : '') +
+          ' autoplay muted playsinline webkit-playsinline preload="auto" loop' +
           ' style="width:100%;display:block;max-height:320px;pointer-events:none"></video>' +
         /* Overlay play */
         '<div class="post-video-thumb-overlay" id="off-fvo-' + p.id + '">' +
@@ -27980,7 +31659,7 @@ function _offDoRepost(postId) {
     if (ico) ico.style.color = '#16A34A';
   }
 
-  renderFeed(getAllPosts());
+  renderFeed(_getFeedPosts());
   showToast('Publication officielle republiée ✓', 'ok');
 }
 
@@ -28263,7 +31942,12 @@ function _checkDMInbox() {
       } else {
         /* Conversation existante — mettre à jour lastMsg + badge non-lu */
         if (!existing.email) existing.email = entry.fromEmail;
-        var isOpen = _chatConvId === existing.id;
+        var _isMsgPageActive = (function() {
+          var pg = document.getElementById('p-messages');
+          var sc = document.getElementById('chat-screen');
+          return pg && pg.classList.contains('active') && sc && sc.classList.contains('open');
+        })();
+        var isOpen = _isMsgPageActive && _chatConvId === existing.id;
         if (!isOpen && entry.at && (!existing.lastAt || entry.at > existing.lastAt)) {
           existing.lastMsg = entry.lastMsg || existing.lastMsg;
           existing.lastAt  = entry.at;
@@ -28463,13 +32147,21 @@ function _mkOpenCreate() {
 
     /* Prix normal (service/produit) */
     '<div id="mk-price-wrap" style="margin-bottom:12px;display:flex;gap:10px">'+
-      '<div style="flex:2">'+
-        '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Prix (€)</label>'+
+      '<div style="flex:1.4">'+
+        '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Prix</label>'+
         '<input id="mk-price-inp" type="number" min="0" placeholder="0.00" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box">'+
       '</div>'+
+      '<div style="flex:1">'+
+        '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Devise</label>'+
+        '<select id="mk-currency-sel" style="width:100%;margin-top:6px;padding:10px 8px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;background:#F8FAFC;color:#0F172A">'+
+          '<option value="EUR">€ EUR</option>'+
+          '<option value="USD">$ USD</option>'+
+          '<option value="XOF">FCFA (XOF)</option>'+
+        '</select>'+
+      '</div>'+
       '<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end">'+
-        '<label style="display:flex;align-items:center;gap:6px;padding:10px 0;cursor:pointer;font-size:12.5px;color:#374151">'+
-          '<input type="checkbox" id="mk-offer-chk" style="accent-color:#6366F1"> Offre possible'+
+        '<label style="display:flex;align-items:center;gap:6px;padding:10px 0;cursor:pointer;font-size:12px;color:#374151">'+
+          '<input type="checkbox" id="mk-offer-chk" style="accent-color:#6366F1"> Offre'+
         '</label>'+
       '</div>'+
     '</div>'+
@@ -28486,18 +32178,30 @@ function _mkOpenCreate() {
           '💳 Payant</button>'+
       '</div>'+
       '<div id="mk-ebook-paid-fields" style="display:none;margin-top:10px">'+
-        '<input id="mk-ebook-price-inp" type="number" min="0.99" step="0.01" placeholder="Prix en € (ex: 9.99)" '+
-          'style="width:100%;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
-        '<div style="font-size:10.5px;color:#94A3B8;margin-top:4px"><i class="fas fa-info-circle"></i> 1% de commission Geniwork sur chaque vente</div>'+
+        '<div style="display:flex;gap:10px">'+
+          '<input id="mk-ebook-price-inp" type="number" min="0.99" step="0.01" placeholder="Prix (ex: 9.99)" '+
+            'style="flex:1.4;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
+          '<select id="mk-ebook-currency-sel" style="flex:1;padding:10px 8px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;background:#F8FAFC;color:#0F172A">'+
+            '<option value="EUR">€ EUR</option>'+
+            '<option value="USD">$ USD</option>'+
+            '<option value="XOF">FCFA (XOF)</option>'+
+          '</select>'+
+        '</div>'+
+        (function(){ var _pc2 = _admGetPlansConfig(); return _pc2.paypalEnabled
+          ? '<div style="font-size:10.5px;color:#94A3B8;margin-top:4px"><i class="fas fa-info-circle"></i> 1% de commission Geniwork sur chaque vente</div>'
+          : ''; })() +
       '</div>'+
     '</div>'+
 
-    /* PayPal du vendeur */
-    '<div id="mk-paypal-wrap" style="margin-bottom:12px">'+
-      '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Votre email PayPal</label>'+
-      '<input id="mk-paypal-inp" type="email" placeholder="votre@paypal.com" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
-      '<div style="font-size:10.5px;color:#94A3B8;margin-top:3px"><i class="fas fa-info-circle"></i> L\'acheteur vous paiera via PayPal (1% de commission Geniwork)</div>'+
-    '</div>'+
+    /* PayPal du vendeur — masqué si paiements désactivés par l'admin */
+    (function(){ var _pc = _admGetPlansConfig(); return _pc.paypalEnabled
+      ? '<div id="mk-paypal-wrap" style="margin-bottom:12px">'+
+          '<label style="font-size:12px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Votre email PayPal</label>'+
+          '<input id="mk-paypal-inp" type="email" placeholder="votre@paypal.com" style="width:100%;margin-top:6px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box">'+
+          '<div style="font-size:10.5px;color:#94A3B8;margin-top:3px"><i class="fas fa-info-circle"></i> L\'acheteur vous paiera via PayPal (1% de commission Geniwork)</div>'+
+        '</div>'
+      : '<div id="mk-paypal-wrap" style="display:none"></div>';
+    })()+
 
     /* Photo de couverture Ebook */
     '<div id="mk-ebook-cover-wrap" style="display:none;margin-bottom:12px">'+
@@ -28754,6 +32458,53 @@ function _fldChk(id)  { var el = document.getElementById(id); return el ? el.che
 function _fldNum(id)  { return parseFloat(_fldVal(id)) || 0; }
 function _fldInt(id, def) { return parseInt(_fldVal(id), 10) || (def !== undefined ? def : 50); }
 
+/* ── Devises marketplace : symbole, formatage, conversion ── */
+var _GW_XOF_PER_EUR = 655.957; /* Taux fixe — le Franc CFA est arrimé à l'euro */
+var _gwUsdEurRateCache = null;
+var _gwUsdEurRateCacheAt = 0;
+
+function _gwCurrencySymbol(currency) {
+  if (currency === 'USD') return '$';
+  if (currency === 'XOF') return 'FCFA';
+  return '€';
+}
+
+/* Formate un montant avec sa devise, ex: "12.99 €", "$9.99", "7 500 FCFA" */
+function _gwFmtPrice(amount, currency) {
+  amount = Number(amount) || 0;
+  if (currency === 'USD') return '$' + amount.toFixed(2);
+  if (currency === 'XOF') return Math.round(amount).toLocaleString('fr-FR') + ' FCFA';
+  return amount.toFixed(2) + ' €';
+}
+
+/* Récupère le taux USD→EUR en direct (mis en cache 1h), avec repli si indisponible */
+async function _gwGetUsdEurRate() {
+  var now = Date.now();
+  if (_gwUsdEurRateCache && (now - _gwUsdEurRateCacheAt) < 3600000) return _gwUsdEurRateCache;
+  try {
+    var resp = await fetch('https://api.frankfurter.app/latest?from=USD&to=EUR');
+    var data = await resp.json();
+    if (data && data.rates && data.rates.EUR) {
+      _gwUsdEurRateCache   = data.rates.EUR;
+      _gwUsdEurRateCacheAt = now;
+      return _gwUsdEurRateCache;
+    }
+  } catch (e) { /* repli ci-dessous */ }
+  return 0.92; /* Taux de repli approximatif si l'API est indisponible */
+}
+
+/* Convertit un montant (n'importe quelle devise) en EUR — PayPal est configuré en EUR */
+async function _gwConvertToEUR(amount, currency) {
+  amount = Number(amount) || 0;
+  if (!currency || currency === 'EUR') return amount;
+  if (currency === 'XOF') return amount / _GW_XOF_PER_EUR;
+  if (currency === 'USD') {
+    var rate = await _gwGetUsdEurRate();
+    return amount * rate;
+  }
+  return amount;
+}
+
 function _mkPublishListing() {
   var isEbook = _mkCurrentType === 'ebook';
 
@@ -28766,18 +32517,20 @@ function _mkPublishListing() {
   var title      = _fldVal('mk-title-inp');
   var desc       = _fldVal('mk-desc-inp');
   var price      = _fldNum('mk-price-inp');
+  var currency   = _fldVal('mk-currency-sel') || 'EUR';
   var cat        = _fldVal('mk-cat-sel');
   var city       = _fldVal('mk-city-inp');
   var country    = _fldVal('mk-country-inp');
   var radius     = _fldInt('mk-radius-sel', 50);
   var paypal     = _fldVal('mk-paypal-inp');
   var allowOffer = _fldChk('mk-offer-chk');
+  var _ppEnabled = _admGetPlansConfig().paypalEnabled;
 
-  if (!title)   { showToast('Ajoutez un titre', 'err'); return; }
-  if (!price)   { showToast('Ajoutez un prix valide', 'err'); return; }
-  if (!city)    { showToast('Ajoutez votre ville', 'err'); return; }
-  if (!country) { showToast('Ajoutez votre pays', 'err'); return; }
-  if (!paypal)  { showToast('Ajoutez votre email PayPal', 'err'); return; }
+  if (!title)               { showToast('Ajoutez un titre', 'err'); return; }
+  if (!price)               { showToast('Ajoutez un prix valide', 'err'); return; }
+  if (!city)                { showToast('Ajoutez votre ville', 'err'); return; }
+  if (!country)             { showToast('Ajoutez votre pays', 'err'); return; }
+  if (_ppEnabled && !paypal){ showToast('Ajoutez votre email PayPal', 'err'); return; }
 
   var plan       = _mkGetUserPlanKey(_currentUser.email);
   var limits     = _MK_PLAN_LIMITS[plan] || _MK_PLAN_LIMITS.free;
@@ -28792,7 +32545,7 @@ function _mkPublishListing() {
     title:         title,
     description:   desc,
     price:         price,
-    currency:      'EUR',
+    currency:      currency,
     allowOffer:    allowOffer,
     images:        _mkPickedImages.slice(),
     location:      { city: city, country: country,
@@ -28841,11 +32594,13 @@ function _mkPublishEbook() {
   var paidBtn = document.getElementById('mk-ebook-paid-btn');
   var isPaid  = paidBtn && paidBtn.style.background.indexOf('6366') !== -1;
   var price   = isPaid ? (_fldNum('mk-ebook-price-inp') || 0) : 0;
+  var currency = _fldVal('mk-ebook-currency-sel') || 'EUR';
 
+  var _ppEnabled2 = _admGetPlansConfig().paypalEnabled;
   if (!title)   { showToast('Ajoutez un titre', 'err'); return; }
   if (!_mkEbookFile) { showToast('Sélectionnez un fichier ebook (PDF/EPUB)', 'err'); return; }
   if (isPaid && price <= 0) { showToast('Entrez un prix valide', 'err'); return; }
-  if (isPaid && !paypal)    { showToast('Ajoutez votre email PayPal', 'err'); return; }
+  if (isPaid && _ppEnabled2 && !paypal) { showToast('Ajoutez votre email PayPal', 'err'); return; }
 
   /* Bouton → spinner */
   var pubBtn = document.querySelector('[onclick="_mkPublishListing()"]');
@@ -28872,7 +32627,7 @@ function _mkPublishEbook() {
       author:        author,
       price:         isPaid ? price : 0,
       isFree:        !isPaid,
-      currency:      'EUR',
+      currency:      isPaid ? currency : 'EUR',
       coverImage:    _mkEbookCover || '',
       ebookUrl:      ebookUrl,
       images:        _mkEbookCover ? [_mkEbookCover] : [],
@@ -29011,7 +32766,7 @@ function _mkOpenDetail(listingId) {
     '</div>'+
 
     '<div style="font-size:18px;font-weight:800;color:#0F172A;line-height:1.3;margin-bottom:8px">'+escHtml(listing.title)+'</div>'+
-    '<div style="font-size:22px;font-weight:900;color:#6366F1;margin-bottom:12px">'+listing.price.toFixed(2)+' €'+
+    '<div style="font-size:22px;font-weight:900;color:#6366F1;margin-bottom:12px">'+_gwFmtPrice(listing.price, listing.currency)+
       (listing.allowOffer ? ' <span style="font-size:12px;background:#EEF2FF;color:#6366F1;padding:2px 8px;border-radius:20px;font-weight:600">Offre possible</span>' : '')+
     '</div>'+
 
@@ -29104,7 +32859,7 @@ function _mkOpenEbookDetail(listing) {
     '<div style="font-size:18px;font-weight:800;color:#0F172A;line-height:1.3;margin-bottom:4px">'+escHtml(listing.title)+'</div>'+
     (listing.author ? '<div style="font-size:13px;color:#6366F1;font-weight:600;margin-bottom:8px"><i class="fas fa-pen-fancy" style="margin-right:5px"></i>'+escHtml(listing.author)+'</div>' : '')+
 
-    (!isFree ? '<div style="font-size:22px;font-weight:900;color:#6366F1;margin-bottom:12px">'+listing.price.toFixed(2)+' €'+
+    (!isFree ? '<div style="font-size:22px;font-weight:900;color:#6366F1;margin-bottom:12px">'+_gwFmtPrice(listing.price, listing.currency)+
       '<span style="font-size:11px;color:#94A3B8;font-weight:400;margin-left:8px">1% commission Geniwork</span>'+
     '</div>' : '')+
 
@@ -29186,11 +32941,13 @@ function _mkRenderEbookPayPalBtn(listing) {
   var sellerAmount = parseFloat((listing.price - commission).toFixed(2));
   paypal.Buttons({
     createOrder: function(data, actions) {
-      return actions.order.create({
-        purchase_units: [{ description: listing.title,
-          amount: { value: listing.price.toFixed(2), currency_code: 'EUR' },
-          payee: { email_address: listing.sellerPaypal }
-        }]
+      return _gwConvertToEUR(listing.price, listing.currency).then(function(eurAmount) {
+        return actions.order.create({
+          purchase_units: [{ description: listing.title,
+            amount: { value: eurAmount.toFixed(2), currency_code: 'EUR' },
+            payee: { email_address: listing.sellerPaypal }
+          }]
+        });
       });
     },
     onApprove: function(data, actions) {
@@ -29199,7 +32956,7 @@ function _mkRenderEbookPayPalBtn(listing) {
         txns.unshift({
           id: 'txn_'+Date.now(), listingId: listing.id, listingTitle: listing.title,
           listingType: 'ebook', ebookUrl: listing.ebookUrl,
-          amount: listing.price, commission: commission, sellerNet: sellerAmount,
+          amount: listing.price, currency: listing.currency, commission: commission, sellerNet: sellerAmount,
           sellerEmail: listing.sellerEmail,
           buyerEmail:  _currentUser ? _currentUser.email : '',
           paypalOrderId: details.id, status: 'completed', date: new Date().toISOString()
@@ -29257,12 +33014,14 @@ function _mkRenderPayPalBtn(listing) {
 
   paypal.Buttons({
     createOrder: function(data, actions) {
-      return actions.order.create({
-        purchase_units: [{
-          description: listing.title,
-          amount: { value: listing.price.toFixed(2), currency_code: 'EUR' },
-          payee: { email_address: listing.sellerPaypal }
-        }]
+      return _gwConvertToEUR(listing.price, listing.currency).then(function(eurAmount) {
+        return actions.order.create({
+          purchase_units: [{
+            description: listing.title,
+            amount: { value: eurAmount.toFixed(2), currency_code: 'EUR' },
+            payee: { email_address: listing.sellerPaypal }
+          }]
+        });
       });
     },
     onApprove: function(data, actions) {
@@ -29273,6 +33032,7 @@ function _mkRenderPayPalBtn(listing) {
           listingId:     listing.id,
           listingTitle:  listing.title,
           amount:        listing.price,
+          currency:      listing.currency,
           commission:    commission,
           sellerNet:     sellerAmount,
           sellerEmail:   listing.sellerEmail,
@@ -29379,7 +33139,7 @@ function _mkContactSeller(email, listingId) {
       listingImg:   listing.images && listing.images.length ? listing.images[0] : null,
       listingCat:   listing.category,
       listingType:  listing.type,
-      text:         '📦 ' + listing.title + ' — ' + listing.price.toFixed(2) + ' €'
+      text:         '📦 ' + listing.title + ' — ' + _gwFmtPrice(listing.price, listing.currency)
     };
     conv.messages.push(cardMsg);
     conv.lastMsg = '📦 ' + listing.title;
@@ -29473,7 +33233,7 @@ function _mkBuildFeedAdCard(listing) {
       '<div style="font-size:11px;color:#6366F1;font-weight:700;margin-bottom:2px">'+escHtml(catLabel)+'</div>'+
       '<div style="font-size:14px;font-weight:800;color:#0F172A;margin-bottom:4px">'+escHtml(listing.title)+'</div>'+
       '<div style="display:flex;align-items:center;justify-content:space-between">'+
-        '<span style="font-size:16px;font-weight:900;color:#6366F1">'+listing.price.toFixed(2)+' €</span>'+
+        '<span style="font-size:16px;font-weight:900;color:#6366F1">'+_gwFmtPrice(listing.price, listing.currency)+'</span>'+
         '<span style="font-size:11px;color:#94A3B8"><i class="fas fa-location-dot" style="margin-right:3px"></i>'+escHtml(listing.location.city||'')+'</span>'+
       '</div>'+
       '<button onclick="event.stopPropagation();_mkOpenDetail(\''+listing.id+'\')" style="width:100%;margin-top:10px;padding:10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">Voir l\'annonce</button>'+
@@ -29569,7 +33329,7 @@ function _mkRenderSystemListings() {
     }
   }
 
-  if (!mkListings.length) {
+  if (!mkListings.length || _mkIsArtisteMode()) {
     mkSection.style.display = 'none';
     return;
   }
@@ -29600,7 +33360,7 @@ function _mkRenderSystemListings() {
       cardE.innerHTML =
         '<div class="mk-service-img" style="'+coverStyle+';position:relative;aspect-ratio:3/4;min-height:130px">'+
           '<span class="mk-service-badge" style="background:'+(isFreeE?'#10B981':'#6366F1')+'">'+
-            (isFreeE ? '🎁 Gratuit' : '💳 '+listing.price.toFixed(2)+'€')+'</span>'+
+            (isFreeE ? '🎁 Gratuit' : '💳 '+_gwFmtPrice(listing.price, listing.currency))+'</span>'+
           '<span style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.5);color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:10px">📖 Ebook</span>'+
         '</div>'+
         '<div class="mk-service-body">'+
@@ -29616,7 +33376,7 @@ function _mkRenderSystemListings() {
           '<div style="display:flex;align-items:center;justify-content:space-between">'+
             (isFreeE
               ? '<span style="font-size:11px;color:#10B981;font-weight:700"><i class="fas fa-download" style="margin-right:3px"></i>Gratuit</span>'
-              : '<p class="mk-service-price" style="margin:0"><strong>'+listing.price.toFixed(2)+'€</strong></p>')+
+              : '<p class="mk-service-price" style="margin:0"><strong>'+_gwFmtPrice(listing.price, listing.currency)+'</strong></p>')+
             '<span style="font-size:10px;color:#64748B"><i class="fas fa-download" style="margin-right:2px"></i>'+(listing.downloads||0)+'</span>'+
           '</div>'+
         '</div>';
@@ -29671,7 +33431,7 @@ function _mkRenderSystemListings() {
           escHtml((listing.description||'').slice(0,55))+(listing.description&&listing.description.length>55?'…':'')+
         '</p>'+
         '<div style="display:flex;align-items:center;justify-content:space-between">'+
-          '<p class="mk-service-price" style="margin:0">À partir de <strong>'+listing.price.toFixed(2)+'€</strong></p>'+
+          '<p class="mk-service-price" style="margin:0">À partir de <strong>'+_gwFmtPrice(listing.price, listing.currency)+'</strong></p>'+
           (isMine
             ? ''
             : '<span style="font-size:10px;color:#6366F1;font-weight:700;padding:3px 8px;background:#EEF2FF;border-radius:20px"><i class="fas fa-cart-plus" style="margin-right:3px"></i>Ajouter</span>')+
@@ -30594,7 +34354,7 @@ function _mkRefreshAllListings() {
               '<div style="font-size:14px;font-weight:800;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+escHtml(l.title)+'</div>' +
               '<div style="font-size:11.5px;color:#64748B;margin-top:2px">'+escHtml(l.sellerNom)+' · '+ago+'</div>' +
               '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">' +
-                '<div style="font-size:15px;font-weight:800;color:#0F172A">'+l.price.toFixed(2)+'€</div>' +
+                '<div style="font-size:15px;font-weight:800;color:#0F172A">'+_gwFmtPrice(l.price, l.currency)+'</div>' +
                 (isMine
                   ? '<button onclick="event.stopPropagation();_mkOpenMySales()" style="padding:5px 10px;background:#EEF2FF;color:#6366F1;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-cog" style="margin-right:3px"></i>Gérer</button>'
                   : '<button onclick="event.stopPropagation();_mkAddListingToCart(\''+safeId+'\')" style="padding:5px 10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-cart-plus" style="margin-right:3px"></i>Panier</button>') +
@@ -30926,6 +34686,402 @@ function _secTypeLabel(type) {
     devtools:      'Inspection DevTools',
     integrity:     'Intégrité compromise'
   }[type] || type;
+}
+
+/* ══════════════════════════════════════════
+   ONGLET SAUVEGARDE — EXPORT / DOWNLOAD
+══════════════════════════════════════════ */
+function _admBuildBackup() {
+  if (!_admIsSA()) return '<div class="adm-empty" style="padding:60px 20px"><i class="fas fa-lock"></i><p>Accès réservé au Super Administrateur</p></div>';
+
+  /* Statistiques rapides */
+  var users   = getUsers();
+  var posts   = [];
+  try {
+    var allKeys = Object.keys(localStorage).filter(function(k){ return k.startsWith('gw_userposts_'); });
+    allKeys.forEach(function(k){ var p=JSON.parse(localStorage.getItem(k)||'[]'); if(Array.isArray(p)) posts=posts.concat(p); });
+  } catch(e){}
+  var offPosts = _offGetPosts();
+  var notifs   = 0;
+  try {
+    users.forEach(function(u){ var n=JSON.parse(localStorage.getItem('gw_notifs_'+u.email)||'[]'); notifs+=n.length; });
+  } catch(e){}
+  var bans     = JSON.parse(localStorage.getItem('gw_bans') || '[]');
+  var admins   = _admGetAdmins();
+  var reports  = JSON.parse(localStorage.getItem('gw_reports') || '[]');
+  var payments = JSON.parse(localStorage.getItem('gw_payments') || '[]');
+
+  function _stat(ico, color, label, val) {
+    return '<div style="background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.07);display:flex;align-items:center;gap:12px">' +
+      '<div style="width:40px;height:40px;border-radius:10px;background:' + color + ';display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+        '<i class="fas ' + ico + '" style="color:#fff;font-size:16px"></i>' +
+      '</div>' +
+      '<div><div style="font-size:20px;font-weight:800;color:#0F172A">' + val + '</div>' +
+        '<div style="font-size:11px;color:#64748B;font-weight:500">' + label + '</div></div>' +
+    '</div>';
+  }
+
+  function _card(ico, color, title, desc, datasets) {
+    var btns = datasets.map(function(d) {
+      return '<button onclick="_admDownload(\'' + d.key + '\')" style="display:flex;align-items:center;gap:7px;padding:9px 14px;border-radius:9px;border:1.5px solid ' + color + ';background:#fff;color:' + color + ';font-size:12px;font-weight:700;cursor:pointer;transition:all .18s" ' +
+        'onmouseover="this.style.background=\'' + color + '\';this.style.color=\'#fff\'" ' +
+        'onmouseout="this.style.background=\'#fff\';this.style.color=\'' + color + '\'">' +
+        '<i class="fas fa-download" style="font-size:11px"></i>' + d.label + '</button>';
+    }).join('');
+    return '<div style="background:#fff;border-radius:16px;padding:18px;box-shadow:0 1px 5px rgba(0,0,0,.08);border-left:4px solid ' + color + '">' +
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
+        '<div style="width:36px;height:36px;border-radius:9px;background:' + color + '22;display:flex;align-items:center;justify-content:center">' +
+          '<i class="fas ' + ico + '" style="color:' + color + ';font-size:15px"></i>' +
+        '</div>' +
+        '<div><div style="font-size:14px;font-weight:800;color:#0F172A">' + title + '</div>' +
+        '<div style="font-size:11px;color:#64748B">' + desc + '</div></div>' +
+      '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">' + btns + '</div>' +
+    '</div>';
+  }
+
+  return '<div class="adm-tab-header"><h2>Sauvegarde des données</h2><p>Exportez et téléchargez toutes les données de l\'application</p></div>' +
+  '<div style="padding:0 16px 32px;display:flex;flex-direction:column;gap:20px">' +
+
+  /* Statistiques */
+  '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px">' +
+    _stat('fa-users',       '#2563EB', 'Utilisateurs',  users.length) +
+    _stat('fa-newspaper',   '#7C3AED', 'Publications',  posts.length) +
+    _stat('fa-star',        '#F59E0B', 'Posts officiels', offPosts.length) +
+    _stat('fa-bell',        '#EC4899', 'Notifications', notifs) +
+    _stat('fa-ban',         '#EF4444', 'Bans',          Array.isArray(bans) ? bans.length : 0) +
+    _stat('fa-flag',        '#F97316', 'Signalements',  reports.length) +
+  '</div>' +
+
+  /* Sauvegarde complète */
+  '<div style="background:linear-gradient(135deg,#1D4ED8,#7C3AED);border-radius:16px;padding:20px;color:#fff">' +
+    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">' +
+      '<div style="width:44px;height:44px;border-radius:12px;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center">' +
+        '<i class="fas fa-database" style="font-size:20px"></i>' +
+      '</div>' +
+      '<div><div style="font-size:16px;font-weight:800">Sauvegarde complète</div>' +
+        '<div style="font-size:12px;opacity:.8">Toutes les données de l\'application en un seul fichier JSON</div></div>' +
+    '</div>' +
+    '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
+      '<button onclick="_admDownload(\'full\')" style="flex:1;min-width:160px;padding:12px;border-radius:10px;border:2px solid rgba(255,255,255,.4);background:rgba(255,255,255,.15);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">' +
+        '<i class="fas fa-download"></i> Télécharger tout (JSON)' +
+      '</button>' +
+      '<button onclick="_admDownloadCSV(\'users\')" style="flex:1;min-width:160px;padding:12px;border-radius:10px;border:2px solid rgba(255,255,255,.4);background:rgba(255,255,255,.15);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">' +
+        '<i class="fas fa-file-csv"></i> Export complet (CSV)' +
+      '</button>' +
+    '</div>' +
+  '</div>' +
+
+  /* Données Utilisateurs */
+  _card('fa-users', '#2563EB', 'Données Utilisateurs',
+    'Comptes, profils, abonnements, messages, notifications',
+    [
+      { key:'users',    label:'Comptes' },
+      { key:'profiles', label:'Profils' },
+      { key:'following',label:'Abonnements' },
+      { key:'notifs',   label:'Notifications' },
+      { key:'bans',     label:'Bans' }
+    ]) +
+
+  /* Données Publications */
+  _card('fa-newspaper', '#7C3AED', 'Publications & Contenu',
+    'Posts utilisateurs, publications officielles, signalements',
+    [
+      { key:'posts',      label:'Posts utilisateurs' },
+      { key:'official',   label:'Publications officielles' },
+      { key:'reports',    label:'Signalements' },
+      { key:'comments',   label:'Commentaires & Likes' }
+    ]) +
+
+  /* Données Admin */
+  _card('fa-shield-halved', '#DC2626', 'Données Administratives',
+    'Équipe admin, logs, paiements, restrictions, paramètres',
+    [
+      { key:'admins',       label:'Équipe admin' },
+      { key:'payments',     label:'Paiements' },
+      { key:'restrictions', label:'Restrictions' },
+      { key:'admin_log',    label:'Journal admin' },
+      { key:'settings',     label:'Paramètres' }
+    ]) +
+
+  /* Marketplace & Artistes */
+  _card('fa-store', '#059669', 'Marketplace & Artistes',
+    'Annonces marketplace, chansons, statistiques artistes',
+    [
+      { key:'marketplace', label:'Marketplace' },
+      { key:'artiste',     label:'Artistes & Chansons' },
+      { key:'services',    label:'Services freelance' }
+    ]) +
+
+  /* Historique des sauvegardes */
+  '<div style="background:#F8FAFC;border-radius:14px;padding:16px;border:1.5px solid #E5E7EB">' +
+    '<div style="font-size:13px;font-weight:700;color:#374151;margin-bottom:10px;display:flex;align-items:center;gap:8px">' +
+      '<i class="fas fa-clock-rotate-left" style="color:#6366F1"></i> Dernières sauvegardes' +
+    '</div>' +
+    '<div id="adm-backup-history" style="font-size:12px;color:#64748B">' +
+      _admGetBackupHistory() +
+    '</div>' +
+  '</div>' +
+
+  '</div>';
+}
+
+/* ── Historique localStorage ── */
+function _admGetBackupHistory() {
+  try {
+    var history = JSON.parse(localStorage.getItem('gw_backup_history') || '[]');
+    if (!history.length) return '<p style="color:#9CA3AF;font-style:italic">Aucune sauvegarde effectuée pour l\'instant.</p>';
+    return history.slice(0, 8).map(function(h) {
+      return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #F1F5F9">' +
+        '<span><i class="fas fa-file-arrow-down" style="color:#6366F1;margin-right:6px"></i>' + escHtml(h.type) + '</span>' +
+        '<span style="color:#9CA3AF">' + escHtml(h.date) + ' · ' + escHtml(h.size) + '</span>' +
+      '</div>';
+    }).join('');
+  } catch(e) { return ''; }
+}
+
+function _admSaveBackupHistory(type, size) {
+  try {
+    var history = JSON.parse(localStorage.getItem('gw_backup_history') || '[]');
+    var now = new Date();
+    history.unshift({
+      type: type,
+      date: now.toLocaleDateString('fr-FR') + ' ' + now.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }),
+      size: size
+    });
+    localStorage.setItem('gw_backup_history', JSON.stringify(history.slice(0, 20)));
+  } catch(e) {}
+}
+
+/* ── Télécharge un fichier JSON ── */
+function _admDownload(key) {
+  var data = null;
+  var filename = 'geniwork_';
+  var now = new Date().toISOString().slice(0,10);
+
+  try {
+    switch(key) {
+      /* ── Sauvegarde complète ── */
+      case 'full':
+        data = _admCollectAll();
+        filename += 'backup_complet_' + now;
+        break;
+
+      /* ── Utilisateurs ── */
+      case 'users':
+        data = { users: getUsers(), exportedAt: new Date().toISOString() };
+        filename += 'utilisateurs_' + now;
+        break;
+      case 'profiles':
+        var profiles = {};
+        getUsers().forEach(function(u) {
+          var p = loadUserProfile(u.email);
+          if (p) profiles[u.email] = p;
+        });
+        data = { profiles: profiles, exportedAt: new Date().toISOString() };
+        filename += 'profils_' + now;
+        break;
+      case 'following':
+        var followData = {};
+        getUsers().forEach(function(u) {
+          try { followData[u.email] = JSON.parse(localStorage.getItem('gw_following_' + u.email) || '[]'); } catch(e){}
+        });
+        data = { following: followData, exportedAt: new Date().toISOString() };
+        filename += 'abonnements_' + now;
+        break;
+      case 'notifs':
+        var notifsData = {};
+        getUsers().forEach(function(u) {
+          try { notifsData[u.email] = JSON.parse(localStorage.getItem('gw_notifs_' + u.email) || '[]'); } catch(e){}
+        });
+        data = { notifications: notifsData, exportedAt: new Date().toISOString() };
+        filename += 'notifications_' + now;
+        break;
+      case 'bans':
+        data = { bans: JSON.parse(localStorage.getItem('gw_bans') || '[]'), exportedAt: new Date().toISOString() };
+        filename += 'bans_' + now;
+        break;
+
+      /* ── Publications ── */
+      case 'posts':
+        var postsData = {};
+        getUsers().forEach(function(u) {
+          try { postsData[u.email] = JSON.parse(localStorage.getItem('gw_userposts_' + u.email) || '[]'); } catch(e){}
+        });
+        data = { posts: postsData, exportedAt: new Date().toISOString() };
+        filename += 'publications_' + now;
+        break;
+      case 'official':
+        data = { official_posts: _offGetPosts(), exportedAt: new Date().toISOString() };
+        filename += 'publications_officielles_' + now;
+        break;
+      case 'reports':
+        data = { reports: JSON.parse(localStorage.getItem('gw_reports') || '[]'), exportedAt: new Date().toISOString() };
+        filename += 'signalements_' + now;
+        break;
+      case 'comments':
+        var commentsData = {};
+        try {
+          Object.keys(localStorage).filter(function(k){ return k.startsWith('gw_likes_') || k.startsWith('gw_comments_'); }).forEach(function(k) {
+            try { commentsData[k] = JSON.parse(localStorage.getItem(k) || '[]'); } catch(e){}
+          });
+        } catch(e){}
+        data = { interactions: commentsData, exportedAt: new Date().toISOString() };
+        filename += 'commentaires_likes_' + now;
+        break;
+
+      /* ── Admin ── */
+      case 'admins':
+        data = {
+          super_admin: _admGetSuperAdmin(),
+          admins:      _admGetAdmins(),
+          publishers:  _offGetPublishers(),
+          exportedAt:  new Date().toISOString()
+        };
+        filename += 'equipe_admin_' + now;
+        break;
+      case 'payments':
+        data = { payments: JSON.parse(localStorage.getItem('gw_payments') || '[]'), exportedAt: new Date().toISOString() };
+        filename += 'paiements_' + now;
+        break;
+      case 'restrictions':
+        data = {
+          restrictions: JSON.parse(localStorage.getItem('gw_restrictions') || '[]'),
+          appeals:      JSON.parse(localStorage.getItem('gw_restriction_appeals') || '[]'),
+          exportedAt:   new Date().toISOString()
+        };
+        filename += 'restrictions_' + now;
+        break;
+      case 'admin_log':
+        data = { admin_log: JSON.parse(localStorage.getItem('gw_admin_log') || '[]'), exportedAt: new Date().toISOString() };
+        filename += 'journal_admin_' + now;
+        break;
+      case 'settings':
+        var settingsKeys = ['gw_plans_config','gw_settings_logo','gw_official_logo'];
+        var settingsData = {};
+        settingsKeys.forEach(function(k) { try { settingsData[k] = JSON.parse(localStorage.getItem(k) || 'null'); } catch(e){} });
+        data = { settings: settingsData, exportedAt: new Date().toISOString() };
+        filename += 'parametres_' + now;
+        break;
+
+      /* ── Marketplace & Artistes ── */
+      case 'marketplace':
+        data = {
+          listings:       JSON.parse(localStorage.getItem('gw_mk_listings') || '[]'),
+          collab_requests:JSON.parse(localStorage.getItem('gw_collab_requests') || '[]'),
+          exportedAt:     new Date().toISOString()
+        };
+        filename += 'marketplace_' + now;
+        break;
+      case 'artiste':
+        data = {
+          artiste_songs: JSON.parse(localStorage.getItem('gw_artiste_songs') || '[]'),
+          exportedAt:    new Date().toISOString()
+        };
+        filename += 'artistes_chansons_' + now;
+        break;
+      case 'services':
+        var servicesData = {};
+        getUsers().forEach(function(u) {
+          try { servicesData[u.email] = JSON.parse(localStorage.getItem('gw_services_' + u.email) || '[]'); } catch(e){}
+        });
+        data = { services: servicesData, exportedAt: new Date().toISOString() };
+        filename += 'services_' + now;
+        break;
+
+      default:
+        showToast('Clé inconnue : ' + key, 'err'); return;
+    }
+  } catch(e) {
+    showToast('Erreur lors de la collecte des données', 'err');
+    console.error('[GW Backup]', e);
+    return;
+  }
+
+  _admTriggerDownload(JSON.stringify(data, null, 2), filename + '.json', 'application/json');
+  _admSaveBackupHistory(filename.replace('geniwork_','').replace(/_\d{4}-\d{2}-\d{2}$/,''), _admFormatSize(JSON.stringify(data).length));
+  showToast('Téléchargement démarré ✓', 'ok');
+  /* Rafraîchit l'historique */
+  var hist = document.getElementById('adm-backup-history');
+  if (hist) hist.innerHTML = _admGetBackupHistory();
+}
+
+/* ── Export CSV des utilisateurs ── */
+function _admDownloadCSV(type) {
+  var rows = [], now = new Date().toISOString().slice(0,10);
+  try {
+    if (type === 'users') {
+      rows.push(['Email','Nom','Rôle','Date inscription']);
+      getUsers().forEach(function(u) {
+        rows.push([u.email || '', u.nom || '', u.role || 'Membre', u.createdAt ? new Date(u.createdAt).toLocaleDateString('fr-FR') : '']);
+      });
+    }
+  } catch(e) { showToast('Erreur CSV', 'err'); return; }
+  var csv = rows.map(function(r){ return r.map(function(c){ return '"' + String(c).replace(/"/g,'""') + '"'; }).join(','); }).join('\r\n');
+  _admTriggerDownload(csv, 'geniwork_utilisateurs_' + now + '.csv', 'text/csv;charset=utf-8;');
+  _admSaveBackupHistory('Export CSV utilisateurs', _admFormatSize(csv.length));
+  showToast('Export CSV téléchargé ✓', 'ok');
+  var hist = document.getElementById('adm-backup-history');
+  if (hist) hist.innerHTML = _admGetBackupHistory();
+}
+
+/* ── Collecte TOUTES les données de l'app ── */
+function _admCollectAll() {
+  var all = { meta: { version: '1.0', exportedAt: new Date().toISOString(), exportedBy: _adminUser ? _adminUser.email : 'unknown' } };
+  try {
+    all.users     = getUsers();
+    all.profiles  = {};
+    all.posts     = {};
+    all.notifs    = {};
+    all.following = {};
+    all.services  = {};
+    getUsers().forEach(function(u) {
+      try { all.profiles[u.email]  = loadUserProfile(u.email); } catch(e){}
+      try { all.posts[u.email]     = JSON.parse(localStorage.getItem('gw_userposts_' + u.email) || '[]'); } catch(e){}
+      try { all.notifs[u.email]    = JSON.parse(localStorage.getItem('gw_notifs_' + u.email) || '[]'); } catch(e){}
+      try { all.following[u.email] = JSON.parse(localStorage.getItem('gw_following_' + u.email) || '[]'); } catch(e){}
+      try { all.services[u.email]  = JSON.parse(localStorage.getItem('gw_services_' + u.email) || '[]'); } catch(e){}
+    });
+    all.official_posts   = _offGetPosts();
+    all.bans             = JSON.parse(localStorage.getItem('gw_bans') || '[]');
+    all.reports          = JSON.parse(localStorage.getItem('gw_reports') || '[]');
+    all.payments         = JSON.parse(localStorage.getItem('gw_payments') || '[]');
+    all.restrictions     = JSON.parse(localStorage.getItem('gw_restrictions') || '[]');
+    all.restriction_apps = JSON.parse(localStorage.getItem('gw_restriction_appeals') || '[]');
+    all.admin_log        = JSON.parse(localStorage.getItem('gw_admin_log') || '[]');
+    all.admins           = { super_admin: _admGetSuperAdmin(), admins: _admGetAdmins(), publishers: _offGetPublishers() };
+    all.marketplace      = JSON.parse(localStorage.getItem('gw_mk_listings') || '[]');
+    all.collab_requests  = JSON.parse(localStorage.getItem('gw_collab_requests') || '[]');
+    all.artiste_songs    = JSON.parse(localStorage.getItem('gw_artiste_songs') || '[]');
+    all.settings         = { plans: JSON.parse(localStorage.getItem('gw_plans_config') || 'null') };
+    /* Likes & interactions */
+    all.interactions = {};
+    Object.keys(localStorage).filter(function(k){ return k.startsWith('gw_likes_') || k.startsWith('gw_comments_'); }).forEach(function(k) {
+      try { all.interactions[k] = JSON.parse(localStorage.getItem(k) || '[]'); } catch(e){}
+    });
+  } catch(e) { console.error('[GW Backup full]', e); }
+  return all;
+}
+
+/* ── Helpers ── */
+function _admTriggerDownload(content, filename, mime) {
+  try {
+    var blob = new Blob([content], { type: mime });
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() { URL.revokeObjectURL(url); a.remove(); }, 2000);
+  } catch(e) { showToast('Erreur de téléchargement', 'err'); }
+}
+
+function _admFormatSize(bytes) {
+  if (bytes < 1024)        return bytes + ' o';
+  if (bytes < 1024*1024)   return (bytes/1024).toFixed(1) + ' Ko';
+  return (bytes/1024/1024).toFixed(2) + ' Mo';
 }
 
 /* ── Construire le panel Sécurité ── */

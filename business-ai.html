@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GENIWORK Business AI</title>
+<style>
+  :root {
+    --accent: #7C3AED;
+    --accent-dark: #6D28D9;
+    --accent-blue: #3B82F6;
+    --bg-app: #F8FAFC;
+    --bg-sidebar: #FFFFFF;
+    --bg-card: #FFFFFF;
+    --bg-card-soft: #F1F5F9;
+    --border: #E2E8F0;
+    --text: #1E293B;
+    --text-muted: #64748B;
+    --error-bg: #FEF2F2;
+    --error-border: #FCA5A5;
+    --pill-bg: #EDE9FE;
+    --pill-text: #6D28D9;
+  }
+  [data-theme="dark"] {
+    --bg-app: #05050D;
+    --bg-sidebar: #0A0A1A;
+    --bg-card: #12101F;
+    --bg-card-soft: #181530;
+    --border: #221F38;
+    --text: #F1F5F9;
+    --text-muted: #94A3B8;
+    --error-bg: #2A1416;
+    --error-border: #7F1D1D;
+    --pill-bg: #241B40;
+    --pill-text: #C4B5FD;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg-app);
+    color: var(--text);
+    transition: background 0.2s, color 0.2s;
+  }
+  .app { display: flex; min-height: 100vh; }
+
+  .sidebar {
+    width: 320px;
+    flex-shrink: 0;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    padding: 18px 24px 30px;
+  }
+  .brand-logo { max-width: 190px; height: auto; margin: 0 0 22px; display: block; }
+  .mascot-img { max-width: 230px; width: 100%; height: auto; display: block; margin: 0 auto; }
+  .sidebar h1 { font-size: 34px; margin: 0 0 12px; line-height: 1.1; font-weight: 800; }
+  .sidebar h1 .accent { color: var(--accent-blue); }
+  .sidebar-desc { font-size: 13px; color: var(--text-muted); line-height: 1.55; margin-bottom: 16px; }
+  .mascot { text-align: center; margin: 14px 0 20px; }
+  .checklist { list-style: none; padding: 0; margin: 0 0 20px; font-size: 13px; }
+  .checklist li { margin-bottom: 10px; display: flex; align-items: center; gap: 9px; font-weight: 500; }
+  .checklist li::before {
+    content: "✓"; color: var(--accent-blue); font-weight: 700; font-size: 11px;
+    width: 19px; height: 19px; border-radius: 50%; border: 1.5px solid var(--accent-blue);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .benefits-box {
+    background: var(--bg-card-soft); border: 1px solid var(--border); border-radius: 14px;
+    padding: 16px; margin-bottom: 18px;
+  }
+  .benefits-title { font-weight: 700; font-size: 13px; margin-bottom: 12px; }
+  .benefits-box ul { list-style: none; padding: 0; margin: 0; font-size: 12px; color: var(--text-muted); }
+  .benefits-box li { margin-bottom: 8px; }
+  blockquote {
+    font-size: 13px; color: var(--text-muted); font-style: italic; line-height: 1.5;
+    border-left: 2px solid var(--accent); padding-left: 12px; margin: 0;
+  }
+
+  main { flex: 1; padding: 28px 30px 60px; max-width: 1200px; }
+  .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+  .topbar-title { font-size: 21px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .badge {
+    font-size: 12px; background: var(--pill-bg); color: var(--pill-text); padding: 4px 12px;
+    border-radius: 999px; font-weight: 600;
+  }
+  .plan-wrap { display: flex; align-items: center; gap: 8px; }
+  .credit-badge {
+    font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 999px;
+    background: var(--pill-bg); color: var(--pill-text); white-space: nowrap;
+  }
+  .credit-badge.low { background: #FEF3C7; color: #92400E; }
+  [data-theme="dark"] .credit-badge.low { background: #422006; color: #FCD34D; }
+  .credit-badge.empty { background: var(--error-bg); color: #DC2626; }
+  .history-wrap { position: relative; }
+  .history-btn {
+    background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+    border-radius: 999px; padding: 8px 16px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  .history-btn:hover { border-color: var(--accent); }
+  .history-panel {
+    display: none; position: absolute; top: calc(100% + 8px); left: 0; z-index: 20;
+    width: 300px; max-height: 360px; overflow-y: auto; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 14px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  }
+  .history-panel.visible { display: block; }
+  .history-empty { color: var(--text-muted); font-size: 13px; padding: 14px; text-align: center; }
+  .history-item {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    background: none; border: none; border-radius: 10px; padding: 10px; cursor: pointer; font-family: inherit;
+  }
+  .history-item:hover { background: var(--bg-app); }
+  .history-item .hi-icon { font-size: 18px; }
+  .history-item .hi-label { font-weight: 600; font-size: 13px; color: var(--text); }
+  .history-item .hi-meta { font-size: 11px; color: var(--text-muted); }
+  #theme-toggle {
+    margin-left: auto;
+    background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+    border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  #theme-toggle:hover { border-color: var(--accent); }
+
+  .search-bar {
+    display: flex; align-items: center; gap: 10px; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 14px; padding: 8px 8px 8px 18px; margin-bottom: 26px;
+  }
+  .search-bar .search-icon { color: var(--text-muted); }
+  .search-bar input {
+    flex: 1; border: none; background: transparent; font-size: 14px; padding: 11px 0; color: var(--text); font-family: inherit;
+  }
+  .search-bar input:focus { outline: none; }
+  .search-btn {
+    background: linear-gradient(135deg, var(--accent), var(--accent-blue)); border: none; color: white;
+    width: 40px; height: 40px; border-radius: 10px; cursor: pointer; font-size: 16px; flex-shrink: 0;
+  }
+
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-bottom: 26px; }
+  .card {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 20px; cursor: pointer; text-align: left; transition: border-color 0.15s, transform 0.1s;
+    font-family: inherit;
+  }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .card.active { border-color: var(--accent); }
+  .card-icon {
+    width: 42px; height: 42px; border-radius: 12px; font-size: 19px;
+    display: flex; align-items: center; justify-content: center; color: white; margin-bottom: 4px;
+  }
+  .card-label { font-weight: 700; font-size: 15px; }
+  .card-desc { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+
+  .bottom-row { display: grid; grid-template-columns: 2fr 1fr; gap: 18px; align-items: stretch; }
+  .how { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 22px; }
+  .how-title { font-weight: 700; font-size: 16px; margin: 0 0 18px; }
+  .how-steps { display: flex; gap: 8px; align-items: flex-start; }
+  .how-step { flex: 1; text-align: center; }
+  .how-arrow { color: var(--text-muted); font-size: 16px; padding-top: 13px; }
+  .how-circle {
+    width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-blue));
+    color: white; display: flex; align-items: center; justify-content: center; margin: 0 auto 10px; font-size: 16px;
+  }
+  .how-step-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+  .how-step-desc { font-size: 11px; color: var(--text-muted); line-height: 1.3; }
+
+  .cta-box {
+    background: linear-gradient(160deg, var(--accent), var(--accent-blue));
+    border-radius: 16px; padding: 22px; color: white; display: flex; flex-direction: column;
+  }
+  .cta-box .cta-icon { font-size: 22px; margin-bottom: 10px; }
+  .cta-box h3 { font-size: 17px; margin: 0 0 10px; }
+  .cta-box p { font-size: 12px; opacity: 0.9; line-height: 1.5; margin: 0 0 16px; flex-grow: 1; }
+  .cta-box a.cta-btn, .cta-box button {
+    background: white; color: var(--accent-dark); border: none; padding: 10px 16px;
+    border-radius: 10px; font-weight: 700; font-size: 13px; cursor: pointer; font-family: inherit;
+    text-decoration: none; display: inline-block; text-align: center;
+  }
+
+  #login-gate {
+    margin-top: 60px; text-align: center; color: var(--text-muted); font-size: 15px;
+  }
+
+  #workspace {
+    display: none; margin-top: 20px; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 16px; padding: 20px;
+  }
+  #workspace.visible { display: block; }
+  #workspace h3 { margin: 0 0 4px; }
+  #workspace .ws-desc { color: var(--text-muted); font-size: 13px; margin: 0 0 14px; }
+  .transcript { display: none; flex-direction: column; gap: 12px; margin-bottom: 14px; max-height: 500px; overflow-y: auto; }
+  .chat-bubble { max-width: 85%; padding: 12px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; }
+  .chat-bubble.user { align-self: flex-end; background: linear-gradient(135deg, var(--accent), var(--accent-blue)); color: white; }
+  .chat-bubble.assistant { align-self: flex-start; background: var(--bg-app); border: 1px solid var(--border); max-width: 95%; }
+  .chat-bubble.assistant p:first-child { margin-top: 0; }
+  .chat-bubble.assistant p:last-child { margin-bottom: 0; }
+  .chat-bubble img.attached-preview { max-width: 160px; border-radius: 8px; display: block; margin-top: 8px; }
+  .chat-file-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .file-label {
+    background: var(--bg-app); border: 1px dashed var(--border); border-radius: 10px;
+    padding: 9px 14px; font-size: 13px; cursor: pointer; color: var(--text-muted);
+  }
+  .file-label:hover { border-color: var(--accent); color: var(--accent); }
+  #chat-file { display: none; }
+  textarea {
+    width: 100%; min-height: 50px; padding: 12px; border-radius: 10px;
+    border: 1px solid var(--border); font-size: 14px; font-family: inherit; resize: vertical;
+    color: var(--text); background: var(--bg-app);
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .chat-input-row { display: flex; gap: 10px; align-items: flex-end; }
+  button.primary {
+    background: linear-gradient(135deg, var(--accent), var(--accent-blue)); color: white; border: none;
+    padding: 11px 22px; border-radius: 10px; font-weight: 600; font-size: 14px; cursor: pointer;
+  }
+  button.primary:hover { opacity: 0.92; }
+  button.primary:disabled { opacity: 0.6; cursor: default; }
+  #loading { color: var(--text-muted); font-size: 13px; display: none; margin-top: 8px; }
+  .reset-btn {
+    background: none; border: none; color: var(--text-muted); font-size: 12px;
+    cursor: pointer; margin-top: 10px; padding: 0; font-family: inherit;
+  }
+  .reset-btn:hover { color: var(--accent); }
+
+  .result-box { background: var(--bg-app); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .result-box pre { white-space: pre-wrap; word-break: break-word; font-size: 13px; margin: 0; }
+  .result-box table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .result-box th, .result-box td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+  .error-box { color: #DC2626; background: var(--error-bg); border: 1px solid var(--error-border); padding: 14px; border-radius: 10px; }
+  iframe.preview { width: 100%; height: 480px; border: 1px solid var(--border); border-radius: 10px; background: white; }
+  img.generated { max-width: 100%; border-radius: 10px; }
+  .export-bar { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .export-bar button {
+    background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+    padding: 9px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; font-family: inherit; font-weight: 600;
+  }
+  .export-bar button:hover { border-color: var(--accent); color: var(--accent); }
+
+  @media (max-width: 900px) {
+    .app { flex-direction: column; }
+    .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+    .bottom-row { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 480px) {
+    .card-grid { grid-template-columns: repeat(2, 1fr); }
+    .how-steps { flex-direction: column; }
+    .how-arrow { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <img src="/img/business-ai/logo.png" alt="Geniwork" class="brand-logo" />
+      <h1>Business <span class="accent">AI</span></h1>
+      <p class="sidebar-desc">Votre assistant intelligent pour développer votre business. Gagnez du temps, prenez de meilleures décisions et passez à l'action plus rapidement.</p>
+      <div class="mascot"><img src="/img/business-ai/mascot.png" alt="Assistant IA" class="mascot-img" /></div>
+      <ul class="checklist">
+        <li>Simple</li>
+        <li>Rapide</li>
+        <li>Intelligent</li>
+        <li>Efficace</li>
+      </ul>
+      <div class="benefits-box">
+        <div class="benefits-title">👑 Gagnez plus avec l'IA</div>
+        <ul>
+          <li>↑ Productivité x10</li>
+          <li>⚡ Décisions plus rapides</li>
+          <li>✓ Moins d'erreurs</li>
+          <li>🕐 Plus de temps pour l'essentiel</li>
+        </ul>
+      </div>
+      <blockquote>"L'IA ne remplace pas les entrepreneurs, elle les rend plus puissants."</blockquote>
+    </aside>
+
+    <main>
+      <div id="login-gate" style="display:none;">
+        <p>Connecte-toi depuis l'application GENIWORK pour utiliser Business AI.</p>
+      </div>
+
+      <div id="app-content">
+        <div class="topbar">
+          <div class="topbar-title">✨ Business AI <span class="badge">Propulsé par l'IA</span></div>
+          <div class="plan-wrap">
+            <span class="credit-badge" id="credit-badge">…</span>
+          </div>
+          <div class="history-wrap">
+            <button class="history-btn" onclick="toggleHistoryPanel(event)">🕐 Historique</button>
+            <div class="history-panel" id="history-panel"></div>
+          </div>
+          <button id="theme-toggle" onclick="toggleTheme()">🌙 Sombre</button>
+        </div>
+
+        <div class="search-bar">
+          <span class="search-icon">🔍</span>
+          <input id="quick-search" placeholder="Que souhaitez-vous créer aujourd'hui ?" onkeydown="if(event.key==='Enter') quickAsk()">
+          <button class="search-btn" onclick="quickAsk()">✨</button>
+        </div>
+
+        <div class="card-grid" id="card-grid"></div>
+
+        <div class="bottom-row">
+          <div class="how">
+            <div class="how-title">Comment ça marche ?</div>
+            <div class="how-steps">
+              <div class="how-step"><div class="how-circle">🧩</div><div class="how-step-title">1. Choisissez un outil</div><div class="how-step-desc">Sélectionnez l'outil IA dont vous avez besoin.</div></div>
+              <div class="how-arrow">→</div>
+              <div class="how-step"><div class="how-circle">✏️</div><div class="how-step-title">2. Donnez les informations</div><div class="how-step-desc">Renseignez les détails nécessaires.</div></div>
+              <div class="how-arrow">→</div>
+              <div class="how-step"><div class="how-circle">✨</div><div class="how-step-title">3. L'IA génère le résultat</div><div class="how-step-desc">Notre IA analyse et crée pour vous.</div></div>
+              <div class="how-arrow">→</div>
+              <div class="how-step"><div class="how-circle">🚀</div><div class="how-step-title">4. Utilisez et passez à l'action</div><div class="how-step-desc">Téléchargez, partagez et développez votre business.</div></div>
+            </div>
+          </div>
+          <div class="cta-box" id="cta-box"></div>
+        </div>
+
+        <div id="workspace">
+          <h3 id="ws-title"></h3>
+          <p class="ws-desc" id="ws-desc"></p>
+          <div id="transcripts"></div>
+          <div class="chat-file-row">
+            <label class="file-label" id="file-label" for="chat-file">📎 Joindre un document/image (optionnel)</label>
+            <input type="file" id="chat-file" accept="image/*,.pdf" onchange="onFilePicked()" />
+          </div>
+          <div class="chat-input-row">
+            <textarea id="message" placeholder="" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendMessage();}"></textarea>
+            <button class="primary" id="send-btn" onclick="sendMessage()">Envoyer</button>
+          </div>
+          <span id="loading">L'IA réfléchit...</span>
+          <button class="reset-btn" onclick="resetConversation()">↺ Nouvelle conversation</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const userEmail = params.get('email');
+
+    const CARD_COLORS = {
+      "business-plan": "#7C3AED", "devis-facture": "#EC4899", "bilan": "#0D9488",
+      "budget": "#10B981", "strategie": "#EF4444", "idees-projet": "#F59E0B",
+      "marketing": "#EC4899", "mini-site": "#3B82F6", "image": "#06B6D4",
+      "document": "#64748B", "matching": "#F97316", "moderation": "#3B82F6",
+      "chat": "#8B5CF6", "feed": "#22C55E",
+    };
+
+    const FEATURES = {
+      "business-plan": { label: "Business Plan", description: "Génère un business plan complet, étape par étape.", icon: "📋", outputType: "markdown", creditCost: 3, placeholder: "Décrivez votre projet d'entreprise..." },
+      "devis-facture": { label: "Devis / Facture", description: "Crée un devis ou une facture professionnelle.", icon: "🧾", outputType: "json", creditCost: 2, placeholder: "Décrivez la prestation, le client, les montants..." },
+      "bilan": { label: "Bilan / Mini-comptabilité", description: "Analyse vos finances et produit un mini-bilan.", icon: "📊", outputType: "markdown", creditCost: 2, placeholder: "Donnez vos revenus, dépenses, dates..." },
+      "budget": { label: "Budget", description: "Construit un budget prévisionnel détaillé.", icon: "💰", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos besoins budgétaires..." },
+      "strategie": { label: "Stratégie business", description: "Conseille une stratégie de développement.", icon: "🎯", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos objectifs..." },
+      "idees-projet": { label: "Idées de projet", description: "Propose des idées de projets localisées.", icon: "💡", outputType: "markdown", creditCost: 2, placeholder: "Votre ville/région, vos compétences, votre budget..." },
+      "marketing": { label: "Marketing", description: "Construit une stratégie marketing complète.", icon: "📣", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre offre et votre cible..." },
+      "mini-site": { label: "Mini-site web", description: "Génère une page web complète prête à l'emploi.", icon: "🌐", outputType: "html", creditCost: 4, placeholder: "Décrivez le site souhaité (activité, sections, ton)..." },
+      "image": { label: "Génération d'image", description: "Crée une image (logo, visuel, illustration).", icon: "🖼️", outputType: "image", creditCost: 5, placeholder: "Décrivez l'image souhaitée..." },
+      "document": { label: "Assistant document", description: "Analyse un document/image et répond à vos questions.", icon: "📎", outputType: "markdown", creditCost: 2, placeholder: "Posez votre question ou joignez un fichier..." },
+      "matching": { label: "Matching freelance", description: "Aide à trouver le bon profil ou la bonne mission.", icon: "🤝", outputType: "markdown", creditCost: 2, placeholder: "Décrivez le profil ou la mission recherchée..." },
+      "moderation": { label: "Modération de contenu", description: "Vérifie un contenu avant publication.", icon: "🛡️", outputType: "markdown", creditCost: 1, placeholder: "Collez le texte à vérifier..." },
+      "chat": { label: "Assistant business", description: "Posez n'importe quelle question business.", icon: "💬", outputType: "markdown", creditCost: 1, placeholder: "Posez votre question..." },
+      "feed": { label: "Recommandation", description: "Suggère du contenu pertinent pour votre activité.", icon: "✨", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos centres d'intérêt..." },
+    };
+
+    function renderCards() {
+      const grid = document.getElementById('card-grid');
+      grid.innerHTML = Object.entries(FEATURES).map(([key, f]) => `
+        <button class="card" data-key="${key}" data-placeholder="${f.placeholder.replace(/"/g, '&quot;')}" onclick="selectFeature('${key}', this)">
+          <span class="card-icon" style="background:${CARD_COLORS[key] || '#7C3AED'}">${f.icon}</span>
+          <span class="card-label">${f.label}</span>
+          <span class="card-desc">${f.description}</span>
+        </button>`).join('');
+    }
+
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      document.getElementById('theme-toggle').textContent = theme === 'dark' ? '☀️ Clair' : '🌙 Sombre';
+      localStorage.setItem('geniwork-ai-theme', theme);
+    }
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+      applyTheme(current === 'dark' ? 'light' : 'dark');
+    }
+    (function initTheme() {
+      const saved = localStorage.getItem('geniwork-ai-theme');
+      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      applyTheme(saved || (prefersDark ? 'dark' : 'light'));
+    })();
+
+    let creditState = null;
+    const PLAN_LABELS = { free: 'Gratuit', premium: 'Premium', business: 'Business Pro' };
+
+    async function fetchStatus() {
+      const res = await fetch('/api/ai/status?email=' + encodeURIComponent(userEmail));
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      creditState = data.creditState;
+      renderPlanWidget();
+    }
+
+    function renderPlanWidget() {
+      const badge = document.getElementById('credit-badge');
+      if (!creditState) { badge.textContent = '…'; return; }
+      badge.textContent = '💳 ' + creditState.credits + (creditState.renews ? '/' + creditState.planCredits : '') + ' crédits · ' + (PLAN_LABELS[creditState.plan] || creditState.plan);
+      badge.className = 'credit-badge' + (creditState.credits === 0 ? ' empty' : creditState.credits <= Math.ceil(creditState.planCredits * 0.15) ? ' low' : '');
+      renderCTABox();
+    }
+
+    function renderCTABox() {
+      const box = document.getElementById('cta-box');
+      if (!creditState) return;
+      if (creditState.credits > 0) {
+        box.innerHTML = '<div class="cta-icon">💎</div>'
+          + '<h3>' + creditState.credits + ' crédits disponibles</h3>'
+          + '<p>Plan ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + (creditState.renews ? ' · crédits renouvelés chaque mois' : ' · crédit unique, non renouvelable') + '. Chaque génération coûte 1 à 5 crédits selon l\\'outil.</p>'
+          + '<a class="cta-btn" href="/">Retour à l\\'app →</a>';
+        return;
+      }
+      box.innerHTML = '<div class="cta-icon">⚠️</div>'
+        + '<h3>Crédits épuisés</h3>'
+        + '<p>' + (creditState.plan === 'free'
+          ? 'Votre crédit gratuit a été utilisé. Passez à un abonnement Premium ou Business Pro depuis l\\'app pour continuer.'
+          : 'Vos crédits ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + ' sont épuisés ce mois-ci. Ils reviendront le mois prochain, ou achetez un pack de crédits depuis l\\'app.')
+        + '</p>'
+        + '<a class="cta-btn" href="/">Voir les abonnements →</a>';
+    }
+
+    let activeFeature = null;
+    let featureHistory = {};
+    let pendingFile = null;
+    let historyMeta = {};
+
+    function saveHistory() {
+      try {
+        const data = {};
+        for (const key in featureHistory) {
+          if (!featureHistory[key].length) continue;
+          const el = document.getElementById('transcript-' + key);
+          data[key] = { messages: featureHistory[key], html: el ? el.innerHTML : '', updated: historyMeta[key] ? historyMeta[key].updated : Date.now() };
+        }
+        localStorage.setItem('geniwork-ai-history-' + userEmail, JSON.stringify(data));
+      } catch (e) {}
+    }
+    function loadHistory() {
+      try {
+        const raw = localStorage.getItem('geniwork-ai-history-' + userEmail);
+        if (!raw) return;
+        const data = JSON.parse(raw);
+        for (const key in data) {
+          featureHistory[key] = data[key].messages || [];
+          historyMeta[key] = { updated: data[key].updated };
+          const el = getOrCreateTranscript(key);
+          el.innerHTML = data[key].html || '';
+        }
+      } catch (e) {}
+    }
+    function timeAgo(ts) {
+      const diffMin = Math.round((Date.now() - ts) / 60000);
+      if (diffMin < 1) return 'à l\\'instant';
+      if (diffMin < 60) return 'il y a ' + diffMin + ' min';
+      const diffH = Math.round(diffMin / 60);
+      if (diffH < 24) return 'il y a ' + diffH + 'h';
+      return 'il y a ' + Math.round(diffH / 24) + 'j';
+    }
+    function renderHistoryPanel() {
+      const panel = document.getElementById('history-panel');
+      const keys = Object.keys(featureHistory).filter((k) => featureHistory[k].length);
+      if (!keys.length) { panel.innerHTML = '<div class="history-empty">Aucune conversation pour l\\'instant.</div>'; return; }
+      keys.sort((a, b) => (historyMeta[b] ? historyMeta[b].updated : 0) - (historyMeta[a] ? historyMeta[a].updated : 0));
+      panel.innerHTML = keys.map((key) => {
+        const f = FEATURES[key];
+        const count = featureHistory[key].length;
+        const updated = historyMeta[key] ? timeAgo(historyMeta[key].updated) : '';
+        return '<button class="history-item" onclick="openHistoryItem(\\'' + key + '\\')">'
+          + '<span class="hi-icon">' + f.icon + '</span>'
+          + '<span><span class="hi-label">' + f.label + '</span><br><span class="hi-meta">' + count + ' message(s) · ' + updated + '</span></span>'
+          + '</button>';
+      }).join('');
+    }
+    function toggleHistoryPanel(event) {
+      event.stopPropagation();
+      const panel = document.getElementById('history-panel');
+      if (panel.classList.contains('visible')) { panel.classList.remove('visible'); return; }
+      renderHistoryPanel();
+      panel.classList.add('visible');
+    }
+    function openHistoryItem(key) {
+      const card = document.querySelector('.card[data-key="' + key + '"]');
+      if (card) selectFeature(key, card);
+      document.getElementById('history-panel').classList.remove('visible');
+    }
+    document.addEventListener('click', () => { document.getElementById('history-panel').classList.remove('visible'); });
+
+    function getOrCreateTranscript(key) {
+      let el = document.getElementById('transcript-' + key);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'transcript-' + key;
+        el.className = 'transcript';
+        document.getElementById('transcripts').appendChild(el);
+      }
+      return el;
+    }
+
+    function selectFeature(key, el) {
+      document.querySelectorAll('.card').forEach((c) => c.classList.remove('active'));
+      el.classList.add('active');
+      activeFeature = key;
+      const f = FEATURES[key];
+      document.getElementById('workspace').classList.add('visible');
+      document.getElementById('ws-title').textContent = f.label;
+      document.getElementById('ws-desc').textContent = f.description;
+      document.querySelectorAll('.transcript').forEach((t) => { t.style.display = 'none'; });
+      getOrCreateTranscript(key).style.display = 'flex';
+      const textarea = document.getElementById('message');
+      textarea.value = '';
+      textarea.placeholder = el.dataset.placeholder;
+      document.getElementById('workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      textarea.focus();
+    }
+
+    function quickAsk() {
+      const input = document.getElementById('quick-search');
+      const value = input.value.trim();
+      if (!value) return;
+      const chatCard = document.querySelector('.card[data-key="chat"]');
+      selectFeature('chat', chatCard);
+      document.getElementById('message').value = value;
+      input.value = '';
+      sendMessage();
+    }
+
+    function onFilePicked() {
+      const input = document.getElementById('chat-file');
+      const label = document.getElementById('file-label');
+      const file = input.files[0];
+      if (!file) { pendingFile = null; label.textContent = '📎 Joindre un document/image (optionnel)'; return; }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = reader.result.split(',')[1];
+        pendingFile = { mediaType: file.type, base64, name: file.name };
+        label.textContent = '📎 ' + file.name;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function appendBubble(key, role, htmlContent, attachedFile) {
+      const transcript = getOrCreateTranscript(key);
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble ' + role;
+      bubble.innerHTML = htmlContent;
+      if (attachedFile && attachedFile.mediaType.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.className = 'attached-preview';
+        img.src = 'data:' + attachedFile.mediaType + ';base64,' + attachedFile.base64;
+        bubble.appendChild(img);
+      } else if (attachedFile) {
+        const tag = document.createElement('div');
+        tag.style.fontSize = '12px'; tag.style.opacity = '0.8'; tag.style.marginTop = '6px';
+        tag.textContent = '📎 ' + attachedFile.name;
+        bubble.appendChild(tag);
+      }
+      transcript.appendChild(bubble);
+      transcript.scrollTop = transcript.scrollHeight;
+      return bubble;
+    }
+
+    async function sendMessage() {
+      const key = activeFeature;
+      const textarea = document.getElementById('message');
+      const message = textarea.value.trim();
+      const loading = document.getElementById('loading');
+      const sendBtn = document.getElementById('send-btn');
+
+      if (!key) { alert('Choisissez une fonctionnalité ci-dessus.'); return; }
+      if (!message && !pendingFile) { alert('Décrivez votre demande avant d\\'envoyer.'); return; }
+
+      if (!featureHistory[key]) featureHistory[key] = [];
+
+      const userContent = [];
+      if (message) userContent.push({ type: 'text', text: message });
+      if (pendingFile) {
+        const blockType = pendingFile.mediaType === 'application/pdf' ? 'document' : 'image';
+        userContent.push({ type: blockType, source: { type: 'base64', media_type: pendingFile.mediaType, data: pendingFile.base64 } });
+      }
+
+      appendBubble(key, 'user', '<p>' + (message ? message.replace(/</g, '&lt;') : '<em>(fichier joint)</em>') + '</p>', pendingFile);
+      featureHistory[key].push({ role: 'user', content: userContent });
+
+      textarea.value = '';
+      pendingFile = null;
+      document.getElementById('file-label').textContent = '📎 Joindre un document/image (optionnel)';
+      document.getElementById('chat-file').value = '';
+
+      loading.style.display = 'inline';
+      sendBtn.disabled = true;
+
+      try {
+        const res = await fetch('/api/ai/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feature: key, email: userEmail, messages: featureHistory[key] }),
+        });
+        const data = await res.json();
+        loading.style.display = 'none';
+        sendBtn.disabled = false;
+
+        if (data.creditState) { creditState = data.creditState; renderPlanWidget(); }
+
+        if (data.error) {
+          appendBubble(key, 'assistant', '<div class="error-box">' + data.error + '</div>');
+          document.getElementById('cta-box').scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+
+        featureHistory[key].push({ role: 'assistant', content: data.assistantText });
+        historyMeta[key] = { updated: Date.now() };
+
+        const filenameBase = (FEATURES[key].label || 'geniwork-ia').toLowerCase()
+          .normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-') + '-' + featureHistory[key].length;
+
+        const block = buildResultBlock(data.outputType, data, filenameBase);
+        appendBubble(key, 'assistant', block);
+        saveHistory();
+      } catch (err) {
+        loading.style.display = 'none';
+        sendBtn.disabled = false;
+        appendBubble(key, 'assistant', '<div class="error-box">Erreur: ' + err.message + '</div>');
+      }
+    }
+
+    function resetConversation() {
+      const key = activeFeature;
+      if (!key) return;
+      featureHistory[key] = [];
+      delete historyMeta[key];
+      getOrCreateTranscript(key).innerHTML = '';
+      saveHistory();
+    }
+
+    let exportStore = [];
+    function buildResultBlock(outputType, payload, filenameBase) {
+      const idx = exportStore.push(Object.assign({ outputType, filenameBase }, payload)) - 1;
+      let inner;
+      if (outputType === 'image') {
+        inner = '<img class="generated" src="data:image/png;base64,' + payload.image + '" />';
+      } else if (outputType === 'html') {
+        inner = '<iframe class="preview" srcdoc="' + payload.html.replace(/"/g, '&quot;') + '"></iframe>';
+      } else if (outputType === 'json') {
+        inner = '<div class="result-box export-source"><pre>' + payload.text.replace(/</g, '&lt;') + '</pre></div>';
+      } else {
+        inner = '<div class="result-box export-source">' + payload.html + '</div>';
+      }
+      return '<div class="export-wrap" data-idx="' + idx + '">' + inner + buildExportBar(outputType) + '</div>';
+    }
+    function buildExportBar(outputType) {
+      if (outputType === 'html') return '<div class="export-bar"><button onclick="downloadHTML(this)">🌐 Télécharger le HTML</button></div>';
+      if (outputType === 'image') return '<div class="export-bar"><button onclick="downloadImage(this)">🖼️ Télécharger le PNG</button></div>';
+      return '<div class="export-bar"><button onclick="downloadPDF(this)">📄 PDF</button><button onclick="downloadWord(this)">📝 Word</button><button onclick="downloadExcel(this)">📊 Excel</button></div>';
+    }
+    function getExportData(btn) { return exportStore[Number(btn.closest('.export-wrap').dataset.idx)]; }
+    function triggerDownload(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    }
+    function downloadPDF(btn) {
+      const wrap = btn.closest('.export-wrap');
+      const el = wrap.querySelector('.export-source');
+      const data = getExportData(btn);
+      if (!el || !data || !window.html2pdf) return;
+      html2pdf().from(el).set({ filename: data.filenameBase + '.pdf', margin: 10, html2canvas: { scale: 2 } }).save();
+    }
+    function downloadWord(btn) {
+      const wrap = btn.closest('.export-wrap');
+      const el = wrap.querySelector('.export-source');
+      const data = getExportData(btn);
+      if (!el || !data) return;
+      const html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><title>GENIWORK</title></head><body>' + el.innerHTML + '</body></html>';
+      triggerDownload(new Blob(['\\ufeff', html], { type: 'application/msword' }), data.filenameBase + '.doc');
+    }
+    function downloadExcel(btn) {
+      const wrap = btn.closest('.export-wrap');
+      const el = wrap.querySelector('.export-source');
+      const data = getExportData(btn);
+      if (!el || !data) return;
+      const html = '<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"><title>GENIWORK</title></head><body>' + el.innerHTML + '</body></html>';
+      triggerDownload(new Blob(['\\ufeff', html], { type: 'application/vnd.ms-excel' }), data.filenameBase + '.xls');
+    }
+    function downloadHTML(btn) {
+      const data = getExportData(btn);
+      if (!data) return;
+      triggerDownload(new Blob([data.html], { type: 'text/html' }), data.filenameBase + '.html');
+    }
+    function downloadImage(btn) {
+      const data = getExportData(btn);
+      if (!data) return;
+      const byteChars = atob(data.image);
+      const bytes = new Uint8Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+      triggerDownload(new Blob([bytes], { type: 'image/png' }), data.filenameBase + '.png');
+    }
+
+    (async function init() {
+      if (!userEmail) {
+        document.getElementById('login-gate').style.display = 'block';
+        document.getElementById('app-content').style.display = 'none';
+        return;
+      }
+      renderCards();
+      loadHistory();
+      try {
+        await fetchStatus();
+      } catch (e) {
+        document.getElementById('credit-badge').textContent = 'Erreur crédits';
+      }
+    })();
+  </script>
+</body>
+</html>

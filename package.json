@@ -5,6 +5,7 @@
     "build": "node build.js"
   },
   "dependencies": {
+    "marked": "^18.0.5",
     "nodemailer": "^6.9.13"
   },
   "devDependencies": {

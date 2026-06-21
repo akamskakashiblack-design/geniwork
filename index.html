@@ -123,6 +123,9 @@
       <div class="auth-screen">
         <button class="btn-back" onclick="goTo('screen-landing')"><i class="fas fa-arrow-left"></i></button>
 
+        <!-- Bannière contenu partagé : gérée via JS -->
+        <div id="login-song-banner" class="gw-share-banner hidden"></div>
+
         <div class="auth-logo">
           <img src="./img/logo princ.svg" alt="Geniwork" class="logo-img" />
           <span class="logo-text">Geni<strong>work</strong></span>
@@ -186,6 +189,9 @@
     <div class="phone-frame">
       <div class="auth-screen">
         <button class="btn-back" onclick="goTo('screen-landing')"><i class="fas fa-arrow-left"></i></button>
+
+        <!-- Bannière contenu partagé : gérée via JS -->
+        <div id="register-song-banner" class="gw-share-banner hidden"></div>
 
         <div class="auth-header no-logo">
           <h1>Inscription</h1>
@@ -296,6 +302,9 @@
           <div class="resend-row">
             Vous n'avez pas reçu le code ?
             <button class="link-blue" onclick="resendCode()">Renvoyer</button>
+          </div>
+          <div style="margin-top:12px;padding:10px 14px;background:#FFF7ED;border:1px solid #FED7AA;border-radius:10px;font-size:12.5px;color:#92400E;text-align:center;line-height:1.5">
+            📬 Si vous ne voyez pas le code dans votre boîte de réception, <strong>vérifiez votre dossier Spam / Courrier indésirable</strong>.
           </div>
         </div>
       </div>
@@ -610,9 +619,6 @@
 
       <!-- ── TOPBAR ── -->
       <header class="app-topbar">
-        <button class="app-topbar-btn" onclick="toggleSidebar()">
-          <i class="fas fa-bars"></i>
-        </button>
         <div class="app-brand" onclick="_admTapLogo()" style="cursor:default;user-select:none">
           <img src="./img/logo princ.svg" alt="" class="app-brand-logo"/>
           <span class="app-brand-name">Geni<strong>work</strong></span>
@@ -624,6 +630,9 @@
           <button class="app-topbar-btn notif-btn" onclick="showPage('p-notifs');renderNotifs()">
             <i class="fas fa-bell"></i>
             <span class="notif-badge" id="notif-badge">3</span>
+          </button>
+          <button class="app-topbar-btn topbar-menu-btn" onclick="toggleSidebar()">
+            <i class="fas fa-bars"></i>
           </button>
         </div>
       </header>
@@ -773,28 +782,37 @@
               <i class="fas fa-arrow-up"></i> Nouveaux posts
             </div>
 
-            <!-- Compositeur de post -->
-            <div class="composer-card">
-              <div class="composer-row">
-                <div class="user-av" id="composer-av">
-                  <span id="composer-initials">?</span>
+            <!-- ── HERO SECTION ── -->
+            <div class="feed-hero">
+              <div class="feed-hero-inner">
+                <div class="feed-hero-text">
+                  <h2 class="feed-hero-title">Bonjour, 👋<br><span id="hero-firstname">Bienvenue</span></h2>
+                  <p class="feed-hero-sub">Découvrez des talents qualifiés<br>et faites avancer vos projets.</p>
                 </div>
-                <button class="composer-placeholder" onclick="showPage('p-publish')" data-i18n="composer.ph">
-                  Quoi de neuf ?
-                </button>
-                <button class="composer-plus" onclick="showPage('p-publish')">
-                  <i class="fas fa-plus"></i>
-                </button>
+                <div class="feed-hero-av-wrap">
+                  <div class="user-av feed-hero-av" id="composer-av" onclick="showPage('p-profil');renderProfilePage()" style="cursor:pointer">
+                    <span id="composer-initials">?</span>
+                  </div>
+                  <span class="feed-hero-online-dot"></span>
+                </div>
               </div>
-              <div class="composer-media composer-media-discover">
-                <button class="composer-discover-btn composer-short-btn" onclick="openShortsDiscover()">
-                  <i class="fas fa-mobile-screen-button"></i> Shorts
+              <!-- Catégories -->
+              <div class="feed-hero-cats">
+                <button class="feed-cat-btn feed-cat-video" onclick="openVideosDiscover()">
+                  <i class="fas fa-video"></i> Vidéo
                 </button>
-                <button class="composer-discover-btn composer-video-btn" onclick="openVideosDiscover()">
-                  <i class="fas fa-play-circle"></i> Vidéos
+                <button class="feed-cat-btn feed-cat-short" onclick="openShortsDiscover()">
+                  <i class="fas fa-mobile-screen-button"></i> Short
+                </button>
+                <button class="feed-cat-btn feed-cat-ai" onclick="openBusinessAI()">
+                  <span class="feed-cat-ai-badge">AI</span> Business AI
+                </button>
+                <button class="feed-cat-btn feed-cat-collab" onclick="openMarketplaceCollab()">
+                  <i class="fas fa-users"></i> Collaborateurs
                 </button>
               </div>
             </div>
+
 
             <!-- Liste des posts -->
             <div id="feed-list"></div>
@@ -932,13 +950,17 @@
                 <div class="mk-cat-ico"><i class="fas fa-box-open"></i></div>
                 <span>Produit</span>
               </button>
-              <button class="mk-cat" onclick="setMkCat(this,'ebook')">
+              <button class="mk-cat" id="mk-cat-btn-ebook" onclick="setMkCat(this,'ebook')">
                 <div class="mk-cat-ico"><i class="fas fa-book-open"></i></div>
                 <span>Ebook</span>
               </button>
-              <button class="mk-cat" onclick="setMkCat(this,'collab')">
+              <button class="mk-cat" id="mk-cat-btn-collab" onclick="setMkCat(this,'collab')">
                 <div class="mk-cat-ico"><i class="fas fa-handshake"></i></div>
                 <span>Collaboration</span>
+              </button>
+              <button class="mk-cat" id="mk-cat-btn-artiste" onclick="setMkCat(this,'artiste')">
+                <div class="mk-cat-ico"><i class="fas fa-music"></i></div>
+                <span>Artiste</span>
               </button>
             </div>
 
@@ -963,6 +985,40 @@
               <div id="collab-list-wrap" style="padding:0 16px"></div>
             </div>
 
+            <!-- ══ ARTISTE / STREAMING ══ -->
+            <div id="mk-artiste-section" style="display:none">
+
+              <!-- Hero header style Spotify -->
+              <div style="background:linear-gradient(160deg,#2D0A5E 0%,#0F172A 70%);border-radius:16px;padding:20px 16px 16px;margin-bottom:16px;position:relative;overflow:hidden">
+                <div style="position:absolute;top:-20px;right:-20px;width:120px;height:120px;border-radius:50%;background:rgba(124,58,237,.18);pointer-events:none"></div>
+                <div style="position:absolute;bottom:-30px;left:30%;width:80px;height:80px;border-radius:50%;background:rgba(219,39,119,.12);pointer-events:none"></div>
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+                  <div style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#7C3AED,#DB2777);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+                    <i class="fas fa-music" style="color:#fff;font-size:16px"></i>
+                  </div>
+                  <div>
+                    <div style="color:#F1F5F9;font-weight:800;font-size:16px">Sons &amp; Musiques</div>
+                    <div style="color:#94A3B8;font-size:12px">Découvrez les artistes de la communauté</div>
+                  </div>
+                </div>
+                <button onclick="_artisteOpenPost()" style="background:linear-gradient(135deg,#7C3AED,#DB2777);border:none;border-radius:25px;padding:10px 20px;color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+                  <i class="fas fa-plus"></i> Publier un son
+                </button>
+              </div>
+
+              <!-- Barre de recherche -->
+              <div style="position:relative;margin-bottom:12px">
+                <i class="fas fa-search" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:#475569;font-size:13px;pointer-events:none"></i>
+                <input id="artiste-search-input" type="text" placeholder="Chercher un artiste ou un son…"
+                  oninput="_artisteOnSearch(this.value)"
+                  style="width:100%;background:#1E293B;border:1px solid #334155;border-radius:25px;
+                         padding:10px 14px 10px 36px;color:#F1F5F9;font-size:13px;box-sizing:border-box;
+                         outline:none;-webkit-appearance:none">
+              </div>
+
+              <!-- Liste style Spotify -->
+              <div id="artiste-list-wrap" style="padding:0 4px"></div>
+            </div>
 
             <!-- Services des membres -->
             <div id="mk-user-services-section" style="display:none">
@@ -971,6 +1027,9 @@
               </div>
               <div id="mk-user-services-list" class="mk-services-scroll"></div>
             </div>
+
+            <!-- ══ SECTION COMMERCE (cachée en mode Artiste) ══ -->
+            <div id="mk-commerce-section">
 
             <!-- Acheter ou vendre -->
             <h3 class="mk-section-title">Acheter ou vendre</h3>
@@ -1013,6 +1072,8 @@
             <div id="mk-tx-buy" class="mk-tx-list"></div>
             <div id="mk-tx-sell" class="mk-tx-list hidden"></div>
 
+            </div><!-- /mk-commerce-section -->
+
           </div><!-- /page-scroll -->
 
           <!-- FAB Vendre -->
@@ -1036,9 +1097,10 @@
           <div class="page-scroll pub-scroll">
             <div class="pub-composer">
               <div class="user-av lg" id="pub-av"><span id="pub-initials">?</span></div>
-              <div class="pub-right">
+              <div class="pub-right" style="position:relative">
                 <p class="pub-name" id="pub-name">—</p>
-                <textarea id="pub-text" placeholder="Partagez une actualité, un projet, une idée..." rows="5"></textarea>
+                <textarea id="pub-text" placeholder="Partagez une actualité, un projet, une idée... #hashtag" rows="5" oninput="_gwHashtagSuggest(this)"></textarea>
+                <div id="gw-hashtag-suggest" style="display:none;position:absolute;left:0;right:0;background:#1E293B;border:1px solid #334155;border-radius:10px;z-index:200;max-height:160px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.4)"></div>
               </div>
             </div>
 
@@ -2717,6 +2779,14 @@
             <i class="fas fa-arrow-left"></i>
           </button>
 
+          <!-- Vidéo précédente / suivante — toujours visibles, gauche/droite de l'écran -->
+          <button class="vpd-nav-btn vpd-nav-prev" onclick="event.stopPropagation();vpGoPrevVideo()" aria-label="Vidéo précédente">
+            <i class="fas fa-chevron-left"></i>
+          </button>
+          <button class="vpd-nav-btn vpd-nav-next" onclick="event.stopPropagation();vpGoNextVideo()" aria-label="Vidéo suivante">
+            <i class="fas fa-chevron-right"></i>
+          </button>
+
           <!-- Controls overlay — hidden by default, tap vp-area to reveal -->
           <div class="vpd-ctrl-overlay" id="vpd-ctrl-overlay" onclick="vpAreaTap(event)">
 
@@ -3352,6 +3422,10 @@
             <i class="fas fa-circle-check"></i><span>Badge vérifié</span>
             <span class="adm-sidebar-badge hidden" id="adm-badge-badges">0</span>
           </button>
+          <button class="adm-sidebar-item" id="adm-nav-artiste" onclick="_admSwitchTab('artiste')">
+            <i class="fas fa-music"></i><span>Artistes</span>
+            <span class="adm-sidebar-badge hidden" id="adm-badge-artiste">0</span>
+          </button>
 
           <!-- ── Contenu ── -->
           <div class="adm-sidebar-nav-label">Contenu</div>
@@ -3361,6 +3435,7 @@
           </button>
           <button class="adm-sidebar-item" id="adm-nav-marketplace" onclick="_admSwitchTab('marketplace')">
             <i class="fas fa-store"></i><span>Marketplace</span>
+            <span class="adm-sidebar-badge hidden" id="adm-badge-artiste">0</span>
           </button>
           <button class="adm-sidebar-item" id="adm-nav-reports" onclick="_admSwitchTab('reports')">
             <i class="fas fa-flag"></i><span>Signalements</span>
@@ -3395,6 +3470,12 @@
           <button class="adm-sidebar-item" id="adm-nav-security" onclick="_admSwitchTab('security')">
             <i class="fas fa-shield-halved"></i><span>Sécurité</span>
             <span class="adm-sidebar-badge hidden" id="adm-badge-security">0</span>
+          </button>
+
+          <!-- ── Sauvegarde ── -->
+          <div class="adm-sidebar-nav-label">Données</div>
+          <button class="adm-sidebar-item" id="adm-nav-backup" onclick="_admSwitchTab('backup')">
+            <i class="fas fa-database"></i><span>Sauvegarde</span>
           </button>
 
         </nav>
@@ -3453,7 +3534,8 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260609p"></script>
+  <script src="js/app.js?v=20260609v"></script>
+  <script src="js/gw-messaging.js?v=20260618"></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">
