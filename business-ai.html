@@ -412,15 +412,15 @@
       if (creditState.credits > 0) {
         box.innerHTML = '<div class="cta-icon">💎</div>'
           + '<h3>' + creditState.credits + ' crédits disponibles</h3>'
-          + '<p>Plan ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + (creditState.renews ? ' · crédits renouvelés chaque mois' : ' · crédit unique, non renouvelable') + '. Chaque génération coûte 1 à 5 crédits selon l\\'outil.</p>'
-          + '<a class="cta-btn" href="/">Retour à l\\'app →</a>';
+          + '<p>Plan ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + (creditState.renews ? ' · crédits renouvelés chaque mois' : ' · crédit unique, non renouvelable') + '. Chaque génération coûte 1 à 5 crédits selon l\'outil.</p>'
+          + '<a class="cta-btn" href="/">Retour à l\'app →</a>';
         return;
       }
       box.innerHTML = '<div class="cta-icon">⚠️</div>'
         + '<h3>Crédits épuisés</h3>'
         + '<p>' + (creditState.plan === 'free'
-          ? 'Votre crédit gratuit a été utilisé. Passez à un abonnement Premium ou Business Pro depuis l\\'app pour continuer.'
-          : 'Vos crédits ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + ' sont épuisés ce mois-ci. Ils reviendront le mois prochain, ou achetez un pack de crédits depuis l\\'app.')
+          ? 'Votre crédit gratuit a été utilisé. Passez à un abonnement Premium ou Business Pro depuis l\'app pour continuer.'
+          : 'Vos crédits ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + ' sont épuisés ce mois-ci. Ils reviendront le mois prochain, ou achetez un pack de crédits depuis l\'app.')
         + '</p>'
         + '<a class="cta-btn" href="/">Voir les abonnements →</a>';
     }
@@ -456,7 +456,7 @@
     }
     function timeAgo(ts) {
       const diffMin = Math.round((Date.now() - ts) / 60000);
-      if (diffMin < 1) return 'à l\\'instant';
+      if (diffMin < 1) return 'à l\'instant';
       if (diffMin < 60) return 'il y a ' + diffMin + ' min';
       const diffH = Math.round(diffMin / 60);
       if (diffH < 24) return 'il y a ' + diffH + 'h';
@@ -465,13 +465,13 @@
     function renderHistoryPanel() {
       const panel = document.getElementById('history-panel');
       const keys = Object.keys(featureHistory).filter((k) => featureHistory[k].length);
-      if (!keys.length) { panel.innerHTML = '<div class="history-empty">Aucune conversation pour l\\'instant.</div>'; return; }
+      if (!keys.length) { panel.innerHTML = '<div class="history-empty">Aucune conversation pour l\'instant.</div>'; return; }
       keys.sort((a, b) => (historyMeta[b] ? historyMeta[b].updated : 0) - (historyMeta[a] ? historyMeta[a].updated : 0));
       panel.innerHTML = keys.map((key) => {
         const f = FEATURES[key];
         const count = featureHistory[key].length;
         const updated = historyMeta[key] ? timeAgo(historyMeta[key].updated) : '';
-        return '<button class="history-item" onclick="openHistoryItem(\\'' + key + '\\')">'
+        return '<button class="history-item" onclick="openHistoryItem(\'' + key + '\')">'
           + '<span class="hi-icon">' + f.icon + '</span>'
           + '<span><span class="hi-label">' + f.label + '</span><br><span class="hi-meta">' + count + ' message(s) · ' + updated + '</span></span>'
           + '</button>';
@@ -573,7 +573,7 @@
       const sendBtn = document.getElementById('send-btn');
 
       if (!key) { alert('Choisissez une fonctionnalité ci-dessus.'); return; }
-      if (!message && !pendingFile) { alert('Décrivez votre demande avant d\\'envoyer.'); return; }
+      if (!message && !pendingFile) { alert('Décrivez votre demande avant d\'envoyer.'); return; }
 
       if (!featureHistory[key]) featureHistory[key] = [];
 
