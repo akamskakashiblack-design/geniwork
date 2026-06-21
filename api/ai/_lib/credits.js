@@ -27,15 +27,31 @@ async function getCreditState(email) {
 
   let credits = typeof data.aiCredits === 'number' ? data.aiCredits : null;
   let cycleMonth = data.aiCycleMonth || null;
+  const planChanged = data.aiPlanGranted !== plan;
 
   if (credits === null) {
+    /* Premiere utilisation : on accorde le quota du plan actuel. */
     credits = cfg.credits;
     cycleMonth = currentMonthKey();
-    await patchProfile(email, { aiCredits: credits, aiCycleMonth: cycleMonth });
+    await patchProfile(email, { aiCredits: credits, aiCycleMonth: cycleMonth, aiPlanGranted: plan });
+  } else if (cfg.renews && planChanged) {
+    /* Souscription/changement vers un plan payant (ex: PayPal confirme) :
+       les credits du nouveau plan sont accordes immediatement, sans
+       attendre le prochain mois. */
+    credits = cfg.credits;
+    cycleMonth = currentMonthKey();
+    await patchProfile(email, { aiCredits: credits, aiCycleMonth: cycleMonth, aiPlanGranted: plan });
   } else if (cfg.renews && cycleMonth !== currentMonthKey()) {
+    /* Renouvellement mensuel normal. */
     credits = cfg.credits;
     cycleMonth = currentMonthKey();
-    await patchProfile(email, { aiCredits: credits, aiCycleMonth: cycleMonth });
+    await patchProfile(email, { aiCredits: credits, aiCycleMonth: cycleMonth, aiPlanGranted: plan });
+  } else if (!cfg.renews && planChanged && credits > cfg.credits) {
+    /* Retour au plan Gratuit apres un plan payant : on plafonne le solde
+       au quota Gratuit pour eviter de "banquer" des credits payants en
+       souscrivant puis en annulant immediatement. */
+    credits = cfg.credits;
+    await patchProfile(email, { aiCredits: credits, aiPlanGranted: plan });
   }
 
   return { plan, credits, cycleMonth, planCredits: cfg.credits, renews: cfg.renews };
