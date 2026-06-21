@@ -679,7 +679,7 @@
       const data = getExportData(btn);
       if (!el || !data) return;
       const html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><title>GENIWORK</title></head><body>' + el.innerHTML + '</body></html>';
-      triggerDownload(new Blob(['\\ufeff', html], { type: 'application/msword' }), data.filenameBase + '.doc');
+      triggerDownload(new Blob(['﻿', html], { type: 'application/msword' }), data.filenameBase + '.doc');
     }
     function downloadExcel(btn) {
       const wrap = btn.closest('.export-wrap');
@@ -687,7 +687,7 @@
       const data = getExportData(btn);
       if (!el || !data) return;
       const html = '<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"><title>GENIWORK</title></head><body>' + el.innerHTML + '</body></html>';
-      triggerDownload(new Blob(['\\ufeff', html], { type: 'application/vnd.ms-excel' }), data.filenameBase + '.xls');
+      triggerDownload(new Blob(['﻿', html], { type: 'application/vnd.ms-excel' }), data.filenameBase + '.xls');
     }
     function downloadHTML(btn) {
       const data = getExportData(btn);
