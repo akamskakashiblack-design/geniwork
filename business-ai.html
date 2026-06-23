@@ -439,6 +439,10 @@
           data[key] = { messages: featureHistory[key], html: el ? el.innerHTML : '', updated: historyMeta[key] ? historyMeta[key].updated : Date.now() };
         }
         localStorage.setItem('geniwork-ai-history-' + userEmail, JSON.stringify(data));
+        // exportStore alimente les boutons PDF/Word/Excel via data-idx : sans le
+        // persister, ces boutons pointent vers un tableau vide apres rechargement
+        // et les telechargements ne font plus rien (silencieusement).
+        localStorage.setItem('geniwork-ai-exportstore-' + userEmail, JSON.stringify(exportStore));
       } catch (e) {}
     }
     function loadHistory() {
@@ -452,6 +456,8 @@
           const el = getOrCreateTranscript(key);
           el.innerHTML = data[key].html || '';
         }
+        const savedStore = localStorage.getItem('geniwork-ai-exportstore-' + userEmail);
+        if (savedStore) exportStore = JSON.parse(savedStore);
       } catch (e) {}
     }
     function timeAgo(ts) {
