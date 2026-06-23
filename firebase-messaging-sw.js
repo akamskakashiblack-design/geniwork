@@ -22,15 +22,18 @@ const messaging = firebase.messaging();
 messaging.onBackgroundMessage(function(payload) {
   var title   = (payload.notification && payload.notification.title) || (payload.data && payload.data.title) || 'Geniwork';
   var body    = (payload.notification && payload.notification.body)  || (payload.data && payload.data.body)  || '';
-  var icon    = (payload.notification && payload.notification.icon)  || '/img/icon-192.png';
+  var icon    = (payload.notification && payload.notification.icon)
+             || (payload.data && payload.data.icon)
+             || 'https://geniwork.vercel.app/img/icon-192.png';
 
   self.registration.showNotification(title, {
     body:    body,
     icon:    icon,
-    badge:   '/img/icon-96.png',
+    badge:   'https://geniwork.vercel.app/img/icon-96.png',
     vibrate: [200, 100, 200],
     tag:     payload.data ? (payload.data.tag || 'geniwork') : 'geniwork',
-    data:    payload.data || {}
+    data:    payload.data || {},
+    renotify: true
   });
 });
 

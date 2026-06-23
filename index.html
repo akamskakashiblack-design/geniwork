@@ -624,6 +624,9 @@
           <span class="app-brand-name">Geni<strong>work</strong></span>
         </div>
         <div class="topbar-right">
+          <button id="job-topbar-btn" class="app-topbar-btn" onclick="showPage('p-jobs');_jobRenderList()" title="Offres d'emploi">
+            <i class="fas fa-briefcase"></i>
+          </button>
           <button class="app-topbar-btn" onclick="openSearch()">
             <i class="fas fa-magnifying-glass"></i>
           </button>
@@ -697,6 +700,15 @@
               <span class="sdb-label">Tableau de bord</span>
               <span class="sdb-desc">Vue d'ensemble de votre activité</span>
             </div>
+          </button>
+
+          <button class="sidebar-item" id="sdb-recruiter-dash" style="display:none" onclick="closeSidebar();_jobOpenRecruiterDashboard()">
+            <span class="sdb-icon"><i class="fas fa-user-tie"></i></span>
+            <div class="sdb-text">
+              <span class="sdb-label">Tableau de bord recruteur</span>
+              <span class="sdb-desc">Recevez les CV des candidatures simplifiées.</span>
+            </div>
+            <span class="sdb-plan-chip hidden" id="sdb-recruiter-badge" style="background:#EF4444;color:#fff">0</span>
           </button>
 
           <button class="sidebar-item" onclick="closeSidebar();openSubPage()">
@@ -1156,6 +1168,19 @@
                 </div>
               </div>
 
+              <!-- Recruteur — offre d'emploi -->
+              <div class="pub-media-row pub-media-row-job">
+                <div class="pub-media-label">
+                  <i class="fas fa-briefcase" style="color:#16A34A"></i>
+                  <span style="color:#16A34A;font-weight:700">Recruteur</span>
+                </div>
+                <div class="pub-media-btns">
+                  <button class="pub-type-btn" onclick="_jobRecruiterEntry()">
+                    <i class="fas fa-plus"></i> Poste un emploi
+                  </button>
+                </div>
+              </div>
+
             </div><!-- /pub-media-section -->
 
             <!-- Infos specs vidéo -->
@@ -1188,6 +1213,35 @@
                    style="display:none" onchange="handleImgPick(this)"/>
             <input type="file" id="cam-front-video"   accept="video/mp4,video/quicktime,video/*" capture="user"
                    style="display:none" onchange="handleVideoPick(this)"/>
+          </div>
+        </section>
+
+        <!-- ▸ OFFRES D'EMPLOI -->
+        <section id="p-jobs" class="app-page">
+          <div class="inner-topbar">
+            <button class="back-btn-sm" onclick="showPage('p-home')">
+              <i class="fas fa-arrow-left"></i>
+            </button>
+            <h2>Offres d'emploi</h2>
+            <span style="width:32px"></span>
+          </div>
+          <div style="display:flex;gap:6px;padding:12px 14px 0">
+            <button id="job-tab-all" class="job-tab-btn active" onclick="_jobSetTab('all')" style="flex:1;padding:9px;border:1.5px solid #E2E8F0;border-radius:10px;background:#16A34A;color:#fff;font-size:12.5px;font-weight:700;cursor:pointer">Toutes</button>
+            <button id="job-tab-saved" class="job-tab-btn" onclick="_jobSetTab('saved')" style="flex:1;padding:9px;border:1.5px solid #E2E8F0;border-radius:10px;background:#fff;color:#374151;font-size:12.5px;font-weight:700;cursor:pointer"><i class="fas fa-bookmark"></i> Sauvegardées</button>
+            <button id="job-tab-history" class="job-tab-btn" onclick="_jobSetTab('history')" style="flex:1;padding:9px;border:1.5px solid #E2E8F0;border-radius:10px;background:#fff;color:#374151;font-size:12.5px;font-weight:700;cursor:pointer"><i class="fas fa-clock-rotate-left"></i> Mes candidatures</button>
+          </div>
+          <div id="job-search-row" style="display:flex;gap:8px;padding:12px 14px 0">
+            <div style="flex:1;position:relative">
+              <i class="fas fa-magnifying-glass" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:#94A3B8;font-size:13px"></i>
+              <input id="job-search-poste" placeholder="Poste…" oninput="_jobRenderList()" style="width:100%;padding:10px 12px 10px 32px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box;outline:none">
+            </div>
+            <div style="flex:1;position:relative">
+              <i class="fas fa-location-dot" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:#94A3B8;font-size:13px"></i>
+              <input id="job-search-ville" placeholder="Ville…" oninput="_jobRenderList()" style="width:100%;padding:10px 12px 10px 32px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box;outline:none">
+            </div>
+          </div>
+          <div class="page-scroll" id="job-list-wrap" style="padding:14px">
+            <!-- Rendu par JS via _jobRenderList() -->
           </div>
         </section>
 
@@ -2654,6 +2708,27 @@
         </div>
       </div>
 
+      <!-- ── RECADRAGE PHOTO GÉNÉRIQUE (marketplace / services / ebook) ── -->
+      <div id="gw-rect-crop-modal" style="display:none;position:fixed;inset:0;z-index:99999;background:#0d0d0d;flex-direction:column;align-items:center;justify-content:center;gap:20px;padding:24px">
+        <p style="color:#fff;font-weight:700;font-size:17px;margin:0">Recadrer la photo</p>
+        <div id="gw-rect-crop-viewport" style="position:relative;width:280px;height:280px;overflow:hidden;background:#000;border-radius:10px;touch-action:none;flex-shrink:0">
+          <img id="gw-rect-crop-img" src="" alt="" draggable="false"
+               style="position:absolute;transform-origin:0 0;cursor:grab;-webkit-user-drag:none;user-select:none;max-width:none"/>
+          <div style="position:absolute;inset:0;border:2px solid rgba(255,255,255,.75);border-radius:6px;pointer-events:none"></div>
+        </div>
+        <div style="width:280px;display:flex;align-items:center;gap:10px">
+          <i class="fas fa-magnifying-glass-minus" style="color:#6B7280;font-size:14px"></i>
+          <input type="range" id="gw-rect-crop-zoom" min="0.1" max="5" step="0.01" value="1"
+                 style="flex:1;accent-color:#2563EB;height:4px">
+          <i class="fas fa-magnifying-glass-plus" style="color:#6B7280;font-size:14px"></i>
+        </div>
+        <p style="color:#9CA3AF;font-size:12px;margin:0;text-align:center">Glissez pour recadrer · Pincez ou utilisez le curseur pour zoomer</p>
+        <div style="width:280px;display:flex;gap:12px">
+          <button onclick="_gwRectCropCancel()" style="flex:1;padding:13px;border-radius:10px;border:1.5px solid #374151;background:transparent;color:#fff;font-size:15px;font-weight:600;cursor:pointer">Annuler</button>
+          <button onclick="_gwRectCropApply()" style="flex:1;padding:13px;border-radius:10px;border:none;background:#2563EB;color:#fff;font-size:15px;font-weight:600;cursor:pointer">Valider</button>
+        </div>
+      </div>
+
       <!-- ── VIDEOS DISCOVER (YouTube-style) ── -->
       <div id="vd-modal" style="display:none;position:fixed;inset:0;z-index:750;background:#0F172A;flex-direction:column;overflow:hidden">
 
@@ -3439,6 +3514,10 @@
           <button class="adm-sidebar-item" id="adm-nav-marketplace" onclick="_admSwitchTab('marketplace')">
             <i class="fas fa-store"></i><span>Marketplace</span>
             <span class="adm-sidebar-badge hidden" id="adm-badge-artiste">0</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-recruiters" onclick="_admSwitchTab('recruiters')">
+            <i class="fas fa-user-tie"></i><span>Recruteurs</span>
+            <span class="adm-sidebar-badge hidden" id="adm-badge-recruiters">0</span>
           </button>
           <button class="adm-sidebar-item" id="adm-nav-reports" onclick="_admSwitchTab('reports')">
             <i class="fas fa-flag"></i><span>Signalements</span>

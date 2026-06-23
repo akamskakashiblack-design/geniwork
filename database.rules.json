@@ -20,7 +20,8 @@
       "dm_msgs": {
         "$dmFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": "auth != null",
+          ".indexOn": ["id", "at", "from"]
         }
       },
       "dm_meta": {
@@ -32,10 +33,12 @@
       "inboxes": {
         "$toFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": "auth != null",
+          ".indexOn": ["fromEmail", "at"]
         }
       },
       "group_msgs": {
+        ".read":  "auth != null",
         "$grpFbKey": {
           ".read":  "auth != null",
           ".write": "auth != null"
@@ -221,6 +224,10 @@
         ".read":  true,
         ".write": "auth != null"
       },
+      "settings_jobs_enabled": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
       "online": {
         ".read":  "auth != null",
         "$userFbKey": {
@@ -260,6 +267,118 @@
         ".write": "auth != null"
       },
       "security_events": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "restrictions": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "restriction_appeals": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "appeal_decisions": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "artiste_posts": {
+        ".read":  true,
+        ".write": "auth != null",
+        ".indexOn": ["ts", "uid"]
+      },
+      "artiste_stats": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
+      "artiste_verif_requests": {
+        ".read":  "auth != null",
+        ".indexOn": ["status", "ts"],
+        "$userKey": {
+          ".write": "auth != null"
+        }
+      },
+      "artiste_pending_notifs": {
+        "$userKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+      "artiste_likes": {
+        ".read":  "auth != null",
+        "$postId": {
+          ".read":  "auth != null",
+          "$userKey": {
+            ".write": "auth != null"
+          }
+        }
+      },
+      "artiste_dislikes": {
+        ".read":  "auth != null",
+        "$postId": {
+          ".read":  "auth != null",
+          "$userKey": {
+            ".write": "auth != null"
+          }
+        }
+      },
+      "artiste_played": {
+        "$postId": {
+          "$userKey": {
+            ".read":  "auth != null",
+            ".write": "auth != null"
+          }
+        }
+      },
+      "artiste_weekly_plays": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
+      "artiste_weekly_top_notif": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "deleted_posts": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "favcounts": {
+        ".read":  true,
+        "$postId": {
+          ".write": "auth != null"
+        }
+      },
+      "jobs": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
+      "recruiter_verifs": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "job_applications": {
+        ".read":  "auth != null",
+        ".write": "auth != null"
+      },
+      "job_saved": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+      "job_hist_hidden": {
+        "$userFbKey": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+      "recruiter_logos": {
+        ".read":  true,
+        ".write": "auth != null"
+      }
+    },
+    "gw_system": {
+      "reset_at": {
         ".read":  "auth != null",
         ".write": "auth != null"
       }

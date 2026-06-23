@@ -4,6 +4,9 @@
   "rewrites": [
     { "source": "/p/:id",                    "destination": "/api/post?id=:id" },
     { "source": "/api/(.*)",                 "destination": "/api/$1" },
+    { "source": "/privacy",                  "destination": "/pages/privacy.html" },
+    { "source": "/delete-account",           "destination": "/pages/delete-account.html" },
+    { "source": "/child-safety",             "destination": "/pages/child-safety.html" },
     { "source": "/firebase-messaging-sw.js", "destination": "/firebase-messaging-sw.js" },
     { "source": "/(.*)",                     "destination": "/index.html" }
   ],

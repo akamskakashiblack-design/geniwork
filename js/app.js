@@ -964,6 +964,25 @@ function _gwFbSyncStart() {
     _admSync('reports'); /* Visible dans signalements si modérés */
   });
 
+  /* ── Offres d'emploi ── */
+  _listen('jobs', 'gw_jobs', function() {
+    if (document.getElementById('job-list-wrap')) { try { _jobRenderList(); } catch(e){} }
+  });
+
+  /* ── Interrupteur global du module Emploi ── */
+  _listen('settings_jobs_enabled', 'gw_jobs_feature_enabled', function() {
+    try { _jobApplyFeatureVisibility(); } catch(e){}
+  });
+
+  /* ── Vérifications entreprise recruteur ── */
+  _listen('recruiter_verifs', 'gw_recruiter_verifs', function() { _admSync('recruiters'); try { _refreshSidebar(); } catch(e){} });
+
+  /* ── Candidatures simplifiées reçues par les recruteurs ── */
+  _listen('job_applications', 'gw_job_applications', function() {
+    try { _refreshSidebar(); } catch(e){}
+    if (document.getElementById('job-recdash-card')) { try { _jobOpenRecruiterDashboard(); } catch(e){} }
+  });
+
   /* ── Paiements / abonnements ── */
   _listen('payments', 'gw_payments', function() { _admSync('payments'); });
 
@@ -2162,7 +2181,8 @@ function _gwFbPreloadAndStart() {
     _gwFbDB.ref('gw/collab_requests').once('value'),
     _gwFbDB.ref('gw/profiles').once('value'),
     _gwFbDB.ref('gw/restrictions').once('value'),
-    _gwFbDB.ref('gw/restriction_appeals').once('value')
+    _gwFbDB.ref('gw/restriction_appeals').once('value'),
+    _gwFbDB.ref('gw/jobs').once('value')
   ]).then(function(snaps) {
 
     /* ── Utilisateurs ── */
@@ -2225,6 +2245,10 @@ function _gwFbPreloadAndStart() {
         localStorage.setItem('gw_restrictions', JSON.stringify(rstArr));
       } catch(e){}
     }
+    /* ── Offres d'emploi ── */
+    var jobsVal = snaps[9] ? snaps[9].val() : null;
+    if (jobsVal) try { localStorage.setItem('gw_jobs', JSON.stringify(jobsVal)); } catch(e){}
+
     /* ── Recours de restriction ── */
     var rstAppVal = snaps[8] ? snaps[8].val() : null;
     if (rstAppVal) {
@@ -2334,6 +2358,15 @@ function saveUsers(users) {
 function findUser(email) {
   return getUsers().find(function(u) {
     return u.email.toLowerCase() === email.toLowerCase();
+  });
+}
+/* Recherche un utilisateur par nom (exact, insensible à la casse/espaces) — évite les collisions d'identité */
+function findUserByName(nom, excludeEmail) {
+  var n = String(nom || '').trim().toLowerCase();
+  if (!n) return null;
+  return getUsers().find(function(u) {
+    if (excludeEmail && u.email && u.email.toLowerCase() === excludeEmail.toLowerCase()) return false;
+    return String(u.nom || '').trim().toLowerCase() === n;
   });
 }
 
@@ -2589,6 +2622,12 @@ var _resetEmail = '';       // email en cours de reset
 /* ══════════════════════════════════════════
    INSCRIPTION
 ══════════════════════════════════════════ */
+/* Empêche les utilisateurs de prendre un nom usurpant le compte officiel Geniwork */
+function _gwIsReservedName(nom) {
+  var n = String(nom || '').trim().toLowerCase().replace(/\s+/g, '');
+  return n === 'geniwork' || n === 'geniworkofficiel' || n === 'geniworkofficial';
+}
+
 function doRegister() {
   var nom   = _gwSanitize(document.getElementById('reg-nom').value.trim(), 100);
   var email = _gwSanitize(document.getElementById('reg-email').value.trim().toLowerCase(), 320);
@@ -2601,6 +2640,12 @@ function doRegister() {
   /* ─ Validations ─ */
   if (!nom) {
     showToast('Veuillez entrer votre nom complet', 'err'); return;
+  }
+  if (_gwIsReservedName(nom)) {
+    showToast('Ce nom est réservé au compte officiel Geniwork', 'err'); return;
+  }
+  if (findUserByName(nom)) {
+    showToast('Ce nom est déjà utilisé par un autre membre. Choisissez-en un autre.', 'err'); return;
   }
   if (!email || !email.includes('@') || !email.includes('.')) {
     showToast('Adresse e-mail invalide', 'err'); return;
@@ -3171,6 +3216,7 @@ _purgeDemoLegacy();
 
 function initApp(user) {
   _currentUser = user;
+  try { _jobApplyFeatureVisibility(); } catch(e){}
 
   /* Crée / renouvelle la session sécurisée */
   if (!_gwLoadSession()) {
@@ -3762,6 +3808,17 @@ function navTo(btn, pageId) {
     }
   }
 
+  if (pageId === 'p-jobs') {
+    try { _jobRenderList(); } catch(e) {}
+    if (_gwFbReady && _gwFbDB) {
+      _gwFbDB.ref('gw/jobs').once('value').then(function(snap) {
+        var jobsVal = snap.val();
+        if (jobsVal !== null) try { localStorage.setItem('gw_jobs', JSON.stringify(Array.isArray(jobsVal) ? jobsVal : Object.values(jobsVal))); } catch(e){}
+        try { _jobRenderList(); } catch(e) {}
+      }).catch(function(){});
+    }
+  }
+
   /* Recalcule les temps relatifs à l'ouverture de la page notifications */
   if (pageId === 'p-notifs') {
     try { renderNotifs(); } catch(e) {}
@@ -3849,6 +3906,22 @@ function _refreshSidebar() {
       avEl.innerHTML = '<img src="' + escHtml(profile.photo) + '" alt=""/>';
     } else {
       avEl.innerHTML = '<span>' + escHtml(getInitials(nom)) + '</span>';
+    }
+  }
+
+  /* Tableau de bord recruteur — visible uniquement si entreprise vérifiée */
+  var recBtn = document.getElementById('sdb-recruiter-dash');
+  if (recBtn && typeof _jobGetMyVerif === 'function') {
+    var myVerif = _jobGetMyVerif(_currentUser.email);
+    var isRecruiter = !!(myVerif && myVerif.status === 'approved');
+    recBtn.style.display = isRecruiter ? '' : 'none';
+    if (isRecruiter) {
+      var recBadge = document.getElementById('sdb-recruiter-badge');
+      if (recBadge) {
+        var nbApps = _jobGetApplicationsForRecruiter(_currentUser.email).filter(function(a) { return a.mode !== 'external' && !a.archived; }).length;
+        recBadge.textContent = nbApps;
+        recBadge.classList.toggle('hidden', nbApps === 0);
+      }
     }
   }
 }
@@ -5493,6 +5566,8 @@ function _getFeedPosts() {
     var key = String(p.id);
     if (seen[key]) return false;
     seen[key] = true;
+    /* Les offres d'emploi restent exclusivement dans la page Emploi, jamais dans le fil */
+    if (p.type === 'job') return false;
     return !(p.video && p.video.videoType === 'short');
   });
 }
@@ -5957,6 +6032,26 @@ function _buildCollabFeedCard(post) {
       '<div style="font-size:12.5px;opacity:.9;line-height:1.4">' + escHtml((cl.description || '').slice(0, 100)) + (cl.description && cl.description.length > 100 ? '…' : '') + '</div>' +
     '</div>' +
 
+    /* Photos jointes */
+    (function() {
+      var imgs = (cl.attachments || []).filter(function(a) { return a.isImg; });
+      if (!imgs.length) return '';
+      return '<div style="display:flex;gap:6px;margin:10px 14px 0;overflow-x:auto">' +
+        imgs.slice(0, 4).map(function(a) {
+          return '<img src="' + escHtml(a.data) + '" style="width:72px;height:72px;border-radius:10px;object-fit:cover;flex-shrink:0;cursor:pointer" ' +
+            'onclick="event.stopPropagation();window.open(this.src)">';
+        }).join('') +
+      '</div>';
+    })() +
+
+    /* Document joint — indicateur seulement, accès complet dans le détail après candidature */
+    (function() {
+      var doc = (cl.attachments || []).find(function(a) { return !a.isImg; });
+      if (!doc) return '';
+      return '<div style="display:flex;align-items:center;gap:6px;margin:10px 14px 0;padding:8px 12px;background:#F1F5F9;border-radius:10px;font-size:12px;color:#64748B">' +
+        '<i class="fas fa-file-alt" style="color:#6366F1"></i> Document joint · accessible après candidature</div>';
+    })() +
+
     /* Skills + CTA */
     '<div style="padding:10px 14px 12px">' +
       (skillsHtml ? '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px">' + skillsHtml + '</div>' : '') +
@@ -5972,6 +6067,8 @@ function _buildCollabFeedCard(post) {
 function buildPostCard(post) {
   /* Card dédiée pour les annonces de collaboration */
   if (post.type === 'collab') return _buildCollabFeedCard(post);
+  /* Card dédiée pour les offres d'emploi */
+  if (post.type === 'job') return _buildJobFeedCard(post);
 
   var card = document.createElement('div');
 
@@ -6174,9 +6271,11 @@ function buildPostCard(post) {
         '<i class="fas fa-retweet"></i> ' +
         escHtml(getDisplayName(post.ownerEmail, post.author)) + ' a republié' +
       '</div>';
-    /* Résout l'email de l'auteur original : champ stocké ou recherche par nom */
+    /* Résout l'email de l'auteur original : champ stocké ou recherche par nom
+       (jamais pour "Geniwork" — réservé au compte officiel, sans email réel, pour éviter
+       toute collision avec un éventuel utilisateur portant ce nom) */
     var roEmail = ro.ownerEmail || null;
-    if (!roEmail && ro.author) {
+    if (!roEmail && ro.author && ro.author !== 'Geniwork') {
       var roUser = getUsers().find(function(u) {
         return (u.nom || '').toLowerCase() === ro.author.toLowerCase() ||
                getDisplayName(u.email, u.nom).toLowerCase() === ro.author.toLowerCase();
@@ -6198,7 +6297,7 @@ function buildPostCard(post) {
     var _roNomSafe  = (ro.author  || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     var _roRoleSafe = (ro.role    || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     var _roEmSafe   = (roEmail    || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    var _roProfileCall = roEmail && ro.author === 'Geniwork'
+    var _roProfileCall = ro.author === 'Geniwork'
       ? "openUserProfileView({nom:'Geniwork',email:null,role:'Compte officiel certifié',_isOfficial:true})"
       : "openUserProfileView({nom:'" + _roNomSafe + "',email:'" + _roEmSafe + "',role:'" + _roRoleSafe + "'})";
     repostCardHtml =
@@ -6244,7 +6343,9 @@ function buildPostCard(post) {
     '</div>' +
     '<div class="post-body">' +
       (post.type === 'repost' && post.repostOf
-        ? (shortText ? '<p class="post-text" id="ptxt-' + post.id + '">' + escHtml(shortText) + '</p>' : '') +
+        ? (shortText ? '<p class="post-text" id="ptxt-' + post.id + '">' + escHtml(shortText) +
+            (needMore ? '… <button class="see-more" onclick="expandPost(' + post.id + ')">Voir plus</button>' : '') +
+            '</p>' : '') +
           repostCardHtml
         : '<p class="post-text" id="ptxt-' + post.id + '">' + escHtml(shortText) +
           (needMore ? '… <button class="see-more" onclick="expandPost(' + post.id + ')">Voir plus</button>' : '') +
@@ -6350,6 +6451,10 @@ function expandRepostOrig(postId) {
   if (!el) return;
   var full = el.getAttribute('data-full') || '';
   el.textContent = full;
+  /* Lève le clamp CSS (-webkit-line-clamp:3) qui limitait l'affichage à 3 lignes */
+  el.style.display = 'block';
+  el.style.webkitLineClamp = 'unset';
+  el.style.overflow = 'visible';
 }
 
 /* Expand le texte complet d'un commentaire tronqué */
@@ -7006,9 +7111,21 @@ function _vpBuildCommentHtml(c) {
       '<div class="vpd-comment-author">' + escHtml(cNom) + ' ' + cBadge +
         '<span class="vpd-comment-time">· ' + _timeAgo(c.at || 0) + '</span>' +
       '</div>' +
-      '<div class="vpd-comment-text">' + escHtml((c.text || '').substring(0, 120)) + '</div>' +
+      '<div class="vpd-comment-text" id="vpdctxt-' + c.id + '" data-full="' + escHtml(c.text || '') + '">' +
+        escHtml((c.text || '').length > 120 ? (c.text || '').slice(0, 120) : (c.text || '')) +
+        ((c.text || '').length > 120
+          ? '… <span class="see-more" style="cursor:pointer;color:#2563EB;font-weight:600" onclick="event.stopPropagation();_vpdExpandComment(\'' + c.id + '\')">Voir plus</span>'
+          : '') +
+      '</div>' +
     '</div>' +
   '</div>';
+}
+
+/* Expand le texte complet d'un commentaire tronqué (vue détaillée vidéo) */
+function _vpdExpandComment(commentId) {
+  var el = document.getElementById('vpdctxt-' + commentId);
+  if (!el) return;
+  el.textContent = el.getAttribute('data-full') || '';
 }
 
 /* ── Populates YouTube-style detail sections (title/author/desc/comments/related) ── */
@@ -15134,6 +15251,203 @@ function handleProfilePhoto(input) {
 }
 
 /* ══════════════════════════════════════════
+   RECADRAGE GÉNÉRIQUE — photos marketplace / services / ebook
+   File d'attente : traite chaque photo sélectionnée une par une dans
+   la fenêtre de recadrage avant de l'ajouter à la liste de l'appelant.
+══════════════════════════════════════════ */
+var _rcSrcImg          = null;
+var _rcScale           = 1;
+var _rcX               = 0;
+var _rcY               = 0;
+var _rcVW              = 280;
+var _rcVH              = 280;
+var _rcOutW            = 800;
+var _rcOutH            = 800;
+var _rcQueue           = [];
+var _gwRectCropDone    = null;
+var _gwRectCropCancelFn = null;
+
+/* files: FileList/array de File · aspectW/aspectH: ratio du cadre (1,1 = carré)
+   onEach(dataUrl) est appelé à chaque photo validée */
+function _gwQueueImageCrop(files, aspectW, aspectH, onEach) {
+  var arr = Array.prototype.slice.call(files);
+  if (!arr.length) return;
+  _rcQueue = arr;
+  _gwProcessNextCropInQueue(aspectW, aspectH, onEach);
+}
+
+function _gwProcessNextCropInQueue(aspectW, aspectH, onEach) {
+  if (!_rcQueue.length) return;
+  var file = _rcQueue.shift();
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    _gwOpenRectCrop(e.target.result, aspectW, aspectH,
+      function(dataUrl) { onEach(dataUrl); _gwProcessNextCropInQueue(aspectW, aspectH, onEach); },
+      function()         { _gwProcessNextCropInQueue(aspectW, aspectH, onEach); }
+    );
+  };
+  reader.readAsDataURL(file);
+}
+
+function _gwOpenRectCrop(src, aspectW, aspectH, onDone, onCancel) {
+  var modal = document.getElementById('gw-rect-crop-modal');
+  var imgEl = document.getElementById('gw-rect-crop-img');
+  var range = document.getElementById('gw-rect-crop-zoom');
+  var vp    = document.getElementById('gw-rect-crop-viewport');
+  if (!modal || !imgEl || !range || !vp) { if (onDone) onDone(src); return; }
+
+  /* La modale vit dans #screen-app, qui a son propre z-index (contexte d'empilement isolé,
+     voir .screen en CSS) — elle ne peut donc jamais passer au-dessus des panneaux ajoutés
+     directement à <body> (formulaires marketplace, services, etc.). On la déplace sous
+     <body> pour qu'elle s'affiche toujours au-dessus, quel que soit l'écran ouvert. */
+  if (modal.parentNode !== document.body) document.body.appendChild(modal);
+
+  /* Dimensionne le cadre selon le ratio demandé (largeur fixe, hauteur proportionnelle) */
+  var W = 280, H = Math.round(W * (aspectH / aspectW));
+  var MAXH = 380;
+  if (H > MAXH) { H = MAXH; W = Math.round(H * (aspectW / aspectH)); }
+  _rcVW = W; _rcVH = H;
+  vp.style.width  = W + 'px';
+  vp.style.height = H + 'px';
+
+  _rcOutW = 800;
+  _rcOutH = Math.round(800 * (aspectH / aspectW));
+
+  _gwRectCropDone     = onDone;
+  _gwRectCropCancelFn = onCancel;
+
+  _rcSrcImg = new Image();
+  _rcSrcImg.onload = function() {
+    /* Échelle initiale : l'image recouvre tout le cadre (pas de bord vide) */
+    var scaleW = _rcVW / _rcSrcImg.naturalWidth;
+    var scaleH = _rcVH / _rcSrcImg.naturalHeight;
+    _rcScale = Math.max(scaleW, scaleH);
+    _rcX = (_rcVW - _rcSrcImg.naturalWidth  * _rcScale) / 2;
+    _rcY = (_rcVH - _rcSrcImg.naturalHeight * _rcScale) / 2;
+    _rcApplyTransform(imgEl);
+
+    range.min   = _rcScale.toFixed(4);
+    range.max   = (_rcScale * 5).toFixed(4);
+    range.step  = '0.01';
+    range.value = _rcScale;
+
+    _rcAttachEvents(imgEl, range);
+  };
+  _rcSrcImg.src = src;
+  imgEl.src = src;
+  modal.style.display = 'flex';
+}
+
+function _rcApplyTransform(imgEl) {
+  imgEl.style.transform = 'translate(' + _rcX + 'px,' + _rcY + 'px) scale(' + _rcScale + ')';
+}
+
+/* Empêche l'image de se décoller du cadre (pas de bord vide, contrairement au crop circulaire) */
+function _rcClamp() {
+  var iw = _rcSrcImg.naturalWidth  * _rcScale;
+  var ih = _rcSrcImg.naturalHeight * _rcScale;
+  var minX = _rcVW - iw, minY = _rcVH - ih;
+  if (_rcX > 0) _rcX = 0; if (_rcX < minX) _rcX = minX;
+  if (_rcY > 0) _rcY = 0; if (_rcY < minY) _rcY = minY;
+}
+
+function _rcAttachEvents(imgEl, range) {
+  var vp = document.getElementById('gw-rect-crop-viewport');
+  vp.onmousedown = null; vp.ontouchstart = null;
+
+  var isDragging = false, lastX = 0, lastY = 0;
+  var pinchStartDist = 0, pinchStartScale = 1;
+
+  vp.onmousedown = function(e) {
+    isDragging = true; lastX = e.clientX; lastY = e.clientY;
+    imgEl.style.cursor = 'grabbing'; e.preventDefault();
+  };
+  document.onmousemove = function(e) {
+    if (!isDragging) return;
+    _rcX += e.clientX - lastX; _rcY += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    _rcClamp(); _rcApplyTransform(imgEl);
+  };
+  document.onmouseup = function() { isDragging = false; imgEl.style.cursor = 'grab'; };
+
+  vp.ontouchstart = function(e) {
+    e.preventDefault();
+    if (e.touches.length === 1) {
+      isDragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    } else if (e.touches.length === 2) {
+      isDragging = false;
+      pinchStartDist  = Math.hypot(
+        e.touches[1].clientX - e.touches[0].clientX,
+        e.touches[1].clientY - e.touches[0].clientY);
+      pinchStartScale = _rcScale;
+    }
+  };
+  vp.ontouchmove = function(e) {
+    e.preventDefault();
+    if (e.touches.length === 1 && isDragging) {
+      _rcX += e.touches[0].clientX - lastX;
+      _rcY += e.touches[0].clientY - lastY;
+      lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+      _rcClamp(); _rcApplyTransform(imgEl);
+    } else if (e.touches.length === 2) {
+      var dist = Math.hypot(
+        e.touches[1].clientX - e.touches[0].clientX,
+        e.touches[1].clientY - e.touches[0].clientY);
+      _rcSetScale(pinchStartScale * dist / pinchStartDist, imgEl, range);
+    }
+  };
+  vp.ontouchend = function(e) { if (e.touches.length < 2) isDragging = false; };
+
+  range.oninput = function() { _rcSetScale(parseFloat(range.value), imgEl, range); };
+}
+
+function _rcSetScale(newScale, imgEl, range) {
+  var min = parseFloat(range.min), max = parseFloat(range.max);
+  newScale = Math.max(min, Math.min(max, newScale));
+  var ratio = newScale / _rcScale;
+  var cx = _rcVW / 2, cy = _rcVH / 2;
+  _rcX = cx - (cx - _rcX) * ratio;
+  _rcY = cy - (cy - _rcY) * ratio;
+  _rcScale = newScale;
+  range.value = newScale;
+  _rcClamp();
+  _rcApplyTransform(imgEl);
+}
+
+function _gwRectCropApply() {
+  if (!_rcSrcImg) return;
+  var srcX = (0 - _rcX) / _rcScale;
+  var srcY = (0 - _rcY) / _rcScale;
+  var srcW = _rcVW / _rcScale;
+  var srcH = _rcVH / _rcScale;
+
+  var canvas = document.createElement('canvas');
+  canvas.width = _rcOutW; canvas.height = _rcOutH;
+  canvas.getContext('2d').drawImage(_rcSrcImg, srcX, srcY, srcW, srcH, 0, 0, _rcOutW, _rcOutH);
+  var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+
+  var done = _gwRectCropDone;
+  _gwRectCropCancelInternal();
+  if (done) done(dataUrl);
+}
+
+function _gwRectCropCancel() {
+  var cancelFn = _gwRectCropCancelFn;
+  _gwRectCropCancelInternal();
+  if (cancelFn) cancelFn();
+}
+
+function _gwRectCropCancelInternal() {
+  var modal = document.getElementById('gw-rect-crop-modal');
+  if (modal) modal.style.display = 'none';
+  document.onmousemove = null;
+  document.onmouseup   = null;
+  _rcSrcImg = null;
+  _gwRectCropDone = null;
+  _gwRectCropCancelFn = null;
+}
+
+/* ══════════════════════════════════════════
    CROP / RECADRAGE PHOTO DE PROFIL
 ══════════════════════════════════════════ */
 var _cropSrcImg  = null;
@@ -15420,6 +15734,8 @@ function openEditName() {
     function() {
       var val = (document.getElementById('edit-name-input').value || '').trim();
       if (!val) { showToast('Le nom ne peut pas être vide', ''); return false; }
+      if (_gwIsReservedName(val)) { showToast('Ce nom est réservé au compte officiel Geniwork', 'err'); return false; }
+      if (findUserByName(val, _currentUser.email)) { showToast('Ce nom est déjà utilisé par un autre membre. Choisissez-en un autre.', 'err'); return false; }
       var p = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
       p.nom = val;
       saveUserProfile(_currentUser.email, p);
@@ -16516,7 +16832,8 @@ function _renderOfficialProfilePosts(container) {
   if (!container) return;
   container.innerHTML = '';
 
-  var offPosts = _offGetPosts();
+  /* Les vidéos Short restent exclusivement dans la section Shorts dédiée */
+  var offPosts = _offGetPosts().filter(function(p) { return !(p.video && p.video.videoType === 'short'); });
   if (!offPosts.length) {
     container.innerHTML =
       '<div class="profil-posts-empty">' +
@@ -16535,73 +16852,14 @@ function _renderOfficialProfilePosts(container) {
   container.appendChild(header);
 
   offPosts.forEach(function(p) {
-    /* Normalise le post officiel au format attendu par buildPostCard.
-       On utilise un ID numérique pour éviter les onclick invalides (off_xxx non quoté).
-       L'ID original p.id est conservé pour les actions vidéo/officielle. */
-    var logo = _admGetOfficialLogo ? _admGetOfficialLogo() : null;
-    /* Extrait le timestamp numérique de l'ID (off_1234567890 → 1234567890) */
-    var numId = parseInt(String(p.id).replace('off_', ''), 10) || Date.now();
-
-    var normalized = {
-      id:         numId,
-      author:     'Geniwork',
-      ownerEmail: null,
-      role:       'Publication officielle',
-      time:       _offTimeAgo(p.publishedAt),
-      at:         p.publishedAt ? new Date(p.publishedAt).getTime() : Date.now(),
-      text:       p.text || '',
-      images:     p.images || [],
-      video:      p.video || null,
-      likers:     Array.isArray(p.likers)   ? p.likers   : [],
-      baseLikes:  p.baseLikes || 0,
-      comments:   Array.isArray(p.comments) ? p.comments : []
-    };
-
-    var card = buildPostCard(normalized);
-
-    /* ── Fixups après construction ── */
-
-    /* 1. Avatar : logo officiel immédiat si en cache, sinon fetch async */
-    var avEl = card.querySelector('.user-av');
-    if (avEl) {
-      var _setAvLogo = function(src, el) {
-        if (!src || !el) return;
-        el.innerHTML = '<img src="' + escHtml(src) + '" alt="Geniwork" style="width:100%;height:100%;object-fit:cover;border-radius:50%">';
-        el.classList.add('av-photo');
-      };
-      if (logo) {
-        _setAvLogo(logo, avEl);
-      } else {
-        (function(el) {
-          _ensureOfficialLogo(function(src) { _setAvLogo(src, el); });
-        })(avEl);
-      }
-    }
-
-    /* 2. Clic auteur → ouvre le profil officiel */
-    var authorArea = card.querySelector('.post-author-area');
-    if (authorArea) authorArea.onclick = function(e) { e.stopPropagation(); openOfficialProfile(); };
-
-    /* 3. Masque le bouton Suivre et le menu (post officiel = pas d'actions normales) */
-    var followBtn = card.querySelector('.post-follow-btn'); if (followBtn) followBtn.remove();
-    var menuBtn   = card.querySelector('.post-menu-btn');  if (menuBtn)  menuBtn.style.display = 'none';
-
-    /* 4. Rewire le clic vidéo → _openOfficialVideo avec l'ID original */
-    if (p.video) {
-      var pvw = card.querySelector('.post-video-wrap');
-      if (pvw) {
-        (function(origId) {
-          pvw.onclick = function(e) {
-            e.stopPropagation();
-            closeUserProfileView();
-            setTimeout(function() { _openOfficialVideo(origId); }, 320);
-          };
-        })(p.id);
-      }
-    }
-
+    /* Réutilise le constructeur officiel déjà câblé sur _offGetPosts() (texte, image,
+       vidéo, short, like, commentaire, republication) — au lieu d'un buildPostCard
+       générique qui ne sait pas écrire dans le stockage officiel (likes cassés). */
+    var card = _buildOfficialCard(p);
     container.appendChild(card);
   });
+
+  if (typeof _initFeedVideoObserver === 'function') _initFeedVideoObserver();
 }
 
 /* ══════════════════════════════════════════
@@ -17375,7 +17633,17 @@ function _updateReviewsBadge(reviews) {
 /* ── Ouvrir le profil de l'auteur d'un post ── */
 function openAuthorProfile(postId) {
   var post = getAllPosts().find(function(p) { return p.id === postId; });
+  if (!post) {
+    /* Pas trouvé parmi les posts utilisateurs → c'est peut-être un post officiel */
+    var idNum = parseInt(String(postId).replace('off_', ''), 10);
+    post = _offGetPosts().find(function(p) { return p.id === idNum || 'off_' + p.id === postId; });
+  }
   if (!post) return;
+  /* Publication officielle Geniwork — sans email réel : toujours router vers le compte officiel dédié */
+  if (!post.ownerEmail && post.author === 'Geniwork') {
+    openUserProfileView({ nom: 'Geniwork', email: null, role: 'Compte officiel certifié', _isOfficial: true });
+    return;
+  }
   /* Utilise le nom actuel (peut avoir changé) */
   var displayNom  = getDisplayName(post.ownerEmail, post.author);
   var displayRole = getDisplayRole(post.ownerEmail, post.role);
@@ -21580,26 +21848,9 @@ function handleSvcPhotos(input) {
   var remaining = 4 - _svcPickedImages.length;
   if (remaining <= 0) { showToast('Maximum 4 photos', 'err'); return; }
   var files = Array.prototype.slice.call(input.files, 0, remaining);
-  var loaded = 0;
-  files.forEach(function(file) {
-    var reader = new FileReader();
-    reader.onload = function(e) {
-      /* Redimensionne via canvas */
-      var img = new Image();
-      img.onload = function() {
-        var canvas = document.createElement('canvas');
-        var MAX = 800;
-        var ratio = Math.min(MAX / img.width, MAX / img.height, 1);
-        canvas.width  = Math.round(img.width  * ratio);
-        canvas.height = Math.round(img.height * ratio);
-        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-        _svcPickedImages.push(canvas.toDataURL('image/jpeg', 0.82));
-        loaded++;
-        if (loaded === files.length) _renderSvcPhotoPreviews();
-      };
-      img.src = e.target.result;
-    };
-    reader.readAsDataURL(file);
+  _gwQueueImageCrop(files, 1, 1, function(dataUrl) {
+    _svcPickedImages.push(dataUrl);
+    _renderSvcPhotoPreviews();
   });
   input.value = '';
 }
@@ -23290,8 +23541,9 @@ function renderSrchResults(query) {
            currentNom.toLowerCase().indexOf(q)                   !== -1  ||
            (p.role       && p.role.toLowerCase().indexOf(q)      !== -1);
   });
-  /* ── Publications officielles aussi cherchées ── */
+  /* ── Publications officielles aussi cherchées (hors Shorts, exclusifs à leur section) ── */
   var matchedOfficialPosts = _offGetPosts().filter(function(p) {
+    if (p.video && p.video.videoType === 'short') return false;
     return (p.text && p.text.toLowerCase().indexOf(q) !== -1) ||
            'geniwork'.indexOf(q) !== -1;
   }).map(function(p) { return Object.assign({}, p, { _isOfficialPost: true }); });
@@ -25613,11 +25865,11 @@ var _admTapTimer  = null;
 */
 var _ADM_ROLE_PERMS = {
   'Super Admin': {
-    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','artiste','marketplace','notifs','settings','security','backup'],
+    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','artiste','marketplace','recruiters','notifs','settings','security','backup'],
     actions: ['ban','unban','delete_post','delete_user','send_notif','publish','manage_team','manage_payments','change_settings','approve_badge','dismiss_report','warn_user','reset_password','change_role','approve_request']
   },
   'Admin': {
-    tabs:    ['dashboard','analytics','payments','reports','users','badges','publi','marketplace','notifs'],
+    tabs:    ['dashboard','analytics','payments','reports','users','badges','publi','marketplace','recruiters','notifs'],
     actions: ['ban','unban','delete_post','send_notif','publish','approve_badge','dismiss_report','warn_user']
   },
   'Modérateur': {
@@ -25625,7 +25877,7 @@ var _ADM_ROLE_PERMS = {
     actions: ['ban','unban','dismiss_report','warn_user']
   },
   'Éditeur': {
-    tabs:    ['dashboard','publi','marketplace'],
+    tabs:    ['dashboard','publi','marketplace','recruiters'],
     actions: ['publish']
   },
   'Support': {
@@ -26055,7 +26307,8 @@ function _admApplySidebarPerms() {
     payments:'adm-nav-payments',   reports:'adm-nav-reports',
     users:'adm-nav-users',         badges:'adm-nav-badges',
     team:'adm-nav-team',           publi:'adm-nav-publi',
-    marketplace:'adm-nav-marketplace', notifs:'adm-nav-notifs',
+    marketplace:'adm-nav-marketplace', recruiters:'adm-nav-recruiters',
+    notifs:'adm-nav-notifs',
     settings:'adm-nav-settings',       security:'adm-nav-security'
   };
   Object.keys(tabNav).forEach(function(tab) {
@@ -26066,7 +26319,7 @@ function _admApplySidebarPerms() {
   var sectionMap = [
     ['dashboard','analytics'],
     ['users','badges'],
-    ['publi','marketplace','reports'],
+    ['publi','marketplace','recruiters','reports'],
     ['payments'],
     ['notifs'],
     ['team','settings','security']
@@ -26255,6 +26508,7 @@ function _admSwitchTab(tab) {
     team        : 'Équipe & Tâches',
     publi       : 'Publications officielles',
     marketplace : 'Marketplace',
+    recruiters  : 'Vérifications recruteurs',
     notifs      : 'Notifications & Communication',
     settings    : 'Paramètres système',
     security    : 'Sécurité & Maintenance',
@@ -26262,6 +26516,19 @@ function _admSwitchTab(tab) {
   };
   var titleEl = document.getElementById('adm-topbar-title');
   if (titleEl) titleEl.textContent = titles[tab] || tab;
+
+  /* Recruteurs : on force une lecture directe Firebase à l'ouverture de l'onglet,
+     pour éviter de dépendre du timing du listener temps réel (sync cross-appareil). */
+  if (tab === 'recruiters' && _gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/recruiter_verifs').once('value').then(function(snap) {
+      var val = snap.val();
+      if (val !== null && val !== undefined) localStorage.setItem('gw_recruiter_verifs', JSON.stringify(val));
+      _admRender();
+      try { _admUpdateNavBadges(); } catch(e){}
+    }).catch(function() { _admRender(); });
+    return;
+  }
+
   _admRender();
 }
 
@@ -26341,15 +26608,18 @@ function _admUpdateNavBadges() {
   var publis   = _offGetPosts().length;
   var pays     = _admGetPayments().length;
   var pending  = _admGetRequests().filter(function(r){ return r.status === 'pending'; }).length;
+  var jobVerifs = _jobGetVerifs().filter(function(v){ return v.status === 'pending'; }).length;
   var rb  = document.getElementById('adm-badge-reports');
   var bb  = document.getElementById('adm-badge-badges');
   var pb  = document.getElementById('adm-badge-publi');
   var pyb = document.getElementById('adm-badge-payments');
   var tb  = document.getElementById('adm-badge-team');
   var ab  = document.getElementById('adm-badge-artiste');
+  var jvb = document.getElementById('adm-badge-recruiters');
   if (rb)  { rb.textContent  = reports; rb.classList.toggle('hidden',  reports === 0); }
   if (bb)  { bb.textContent  = badges;  bb.classList.toggle('hidden',  badges  === 0); }
   if (pb)  { pb.textContent  = publis;  pb.classList.toggle('hidden',  publis  === 0); }
+  if (jvb) { jvb.textContent = jobVerifs; jvb.classList.toggle('hidden', jobVerifs === 0); }
   if (pyb) { pyb.textContent = pays;    pyb.classList.toggle('hidden', pays    === 0); }
   if (tb)  { tb.textContent  = pending; tb.classList.toggle('hidden',  pending === 0); }
   /* Badge demandes artiste — lit depuis profils (garanti) + recours en surbrillance */
@@ -26405,6 +26675,7 @@ function _admRender() {
   else if (_adminTab === 'publi')       content.innerHTML = _admBuildPubli();
   else if (_adminTab === 'artiste')     content.innerHTML = _admBuildArtiste();
   else if (_adminTab === 'marketplace') content.innerHTML = _admBuildMarketplace();
+  else if (_adminTab === 'recruiters')  content.innerHTML = _admBuildRecruitersTab();
   else if (_adminTab === 'notifs')      content.innerHTML = _admBuildNotifs();
   else if (_adminTab === 'settings')    content.innerHTML = _admBuildSettings();
   else if (_adminTab === 'security')    { content.innerHTML = _admBuildSecurity(); _admSecurityListen(); }
@@ -27942,6 +28213,167 @@ function _admArtisteDeleteSongConfirm() {
         _showErr('Erreur Firebase : ' + (e2.message || e.message || 'Permission refusée'));
       });
     });
+}
+
+/* ── Onglet dédié "Recruteurs" — vérifications entreprise (anti-arnaque) ── */
+function _admBuildRecruitersTab() {
+  return '<div class="adm-tab-header"><h2>Recruteurs</h2><p>Vérification des entreprises avant publication d\'offres d\'emploi</p></div>' +
+    '<div class="adm-dash">' + _admBuildJobRequests() + '</div>';
+}
+
+/* ── Modération des vérifications entreprise recruteur (anti-arnaque) ── */
+function _admBuildJobRequests() {
+  var all      = _jobGetVerifs();
+  var pending  = all.filter(function(v) { return v.status === 'pending'; });
+  var approved = all.filter(function(v) { return v.status === 'approved'; });
+  var rejected = all.filter(function(v) { return v.status === 'rejected'; });
+
+  var jobsOn = _jobFeatureEnabled();
+  var html = '<div style="display:flex;align-items:center;gap:10px;padding:14px;background:#0F172A;border:1px solid #1E293B;border-radius:14px;margin-bottom:14px">' +
+    '<div style="flex:1">' +
+      '<div style="font-size:13.5px;font-weight:700;color:#F1F5F9"><i class="fas fa-power-off" style="margin-right:6px;color:' + (jobsOn ? '#16A34A' : '#EF4444') + '"></i>Module Offres d\'emploi</div>' +
+      '<div style="font-size:11px;color:#64748B;margin-top:2px">' + (jobsOn ? 'Actif — visible par tous les membres' : 'Désactivé — masqué partout (icône, bouton Recruteur, page Emploi)') + '</div>' +
+    '</div>' +
+    '<label class="sdb-toggle" style="flex-shrink:0">' +
+      '<input type="checkbox" id="adm-jobs-toggle" ' + (jobsOn ? 'checked' : '') + ' onchange="_admSetJobsFeature(this.checked)">' +
+      '<span class="sdb-toggle-track"></span>' +
+    '</label>' +
+  '</div>' +
+
+  '<div class="adm-dash-title" style="margin-top:0">' +
+    '<i class="fas fa-briefcase" style="color:#16A34A;margin-right:6px"></i>Vérifications entreprise (recruteurs)' +
+    (pending.length ? ' <span style="background:#EF4444;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;margin-left:6px">' + pending.length + ' en attente</span>' : '') +
+  '</div>';
+
+  if (!all.length) {
+    return html + '<div style="text-align:center;padding:24px;color:#475569;font-size:13px"><i class="fas fa-inbox" style="display:block;font-size:32px;margin-bottom:8px"></i>Aucune demande de vérification pour le moment</div>';
+  }
+
+  html += '<div style="display:flex;gap:8px;margin-bottom:14px">' +
+    '<span style="font-size:12px;font-weight:700;color:#EF4444;background:rgba(239,68,68,.1);border-radius:8px;padding:4px 10px">⏳ ' + pending.length + ' en attente</span>' +
+    '<span style="font-size:12px;font-weight:700;color:#16A34A;background:rgba(22,163,74,.1);border-radius:8px;padding:4px 10px">✓ ' + approved.length + ' vérifiées</span>' +
+    '<span style="font-size:12px;font-weight:700;color:#64748B;background:#1E293B;border-radius:8px;padding:4px 10px">✗ ' + rejected.length + ' refusées</span>' +
+  '</div>';
+
+  var toShow = pending.concat(approved.slice(0,5)).concat(rejected.slice(0,5));
+  toShow.forEach(function(v) {
+    var isPending = v.status === 'pending';
+    var dt = v.submittedAt ? new Date(v.submittedAt).toLocaleDateString('fr-FR', { day:'2-digit', month:'short', year:'numeric' }) : '';
+    html +=
+      '<div style="background:#0F172A;border:1px solid ' + (isPending ? 'rgba(239,68,68,.3)' : '#1E293B') + ';border-radius:14px;padding:14px;margin-bottom:10px">' +
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+          (v.logo
+            ? '<div style="width:40px;height:40px;border-radius:10px;overflow:hidden;flex-shrink:0"><img src="' + escHtml(v.logo) + '" style="width:100%;height:100%;object-fit:cover"></div>'
+            : '<div style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#16A34A,#15803D);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="fas fa-building" style="color:#fff;font-size:14px"></i></div>') +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:700;color:#F1F5F9">' + escHtml(v.company) + '</div>' +
+            '<div style="font-size:11px;color:#64748B">' + escHtml(v.nom || v.email) + ' · ' + escHtml(v.email) + '</div>' +
+          '</div>' +
+          '<div style="text-align:right;flex-shrink:0">' +
+            '<div style="font-size:10px;padding:3px 8px;border-radius:20px;font-weight:700;' +
+              (isPending ? 'background:rgba(239,68,68,.15);color:#EF4444' : v.status === 'approved' ? 'background:rgba(22,163,74,.15);color:#16A34A' : 'background:#1E293B;color:#475569') + '">' +
+              (isPending ? '⏳ En attente' : v.status === 'approved' ? '✓ Vérifiée' : '✗ Refusée') +
+            '</div>' +
+            '<div style="font-size:9px;color:#475569;margin-top:4px">' + dt + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div style="background:#0C1627;border-radius:10px;padding:10px 12px;margin-bottom:10px">' +
+          '<div style="font-size:10px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">N° d\'identification entreprise</div>' +
+          '<div style="font-size:12.5px;color:#E2E8F0;font-family:monospace">' + escHtml(v.regnum || '—') + '</div>' +
+        '</div>' +
+        (v.acceptedTerms
+          ? '<div style="font-size:10.5px;color:#16A34A;margin-bottom:10px"><i class="fas fa-check-double" style="margin-right:5px"></i>Conditions de responsabilité acceptées le ' + (v.acceptedAt ? new Date(v.acceptedAt).toLocaleString('fr-FR') : '—') + '</div>'
+          : '') +
+        (isPending
+          ? '<div style="display:flex;gap:8px">' +
+              '<button onclick="_admApproveRecruiterVerif(\'' + v.id + '\')" style="flex:1;padding:9px;background:#16A34A;color:#fff;border:none;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer"><i class="fas fa-check"></i> Approuver</button>' +
+              '<button onclick="_admRejectRecruiterVerif(\'' + v.id + '\')" style="flex:1;padding:9px;background:#1E293B;color:#EF4444;border:1px solid rgba(239,68,68,.3);border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer"><i class="fas fa-xmark"></i> Refuser</button>' +
+            '</div>'
+          : v.status === 'approved'
+          ? '<button onclick="_admRevokeRecruiterVerif(\'' + v.id + '\')" style="width:100%;padding:9px;background:#1E293B;color:#F87171;border:1px solid rgba(239,68,68,.3);border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer"><i class="fas fa-ban"></i> Retirer la vérification</button>'
+          : '') +
+      '</div>';
+  });
+
+  return html;
+}
+
+function _admApproveRecruiterVerif(id) {
+  var all = _jobGetVerifs();
+  var v   = all.find(function(x) { return x.id === id; });
+  if (!v) return;
+  v.status     = 'approved';
+  v.reviewedAt = new Date().toISOString();
+  _jobSaveVerifs(all);
+
+  if (v.logo) _jobSetRecruiterLogo(v.email, v.logo);
+
+  pushNotif(v.email, {
+    id:      genNotifId(),
+    type:    'system',
+    title:   '✅ Entreprise vérifiée',
+    message: '"' + v.company + '" a été vérifiée par l\'équipe Geniwork. Vous pouvez maintenant publier des offres d\'emploi.',
+    date:    new Date().toISOString(),
+    read:    false
+  });
+
+  showToast('Entreprise approuvée', 'ok');
+  _admRender();
+}
+
+/* Retire une vérification déjà approuvée — bloque les futures publications et clôture les offres actives */
+function _admRevokeRecruiterVerif(id) {
+  var all = _jobGetVerifs();
+  var v   = all.find(function(x) { return x.id === id; });
+  if (!v) return;
+
+  v.status       = 'rejected';
+  v.rejectReason = 'Vérification retirée par l\'équipe Geniwork';
+  v.reviewedAt   = new Date().toISOString();
+  _jobSaveVerifs(all);
+
+  /* Clôture toutes les offres actives de ce recruteur */
+  var jobs = _jobGetAll();
+  var changed = false;
+  jobs.forEach(function(j) {
+    if (j.postedBy === v.email && j.status === 'active') { j.status = 'closed'; changed = true; }
+  });
+  if (changed) _jobSaveAll(jobs);
+
+  pushNotif(v.email, {
+    id:      genNotifId(),
+    type:    'system',
+    title:   '⚠️ Vérification retirée',
+    message: 'La vérification de "' + v.company + '" a été retirée par l\'équipe Geniwork. Vos offres ont été clôturées et vous devez soumettre une nouvelle vérification pour publier à nouveau.',
+    date:    new Date().toISOString(),
+    read:    false
+  });
+
+  showToast('Vérification retirée', 'ok');
+  _admRender();
+}
+
+function _admRejectRecruiterVerif(id) {
+  var all = _jobGetVerifs();
+  var v   = all.find(function(x) { return x.id === id; });
+  if (!v) return;
+  var reason = prompt('Motif du refus (visible par le recruteur) :') || '';
+  v.status       = 'rejected';
+  v.reviewedAt   = new Date().toISOString();
+  v.rejectReason = reason.trim();
+  _jobSaveVerifs(all);
+
+  pushNotif(v.email, {
+    id:      genNotifId(),
+    type:    'system',
+    title:   '❌ Vérification refusée',
+    message: 'La vérification de "' + v.company + '" a été refusée' + (reason ? ' : ' + reason : '') + '. Vous pouvez soumettre une nouvelle demande.',
+    date:    new Date().toISOString(),
+    read:    false
+  });
+
+  showToast('Demande refusée', 'ok');
+  _admRender();
 }
 
 function _admBuildMarketplace() {
@@ -31356,7 +31788,8 @@ function _injectOfficialPosts() {
   /* Retire les anciennes cards officielles du DOM */
   list.querySelectorAll('.post-card.post-official').forEach(function(el){ el.remove(); });
 
-  var officialPosts = _offGetPosts().slice(0, 10);
+  /* Les vidéos Short restent exclusivement dans la section Shorts dédiée */
+  var officialPosts = _offGetPosts().filter(function(p) { return !(p.video && p.video.videoType === 'short'); }).slice(0, 10);
   if (!officialPosts.length) return;
 
   /* Trie du plus récent au plus ancien */
@@ -31388,6 +31821,13 @@ function _injectOfficialPosts() {
   });
   /* Lance l'observer sur les nouvelles vidéos officielles */
   _initFeedVideoObserver();
+}
+
+/* Expand le texte complet d'une publication officielle tronquée */
+function _offExpandText(postId) {
+  var el = document.getElementById('offtxt-' + postId);
+  if (!el) return;
+  el.textContent = el.getAttribute('data-full') || '';
 }
 
 /* Construit une card de post officiel */
@@ -31485,7 +31925,15 @@ function _buildOfficialCard(p) {
         (isFollowingOff ? '<i class="fas fa-check"></i> Abonné' : '<i class="fas fa-plus"></i> Suivre') +
       '</button>' +
     '</div>' +
-    (p.text ? '<div class="post-official-text">' + escHtml(p.text) + '</div>' : '') +
+    (p.text ? (function() {
+      var full = p.text;
+      var needsMore = full.length > 200;
+      var short = needsMore ? full.slice(0, 200) : full;
+      return '<div class="post-official-text" id="offtxt-' + p.id + '" data-full="' + escHtml(full) + '">' +
+        escHtml(short) +
+        (needsMore ? '… <span class="see-more" style="cursor:pointer;color:#2563EB;font-weight:600" onclick="event.stopPropagation();_offExpandText(\'' + p.id + '\')">Voir plus</span>' : '') +
+      '</div>';
+    })() : '') +
     imgHtml +
 
     /* ── Footer : Like + Commentaire ── */
@@ -32346,28 +32794,13 @@ function _mkPickEbookCover(input) {
   var file = input && input.files && input.files[0];
   if (!file) return;
   if (file.size > 10 * 1024 * 1024) { showToast('Image trop lourde (max 10 Mo)', 'err'); return; }
-  var reader = new FileReader();
-  reader.onload = function(e) {
-    /* ── Redimensionner à max 600px et compresser en JPEG 0.75 ── */
-    var img = new Image();
-    img.onload = function() {
-      var MAX = 600;
-      var w = img.width, h = img.height;
-      if (w > MAX || h > MAX) {
-        if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
-        else       { w = Math.round(w * MAX / h); h = MAX; }
-      }
-      var canvas = document.createElement('canvas');
-      canvas.width = w; canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      var compressed = canvas.toDataURL('image/jpeg', 0.75);
-      _mkEbookCover = compressed;
-      var prev = document.getElementById('mk-ebook-cover-preview');
-      if (prev) prev.innerHTML = '<img src="'+compressed+'" style="width:100%;height:100%;object-fit:cover">';
-    };
-    img.src = e.target.result;
-  };
-  reader.readAsDataURL(file);
+  /* Ratio 1:1.4 — format couverture ebook recommandé */
+  _gwQueueImageCrop([file], 1, 1.4, function(dataUrl) {
+    _mkEbookCover = dataUrl;
+    var prev = document.getElementById('mk-ebook-cover-preview');
+    if (prev) prev.innerHTML = '<img src="'+dataUrl+'" style="width:100%;height:100%;object-fit:cover">';
+  });
+  input.value = '';
 }
 
 function _mkPickEbookFile(input) {
@@ -32387,19 +32820,14 @@ function _mkPickEbookFile(input) {
 }
 
 function _mkPickImages(input) {
-  var files = Array.prototype.slice.call(input.files);
   var remaining = 5 - _mkPickedImages.length;
-  files = files.slice(0, remaining);
-  var loaded = 0;
-  files.forEach(function(file) {
-    var reader = new FileReader();
-    reader.onload = function(e) {
-      _mkPickedImages.push(e.target.result);
-      loaded++;
-      if (loaded === files.length) _mkRenderImgPreviews();
-    };
-    reader.readAsDataURL(file);
+  if (remaining <= 0) { showToast('Maximum 5 photos', 'err'); return; }
+  var files = Array.prototype.slice.call(input.files).slice(0, remaining);
+  _gwQueueImageCrop(files, 1, 1, function(dataUrl) {
+    _mkPickedImages.push(dataUrl);
+    _mkRenderImgPreviews();
   });
+  input.value = '';
 }
 
 function _mkRenderImgPreviews() {
@@ -32836,10 +33264,10 @@ function _mkOpenEbookDetail(listing) {
   card.id = 'mk-detail-card';
   card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
 
-  /* Couverture */
+  /* Couverture — respecte le ratio 1:1.4 du recadrage (pas de hauteur fixe qui re-découpe l'image) */
   var coverHtml = listing.coverImage
-    ? '<div style="width:100%;height:200px;overflow:hidden;border-radius:24px 24px 0 0;position:relative">' +
-        '<img src="'+listing.coverImage+'" style="width:100%;height:200px;object-fit:cover">' +
+    ? '<div style="width:100%;aspect-ratio:1/1.4;max-height:55vh;overflow:hidden;border-radius:24px 24px 0 0;position:relative">' +
+        '<img src="'+listing.coverImage+'" style="width:100%;height:100%;object-fit:cover;display:block">' +
         '<div style="position:absolute;inset:0;background:linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.5))"></div>' +
         '<span style="position:absolute;top:12px;left:12px;background:rgba(0,0,0,.5);color:#fff;font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;backdrop-filter:blur(4px)">📖 Ebook</span>' +
       '</div>'
@@ -33718,7 +34146,7 @@ function _collabOpenPost() {
 
     /* Pièces jointes */
     '<div style="margin-bottom:16px">' +
-      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Pièces jointes <span style="font-weight:400;text-transform:none;font-size:10px">optionnel — max 3 photos + 1 doc</span></label>' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Pièces jointes <span style="font-weight:400;text-transform:none;font-size:10px">optionnel — max 4 photos + 1 doc</span></label>' +
       '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center" id="cl-attach-preview"></div>' +
       '<label id="cl-attach-label" style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;padding:9px 14px;border:1.5px dashed #C7D2FE;border-radius:10px;font-size:13px;color:#6366F1;cursor:pointer;background:#F5F3FF">' +
         '<i class="fas fa-paperclip"></i> Ajouter photo / document' +
@@ -33746,21 +34174,31 @@ function _clAttachAdd(input) {
   var curImgs = _clAttachFiles.filter(function(f) { return f.isImg; }).length;
   var curDocs = _clAttachFiles.filter(function(f) { return !f.isImg; }).length;
 
+  var imgFiles = [];
   files.forEach(function(file) {
     var isImg = file.type.startsWith('image/');
-    if (isImg  && curImgs >= 3) { showToast('Maximum 3 photos', 'err'); return; }
+    if (isImg  && curImgs >= 4) { showToast('Maximum 4 photos', 'err'); return; }
     if (!isImg && curDocs >= 1) { showToast('Maximum 1 document', 'err'); return; }
     if (file.size > 5 * 1024 * 1024) { showToast(file.name.slice(0,20) + ' trop lourd (max 5 Mo)', 'err'); return; }
 
+    if (isImg) { curImgs++; imgFiles.push(file); return; }
+
+    curDocs++;
     var reader = new FileReader();
     reader.onload = function(e) {
-      var f = { name: file.name, type: file.type, data: e.target.result, isImg: isImg };
-      _clAttachFiles.push(f);
-      if (isImg) curImgs++; else curDocs++;
+      _clAttachFiles.push({ name: file.name, type: file.type, data: e.target.result, isImg: false });
       _clAttachRender();
     };
     reader.readAsDataURL(file);
   });
+
+  /* Photos → recadrage avant ajout */
+  if (imgFiles.length) {
+    _gwQueueImageCrop(imgFiles, 1, 1, function(dataUrl) {
+      _clAttachFiles.push({ name: 'photo.jpg', type: 'image/jpeg', data: dataUrl, isImg: true });
+      _clAttachRender();
+    });
+  }
   input.value = '';
 }
 
@@ -33791,7 +34229,1265 @@ function _clAttachRender() {
   }).join('');
 
   /* Masquer le bouton si limites atteintes */
-  if (lbl) lbl.style.display = (imgs >= 3 && docs >= 1) ? 'none' : 'inline-flex';
+  if (lbl) lbl.style.display = (imgs >= 4 && docs >= 1) ? 'none' : 'inline-flex';
+}
+
+/* ══════════════════════════════════════════
+   MODULE EMPLOI — Offres d'emploi (recruteurs)
+══════════════════════════════════════════ */
+var _JOB_CONTRACTS = {
+  cdi:       'CDI',
+  cdd:       'CDD',
+  stage:     'Stage',
+  alternance:'Alternance',
+  freelance: 'Freelance'
+};
+
+/* ── Interrupteur global du module Emploi (admin) ── */
+function _jobFeatureEnabled() {
+  var v = localStorage.getItem('gw_jobs_feature_enabled');
+  return v === null ? true : v === '1';
+}
+function _admSetJobsFeature(enabled) {
+  localStorage.setItem('gw_jobs_feature_enabled', enabled ? '1' : '0');
+  _gwFbSet('settings_jobs_enabled', enabled ? 1 : 0);
+  _jobApplyFeatureVisibility();
+  showToast(enabled ? 'Module Offres d\'emploi activé' : 'Module Offres d\'emploi désactivé', 'ok');
+  try { _admRender(); } catch(e){}
+}
+/* Applique l'état (icône topbar, bouton Recruteur, page Emploi) à l'interface */
+function _jobApplyFeatureVisibility() {
+  var on = _jobFeatureEnabled();
+  var topbarBtn = document.getElementById('job-topbar-btn');
+  if (topbarBtn) topbarBtn.style.display = on ? '' : 'none';
+  var composerRow = document.querySelector('.pub-media-row-job');
+  if (composerRow) composerRow.style.display = on ? '' : 'none';
+  if (!on && document.getElementById('job-list-wrap') && document.getElementById('p-jobs') && document.getElementById('p-jobs').classList.contains('active')) {
+    showPage('p-home');
+    showToast('Le module Offres d\'emploi est temporairement désactivé', 'err');
+  }
+}
+
+function _jobGetAll() {
+  try { return JSON.parse(localStorage.getItem('gw_jobs') || '[]'); } catch(e) { return []; }
+}
+function _jobSaveAll(list) {
+  localStorage.setItem('gw_jobs', JSON.stringify(list));
+  _gwFbSet('jobs', list);
+}
+
+/* ══════════════════════════════════════════
+   VÉRIFICATION RECRUTEUR — une seule fois, validée par l'admin
+   Tant qu'elle n'est pas approuvée, impossible de publier une offre.
+══════════════════════════════════════════ */
+function _jobGetVerifs() {
+  try { return JSON.parse(localStorage.getItem('gw_recruiter_verifs') || '[]'); } catch(e) { return []; }
+}
+function _jobSaveVerifs(list) {
+  localStorage.setItem('gw_recruiter_verifs', JSON.stringify(list));
+  _gwFbSet('recruiter_verifs', list);
+}
+/* Dernière demande de vérification de cet utilisateur (la plus récente) */
+function _jobGetMyVerif(email) {
+  var mine = _jobGetVerifs().filter(function(v) { return v.email === email; });
+  if (!mine.length) return null;
+  mine.sort(function(a, b) { return new Date(b.submittedAt) - new Date(a.submittedAt); });
+  return mine[0];
+}
+
+/* ══════════════════════════════════════════
+   CANDIDATURES SIMPLIFIÉES — CV + motivation + tél, reçues par le recruteur
+══════════════════════════════════════════ */
+function _jobGetApplications() {
+  try { return JSON.parse(localStorage.getItem('gw_job_applications') || '[]'); } catch(e) { return []; }
+}
+function _jobSaveApplications(list) {
+  localStorage.setItem('gw_job_applications', JSON.stringify(list));
+  _gwFbSet('job_applications', list);
+}
+/* Candidatures reçues pour les offres publiées par ce recruteur */
+function _jobGetApplicationsForRecruiter(email) {
+  var myJobIds = _jobGetAll().filter(function(j) { return j.postedBy === email; }).map(function(j) { return j.id; });
+  return _jobGetApplications().filter(function(a) { return myJobIds.indexOf(a.jobId) !== -1; })
+    .sort(function(a, b) { return new Date(b.appliedAt) - new Date(a.appliedAt); });
+}
+/* Nombre de clics reçus sur le lien externe d'une offre */
+function _jobExternalClickCount(jobId) {
+  return _jobGetApplications().filter(function(a) { return a.jobId === jobId && a.mode === 'external'; }).length;
+}
+
+/* ══════════════════════════════════════════
+   OFFRES SAUVEGARDÉES — côté candidat
+══════════════════════════════════════════ */
+function _jobGetSavedJobs(email) {
+  try { return JSON.parse(localStorage.getItem('gw_job_saved_' + email) || '[]'); } catch(e) { return []; }
+}
+function _jobSaveSavedJobs(email, list) {
+  localStorage.setItem('gw_job_saved_' + email, JSON.stringify(list));
+  _gwFbSet('job_saved/' + _gwFbKey(email), list);
+}
+function _jobIsSaved(jobId) {
+  return !!(_currentUser && _jobGetSavedJobs(_currentUser.email).indexOf(jobId) !== -1);
+}
+function _jobToggleSaveJob(jobId) {
+  if (!_currentUser) { showToast('Connectez-vous pour sauvegarder', 'err'); return; }
+  var list = _jobGetSavedJobs(_currentUser.email);
+  var idx  = list.indexOf(jobId);
+  if (idx === -1) { list.unshift(jobId); showToast('Offre sauvegardée ✓', 'ok'); }
+  else { list.splice(idx, 1); showToast('Retirée des sauvegardes', ''); }
+  _jobSaveSavedJobs(_currentUser.email, list);
+  var btn = document.getElementById('job-save-btn');
+  if (btn) btn.innerHTML = _jobIsSaved(jobId)
+    ? '<i class="fas fa-bookmark"></i>'
+    : '<i class="far fa-bookmark"></i>';
+  if (document.getElementById('job-list-wrap')) { try { _jobRenderList(); } catch(e){} }
+}
+
+/* ══════════════════════════════════════════
+   HISTORIQUE CANDIDAT — masquage personnel (ne touche pas aux données du recruteur)
+══════════════════════════════════════════ */
+function _jobGetHistoryHidden(email) {
+  try { return JSON.parse(localStorage.getItem('gw_job_hist_hidden_' + email) || '[]'); } catch(e) { return []; }
+}
+function _jobSaveHistoryHidden(email, list) {
+  localStorage.setItem('gw_job_hist_hidden_' + email, JSON.stringify(list));
+  _gwFbSet('job_hist_hidden/' + _gwFbKey(email), list);
+}
+function _jobHideFromHistory(appId) {
+  if (!_currentUser) return;
+  var list = _jobGetHistoryHidden(_currentUser.email);
+  if (list.indexOf(appId) === -1) list.push(appId);
+  _jobSaveHistoryHidden(_currentUser.email, list);
+  _jobRenderList();
+}
+
+/* ── Point d'entrée du bouton "Recruteur" : vérifie le statut avant d'ouvrir le formulaire ── */
+function _jobRecruiterEntry() {
+  if (!_jobFeatureEnabled()) { showToast('Le module Offres d\'emploi est temporairement désactivé', 'err'); return; }
+  if (!_currentUser) { showToast('Connectez-vous pour publier', 'err'); return; }
+  var verif = _jobGetMyVerif(_currentUser.email);
+
+  if (!verif || verif.status === 'rejected') {
+    _jobOpenVerification(verif);
+    return;
+  }
+  if (verif.status === 'pending') {
+    _jobShowPendingScreen(verif);
+    return;
+  }
+  /* approved */
+  _jobOpenPost();
+}
+
+/* ── Écran "en cours d'examen" — visible, pas un simple toast qui disparaît ── */
+function _jobShowPendingScreen(verif) {
+  var existing = document.getElementById('job-pending-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('job-pending-card');
+  if (existingCard) existingCard.remove();
+
+  var bg = document.createElement('div');
+  bg.id = 'job-pending-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+  bg.onclick = function(e) { if (e.target === bg) { bg.remove(); card.remove(); } };
+
+  var card = document.createElement('div');
+  card.id = 'job-pending-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:80vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  var dt = verif.submittedAt ? new Date(verif.submittedAt).toLocaleString('fr-FR') : '';
+
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
+    '<div style="padding:28px 24px 32px;text-align:center">' +
+      '<div style="width:64px;height:64px;border-radius:50%;background:#FFFBEB;display:flex;align-items:center;justify-content:center;margin:0 auto 16px">' +
+        '<i class="fas fa-hourglass-half" style="color:#D97706;font-size:26px"></i>' +
+      '</div>' +
+      '<h2 style="font-size:17px;font-weight:800;color:#0F172A;margin:0 0 8px">Vérification en cours d\'examen</h2>' +
+      '<p style="font-size:13.5px;color:#64748B;line-height:1.6;margin:0 0 16px">' +
+        'Votre demande pour <strong>' + escHtml(verif.company) + '</strong> a bien été reçue' + (dt ? ' le ' + dt : '') + ' et est en cours d\'examen par l\'équipe Geniwork.<br/>' +
+        'Vous pourrez publier des offres d\'emploi dès qu\'elle sera approuvée. Vous recevrez une notification.' +
+      '</p>' +
+      '<button onclick="document.getElementById(\'job-pending-bg\').remove();document.getElementById(\'job-pending-card\').remove()" style="width:100%;padding:13px;background:#F1F5F9;color:#374151;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer">' +
+        'Compris' +
+      '</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+var _jobVerifPendingLogo = null;
+
+/* ── Formulaire de vérification entreprise (1ère fois, ou à nouveau si refusée) ── */
+function _jobOpenVerification(rejectedVerif) {
+  var existing = document.getElementById('job-verif-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('job-verif-card');
+  if (existingCard) existingCard.remove();
+
+  _jobVerifPendingLogo = rejectedVerif ? (rejectedVerif.logo || null) : null;
+
+  var bg = document.createElement('div');
+  bg.id = 'job-verif-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+
+  var card = document.createElement('div');
+  card.id = 'job-verif-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  bg.onclick = function(e) { if (e.target === bg) { bg.remove(); card.remove(); } };
+
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
+    '<div style="padding:16px 20px 28px">' +
+
+    '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px">' +
+      '<span style="font-size:17px;font-weight:800;color:#0F172A">' +
+        '<i class="fas fa-shield-halved" style="color:#16A34A;margin-right:8px"></i>Vérification entreprise' +
+      '</span>' +
+      '<button onclick="(function(){var b=document.getElementById(\'job-verif-bg\');var c=document.getElementById(\'job-verif-card\');if(b)b.remove();if(c)c.remove();})()" ' +
+        'style="flex-shrink:0;width:32px;height:32px;border-radius:50%;border:none;background:#F1F5F9;color:#64748B;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;margin-left:8px">' +
+        '✕' +
+      '</button>' +
+    '</div>' +
+
+    (rejectedVerif && rejectedVerif.status === 'rejected'
+      ? '<div style="padding:10px 12px;background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;margin-bottom:14px;font-size:12px;color:#B91C1C"><i class="fas fa-circle-exclamation" style="margin-right:6px"></i>Demande précédente refusée' + (rejectedVerif.rejectReason ? ' : ' + escHtml(rejectedVerif.rejectReason) : '') + '. Vous pouvez soumettre à nouveau.</div>'
+      : '<div style="display:flex;align-items:flex-start;gap:8px;padding:10px 12px;background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;margin-bottom:16px">' +
+          '<i class="fas fa-shield-halved" style="color:#D97706;margin-top:1px"></i>' +
+          '<span style="font-size:11.5px;color:#92400E;line-height:1.5">Pour protéger les membres contre les arnaques, toute personne souhaitant publier des offres d\'emploi doit faire vérifier son entreprise <strong>une seule fois</strong> par l\'équipe Geniwork.</span>' +
+        '</div>') +
+
+    /* Logo */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Logo de l\'entreprise <span style="font-weight:400;text-transform:none;font-size:10px">optionnel</span></label>' +
+      '<div style="display:flex;align-items:center;gap:10px;margin-top:6px">' +
+        '<div id="job-verif-logo-preview" style="width:56px;height:56px;border-radius:12px;background:#F1F5F9;border:1.5px solid #E2E8F0;overflow:hidden;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+          (_jobVerifPendingLogo
+            ? '<img src="' + _jobVerifPendingLogo + '" style="width:100%;height:100%;object-fit:cover">'
+            : '<i class="fas fa-building" style="color:#94A3B8;font-size:20px"></i>') +
+        '</div>' +
+        '<button type="button" onclick="document.getElementById(\'job-verif-logo-inp\').click()" style="padding:8px 14px;border:1.5px dashed #C7D2FE;border-radius:10px;background:#F5F3FF;color:#6366F1;font-size:12.5px;font-weight:600;cursor:pointer"><i class="fas fa-camera" style="margin-right:5px"></i>' + (_jobVerifPendingLogo ? 'Changer' : 'Ajouter') + '</button>' +
+        '<input type="file" id="job-verif-logo-inp" accept="image/*" style="display:none" onchange="_jobVerifPickLogo(this)">' +
+      '</div>' +
+    '</div>' +
+
+    /* Entreprise */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Nom de l\'entreprise *</label>' +
+      '<input id="job-verif-company" placeholder="Nom légal de l\'entreprise" value="' + escHtml(rejectedVerif ? (rejectedVerif.company || '') : '') + '" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box;outline:none" onfocus="this.style.borderColor=\'#16A34A\'" onblur="this.style.borderColor=\'#E2E8F0\'">' +
+    '</div>' +
+
+    /* Numéro d'identification */
+    '<div style="margin-bottom:16px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Numéro d\'identification de l\'entreprise *</label>' +
+      '<input id="job-verif-regnum" placeholder="Ex : RCCM, SIRET, n° immatriculation…" value="' + escHtml(rejectedVerif ? (rejectedVerif.regnum || '') : '') + '" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box;outline:none" onfocus="this.style.borderColor=\'#16A34A\'" onblur="this.style.borderColor=\'#E2E8F0\'">' +
+      '<div style="font-size:10px;color:#94A3B8;margin-top:4px">Vérifié par l\'équipe Geniwork avant d\'autoriser la publication d\'offres</div>' +
+    '</div>' +
+
+    /* Conditions légales — engagement de responsabilité, applicable quel que soit le pays */
+    '<div style="margin-bottom:14px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px"><i class="fas fa-gavel" style="margin-right:5px;color:#B91C1C"></i>Engagement de responsabilité *</label>' +
+      '<div style="max-height:160px;overflow-y:auto;background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;padding:12px;font-size:11.5px;color:#7F1D1D;line-height:1.6">' +
+        '<strong>Article unique — Véracité des informations et responsabilité.</strong><br/><br/>' +
+        'En soumettant cette demande de vérification, je certifie sur mon honneur que le nom de l\'entreprise, le numéro d\'identification et tout document ou logo fournis sont <strong>véridiques, exacts et vérifiables</strong>, et que je dispose du droit de représenter cette entreprise sur la plateforme Geniwork.<br/><br/>' +
+        'Je reconnais que toute <strong>fausse déclaration, usurpation d\'identité d\'entreprise, ou tentative d\'arnaque, de fraude ou d\'escroquerie</strong> envers un membre de la plateforme constitue une infraction grave, quel que soit le pays dans lequel je me trouve ou dans lequel se trouve la victime, et peut faire l\'objet de <strong>poursuites judiciaires civiles et/ou pénales</strong> devant les juridictions compétentes, conformément aux lois applicables en matière de fraude, d\'usurpation d\'identité et d\'escroquerie.<br/><br/>' +
+        'Je reconnais également que Geniwork se réserve le droit, en cas de doute ou de signalement, de <strong>suspendre immédiatement mon compte</strong>, de <strong>signaler les faits aux autorités compétentes</strong> et de transmettre toute information utile (identité, coordonnées, preuves) dans le cadre d\'une procédure judiciaire, sans préavis.' +
+      '</div>' +
+      '<label style="display:flex;align-items:flex-start;gap:8px;margin-top:10px;cursor:pointer;font-size:12px;color:#374151">' +
+        '<input type="checkbox" id="job-verif-accept" style="accent-color:#16A34A;width:17px;height:17px;flex-shrink:0;margin-top:1px">' +
+        '<span>J\'ai lu et j\'accepte ces conditions. Je certifie que les informations fournies sont exactes et j\'assume l\'entière responsabilité légale en cas de fausse déclaration ou de fraude.</span>' +
+      '</label>' +
+    '</div>' +
+
+    '<button onclick="_jobSubmitVerification()" style="width:100%;padding:14px;background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(22,163,74,.4)">' +
+      '<i class="fas fa-paper-plane" style="margin-right:8px"></i>Soumettre pour vérification' +
+    '</button>' +
+
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _jobVerifPickLogo(input) {
+  var file = input && input.files && input.files[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { showToast('Image trop lourde (max 5 Mo)', 'err'); return; }
+  _gwQueueImageCrop([file], 1, 1, function(dataUrl) {
+    _jobVerifPendingLogo = dataUrl;
+    var prev = document.getElementById('job-verif-logo-preview');
+    if (prev) prev.innerHTML = '<img src="' + dataUrl + '" style="width:100%;height:100%;object-fit:cover">';
+  });
+  input.value = '';
+}
+
+function _jobSubmitVerification() {
+  if (!_currentUser) return;
+
+  var company = (document.getElementById('job-verif-company') || {}).value || '';
+  var regnum  = (document.getElementById('job-verif-regnum')  || {}).value || '';
+  var accepted = document.getElementById('job-verif-accept') ? document.getElementById('job-verif-accept').checked : false;
+
+  if (!company.trim()) { showToast('Le nom de l\'entreprise est obligatoire', 'err'); return; }
+  if (!regnum.trim())  { showToast('Le numéro d\'identification de l\'entreprise est obligatoire', 'err'); return; }
+  if (!accepted)       { showToast('Vous devez accepter les conditions de responsabilité avant de continuer', 'err'); return; }
+
+  var profile = loadUserProfile(_currentUser.email) || {};
+  var nom     = profile.nom || _currentUser.nom || 'Membre';
+
+  var verif = {
+    id:           'jverif_' + Date.now(),
+    email:        _currentUser.email,
+    nom:          nom,
+    company:      company.trim(),
+    regnum:       regnum.trim(),
+    logo:         _jobVerifPendingLogo || null,
+    status:       'pending',
+    submittedAt:  new Date().toISOString(),
+    acceptedTerms: true,
+    acceptedAt:    new Date().toISOString()
+  };
+
+  var all = _jobGetVerifs();
+  all.unshift(verif);
+  _jobSaveVerifs(all);
+
+  var bg   = document.getElementById('job-verif-bg');
+  var card = document.getElementById('job-verif-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+
+  showToast('Demande envoyée ✓ Vous pourrez publier des offres dès la validation par l\'équipe Geniwork', 'ok');
+}
+
+/* ── Ouvrir le formulaire de publication d'offre ── */
+/* ── Logo entreprise du recruteur — persiste sur toutes ses offres, modifiable tous les 14 jours ── */
+function _jobGetRecruiterLogo(email) {
+  try { return JSON.parse(localStorage.getItem('gw_recruiter_logo_' + email) || 'null'); } catch(e) { return null; }
+}
+function _jobSetRecruiterLogo(email, dataUrl) {
+  var rec = { logo: dataUrl, changedAt: Date.now() };
+  localStorage.setItem('gw_recruiter_logo_' + email, JSON.stringify(rec));
+  _gwFbSet('recruiter_logos/' + _gwFbKey(email), rec);
+}
+function _jobLogoCooldownDaysLeft(email) {
+  var rec = _jobGetRecruiterLogo(email);
+  if (!rec || !rec.changedAt) return 0;
+  var days = 14 - Math.floor((Date.now() - rec.changedAt) / 86400000);
+  return Math.max(0, days);
+}
+
+var _jobPendingLogo = null; /* data URL en attente de validation dans le formulaire */
+
+function _jobOpenPost() {
+  if (!_currentUser) { showToast('Connectez-vous pour publier', 'err'); return; }
+
+  var verif = _jobGetMyVerif(_currentUser.email);
+  if (!verif || verif.status !== 'approved') { _jobRecruiterEntry(); return; }
+
+  var existing = document.getElementById('job-post-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('job-post-card');
+  if (existingCard) existingCard.remove();
+
+  _jobSelectedSkills = [];
+
+  var contractOpts = Object.keys(_JOB_CONTRACTS).map(function(k) {
+    return '<option value="' + k + '">' + _JOB_CONTRACTS[k] + '</option>';
+  }).join('');
+
+  var existingLogoRec = _jobGetRecruiterLogo(_currentUser.email);
+  _jobPendingLogo = existingLogoRec ? existingLogoRec.logo : (verif.logo || null);
+  var cooldown = _jobLogoCooldownDaysLeft(_currentUser.email);
+
+  var bg = document.createElement('div');
+  bg.id = 'job-post-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+
+  var card = document.createElement('div');
+  card.id = 'job-post-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  bg.onclick = function(e) { if (e.target === bg) { bg.remove(); card.remove(); } };
+
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
+    '<div style="padding:16px 20px 28px">' +
+
+    '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px">' +
+      '<span style="font-size:17px;font-weight:800;color:#0F172A">' +
+        '<i class="fas fa-briefcase" style="color:#16A34A;margin-right:8px"></i>Publier une offre d\'emploi' +
+      '</span>' +
+      '<button onclick="(function(){var b=document.getElementById(\'job-post-bg\');var c=document.getElementById(\'job-post-card\');if(b)b.remove();if(c)c.remove();})()" ' +
+        'style="flex-shrink:0;width:32px;height:32px;border-radius:50%;border:none;background:#F1F5F9;color:#64748B;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;margin-left:8px">' +
+        '✕' +
+      '</button>' +
+    '</div>' +
+
+    /* Entreprise vérifiée (verrouillée, issue de la vérification admin) */
+    '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#F0FDF4;border:1px solid #BBF7D0;border-radius:10px;margin-bottom:16px">' +
+      '<div id="job-logo-preview" style="width:40px;height:40px;border-radius:10px;background:#fff;border:1.5px solid #E2E8F0;overflow:hidden;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+        (_jobPendingLogo
+          ? '<img src="' + _jobPendingLogo + '" style="width:100%;height:100%;object-fit:cover">'
+          : '<i class="fas fa-building" style="color:#94A3B8;font-size:16px"></i>') +
+      '</div>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:13px;font-weight:700;color:#15803D"><i class="fas fa-circle-check" style="margin-right:4px"></i>' + escHtml(verif.company) + '</div>' +
+        '<div style="font-size:10.5px;color:#16A34A">Entreprise vérifiée par Geniwork</div>' +
+      '</div>' +
+      (cooldown > 0
+        ? '<span style="font-size:10px;color:#94A3B8;flex-shrink:0"><i class="fas fa-lock"></i> logo : ' + cooldown + 'j</span>'
+        : '<button type="button" onclick="document.getElementById(\'job-logo-inp\').click()" style="flex-shrink:0;padding:6px 10px;border:none;border-radius:8px;background:#fff;color:#16A34A;font-size:11px;font-weight:600;cursor:pointer"><i class="fas fa-camera"></i></button>') +
+      '<input type="file" id="job-logo-inp" accept="image/*" style="display:none" onchange="_jobPickLogo(this)">' +
+    '</div>' +
+
+    /* Titre du poste */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Titre du poste *</label>' +
+      '<input id="job-title" placeholder="Ex : Développeur Frontend React" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box;outline:none" onfocus="this.style.borderColor=\'#16A34A\'" onblur="this.style.borderColor=\'#E2E8F0\'">' +
+    '</div>' +
+
+    /* Description */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Description du poste *</label>' +
+      '<textarea id="job-desc" placeholder="Missions, profil recherché, avantages…" rows="4" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;resize:none;box-sizing:border-box;outline:none" onfocus="this.style.borderColor=\'#16A34A\'" onblur="this.style.borderColor=\'#E2E8F0\'"></textarea>' +
+    '</div>' +
+
+    /* Type de contrat + Remote */
+    '<div style="display:flex;gap:10px;margin-bottom:13px">' +
+      '<div style="flex:2">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Type de contrat</label>' +
+        '<select id="job-contract" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:12.5px;background:#F8FAFC;color:#0F172A;box-sizing:border-box">' + contractOpts + '</select>' +
+      '</div>' +
+      '<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:2px">' +
+        '<label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;color:#374151;padding:10px 0">' +
+          '<input type="checkbox" id="job-remote" style="accent-color:#16A34A;width:17px;height:17px"> Remote' +
+        '</label>' +
+      '</div>' +
+    '</div>' +
+
+    /* Localisation */
+    '<div style="margin-bottom:13px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Localisation</label>' +
+        '<button type="button" id="job-gps-btn" onclick="_jobDetectLocation(false)" style="font-size:10.5px;font-weight:700;color:#6366F1;background:#EEF2FF;border:none;border-radius:8px;padding:4px 9px;cursor:pointer"><i class="fas fa-location-crosshairs" style="margin-right:4px"></i>GPS</button>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;margin-top:5px">' +
+        '<input id="job-city" placeholder="Ville" style="flex:1;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box;outline:none">' +
+        '<input id="job-country" placeholder="Pays" style="flex:1;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box;outline:none">' +
+      '</div>' +
+    '</div>' +
+
+    /* Salaire + devise */
+    '<div style="margin-bottom:13px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Salaire <span style="font-weight:400;text-transform:none;font-size:10px">optionnel</span></label>' +
+      '<div style="display:flex;gap:8px;margin-top:5px">' +
+        '<input id="job-salary-amount" type="number" min="0" placeholder="Ex : 35000" style="flex:2;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box;outline:none">' +
+        '<select id="job-salary-currency" style="flex:1;padding:11px 8px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:12.5px;background:#F8FAFC;box-sizing:border-box">' +
+          '<option value="EUR">€ EUR</option>' +
+          '<option value="USD">$ USD</option>' +
+          '<option value="XOF">FCFA</option>' +
+        '</select>' +
+      '</div>' +
+    '</div>' +
+
+    /* Compétences — tags avec autocomplete */
+    '<div style="margin-bottom:16px;position:relative">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Compétences requises</label>' +
+      '<div id="job-skills-tags" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px"></div>' +
+      '<input id="job-skills-inp" placeholder="Tapez pour rechercher une compétence…" autocomplete="off" oninput="_jobSkillsSuggest(this.value)" onfocus="_jobSkillsSuggest(this.value)" onblur="setTimeout(function(){var b=document.getElementById(\'job-skills-suggest\');if(b)b.style.display=\'none\'},150)" style="width:100%;margin-top:6px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box;outline:none">' +
+      '<div id="job-skills-suggest" style="display:none;position:absolute;left:0;right:0;top:100%;background:#fff;border:1.5px solid #E2E8F0;border-radius:10px;margin-top:4px;max-height:180px;overflow-y:auto;z-index:10;box-shadow:0 8px 20px rgba(0,0,0,.1)"></div>' +
+    '</div>' +
+
+    /* Mode de candidature — choix obligatoire */
+    '<div style="margin-bottom:16px">' +
+      '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Mode de candidature *</label>' +
+      '<label style="display:flex;align-items:flex-start;gap:10px;padding:12px;background:#F8FAFC;border:1.5px solid #E2E8F0;border-radius:12px;margin-bottom:8px;cursor:pointer" onclick="_jobToggleApplyMode(\'simplified\')">' +
+        '<input type="radio" name="job-apply-mode" id="job-apply-mode-simplified" value="simplified" style="accent-color:#16A34A;width:17px;height:17px;margin-top:2px" checked>' +
+        '<div>' +
+          '<div style="font-size:13px;font-weight:700;color:#0F172A">Candidature simplifiée</div>' +
+          '<div style="font-size:11px;color:#64748B;margin-top:2px">Les candidats envoient CV + motivation + téléphone directement dans Geniwork</div>' +
+        '</div>' +
+      '</label>' +
+      '<label style="display:flex;align-items:flex-start;gap:10px;padding:12px;background:#F8FAFC;border:1.5px solid #E2E8F0;border-radius:12px;cursor:pointer" onclick="_jobToggleApplyMode(\'external\')">' +
+        '<input type="radio" name="job-apply-mode" id="job-apply-mode-external" value="external" style="accent-color:#16A34A;width:17px;height:17px;margin-top:2px">' +
+        '<div style="flex:1">' +
+          '<div style="font-size:13px;font-weight:700;color:#0F172A">Site de recrutement externe</div>' +
+          '<div style="font-size:11px;color:#64748B;margin-top:2px">Le candidat est redirigé vers votre site/lien — pas de message direct dans Geniwork</div>' +
+          '<input id="job-apply-url" placeholder="https://votre-site.com/offre" style="display:none;width:100%;margin-top:8px;padding:10px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;box-sizing:border-box;outline:none" onclick="event.stopPropagation()">' +
+        '</div>' +
+      '</label>' +
+    '</div>' +
+
+    /* Bouton publier */
+    '<button onclick="_jobSubmitPost()" style="width:100%;padding:14px;background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(22,163,74,.4)">' +
+      '<i class="fas fa-paper-plane" style="margin-right:8px"></i>Soumettre pour validation' +
+    '</button>' +
+
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+
+  /* Détection GPS automatique à l'ouverture du formulaire (silencieuse) */
+  _jobDetectLocation(true);
+}
+
+/* ── Compétences requises : tags + autocomplete (clic seulement, pas de saisie libre) ── */
+var _jobSelectedSkills = [];
+
+function _jobSkillsSuggest(query) {
+  var box = document.getElementById('job-skills-suggest');
+  if (!box) return;
+  var q = (query || '').trim().toLowerCase();
+  var matches = SKILLS_LIST.filter(function(s) {
+    return _jobSelectedSkills.indexOf(s) === -1 && (!q || s.toLowerCase().indexOf(q) !== -1);
+  }).slice(0, 8);
+
+  if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+
+  box.innerHTML = matches.map(function(s) {
+    return '<div onclick="_jobAddSkill(\'' + s.replace(/'/g, "\\'") + '\')" style="padding:10px 14px;font-size:13px;color:#374151;cursor:pointer;border-bottom:1px solid #F1F5F9" onmouseover="this.style.background=\'#F8FAFC\'" onmouseout="this.style.background=\'#fff\'">' + escHtml(s) + '</div>';
+  }).join('');
+  box.style.display = 'block';
+}
+
+function _jobAddSkill(skill) {
+  if (!skill || _jobSelectedSkills.indexOf(skill) !== -1) return;
+  _jobSelectedSkills.push(skill);
+  var inp = document.getElementById('job-skills-inp');
+  if (inp) inp.value = '';
+  var box = document.getElementById('job-skills-suggest');
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+  _jobRenderSkillTags();
+}
+
+function _jobRemoveSkill(skill) {
+  _jobSelectedSkills = _jobSelectedSkills.filter(function(s) { return s !== skill; });
+  _jobRenderSkillTags();
+}
+
+function _jobRenderSkillTags() {
+  var wrap = document.getElementById('job-skills-tags');
+  if (!wrap) return;
+  wrap.innerHTML = _jobSelectedSkills.map(function(s) {
+    return '<span style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;background:#EEF2FF;color:#4F46E5;border-radius:20px;font-size:12px;font-weight:600">' +
+      escHtml(s) +
+      '<i class="fas fa-xmark" style="cursor:pointer;font-size:11px" onclick="_jobRemoveSkill(\'' + s.replace(/'/g, "\\'") + '\')"></i>' +
+    '</span>';
+  }).join('');
+}
+
+/* ── Mode de candidature : simplifiée (CV interne) ou site externe — choix exclusif obligatoire ── */
+function _jobToggleApplyMode(mode) {
+  var rSimp = document.getElementById('job-apply-mode-simplified');
+  var rExt  = document.getElementById('job-apply-mode-external');
+  if (rSimp) rSimp.checked = (mode === 'simplified');
+  if (rExt)  rExt.checked  = (mode === 'external');
+  var urlInp = document.getElementById('job-apply-url');
+  if (urlInp) urlInp.style.display = (mode === 'external') ? 'block' : 'none';
+}
+
+/* Détecte la position GPS et remplit automatiquement ville + pays de l'offre */
+function _jobDetectLocation(silent) {
+  var btn = document.getElementById('job-gps-btn');
+  if (!navigator.geolocation) {
+    if (!silent) showToast('GPS non supporté — entrez votre ville manuellement', 'err');
+    return;
+  }
+  if (btn) btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right:4px"></i>Détection…';
+  navigator.geolocation.getCurrentPosition(function(pos) {
+    var lat = pos.coords.latitude;
+    var lng = pos.coords.longitude;
+    fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&accept-language=fr')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var addr    = data.address || {};
+        var city    = addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
+        var country = addr.country || '';
+        var ci = document.getElementById('job-city');
+        var co = document.getElementById('job-country');
+        if (ci && city)    ci.value = city;
+        if (co && country) co.value = country;
+        if (btn) btn.innerHTML = '<i class="fas fa-check" style="margin-right:4px"></i>GPS';
+        if (!silent) showToast('Localisation détectée : ' + (city ? city + ', ' : '') + country, 'ok');
+      }).catch(function() {
+        if (btn) btn.innerHTML = '<i class="fas fa-location-crosshairs" style="margin-right:4px"></i>GPS';
+        if (!silent) showToast('Impossible de récupérer l\'adresse — entrez manuellement', 'err');
+      });
+  }, function() {
+    if (btn) btn.innerHTML = '<i class="fas fa-location-crosshairs" style="margin-right:4px"></i>GPS';
+    if (!silent) showToast('GPS indisponible — entrez votre ville manuellement', 'err');
+  });
+}
+
+/* ── Sélection du logo entreprise (recadrage carré) ── */
+function _jobPickLogo(input) {
+  var file = input && input.files && input.files[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { showToast('Image trop lourde (max 5 Mo)', 'err'); return; }
+  _gwQueueImageCrop([file], 1, 1, function(dataUrl) {
+    _jobPendingLogo = dataUrl;
+    var prev = document.getElementById('job-logo-preview');
+    if (prev) prev.innerHTML = '<img src="' + dataUrl + '" style="width:100%;height:100%;object-fit:cover">';
+  });
+  input.value = '';
+}
+
+function _jobSubmitPost() {
+  if (!_currentUser) return;
+
+  var verif = _jobGetMyVerif(_currentUser.email);
+  if (!verif || verif.status !== 'approved') { showToast('Entreprise non vérifiée', 'err'); return; }
+
+  var title       = (document.getElementById('job-title')          || {}).value || '';
+  var desc        = (document.getElementById('job-desc')           || {}).value || '';
+  var contract    = (document.getElementById('job-contract')       || {}).value || 'cdi';
+  var remote      = document.getElementById('job-remote') ? document.getElementById('job-remote').checked : false;
+  var city        = (document.getElementById('job-city')           || {}).value || '';
+  var country     = (document.getElementById('job-country')        || {}).value || '';
+  var salaryAmt   = parseFloat((document.getElementById('job-salary-amount') || {}).value) || 0;
+  var salaryCur   = (document.getElementById('job-salary-currency') || {}).value || 'EUR';
+  var applyMode   = document.getElementById('job-apply-mode-external') && document.getElementById('job-apply-mode-external').checked ? 'external' : 'simplified';
+  var applyUrl    = (document.getElementById('job-apply-url') || {}).value || '';
+
+  if (!title.trim()) { showToast('Le titre du poste est requis', 'err'); return; }
+  if (!desc.trim())  { showToast('La description est requise', 'err'); return; }
+  if (applyMode === 'external') {
+    if (!applyUrl.trim()) { showToast('Le lien vers votre site de recrutement est requis', 'err'); return; }
+    if (!/^https?:\/\//i.test(applyUrl.trim())) { showToast('Le lien doit commencer par http:// ou https://', 'err'); return; }
+  }
+
+  var skills = _jobSelectedSkills.slice();
+
+  /* Logo : sauvegarde uniquement si changé et hors période de blocage (14 jours) */
+  var existingLogoRec = _jobGetRecruiterLogo(_currentUser.email);
+  var prevLogo = existingLogoRec ? existingLogoRec.logo : (verif.logo || null);
+  if (_jobPendingLogo && _jobPendingLogo !== prevLogo) {
+    if (_jobLogoCooldownDaysLeft(_currentUser.email) > 0) {
+      showToast('Logo modifiable seulement tous les 14 jours — l\'ancien logo est conservé', '');
+    } else {
+      _jobSetRecruiterLogo(_currentUser.email, _jobPendingLogo);
+    }
+  }
+  var finalLogo = (_jobLogoCooldownDaysLeft(_currentUser.email) > 0 && prevLogo) ? prevLogo : (_jobPendingLogo || prevLogo);
+
+  var job = {
+    id:           'job_' + Date.now(),
+    title:        title.trim(),
+    company:      verif.company,
+    regnum:       verif.regnum,
+    logo:         finalLogo || null,
+    description:  desc.trim(),
+    contract:     contract,
+    remote:       remote,
+    city:         city.trim(),
+    country:      country.trim(),
+    salary:       salaryAmt > 0 ? { amount: salaryAmt, currency: salaryCur } : null,
+    skills:       skills,
+    applyMode:    applyMode,
+    applyUrl:     applyMode === 'external' ? applyUrl.trim() : null,
+    postedBy:     _currentUser.email,
+    postedByNom:  verif.nom,
+    date:         new Date().toISOString(),
+    status:       'active', /* entreprise déjà vérifiée — publication immédiate */
+    applicants:   []
+  };
+
+  var all = _jobGetAll();
+  all.unshift(job);
+  _jobSaveAll(all);
+
+  /* L'offre n'est volontairement PAS publiée dans le fil — uniquement visible dans la page Emploi */
+
+  var bg   = document.getElementById('job-post-bg');
+  var card = document.getElementById('job-post-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+
+  showToast('Offre publiée ✓ Les membres peuvent maintenant postuler !', 'ok');
+  _jobRenderList();
+}
+
+/* ── Card de l'offre dans le fil d'actualité ── */
+function _buildJobFeedCard(post) {
+  var card = document.createElement('div');
+  card.className = 'post-card post-card-job';
+  card.id = 'post-' + post.id;
+
+  var j       = post.job || {};
+  var profile = post.ownerEmail ? (loadUserProfile(post.ownerEmail) || {}) : {};
+  var nom     = profile.nom || post.author || 'Membre';
+  var contractLabel = _JOB_CONTRACTS[j.contract] || j.contract || '';
+  var locLabel = [j.city, j.country].filter(Boolean).join(', ');
+  var salaryLabel = (j.salary && j.salary.amount) ? _gwFmtPrice(j.salary.amount, j.salary.currency) : '';
+
+  var isOwn = _currentUser && post.ownerEmail === _currentUser.email;
+
+  card.innerHTML =
+    '<div style="display:flex;align-items:center;gap:10px;padding:12px 14px 0">' +
+      (j.logo
+        ? '<div class="user-av sm" style="padding:0;overflow:hidden"><img src="' + escHtml(j.logo) + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%"></div>'
+        : getAvatarHtml(post.ownerEmail, nom, 'sm')) +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:13.5px;font-weight:700;color:#0F172A">' + escHtml(nom) + getBadgeHtml(post.ownerEmail) + '</div>' +
+        '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(post.at ? new Date(post.at).toISOString() : post.date || '') + '</div>' +
+      '</div>' +
+      (isOwn
+        ? '<button onclick="event.stopPropagation();deletePost(' + post.id + ')" style="background:none;border:none;color:#CBD5E1;font-size:16px;cursor:pointer;padding:4px"><i class="fas fa-ellipsis-vertical"></i></button>'
+        : '') +
+    '</div>' +
+
+    '<div style="margin:10px 14px 0;padding:12px 14px;background:linear-gradient(135deg,#16A34A,#15803D);border-radius:12px;color:#fff">' +
+      '<div style="font-size:11px;font-weight:700;opacity:.85;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">' +
+        '<i class="fas fa-briefcase" style="margin-right:5px"></i>Offre d\'emploi · <i class="fas fa-circle-check" style="margin-right:2px"></i>Vérifiée' +
+        (contractLabel ? ' · ' + contractLabel : '') +
+      '</div>' +
+      '<div style="font-size:15px;font-weight:800;margin-bottom:4px">' + escHtml(j.title || '') + '</div>' +
+      (j.company ? '<div style="font-size:12.5px;opacity:.9">' + escHtml(j.company) + (locLabel ? ' · ' + escHtml(locLabel) : '') + '</div>' : (locLabel ? '<div style="font-size:12.5px;opacity:.9">' + escHtml(locLabel) + '</div>' : '')) +
+      (salaryLabel ? '<div style="font-size:12.5px;opacity:.9;margin-top:2px"><i class="fas fa-money-bill-wave" style="margin-right:4px"></i>' + escHtml(salaryLabel) + '</div>' : '') +
+    '</div>' +
+
+    '<div style="padding:10px 14px 12px">' +
+      '<button onclick="event.stopPropagation();showPage(\'p-jobs\');_jobRenderList();setTimeout(function(){_jobOpenDetail(\'' + escHtml(j.id || '') + '\');},300)" ' +
+        'style="width:100%;padding:10px;background:#F0FDF4;color:#16A34A;border:1.5px solid #BBF7D0;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">' +
+        '<i class="fas fa-arrow-right" style="margin-right:6px"></i>Voir l\'offre' +
+      '</button>' +
+    '</div>';
+
+  return card;
+}
+
+/* ── Onglets de la page Emploi : toutes / sauvegardées / historique candidat ── */
+var _jobCurrentTab = 'all';
+function _jobSetTab(tab) {
+  _jobCurrentTab = tab;
+  ['all', 'saved', 'history'].forEach(function(t) {
+    var btn = document.getElementById('job-tab-' + t);
+    if (!btn) return;
+    var active = t === tab;
+    btn.style.background = active ? '#16A34A' : '#fff';
+    btn.style.color      = active ? '#fff'    : '#374151';
+  });
+  var searchRow = document.getElementById('job-search-row');
+  if (searchRow) searchRow.style.display = (tab === 'all') ? 'flex' : 'none';
+  _jobRenderList();
+}
+
+/* Construit la card cliquable d'une offre (réutilisée par tous les onglets) */
+function _jobBuildCard(j) {
+  var card = document.createElement('div');
+  card.className = 'collab-card';
+  card.style.marginBottom = '10px';
+  card.onclick = function() { _jobOpenDetail(j.id); };
+
+  var contractLabel = _JOB_CONTRACTS[j.contract] || j.contract || '';
+  var locLabel = [j.city, j.country].filter(Boolean).join(', ');
+  var ago = _collabTimeAgo(j.date);
+  var salaryLabel = (j.salary && j.salary.amount) ? _gwFmtPrice(j.salary.amount, j.salary.currency) : '';
+
+  card.innerHTML =
+    '<div style="display:flex;gap:10px;align-items:flex-start">' +
+      (j.logo
+        ? '<div style="width:40px;height:40px;border-radius:10px;overflow:hidden;flex-shrink:0"><img src="' + escHtml(j.logo) + '" style="width:100%;height:100%;object-fit:cover"></div>'
+        : '<div style="width:40px;height:40px;border-radius:10px;background:#F0FDF4;color:#16A34A;display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="fas fa-briefcase"></i></div>') +
+      '<div style="flex:1;min-width:0">' +
+        '<div class="collab-card-head">' +
+          '<div class="collab-card-domain">' + escHtml(contractLabel) + ' · <i class="fas fa-circle-check" style="font-size:10px"></i> Vérifiée</div>' +
+          '<div class="collab-card-meta">' +
+            (j.remote ? '<span class="collab-badge-remote"><i class="fas fa-wifi"></i> Remote</span>' : '') +
+            '<span class="collab-card-ago">' + ago + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="collab-card-title">' + escHtml(j.title) + '</div>' +
+        (j.company || locLabel ? '<div class="collab-card-desc">' + escHtml([j.company, locLabel].filter(Boolean).join(' · ')) + '</div>' : '') +
+        (salaryLabel ? '<div class="collab-card-desc" style="color:#16A34A;font-weight:600">' + escHtml(salaryLabel) + '</div>' : '') +
+        '<div class="collab-card-desc">' + escHtml((j.description || '').slice(0, 80)) + (j.description && j.description.length > 80 ? '…' : '') + '</div>' +
+      '</div>' +
+    '</div>';
+
+  return card;
+}
+
+function _jobEmptyState(wrap, title, sub) {
+  wrap.innerHTML =
+    '<div style="text-align:center;padding:20px 0;color:#94A3B8">' +
+      '<i class="fas fa-briefcase" style="font-size:28px;display:block;margin-bottom:8px;color:#CBD5E1"></i>' +
+      '<div style="font-size:13px;font-weight:600;color:#64748B">' + escHtml(title) + '</div>' +
+      '<div style="font-size:12px;margin-top:4px">' + escHtml(sub) + '</div>' +
+    '</div>';
+}
+
+/* ── Rendu de la liste des offres (selon l'onglet actif) ── */
+function _jobRenderList() {
+  var wrap = document.getElementById('job-list-wrap');
+  if (!wrap) return;
+
+  if (_jobCurrentTab === 'history') { _jobRenderHistory(wrap); return; }
+
+  var all = _jobGetAll().filter(function(j) { return j.status === 'active'; });
+
+  if (_jobCurrentTab === 'saved') {
+    var saved = _currentUser ? _jobGetSavedJobs(_currentUser.email) : [];
+    all = all.filter(function(j) { return saved.indexOf(j.id) !== -1; });
+  }
+
+  var qPoste = ((document.getElementById('job-search-poste') || {}).value || '').trim().toLowerCase();
+  var qVille = ((document.getElementById('job-search-ville') || {}).value || '').trim().toLowerCase();
+
+  if (_jobCurrentTab === 'all' && qPoste) {
+    all = all.filter(function(j) {
+      return (j.title || '').toLowerCase().indexOf(qPoste) !== -1 ||
+             (j.skills || []).some(function(s) { return s.toLowerCase().indexOf(qPoste) !== -1; });
+    });
+  }
+  if (_jobCurrentTab === 'all' && qVille) {
+    all = all.filter(function(j) {
+      return (j.city || '').toLowerCase().indexOf(qVille) !== -1 ||
+             (j.country || '').toLowerCase().indexOf(qVille) !== -1 ||
+             (j.remote && 'remote'.indexOf(qVille) !== -1);
+    });
+  }
+
+  if (!all.length) {
+    if (_jobCurrentTab === 'saved') {
+      _jobEmptyState(wrap, 'Aucune offre sauvegardée', 'Cliquez sur le marque-page dans une offre pour la retrouver ici');
+    } else {
+      _jobEmptyState(wrap,
+        (qPoste || qVille) ? 'Aucun résultat' : 'Aucune offre d\'emploi',
+        (qPoste || qVille) ? 'Essayez une autre recherche' : 'Soyez le premier à publier !');
+    }
+    return;
+  }
+
+  all.sort(function(a, b) { return new Date(b.date) - new Date(a.date); });
+
+  wrap.innerHTML = '';
+  all.forEach(function(j) { wrap.appendChild(_jobBuildCard(j)); });
+}
+
+/* ── Historique des candidatures du candidat connecté ── */
+function _jobRenderHistory(wrap) {
+  if (!_currentUser) { _jobEmptyState(wrap, 'Connectez-vous', 'pour voir vos candidatures'); return; }
+
+  var hidden = _jobGetHistoryHidden(_currentUser.email);
+  var mine = _jobGetApplications()
+    .filter(function(a) { return a.applicantEmail === _currentUser.email && hidden.indexOf(a.id) === -1; })
+    .sort(function(a, b) { return new Date(b.appliedAt) - new Date(a.appliedAt); });
+
+  if (!mine.length) { _jobEmptyState(wrap, 'Aucune candidature', 'Vos candidatures apparaîtront ici'); return; }
+
+  var allJobs = _jobGetAll();
+
+  wrap.innerHTML = mine.map(function(a) {
+    var job = allJobs.find(function(j) { return j.id === a.jobId; });
+    var modeLabel = a.mode === 'external' ? 'Site externe' : 'Candidature simplifiée';
+    var modeColor = a.mode === 'external' ? '#4F46E5' : '#16A34A';
+    return '<div class="collab-card" style="margin-bottom:10px">' +
+      '<div style="display:flex;gap:10px;align-items:flex-start">' +
+        (job && job.logo
+          ? '<div style="width:40px;height:40px;border-radius:10px;overflow:hidden;flex-shrink:0"><img src="' + escHtml(job.logo) + '" style="width:100%;height:100%;object-fit:cover"></div>'
+          : '<div style="width:40px;height:40px;border-radius:10px;background:#F0FDF4;color:#16A34A;display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="fas fa-briefcase"></i></div>') +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">' +
+            '<div class="collab-card-title" style="margin:0">' + escHtml(a.jobTitle) + '</div>' +
+            '<button onclick="event.stopPropagation();_jobHideFromHistory(\'' + a.id + '\')" title="Retirer de mon historique" style="background:none;border:none;color:#CBD5E1;cursor:pointer;font-size:13px;flex-shrink:0"><i class="fas fa-trash"></i></button>' +
+          '</div>' +
+          '<div style="font-size:11.5px;font-weight:700;color:' + modeColor + ';margin-top:3px">' + modeLabel + '</div>' +
+          '<div class="collab-card-desc" style="margin-top:3px">' + _collabTimeAgo(a.appliedAt) + (job ? '' : ' · Offre supprimée') + '</div>' +
+        '</div>' +
+      '</div>' +
+      (job ? '<button onclick="_jobOpenDetail(\'' + job.id + '\')" style="width:100%;margin-top:10px;padding:9px;background:#F8FAFC;color:#374151;border:1.5px solid #E2E8F0;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer">Voir l\'offre</button>' : '') +
+    '</div>';
+  }).join('');
+}
+
+/* ── Détail d'une offre ── */
+function _jobOpenDetail(id) {
+  var all = _jobGetAll();
+  var j   = all.find(function(x) { return x.id === id; });
+  if (!j) { showToast('Offre introuvable', 'err'); return; }
+
+  var existing = document.getElementById('job-detail-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('job-detail-card');
+  if (existingCard) existingCard.remove();
+
+  var isMine     = _currentUser && j.postedBy === _currentUser.email;
+  var hasApplied = _currentUser && (j.applicants || []).indexOf(_currentUser.email) !== -1;
+
+  var contractLabel = _JOB_CONTRACTS[j.contract] || j.contract || '';
+  var locLabel = [j.city, j.country].filter(Boolean).join(', ');
+
+  var skillsHtml = (j.skills || []).map(function(s) {
+    return '<span class="collab-skill-tag">' + escHtml(s) + '</span>';
+  }).join('');
+
+  var bg = document.createElement('div');
+  bg.id = 'job-detail-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+
+  var card = document.createElement('div');
+  card.id = 'job-detail-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:88vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  bg.onclick = function(e) { if (e.target === bg) { bg.remove(); card.remove(); } };
+
+  var actionHtml = '';
+  if (isMine) {
+    actionHtml =
+      '<button onclick="_jobClose(\'' + id + '\')" style="width:100%;padding:13px;background:#FEF2F2;color:#EF4444;border:2px solid #FECACA;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px">' +
+        '<i class="fas fa-times-circle" style="margin-right:6px"></i>Clôturer cette offre' +
+      '</button>';
+  } else if (hasApplied) {
+    actionHtml =
+      '<div style="text-align:center;padding:14px;background:#F0FDF4;border-radius:12px;margin-bottom:10px;font-weight:700;color:#16A34A;font-size:14px">' +
+        '<i class="fas fa-check-circle" style="margin-right:6px"></i>Vous avez déjà postulé' +
+      '</div>';
+  } else if (_currentUser) {
+    actionHtml =
+      '<button onclick="' + (j.applyMode === 'external' ? '_jobApplyExternal(\'' + id + '\')' : '_jobOpenSimplifiedApply(\'' + id + '\')') + '" style="width:100%;padding:14px;background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(22,163,74,.4);margin-bottom:10px">' +
+        (j.applyMode === 'external'
+          ? '<i class="fas fa-arrow-up-right-from-square" style="margin-right:8px"></i>Postuler sur le site de l\'entreprise'
+          : '<i class="fas fa-paper-plane" style="margin-right:8px"></i>Candidature simplifiée') +
+      '</button>';
+  }
+
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
+    '<div style="padding:16px 20px 28px">' +
+
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">' +
+      '<span style="font-size:12px;font-weight:700;padding:5px 12px;border-radius:20px;background:#F0FDF4;color:#16A34A"><i class="fas fa-circle-check" style="margin-right:4px"></i>Entreprise vérifiée · ' + escHtml(contractLabel) + '</span>' +
+      '<div style="display:flex;gap:6px;flex-shrink:0">' +
+        '<button id="job-save-btn" onclick="_jobToggleSaveJob(\'' + id + '\')" style="border:none;background:#F1F5F9;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:14px;color:#16A34A">' + (_jobIsSaved(id) ? '<i class="fas fa-bookmark"></i>' : '<i class="far fa-bookmark"></i>') + '</button>' +
+        '<button onclick="document.getElementById(\'job-detail-bg\').remove();document.getElementById(\'job-detail-card\').remove()" style="border:none;background:#F1F5F9;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:16px;color:#64748B">✕</button>' +
+      '</div>' +
+    '</div>' +
+
+    (j.logo ? '<div style="width:52px;height:52px;border-radius:14px;overflow:hidden;margin-bottom:10px"><img src="' + escHtml(j.logo) + '" style="width:100%;height:100%;object-fit:cover"></div>' : '') +
+    '<h2 style="font-size:18px;font-weight:800;color:#0F172A;margin:0 0 6px">' + escHtml(j.title) + '</h2>' +
+    (j.company ? '<div style="font-size:13.5px;color:#16A34A;font-weight:600;margin-bottom:10px"><i class="fas fa-building" style="margin-right:5px"></i>' + escHtml(j.company) + '</div>' : '') +
+
+    '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">' +
+      (j.remote ? '<span style="font-size:11.5px;padding:4px 10px;background:#ECFDF5;color:#059669;border-radius:20px;font-weight:600"><i class="fas fa-wifi" style="margin-right:4px"></i>Remote</span>' : '') +
+      (locLabel ? '<span style="font-size:11.5px;padding:4px 10px;background:#FFF7ED;color:#EA580C;border-radius:20px;font-weight:600"><i class="fas fa-location-dot" style="margin-right:4px"></i>' + escHtml(locLabel) + '</span>' : '') +
+      (j.salary && j.salary.amount ? '<span style="font-size:11.5px;padding:4px 10px;background:#EEF2FF;color:#4F46E5;border-radius:20px;font-weight:600"><i class="fas fa-money-bill-wave" style="margin-right:4px"></i>' + escHtml(_gwFmtPrice(j.salary.amount, j.salary.currency)) + '</span>' : '') +
+    '</div>' +
+
+    '<div style="font-size:13.5px;color:#374151;line-height:1.6;margin-bottom:14px;white-space:pre-wrap">' + escHtml(j.description) + '</div>' +
+
+    (skillsHtml ? '<div style="margin-bottom:14px"><div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Compétences recherchées</div><div style="display:flex;flex-wrap:wrap;gap:6px">' + skillsHtml + '</div></div>' : '') +
+
+    '<div style="display:flex;align-items:center;gap:10px;padding:12px;background:#F8FAFC;border-radius:12px;margin:14px 0">' +
+      getAvatarHtml(j.postedBy || null, j.postedByNom || '?', 'md') +
+      '<div>' +
+        '<div style="font-size:13px;font-weight:700;color:#0F172A">' + escHtml(j.postedByNom) + '</div>' +
+        '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(j.date) + ' · ' + (j.applicants || []).length + ' candidat(s)</div>' +
+      '</div>' +
+    '</div>' +
+
+    actionHtml +
+
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+/* ── Postuler via le site de recrutement externe du recruteur — pas de message direct ── */
+function _jobApplyExternal(id) {
+  if (!_currentUser) { showToast('Connectez-vous pour postuler', 'err'); return; }
+
+  var all = _jobGetAll();
+  var j   = all.find(function(x) { return x.id === id; });
+  if (!j || !j.applyUrl) return;
+
+  if (j.postedBy === _currentUser.email) {
+    showToast('Vous ne pouvez pas postuler à votre propre offre', 'err'); return;
+  }
+
+  if (!j.applicants) j.applicants = [];
+  if (j.applicants.indexOf(_currentUser.email) === -1) {
+    j.applicants.push(_currentUser.email);
+    _jobSaveAll(all);
+  }
+
+  var profile      = loadUserProfile(_currentUser.email) || {};
+  var applicantNom = profile.nom || _currentUser.nom || 'Un membre';
+  var apps = _jobGetApplications();
+  apps.unshift({
+    id:             'app_' + Date.now(),
+    jobId:          id,
+    jobTitle:       j.title,
+    applicantEmail: _currentUser.email,
+    applicantNom:   applicantNom,
+    mode:           'external',
+    appliedAt:      new Date().toISOString()
+  });
+  _jobSaveApplications(apps);
+
+  window.open(j.applyUrl, '_blank');
+
+  var bg   = document.getElementById('job-detail-bg');
+  var card = document.getElementById('job-detail-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+}
+
+/* ── Candidature simplifiée : CV + motivation + téléphone ── */
+var _jobApplyPendingCV = null; /* {name, data} en attente */
+
+function _jobOpenSimplifiedApply(id) {
+  if (!_currentUser) { showToast('Connectez-vous pour postuler', 'err'); return; }
+  var all = _jobGetAll();
+  var j   = all.find(function(x) { return x.id === id; });
+  if (!j) return;
+  if (j.postedBy === _currentUser.email) { showToast('Vous ne pouvez pas postuler à votre propre offre', 'err'); return; }
+  if ((j.applicants || []).indexOf(_currentUser.email) !== -1) { showToast('Vous avez déjà postulé', 'err'); return; }
+
+  _jobApplyPendingCV = null;
+
+  var existing = document.getElementById('job-apply-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('job-apply-card');
+  if (existingCard) existingCard.remove();
+
+  var bg = document.createElement('div');
+  bg.id = 'job-apply-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1600;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+  bg.onclick = function(e) { if (e.target === bg) { bg.remove(); card.remove(); } };
+
+  var card = document.createElement('div');
+  card.id = 'job-apply-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1601;max-height:90vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
+    '<div style="padding:16px 20px 28px">' +
+      '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px">' +
+        '<span style="font-size:17px;font-weight:800;color:#0F172A"><i class="fas fa-paper-plane" style="color:#16A34A;margin-right:8px"></i>Candidature simplifiée</span>' +
+        '<button onclick="document.getElementById(\'job-apply-bg\').remove();document.getElementById(\'job-apply-card\').remove()" style="flex-shrink:0;width:32px;height:32px;border-radius:50%;border:none;background:#F1F5F9;color:#64748B;font-size:16px;cursor:pointer">✕</button>' +
+      '</div>' +
+      '<div style="font-size:12.5px;color:#64748B;margin-bottom:16px">Pour : <strong style="color:#0F172A">' + escHtml(j.title) + '</strong></div>' +
+
+      '<div style="margin-bottom:13px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Votre CV *</label>' +
+        '<div style="margin-top:5px">' +
+          '<button type="button" id="job-cv-btn" onclick="document.getElementById(\'job-cv-inp\').click()" style="width:100%;padding:12px;border:1.5px dashed #CBD5E1;border-radius:10px;background:#F8FAFC;color:#64748B;font-size:13px;cursor:pointer;text-align:center">' +
+            '<i class="fas fa-file-arrow-up" style="margin-right:6px"></i>Choisir un fichier (PDF, image)' +
+          '</button>' +
+          '<input type="file" id="job-cv-inp" accept=".pdf,image/*" style="display:none" onchange="_jobPickCV(this)">' +
+        '</div>' +
+      '</div>' +
+
+      '<div style="margin-bottom:13px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Téléphone *</label>' +
+        '<input id="job-apply-phone" type="tel" placeholder="Ex : +225 07 00 00 00 00" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13.5px;box-sizing:border-box;outline:none">' +
+      '</div>' +
+
+      '<div style="margin-bottom:18px">' +
+        '<label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px">Message de motivation <span style="font-weight:400;text-transform:none;font-size:10px">optionnel</span></label>' +
+        '<textarea id="job-apply-motivation" placeholder="Pourquoi ce poste vous intéresse…" rows="4" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;resize:none;box-sizing:border-box;outline:none"></textarea>' +
+      '</div>' +
+
+      '<button onclick="_jobSubmitSimplifiedApply(\'' + id + '\')" style="width:100%;padding:14px;background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(22,163,74,.4)">' +
+        '<i class="fas fa-paper-plane" style="margin-right:8px"></i>Envoyer ma candidature' +
+      '</button>' +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _jobPickCV(input) {
+  var file = input && input.files && input.files[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { showToast('Fichier trop lourd (max 5 Mo)', 'err'); return; }
+  var reader = new FileReader();
+  reader.onload = function() {
+    _jobApplyPendingCV = { name: file.name, data: reader.result };
+    var btn = document.getElementById('job-cv-btn');
+    if (btn) btn.innerHTML = '<i class="fas fa-circle-check" style="color:#16A34A;margin-right:6px"></i>' + escHtml(file.name);
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+function _jobSubmitSimplifiedApply(id) {
+  if (!_currentUser) return;
+  var all = _jobGetAll();
+  var j   = all.find(function(x) { return x.id === id; });
+  if (!j) return;
+
+  var phone = (document.getElementById('job-apply-phone') || {}).value || '';
+  var motivation = (document.getElementById('job-apply-motivation') || {}).value || '';
+
+  if (!_jobApplyPendingCV) { showToast('Merci de joindre votre CV', 'err'); return; }
+  if (!phone.trim())       { showToast('Le numéro de téléphone est requis', 'err'); return; }
+
+  if (!j.applicants) j.applicants = [];
+  if (j.applicants.indexOf(_currentUser.email) === -1) j.applicants.push(_currentUser.email);
+  _jobSaveAll(all);
+
+  var profile      = loadUserProfile(_currentUser.email) || {};
+  var applicantNom = profile.nom || _currentUser.nom || 'Un membre';
+
+  var apps = _jobGetApplications();
+  apps.unshift({
+    id:              'app_' + Date.now(),
+    jobId:           id,
+    jobTitle:        j.title,
+    applicantEmail:  _currentUser.email,
+    applicantNom:    applicantNom,
+    cv:              _jobApplyPendingCV,
+    phone:           phone.trim(),
+    motivation:      motivation.trim(),
+    mode:            'simplified',
+    archived:        false,
+    appliedAt:       new Date().toISOString()
+  });
+  _jobSaveApplications(apps);
+
+  pushNotif(j.postedBy, {
+    id:      genNotifId(),
+    type:    'system',
+    title:   '💼 Nouvelle candidature simplifiée !',
+    message: applicantNom + ' a postulé à votre offre "' + j.title + '" avec son CV. Consultez votre tableau de bord recruteur.',
+    date:    new Date().toISOString(),
+    read:    false
+  });
+
+  var bgA   = document.getElementById('job-apply-bg');
+  var cardA = document.getElementById('job-apply-card');
+  if (bgA)   bgA.remove();
+  if (cardA) cardA.remove();
+  var bg   = document.getElementById('job-detail-bg');
+  var card = document.getElementById('job-detail-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+
+  showToast('Candidature envoyée ✓', 'ok');
+}
+
+/* ── Clôturer une offre (recruteur) ── */
+function _jobClose(id) {
+  var all = _jobGetAll();
+  var j   = all.find(function(x) { return x.id === id; });
+  if (!j) return;
+  j.status = 'closed';
+  _jobSaveAll(all);
+
+  var bg   = document.getElementById('job-detail-bg');
+  var card = document.getElementById('job-detail-card');
+  if (bg)   bg.remove();
+  if (card) card.remove();
+
+  showToast('Offre clôturée', 'ok');
+  _jobRenderList();
+}
+
+/* ── Tableau de bord recruteur : candidatures simplifiées reçues ── */
+var _jobDashTab = 'received'; /* 'received' ou 'archived' */
+
+function _jobDashSetTab(tab) {
+  _jobDashTab = tab;
+  _jobOpenRecruiterDashboard();
+}
+
+function _jobArchiveApplication(appId, archived) {
+  var apps = _jobGetApplications();
+  var a = apps.find(function(x) { return x.id === appId; });
+  if (!a) return;
+  a.archived = archived;
+  _jobSaveApplications(apps);
+  showToast(archived ? 'Candidature archivée' : 'Candidature restaurée', 'ok');
+  _jobOpenRecruiterDashboard();
+}
+
+function _jobOpenRecruiterDashboard() {
+  if (!_currentUser) return;
+  var verif = _jobGetMyVerif(_currentUser.email);
+  if (!verif || verif.status !== 'approved') {
+    showToast('Réservé aux recruteurs vérifiés', 'err');
+    return;
+  }
+
+  var existing = document.getElementById('job-recdash-bg');
+  if (existing) existing.remove();
+  var existingCard = document.getElementById('job-recdash-card');
+  if (existingCard) existingCard.remove();
+
+  var allApps      = _jobGetApplicationsForRecruiter(_currentUser.email);
+  var simplifiedAll = allApps.filter(function(a) { return a.mode !== 'external'; });
+  var received      = simplifiedAll.filter(function(a) { return !a.archived; });
+  var archived      = simplifiedAll.filter(function(a) { return a.archived; });
+  var apps          = _jobDashTab === 'archived' ? archived : received;
+
+  /* Clics sur les liens externes, par offre */
+  var myExternalJobs = _jobGetAll().filter(function(j) { return j.postedBy === _currentUser.email && j.applyMode === 'external'; });
+  var clicksHtml = !myExternalJobs.length ? '' :
+    '<div style="margin-bottom:18px">' +
+      '<div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px"><i class="fas fa-arrow-up-right-from-square" style="margin-right:4px"></i>Clics sur vos liens externes</div>' +
+      myExternalJobs.map(function(j) {
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:#F8FAFC;border-radius:10px;margin-bottom:6px">' +
+          '<span style="font-size:12.5px;color:#374151;font-weight:600">' + escHtml(j.title) + '</span>' +
+          '<span style="font-size:12.5px;font-weight:700;color:#4F46E5">' + _jobExternalClickCount(j.id) + ' clic(s)</span>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+
+  var bg = document.createElement('div');
+  bg.id = 'job-recdash-bg';
+  bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
+  bg.onclick = function(e) { if (e.target === bg) { bg.remove(); card.remove(); } };
+
+  var card = document.createElement('div');
+  card.id = 'job-recdash-card';
+  card.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#fff;border-radius:24px 24px 0 0;z-index:1501;max-height:90vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+
+  var listHtml = !apps.length
+    ? '<div style="text-align:center;padding:40px 20px;color:#94A3B8">' +
+        '<i class="fas fa-inbox" style="font-size:34px;margin-bottom:10px;display:block"></i>' +
+        (_jobDashTab === 'archived' ? 'Aucune candidature archivée.' : 'Aucune candidature reçue pour le moment.') +
+      '</div>'
+    : apps.map(function(a) {
+        return '<div style="border:1.5px solid #E2E8F0;border-radius:14px;padding:14px;margin-bottom:12px">' +
+          '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+            getAvatarHtml(a.applicantEmail, a.applicantNom, 'sm') +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:13.5px;font-weight:700;color:#0F172A">' + escHtml(a.applicantNom) + '</div>' +
+              '<div style="font-size:11px;color:#94A3B8">Pour : ' + escHtml(a.jobTitle) + ' · ' + _collabTimeAgo(a.appliedAt) + '</div>' +
+            '</div>' +
+            '<button onclick="_jobArchiveApplication(\'' + a.id + '\',' + (a.archived ? 'false' : 'true') + ')" title="' + (a.archived ? 'Restaurer' : 'Archiver') + '" style="background:#F1F5F9;border:none;width:30px;height:30px;border-radius:50%;cursor:pointer;color:#64748B;font-size:12.5px;flex-shrink:0"><i class="fas fa-' + (a.archived ? 'box-open' : 'box-archive') + '"></i></button>' +
+          '</div>' +
+          '<div style="display:flex;gap:8px;margin-bottom:' + (a.motivation ? '10px' : '0') + '">' +
+            '<a href="' + a.cv.data + '" download="' + escHtml(a.cv.name) + '" style="flex:1;text-align:center;padding:9px;background:#F0FDF4;color:#16A34A;border-radius:9px;font-size:12.5px;font-weight:700;text-decoration:none"><i class="fas fa-file-arrow-down" style="margin-right:5px"></i>CV</a>' +
+            '<a href="tel:' + escHtml(a.phone) + '" style="flex:1;text-align:center;padding:9px;background:#EEF2FF;color:#4F46E5;border-radius:9px;font-size:12.5px;font-weight:700;text-decoration:none"><i class="fas fa-phone" style="margin-right:5px"></i>' + escHtml(a.phone) + '</a>' +
+          '</div>' +
+          (a.motivation ? '<div style="font-size:12.5px;color:#374151;line-height:1.5;background:#F8FAFC;border-radius:9px;padding:9px">' + escHtml(a.motivation) + '</div>' : '') +
+        '</div>';
+      }).join('');
+
+  card.innerHTML =
+    '<div style="width:36px;height:4px;border-radius:2px;background:#E2E8F0;margin:12px auto 0"></div>' +
+    '<div style="padding:16px 20px 28px">' +
+      '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px">' +
+        '<span style="font-size:17px;font-weight:800;color:#0F172A"><i class="fas fa-user-tie" style="color:#16A34A;margin-right:8px"></i>Tableau de bord recruteur</span>' +
+        '<button onclick="document.getElementById(\'job-recdash-bg\').remove();document.getElementById(\'job-recdash-card\').remove()" style="flex-shrink:0;width:32px;height:32px;border-radius:50%;border:none;background:#F1F5F9;color:#64748B;font-size:16px;cursor:pointer">✕</button>' +
+      '</div>' +
+      clicksHtml +
+      '<div style="display:flex;gap:6px;margin-bottom:14px">' +
+        '<button onclick="_jobDashSetTab(\'received\')" style="flex:1;padding:9px;border:1.5px solid #E2E8F0;border-radius:10px;background:' + (_jobDashTab === 'received' ? '#16A34A' : '#fff') + ';color:' + (_jobDashTab === 'received' ? '#fff' : '#374151') + ';font-size:12.5px;font-weight:700;cursor:pointer">Reçues (' + received.length + ')</button>' +
+        '<button onclick="_jobDashSetTab(\'archived\')" style="flex:1;padding:9px;border:1.5px solid #E2E8F0;border-radius:10px;background:' + (_jobDashTab === 'archived' ? '#16A34A' : '#fff') + ';color:' + (_jobDashTab === 'archived' ? '#fff' : '#374151') + ';font-size:12.5px;font-weight:700;cursor:pointer">Archivées (' + archived.length + ')</button>' +
+      '</div>' +
+      listHtml +
+    '</div>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
 }
 
 /* Ferme tout (modal limite + formulaire collab) et ouvre la page abonnements */
@@ -34069,8 +35765,13 @@ function _collabOpenDetail(id) {
               if (a.isImg) {
                 return '<img src="' + escHtml(a.data) + '" style="width:90px;height:90px;border-radius:10px;object-fit:cover;border:1.5px solid #E2E8F0;cursor:pointer" onclick="window.open(this.src)">';
               }
-              return '<a href="' + escHtml(a.data) + '" download="' + escHtml(a.name) + '" style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#EEF2FF;border-radius:10px;text-decoration:none;font-size:12px;color:#6366F1;font-weight:600">' +
-                '<i class="fas fa-file-arrow-down"></i>' + escHtml(a.name.slice(0, 22)) + '</a>';
+              /* Document : visible et téléchargeable uniquement par le posteur ou après candidature */
+              if (isMine || hasApplied) {
+                return '<a href="' + escHtml(a.data) + '" download="' + escHtml(a.name) + '" style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#EEF2FF;border-radius:10px;text-decoration:none;font-size:12px;color:#6366F1;font-weight:600">' +
+                  '<i class="fas fa-file-arrow-down"></i>' + escHtml(a.name.slice(0, 22)) + '</a>';
+              }
+              return '<div style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#F1F5F9;border-radius:10px;font-size:12px;color:#94A3B8;font-weight:600">' +
+                '<i class="fas fa-lock"></i> ' + escHtml(a.name.slice(0, 18)) + ' — postulez pour y accéder</div>';
             }).join('') +
           '</div>' +
         '</div>'
