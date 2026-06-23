@@ -680,7 +680,21 @@
       const el = wrap.querySelector('.export-source');
       const data = getExportData(btn);
       if (!el || !data || !window.html2pdf) return;
-      html2pdf().from(el).set({ filename: data.filenameBase + '.pdf', margin: 10, html2canvas: { scale: 2 } }).save();
+      // Le bloc résultat vit dans .transcript (max-height + overflow-y:auto) : capturer
+      // l'élément tel quel le tronque/vide au-delà de la zone visible scrollée. On retire
+      // donc temporairement la limite de hauteur du conteneur pendant la capture (un clone
+      // détaché positionné hors écran n'est pas mesuré correctement par html2canvas).
+      const scrollAncestor = el.closest('.transcript');
+      const prevMaxHeight = scrollAncestor ? scrollAncestor.style.maxHeight : null;
+      const prevOverflow = scrollAncestor ? scrollAncestor.style.overflow : null;
+      if (scrollAncestor) { scrollAncestor.style.maxHeight = 'none'; scrollAncestor.style.overflow = 'visible'; }
+      btn.disabled = true;
+      html2pdf().from(el).set({ filename: data.filenameBase + '.pdf', margin: 10, html2canvas: { scale: 2 } }).save()
+        .catch((err) => alert('Échec du téléchargement PDF : ' + err.message))
+        .finally(() => {
+          if (scrollAncestor) { scrollAncestor.style.maxHeight = prevMaxHeight; scrollAncestor.style.overflow = prevOverflow; }
+          btn.disabled = false;
+        });
     }
     function downloadWord(btn) {
       const wrap = btn.closest('.export-wrap');
