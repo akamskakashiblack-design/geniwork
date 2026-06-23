@@ -674,7 +674,46 @@
       return '<div class="export-bar"><button onclick="downloadPDF(this)">📄 PDF</button><button onclick="downloadWord(this)">📝 Word</button><button onclick="downloadExcel(this)">📊 Excel</button></div>';
     }
     function getExportData(btn) { return exportStore[Number(btn.closest('.export-wrap').dataset.idx)]; }
-    function triggerDownload(blob, filename) {
+
+    function isNativeApp() {
+      return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+    }
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(String(reader.result).split(',')[1] || '');
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+    // Sauvegarde via le plugin natif Capacitor Filesystem (WebView Android ne sait pas
+    // declencher de telechargement de blob nativement, contrairement a un navigateur).
+    async function saveFileNative(blob, filename) {
+      const Plugins = window.Capacitor && window.Capacitor.Plugins;
+      if (!Plugins || !Plugins.Filesystem) { alert('Téléchargement indisponible sur cette version de l\'app.'); return; }
+      const base64 = await blobToBase64(blob);
+      const result = await Plugins.Filesystem.writeFile({
+        path: filename,
+        data: base64,
+        directory: 'DOCUMENTS',
+        recursive: true,
+      });
+      if (Plugins.Share) {
+        try { await Plugins.Share.share({ title: filename, url: result.uri }); return; } catch (e) {}
+      }
+      alert('Fichier enregistré : ' + filename);
+    }
+    // Telechargement universel : app native Capacitor → Filesystem ; navigateur mobile
+    // avec partage de fichiers → feuille de partage native ; sinon → telechargement
+    // classique via lien blob (desktop).
+    async function triggerDownload(blob, filename) {
+      if (isNativeApp()) { await saveFileNative(blob, filename); return; }
+      if (navigator.canShare && navigator.share) {
+        try {
+          const file = new File([blob], filename, { type: blob.type });
+          if (navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: filename }); return; }
+        } catch (e) { /* repli sur le telechargement classique */ }
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = filename;
@@ -695,7 +734,8 @@
       const prevOverflow = scrollAncestor ? scrollAncestor.style.overflow : null;
       if (scrollAncestor) { scrollAncestor.style.maxHeight = 'none'; scrollAncestor.style.overflow = 'visible'; }
       btn.disabled = true;
-      html2pdf().from(el).set({ filename: data.filenameBase + '.pdf', margin: 10, html2canvas: { scale: 2 } }).save()
+      html2pdf().from(el).set({ filename: data.filenameBase + '.pdf', margin: 10, html2canvas: { scale: 2 } }).outputPdf('blob')
+        .then((blob) => triggerDownload(blob, data.filenameBase + '.pdf'))
         .catch((err) => alert('Échec du téléchargement PDF : ' + err.message))
         .finally(() => {
           if (scrollAncestor) { scrollAncestor.style.maxHeight = prevMaxHeight; scrollAncestor.style.overflow = prevOverflow; }
