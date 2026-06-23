@@ -322,7 +322,7 @@
             <input type="file" id="chat-file" accept="image/*,.pdf" onchange="onFilePicked()" />
           </div>
           <div class="chat-input-row">
-            <textarea id="message" placeholder="" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendMessage();}"></textarea>
+            <textarea id="message" placeholder="" onkeydown="onMessageKeydown(event)"></textarea>
             <button class="primary" id="send-btn" onclick="sendMessage()">Envoyer</button>
           </div>
           <span id="loading">L'IA réfléchit...</span>
@@ -563,6 +563,15 @@
       transcript.appendChild(bubble);
       transcript.scrollTop = transcript.scrollHeight;
       return bubble;
+    }
+
+    const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+
+    function onMessageKeydown(event) {
+      if (event.key !== 'Enter' || isTouchDevice) return;
+      if (event.shiftKey) return;
+      event.preventDefault();
+      sendMessage();
     }
 
     async function sendMessage() {
