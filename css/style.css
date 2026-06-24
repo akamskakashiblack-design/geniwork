@@ -914,12 +914,12 @@ body {
 /* ── TOPBAR ── */
 .app-topbar {
   flex-shrink: 0;
-  height: 56px;
+  height: calc(56px + env(safe-area-inset-top, 0px));
   background: linear-gradient(135deg, #0B1A33 0%, #0D2150 100%);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px;
+  padding: env(safe-area-inset-top, 0px) 14px 0;
   border-bottom: 1px solid rgba(255,255,255,0.07);
   z-index: 20;
 }
