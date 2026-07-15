@@ -62,6 +62,21 @@ var _gwFbReady   = false;  /* true quand Firebase est connecté */
 var _gwFbSkip    = false;  /* Pause les listeners pour éviter les boucles */
 var _gwAppStarted = false; /* true si l'app a déjà été lancée (fast-path ou normal) */
 
+/* ── Auth anonyme : les writes Firebase (règles auth != null) échouent
+   silencieusement si on écrit avant que signInAnonymously() ait résolu.
+   _gwOnAuthReady() met en attente les writes critiques jusqu'à confirmation,
+   avec un filet de sécurité (8s) pour ne jamais bloquer indéfiniment si
+   l'auth échoue durablement. ── */
+var _gwAuthReady   = false;
+var _gwAuthWaiters = [];
+function _gwOnAuthReady(fn) {
+  if (_gwAuthReady) { fn(); return; }
+  var fired = false;
+  var run = function() { if (fired) return; fired = true; fn(); };
+  _gwAuthWaiters.push(run);
+  setTimeout(run, 8000);
+}
+
 /* ══════════════════════════════════════════
    INDEXEDDB — STOCKAGE VIDÉO PERSISTANT
    Les blob: URLs disparaissent à la fermeture
@@ -186,6 +201,9 @@ function _gwInitFirebase() {
     _gwFbAuth.signInAnonymously()
       .then(function(cred) {
         console.log('[GW Firebase] 🔒 Auth anonyme OK —', cred.user.uid);
+        _gwAuthReady = true;
+        _gwAuthWaiters.forEach(function(fn) { try { fn(); } catch(e){} });
+        _gwAuthWaiters = [];
         _gwFbSyncStart();
         _gwFbPreloadAndStart();
       })
@@ -1085,6 +1103,14 @@ function _gwMergePost(snap) {
   var fbKey = snap.key;
   var posts = snap.val();
   var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
+
+  /* Firebase RTDB peut stocker un tableau "troué" comme objet ({0:..,2:..})
+     plutôt que comme array — le convertir au lieu de le traiter comme
+     "tous les posts supprimés", sinon les Shorts de cet utilisateur
+     disparaissent chez tout le monde alors qu'ils existent toujours. */
+  if (posts && typeof posts === 'object' && !Array.isArray(posts)) {
+    posts = Object.keys(posts).map(function(k) { return posts[k]; });
+  }
 
   /* Array vide ou null = tous les posts de cet utilisateur ont été supprimés */
   if (!Array.isArray(posts) || !posts.length) {
@@ -2195,7 +2221,13 @@ function _gwFbPreloadAndStart() {
     var allPosts = snaps[1].val() || {};
     Object.keys(allPosts).forEach(function(pk) {
       var pv = allPosts[pk];
-      if (!Array.isArray(pv)) return;
+      /* Convertit un objet "troué" (Firebase) en tableau au lieu de l'ignorer —
+         sinon les posts/Shorts de cet utilisateur n'atteignent jamais les
+         autres appareils au chargement initial. */
+      if (!Array.isArray(pv)) {
+        if (pv && typeof pv === 'object') pv = Object.keys(pv).map(function(k) { return pv[k]; });
+        else return;
+      }
       var pe = pk.replace(/__d__/g, '.').replace(/__a__/g, '@');
       try { localStorage.setItem('gw_userposts_' + pe, JSON.stringify(pv)); } catch(e){}
     });
@@ -5484,6 +5516,19 @@ function switchFeedTab(btn, tab) {
 ══════════════════════════════════════════ */
 function _userPostsKey(email) { return 'gw_userposts_' + email; }
 
+/* Plafonne le payload Firebase à 50 éléments SANS jamais sacrifier de vidéo/Short —
+   avant, un simple posts.slice(0,50) faisait disparaître les anciennes vidéos dès
+   qu'un utilisateur dépassait 50 publications au total (photos + vidéos confondues). */
+function _gwCapFirebasePosts(posts) {
+  var CAP = 50;
+  if (posts.length <= CAP) return posts;
+  var videos = posts.filter(function(p) { return p && p.video; });
+  var others = posts.filter(function(p) { return !(p && p.video); });
+  var kept = videos.concat(others.slice(0, Math.max(0, CAP - videos.length)));
+  kept.sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
+  return kept;
+}
+
 function loadPersistedUserPosts(email) {
   return JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
 }
@@ -5492,7 +5537,7 @@ function savePersistedUserPosts(email, posts) {
   localStorage.setItem(_userPostsKey(email), JSON.stringify(posts));
   if (_gwFbReady && _gwFbDB && email) {
     /* Images sont maintenant des URLs Storage (ou base64 <200KB) → écriture directe */
-    var fbPosts = posts.slice(0, 50).map(function(p) {
+    var fbPosts = _gwCapFirebasePosts(posts).map(function(p) {
       var copy = Object.assign({}, p);
       /* Sécurité : si une image base64 est encore trop lourde, la retirer du payload Firebase */
       if (copy.images) {
@@ -14278,6 +14323,10 @@ function publierPost() {
   var videoIdbId  = _pickedVideo ? ('vid_' + postId) : null;
   var docBlob     = _pickedDoc   ? (_pickedDoc.file  || null) : null;
   var docIdbId    = _pickedDoc   ? ('doc_' + postId) : null;
+  /* Capturé maintenant : l'upload réel est désormais différé après le scan
+     NSFW / la confirmation d'auth, et _pickedDoc sera remis à null avant
+     que ce code ne s'exécute (reset du formulaire, plus bas). */
+  var _docExtSnapshot = _pickedDoc && _pickedDoc.type;
 
   /* Pour les vidéos régulières : type et catégorie obligatoires */
   if (_pickedVideo && (_pickedVideo.videoType || 'video') === 'video' && !_pubVidMeta) {
@@ -14345,17 +14394,30 @@ function publierPost() {
 
   /* ── Scan NSFW sur données LOCALES (base64/blob) — avant tout upload ──
      On scanne _imagesSnapshot (base64) + vidéo locale pour éviter les
-     problèmes CORS des URLs Firebase Storage.                            */
+     problèmes CORS des URLs Firebase Storage.
+     IMPORTANT : _nsfwGate résout seulement APRÈS le scan — l'upload vers
+     Storage/Firebase (ce qui rend le post visible aux autres utilisateurs)
+     attend ce résultat au lieu de partir en parallèle. Avant ce correctif,
+     le scan (jusqu'à 30s, voir _gwAnalyzeVideoFrame) pouvait résoudre APRÈS
+     que le Short soit déjà publié et visible pour tous, puis le supprimer
+     de Firebase d'un coup — ce qui donnait l'impression que la vidéo
+     "disparaissait" après coup. En cas d'erreur du scan on résout à `true`
+     (fail-open) pour ne pas bloquer une publication légitime, comme avant. */
+  var _nsfwGate;
   if (_imagesSnapshot.length > 0 || (_pickedVideo && _pickedVideo.url)) {
     var _nsfw_pid   = postId;
     var _nsfw_imgs  = _imagesSnapshot.slice();
     var _nsfw_vid   = (_pickedVideo && _pickedVideo.url) ? _pickedVideo.url : '';
     showToast('🔍 Analyse du contenu en cours…', 'info');
-    _gwScanPostMedia(_nsfw_imgs, _nsfw_vid).then(function(result) {
+    _nsfwGate = _gwScanPostMedia(_nsfw_imgs, _nsfw_vid).then(function(result) {
       if (result && result.flagged) {
         _gwHandleNsfwDetection(result, String(_nsfw_pid));
+        return false;
       }
-    }).catch(function(e) { console.warn('[GW] NSFW scan error', e); });
+      return true;
+    }).catch(function(e) { console.warn('[GW] NSFW scan error', e); return true; });
+  } else {
+    _nsfwGate = Promise.resolve(true);
   }
 
   /* Affichage immédiat local avec les base64 */
@@ -14400,6 +14462,16 @@ function publierPost() {
     renderFeed(_getFeedPosts());
   }
 
+  /* ── Attend confirmation de l'auth anonyme Firebase ET résultat du scan NSFW
+     avant de lancer le véritable upload/publication (celui qui rend le post
+     visible aux autres utilisateurs). Publier juste après l'ouverture de
+     l'app (avant que signInAnonymously() ait résolu) faisait échouer les
+     writes Firebase en silence (règles auth != null) — le post restait
+     visible seulement en local pour l'auteur. _gwOnAuthReady a un filet de
+     8s pour ne jamais bloquer indéfiniment si l'auth échoue durablement. ── */
+  _gwOnAuthReady(function() { _nsfwGate.then(function(_nsfwSafe) {
+    if (!_nsfwSafe) return; /* bloqué par le scan — déjà géré par _gwHandleNsfwDetection */
+
   if (_gwFbStorage && (_imagesSnapshot.length > 0 || videoBlob || docBlob)) {
     var _pendingUploads   = (_imagesSnapshot.length > 0 ? 1 : 0) + (videoBlob ? 1 : 0) + (docBlob ? 1 : 0);
     var _uploadedImages   = _imagesSnapshot;
@@ -14439,7 +14511,7 @@ function publierPost() {
       );
     }
     if (docBlob) {
-      var _dExt = (_pickedDoc && _pickedDoc.type) ? ('.' + _pickedDoc.type) : '.bin';
+      var _dExt = _docExtSnapshot ? ('.' + _docExtSnapshot) : '.bin';
       _uploadBlobToStorage('post_docs/' + postId + _dExt, docBlob,
         function(url) {
           _uploadedDocUrl = url;
@@ -14455,6 +14527,8 @@ function publierPost() {
   } else {
     _finalizePost(_imagesSnapshot, null, null);
   }
+
+  }); });
 
   /* Réinitialise */
   document.getElementById('pub-text').value = '';
