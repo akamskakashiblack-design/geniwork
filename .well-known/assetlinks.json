@@ -1,0 +1,17 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.get_login_creds"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.geniwork.app",
+      "sha256_cert_fingerprints": [
+        "A9:32:02:6A:45:8E:D3:6D:11:B0:F6:DA:70:A7:CF:FC:59:8F:4E:18:19:6E:D6:F5:43:43:C5:4C:20:BB:3C:3E",
+        "CE:D0:43:E7:7E:30:FB:F5:04:13:C2:13:1A:BE:80:1D:59:92:C5:EC:34:EA:0D:FB:85:12:52:7F:3C:00",
+        "CE:D0:43:E7:7E:30:FB:F5:04:13:C2:13:1A:BE:80:1D:59:92:C5:EC:34:EA:0D:FB:85:12:52:7F:3C:00:87:DB"
+      ]
+    }
+  }
+]

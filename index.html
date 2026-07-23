@@ -4,21 +4,22 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
   <meta name="theme-color" content="#060D1F" />
-  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-  <meta http-equiv="Pragma" content="no-cache" />
-  <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
-  <link rel="stylesheet" href="css/style.css?v=20260609e" />
+  <!-- Preconnect pour réduire la latence DNS+TLS des ressources critiques -->
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin />
+  <link rel="preconnect" href="https://accounts.google.com" crossorigin />
+  <link rel="preconnect" href="https://firebaseio.com" crossorigin />
+  <link rel="dns-prefetch" href="https://identitytoolkit.googleapis.com" />
+  <link rel="stylesheet" href="css/style.css?v=1784154646117e" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <!-- Modération visuelle : détection canvas intégrée (sans CDN externe) -->
-  <!-- Firebase SDK — Synchronisation temps réel multi-admin -->
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js"></script>
+  <!-- Firebase SDK — defer pour ne pas bloquer le rendu initial -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js" defer></script>
 
   <!-- ⚡ PRÉ-CHECK SESSION — s'exécute AVANT le rendu du body
        Si une session valide est en localStorage → masque screen-landing
@@ -55,7 +56,7 @@
   ══════════════════════════════════════════ -->
   <div id="screen-splash" class="screen" style="background:#060D1F;flex-direction:column;align-items:center;justify-content:center;gap:36px">
     <div style="display:flex;flex-direction:column;align-items:center;gap:12px">
-      <img src="./img/logo princ.svg" alt="Geniwork" style="width:80px;filter:drop-shadow(0 0 24px rgba(99,102,241,.5))"/>
+      <img src="./img/logo-new.png" alt="Geniwork" style="width:80px;filter:drop-shadow(0 0 24px rgba(99,102,241,.5))"/>
       <span style="color:#fff;font-size:22px;font-weight:800;letter-spacing:1px">Geni<strong style="color:#818CF8">work</strong></span>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
@@ -242,6 +243,9 @@
               <button class="eye-btn" onclick="togglePwd('reg-pwd2',this)"><i class="fas fa-eye"></i></button>
             </div>
           </div>
+
+          <!-- Checkbox 18+ RGPD masquée -->
+          <input type="checkbox" id="reg-age18" checked style="display:none" />
 
           <button class="btn-blue full" onclick="doRegister()">Créer mon compte</button>
           <div class="divider"><span>ou continuer avec</span></div>
@@ -504,7 +508,7 @@
           </div>
 
           <div class="cgu-section">
-            <h4>5. Responsabilité de la Marketplace</h4>
+            <h4>5. Responsabilité du Souk</h4>
             <p>Geniwork agit en tant qu'intermédiaire technique. Les contrats de prestation sont conclus directement entre l'acheteur et le vendeur.</p>
             <ul>
               <li><strong>Litiges :</strong> Geniwork ne peut être tenu responsable de la qualité des services rendus ou du non-respect des engagements entre utilisateurs.</li>
@@ -620,7 +624,7 @@
       <!-- ── TOPBAR ── -->
       <header class="app-topbar">
         <div class="app-brand" onclick="_admTapLogo()" style="cursor:default;user-select:none">
-          <img src="./img/logo princ.svg" alt="" class="app-brand-logo"/>
+          <img src="./img/logo-new.png" alt="" class="app-brand-logo"/>
           <span class="app-brand-name">Geni<strong>work</strong></span>
         </div>
         <div class="topbar-right">
@@ -654,7 +658,7 @@
             <span class="sdb-main-icon"><i class="fas fa-home"></i></span><span class="sdb-main-label">Accueil</span>
           </button>
           <button class="sdb-main-item" id="sdb-nav-mk" data-sdb-page="p-marketplace" onclick="navTo(this,'p-marketplace');renderMarketplaceUserServices()">
-            <span class="sdb-main-icon"><i class="fas fa-store"></i></span><span class="sdb-main-label">Marketplace</span>
+            <span class="sdb-main-icon"><i class="fas fa-store"></i></span><span class="sdb-main-label">Le Souk</span>
           </button>
           <button class="sdb-main-item" id="sdb-nav-msg" data-sdb-page="p-messages" onclick="navTo(this,'p-messages');renderConversations()" style="position:relative">
             <span class="sdb-main-icon"><i class="fas fa-comment-dots"></i></span><span class="sdb-main-label">Messages</span>
@@ -754,6 +758,13 @@
             </div>
           </button>
 
+          <button class="sidebar-item" onclick="closeSidebar();openPrivacyFromSettings()">
+            <span class="sdb-icon"><i class="fas fa-shield-halved"></i></span>
+            <div class="sdb-text">
+              <span class="sdb-label">Confidentialité</span>
+              <span class="sdb-desc">Politique de confidentialité &amp; RGPD</span>
+            </div>
+          </button>
 
           <div class="sdb-divider"></div>
 
@@ -843,7 +854,7 @@
         <div class="achat-screen hidden" id="achat-screen">
           <div class="achat-topbar">
             <button class="achat-back-btn" onclick="closeAchatScreen()"><i class="fas fa-arrow-left"></i></button>
-            <h2 class="achat-title">Marketplace</h2>
+            <h2 class="achat-title">Le Souk</h2>
           </div>
           <!-- Recherche -->
           <div class="achat-search-row">
@@ -921,7 +932,7 @@
 
           <!-- Topbar marketplace -->
           <div class="mk-topbar">
-            <h2 class="mk-title">Marketplace</h2>
+            <h2 class="mk-title">Le Souk</h2>
             <div class="mk-topbar-icons">
               <button class="mk-icon-btn" onclick="openMkNotifs()" id="mk-bell-btn" style="position:relative">
                 <i class="fas fa-bell"></i>
@@ -2027,7 +2038,7 @@
             </div>
 
             <div class="legal-section">
-              <h4>5. Responsabilité de la Marketplace</h4>
+              <h4>5. Responsabilité du Souk</h4>
               <p>Geniwork agit en tant qu'intermédiaire technique. Les contrats de prestation sont conclus directement entre l'acheteur et le vendeur.</p>
               <ul>
                 <li><strong>Litiges :</strong> Geniwork ne peut être tenu responsable de la qualité des services rendus ou du non-respect des engagements entre utilisateurs.</li>
@@ -2324,7 +2335,7 @@
                 <div class="priv-row-left">
                   <span class="priv-ico" style="background:#F0F9FF;color:#0284C7"><i class="fas fa-store"></i></span>
                   <div>
-                    <span class="priv-name">Visible dans le Marketplace</span>
+                    <span class="priv-name">Visible dans Le Souk</span>
                     <span class="priv-desc">Afficher vos services et produits au grand public</span>
                   </div>
                 </div>
@@ -2460,15 +2471,15 @@
 
             <!-- Contact rapide -->
             <div class="support-contact-row">
-              <a class="support-contact-btn" href="mailto:support@geniwork.com">
+              <a class="support-contact-btn" id="support-email-link" href="mailto:support@geniwork.com">
                 <i class="fas fa-envelope"></i>
                 <span>Email</span>
-                <small>support@geniwork.com</small>
+                <small id="support-email-text">support@geniwork.com</small>
               </a>
-              <a class="support-contact-btn support-contact-wa" href="https://wa.me/message/geniwork" target="_blank">
+              <a class="support-contact-btn support-contact-wa" id="support-wa-link" href="https://wa.me/message/geniwork" target="_blank">
                 <i class="fab fa-whatsapp"></i>
                 <span>WhatsApp</span>
-                <small>Réponse rapide</small>
+                <small id="support-wa-text">Réponse rapide</small>
               </a>
             </div>
 
@@ -2513,7 +2524,7 @@
                   <i class="fas fa-plus faq-ico"></i>
                 </button>
                 <div class="faq-body">
-                  <p>Dans le <strong>Marketplace</strong>, appuyez sur <strong>Ajouter au panier</strong> sur un service ou produit. Ensuite, cliquez sur l'icône panier en haut à droite, choisissez votre moyen de paiement (carte, Mobile Money ou virement) et validez votre commande.</p>
+                  <p>Dans <strong>Le Souk</strong>, appuyez sur <strong>Ajouter au panier</strong> sur un service ou produit. Ensuite, cliquez sur l'icône panier en haut à droite, choisissez votre moyen de paiement (carte, Mobile Money ou virement) et validez votre commande.</p>
                 </div>
               </div>
 
@@ -2793,17 +2804,28 @@
 
         <!-- Bouton fermer -->
         <button id="vs-close-btn" onclick="closeVideoScroll()"
-                style="position:absolute;top:max(env(safe-area-inset-top,0px)+12px,12px);left:12px;z-index:20;
+                style="position:absolute;top:calc(52px + env(safe-area-inset-top, 0px));left:12px;z-index:20;
                        background:rgba(0,0,0,.5);border:none;color:#fff;width:42px;height:42px;
                        border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;
                        -webkit-tap-highlight-color:transparent">
           <i class="fas fa-arrow-left"></i>
         </button>
 
+        <!-- Bouton son global (comme TikTok) -->
+        <button id="vs-sound-btn" onclick="vsToggleGlobalMute();event.stopPropagation()"
+                style="position:absolute;top:calc(52px + env(safe-area-inset-top, 0px));right:12px;z-index:20;
+                       background:rgba(0,0,0,.5);border:none;color:#fff;width:42px;height:42px;
+                       border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;
+                       -webkit-tap-highlight-color:transparent">
+          <i id="vs-sound-ico" class="fas fa-volume-xmark"></i>
+        </button>
+
         <!-- Conteneur scroll snappé -->
         <div id="vs-feed"
              style="width:100%;height:100%;overflow-y:scroll;scroll-snap-type:y mandatory;
-                    -webkit-overflow-scrolling:touch;scrollbar-width:none">
+                    -webkit-overflow-scrolling:touch;scrollbar-width:none;
+                    overscroll-behavior:none;overscroll-behavior-y:none;
+                    -webkit-overscroll-behavior:none;touch-action:pan-y">
         </div>
 
         <!-- Overlay fin de vidéo / countdown -->
@@ -2850,6 +2872,8 @@
         <div class="vpd-video-area" id="vp-area" onclick="vpAreaTap(event)">
           <video id="vp-video" playsinline webkit-playsinline preload="auto" x-webkit-airplay="allow"
                  style="width:100%;display:block;background:#000"></video>
+          <div id="vp-overlays"></div>
+          <div id="vp-text-layers"></div>
           <div class="vp-play-flash" id="vp-play-flash"></div>
 
           <!-- Back button — always visible, stops tap propagation -->
@@ -2993,7 +3017,7 @@
           <i class="fas fa-home"></i><span data-i18n="nav.home">Accueil</span>
         </button>
         <button class="bnav-item" data-page="p-marketplace" onclick="navTo(this,'p-marketplace')">
-          <i class="fas fa-store"></i><span>Marketplace</span>
+          <i class="fas fa-store"></i><span>Le Souk</span>
         </button>
         <button class="bnav-center" onclick="navToPublish()">
           <i class="fas fa-plus"></i>
@@ -3512,7 +3536,7 @@
             <span class="adm-sidebar-badge hidden" id="adm-badge-publi">0</span>
           </button>
           <button class="adm-sidebar-item" id="adm-nav-marketplace" onclick="_admSwitchTab('marketplace')">
-            <i class="fas fa-store"></i><span>Marketplace</span>
+            <i class="fas fa-store"></i><span>Le Souk</span>
             <span class="adm-sidebar-badge hidden" id="adm-badge-artiste">0</span>
           </button>
           <button class="adm-sidebar-item" id="adm-nav-recruiters" onclick="_admSwitchTab('recruiters')">
@@ -3616,8 +3640,8 @@
     </div>
   </div>
 
-  <script src="js/app.js?v=20260609v"></script>
-  <script src="js/gw-messaging.js?v=20260618"></script>
+  <script src="js/app.js?v=1784154646117v" defer></script>
+  <script src="js/gw-messaging.js?v=1784154646117" defer></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">
@@ -3673,6 +3697,35 @@
       <div class="adm-dv-body" id="adm-dv-body"></div>
     </div>
   </div>
+
+  <!-- ══ BANDEAU COOKIES RGPD ══ -->
+  <div id="gw-cookie-banner" class="gw-cookie-banner hidden">
+    <div class="gw-cookie-content">
+      <span class="gw-cookie-icon">🍪</span>
+      <p>Nous utilisons des cookies pour faire fonctionner l'application (Firebase, notifications). Aucun cookie publicitaire. <a href="#" onclick="openPrivacyFromSettings();return false;">En savoir plus</a></p>
+    </div>
+    <div class="gw-cookie-actions">
+      <button class="gw-cookie-btn gw-cookie-refuse" onclick="gwCookieChoice(false)">Refuser</button>
+      <button class="gw-cookie-btn gw-cookie-accept" onclick="gwCookieChoice(true)">Accepter</button>
+    </div>
+  </div>
+
+  <script>
+  // Bandeau cookies — affiche si pas encore de choix enregistré
+  (function(){
+    if(!localStorage.getItem('gw_cookie_consent')){
+      setTimeout(function(){
+        var b=document.getElementById('gw-cookie-banner');
+        if(b) b.classList.remove('hidden');
+      }, 1500);
+    }
+  })();
+  function gwCookieChoice(accepted){
+    localStorage.setItem('gw_cookie_consent', accepted ? 'accepted' : 'refused');
+    var b=document.getElementById('gw-cookie-banner');
+    if(b){ b.style.transform='translateY(120%)'; setTimeout(function(){ b.classList.add('hidden'); },400); }
+  }
+  </script>
 
 </body>
 </html>

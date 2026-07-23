@@ -2,6 +2,15 @@
    GENIWORK — Style global (format APK mobile)
    ═══════════════════════════════════════════ */
 
+/* --gw-sat/--gw-sab : marges réelles barre de statut/navigation, injectées
+   par MainActivity.java (mesure native, fiable même sur WebView ancien qui
+   ne supporte pas env(safe-area-inset-*)). Si non injectées (app web), le
+   fallback env(safe-area-inset-*) prend le relais. */
+:root {
+  --gw-sat: env(safe-area-inset-top, 0px);
+  --gw-sab: env(safe-area-inset-bottom, 0px);
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -195,7 +204,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-bottom: var(--gw-sab, env(safe-area-inset-bottom, 0px));
 }
 
 .btn-blue {
@@ -712,7 +721,7 @@ body {
 .cgu-topbar {
   flex-shrink: 0;
   background: #fff;
-  padding: 52px 20px 16px;
+  padding: calc(52px + var(--gw-sat, env(safe-area-inset-top, 0px))) 20px 16px;
   border-bottom: 1px solid #E5E7EB;
   text-align: center;
   position: relative;
@@ -914,12 +923,12 @@ body {
 /* ── TOPBAR ── */
 .app-topbar {
   flex-shrink: 0;
-  height: calc(56px + env(safe-area-inset-top, 0px));
+  height: calc(56px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: linear-gradient(135deg, #0B1A33 0%, #0D2150 100%);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: env(safe-area-inset-top, 0px) 14px 0;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 14px 0;
   border-bottom: 1px solid rgba(255,255,255,0.07);
   z-index: 20;
 }
@@ -1012,7 +1021,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
+  padding: calc(var(--gw-sat, env(safe-area-inset-top, 0px)) + 10px) 14px 10px;
   border-bottom: 1px solid #E5E7EB;
   background: #fff;
 }
@@ -1256,25 +1265,35 @@ mark.srch-mark {
   overflow: hidden;
 }
 
-.app-page.active { display: flex; }
+/* Animation de navigation — sensation native (fade + léger slide up) */
+@keyframes gw-page-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.app-page.active {
+  display: flex;
+  animation: gw-page-in 0.18s ease-out both;
+}
 
 .page-scroll {
   flex: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-bottom: 16px;
+  /* Empêche le rebond de se propager → scroll plus fluide */
+  overscroll-behavior-y: contain;
 }
 
 /* Inner topbar (pages internes) */
 .inner-topbar {
   flex-shrink: 0;
-  height: 52px;
+  height: calc(52px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: #fff;
   border-bottom: 1px solid #E5E7EB;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 16px 0;
   gap: 12px;
 }
 
@@ -1689,6 +1708,9 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   border-radius: 14px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.07);
   overflow: hidden;
+  /* Isole le rendu de chaque carte — un changement dans une carte
+     ne provoque pas le recalcul des autres → scroll plus fluide */
+  contain: layout style;
 }
 
 .post-header {
@@ -1918,7 +1940,7 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   align-items: center;
   justify-content: space-between;
   padding: 10px 20px;
-  padding-bottom: calc(14px + env(safe-area-inset-bottom, 0));
+  padding-bottom: calc(14px + var(--gw-sab, env(safe-area-inset-bottom, 0)));
   background: rgba(0,0,0,0.4);
 }
 
@@ -2029,7 +2051,7 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   display: flex;
   align-items: center;
   justify-content: space-around;
-  padding-bottom: env(safe-area-inset-bottom, 0);
+  padding-bottom: var(--gw-sab, env(safe-area-inset-bottom, 0));
   position: relative;
 }
 
@@ -2049,7 +2071,13 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   transition: color 0.15s;
 }
 
-.bnav-item i { font-size: 20px; }
+/* Icône rebondit au tap — sensation native */
+.bnav-item i {
+  font-size: 20px;
+  display: block;
+  transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), color 0.15s;
+}
+.bnav-item.active i { transform: translateY(-3px) scale(1.18); }
 .bnav-item.active { color: #2563EB; }
 
 /* Badge non lus sur l'icône Messages */
@@ -2084,6 +2112,11 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   box-shadow: 0 4px 14px rgba(37,99,235,0.5);
   flex-shrink: 0;
   margin-bottom: 8px;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.18s;
+}
+.bnav-center:active {
+  transform: scale(0.92);
+  box-shadow: 0 2px 8px rgba(37,99,235,0.4);
 }
 
 /* ── SIDEBAR ── */
@@ -2094,7 +2127,7 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,0.45);
-  z-index: 200;
+  z-index: 950;
 }
 
 .comments-panel {
@@ -2106,7 +2139,7 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   max-width: 430px;
   background: #fff;
   border-radius: 20px 20px 0 0;
-  z-index: 201;
+  z-index: 951;
   display: flex;
   flex-direction: column;
   max-height: 75vh;
@@ -2364,7 +2397,7 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  padding-bottom: calc(10px + env(safe-area-inset-bottom, 0));
+  padding-bottom: calc(10px + var(--gw-sab, env(safe-area-inset-bottom, 0)));
 }
 
 .comments-input-wrap {
@@ -2837,9 +2870,6 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   width: 100%;
   max-height: 380px;
   display: block;
-  will-change: transform;
-  transform: translateZ(0);
-  backface-visibility: hidden;
 }
 
 .post-video-wrap.ratio-45  video { aspect-ratio: 4/5;  object-fit: cover; }
@@ -2920,9 +2950,9 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 .project-form-modal.open    { transform: translateX(-50%) translateX(0); display: flex; }
 
 .proj-form-topbar {
-  flex-shrink: 0; height: 54px;
+  flex-shrink: 0; height: calc(54px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   display: flex; align-items: center; gap: 10px;
-  padding: 0 12px;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 12px 0;
   border-bottom: 1px solid #F3F4F6;
   background: #fff;
 }
@@ -3169,9 +3199,9 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 #video-player-modal { display: flex; }
 
 .vp-topbar {
-  flex-shrink: 0; height: 52px;
+  flex-shrink: 0; height: calc(52px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   display: flex; align-items: center; gap: 10px;
-  padding: 0 12px; background: rgba(0,0,0,.85);
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 12px 0; background: rgba(0,0,0,.85);
   border-bottom: 1px solid rgba(255,255,255,.08);
 }
 .vp-close-btn, .vp-fullscreen-topbtn {
@@ -3257,6 +3287,98 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 .vp-speed:active { opacity: .7; }
 
 /* ══════════════════════════════════════════
+   SHARE SHEET (feuille de partage)
+══════════════════════════════════════════ */
+#gw-share-bg {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 300;
+}
+#gw-share-card {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 430px;
+  background: #fff;
+  border-radius: 24px 24px 0 0;
+  z-index: 301;
+  padding: 0 20px calc(24px + var(--gw-sab, env(safe-area-inset-bottom, 0)));
+  animation: slideUp 0.28s cubic-bezier(0.32,0.72,0,1);
+}
+.gw-share-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 0 14px;
+  border-bottom: 1px solid #F1F5F9;
+}
+.gw-share-thumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  object-fit: cover;
+  background: #E2E8F0;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.gw-share-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.gw-share-thumb i   { font-size: 22px; color: #94A3B8; }
+.gw-share-meta      { flex: 1; min-width: 0; }
+.gw-share-author    { font-size: 14px; font-weight: 700; color: #1F2937; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gw-share-snippet   { font-size: 12px; color: #6B7280; margin-top: 3px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.gw-share-apps {
+  display: flex;
+  justify-content: space-between;
+  padding: 18px 0 6px;
+}
+.gw-share-app {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  min-width: 52px;
+}
+.gw-share-app-ico {
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: #fff;
+  transition: transform 0.15s, opacity 0.15s;
+}
+.gw-share-app:active .gw-share-app-ico { transform: scale(0.88); opacity: 0.8; }
+.gw-share-app span {
+  font-size: 11px;
+  font-weight: 600;
+  color: #374151;
+  white-space: nowrap;
+}
+.gw-share-cancel {
+  width: 100%;
+  padding: 14px;
+  border: none;
+  background: #F1F5F9;
+  border-radius: 14px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #1F2937;
+  cursor: pointer;
+  margin-top: 10px;
+  transition: background 0.15s;
+}
+.gw-share-cancel:active { background: #E2E8F0; }
+
+/* ══════════════════════════════════════════
    VIDEO SCROLL PLAYER (TikTok / Shorts)
 ══════════════════════════════════════════ */
 #vs-modal { touch-action: pan-y; }
@@ -3267,13 +3389,32 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 .vs-item {
   width: 100%;
   height: 100vh;
-  height: 100dvh;
+  height: 100svh; /* small viewport height — exclut UI mobile dynamique */
+  height: 100dvh; /* dynamic viewport height — support progressif */
   scroll-snap-align: start;
+  scroll-snap-stop: always; /* empêche le swipe rapide de sauter plusieurs items (TikTok) */
   position: relative;
   overflow: hidden;
   flex-shrink: 0;
-  /* Dégradé sombre pendant le chargement — pas d'écran noir brutal */
-  background: linear-gradient(160deg, #0F172A 0%, #1E293B 50%, #0F172A 100%);
+  background: #000;
+  /* Force GPU layer — évite le décodage vidéo sur le CPU principal */
+  -webkit-transform: translate3d(0,0,0);
+  transform: translate3d(0,0,0);
+}
+/* Dégradé bas pour lisibilité du texte — style TikTok/Instagram Reels */
+.vs-item::before {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 55%;
+  background: linear-gradient(to top,
+    rgba(0,0,0,.72) 0%,
+    rgba(0,0,0,.35) 40%,
+    transparent 100%);
+  z-index: 1;
+  pointer-events: none;
 }
 /* Spinner de chargement au centre pendant le buffering */
 .vs-item::after {
@@ -3292,11 +3433,23 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 }
 /* Cache le spinner dès que la vidéo joue */
 .vs-item.vs-playing::after { opacity: 0; }
+/* Réaffiche le spinner si la vidéo est en train de bufferer (waiting) */
+.vs-item.vs-playing.vs-buffering::after { opacity: 1; }
 .vs-video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+  position: relative;
+  z-index: 0;
+  /* GPU compositing — évite image figée/son sans image sur Chrome desktop */
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  will-change: transform;
+  /* Fluidité 60fps — désactive le rendu CPU sur Android WebView */
+  -webkit-backface-visibility: hidden;
 }
 .vs-tap-zone {
   position: absolute;
@@ -3313,14 +3466,40 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   opacity: 0;
   transition: opacity .15s;
 }
+/* Bouton son désactivé */
+.vs-mute-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  background: rgba(0,0,0,.72);
+  border: 1.5px solid rgba(255,255,255,.35);
+  border-radius: 40px;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  animation: vs-mute-pulse 1.6s ease-in-out infinite;
+}
+.vs-mute-btn i { font-size: 20px; color: #F87171; }
+@keyframes vs-mute-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(248,113,113,.45); }
+  50%       { box-shadow: 0 0 0 10px rgba(248,113,113,0); }
+}
 /* Mini profil bas-gauche */
 .vs-author-row {
   position: absolute;
-  bottom: 20px;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px) + var(--gw-sab, 0px));
   left: 0;
   right: 72px;
   padding: 0 14px;
-  z-index: 4;
+  z-index: 5; /* au-dessus du gradient ::before (z-index:1) */
   display: flex;
   align-items: flex-end;
   gap: 10px;
@@ -3359,15 +3538,15 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   backdrop-filter: blur(4px);
 }
 .vs-follow-btn.vs-following {
-  background: rgba(255,255,255,.08);
-  border-color: rgba(255,255,255,.3);
-  color: rgba(255,255,255,.6);
+  background: rgba(99,102,241,.85);
+  border-color: rgba(99,102,241,1);
+  color: #fff;
 }
 .vs-side {
   position: absolute;
-  bottom: 14px;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--gw-sab, 0px));
   right: 6px;
-  z-index: 4;
+  z-index: 5;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -3470,7 +3649,7 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   background: #fff;
   border-radius: 22px 22px 0 0;
   z-index: 161;
-  padding: 0 12px calc(20px + env(safe-area-inset-bottom, 0));
+  padding: 0 12px calc(20px + var(--gw-sab, env(safe-area-inset-bottom, 0)));
   animation: slideUp 0.25s ease;
 }
 
@@ -3597,6 +3776,44 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 .nb-share   { background: #DCFCE7; color: #16A34A; }
 .nb-follow  { background: #F3E8FF; color: #7C3AED; }
 .nb-system  { background: #FEF3C7; color: #D97706; }
+.nb-tag     { background: #FEE2E2; color: #DC2626; }
+
+/* ── Système de tag (@mention) ── */
+.gw-tag-mention {
+  color: #DC2626;
+  font-weight: 600;
+  cursor: pointer;
+}
+.gw-mention-dropdown {
+  display: none;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.18);
+  max-height: 260px;
+  overflow-y: auto;
+  z-index: 960;
+  border: 1px solid #E2E8F0;
+}
+.gw-mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13.5px;
+  color: #0F172A;
+}
+.gw-mention-item:hover { background: #F1F5F9; }
+.gw-mention-av {
+  width: 28px; height: 28px; border-radius: 50%;
+  object-fit: cover; flex-shrink: 0;
+}
+.gw-mention-av-ph {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: #6366F1; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 13px; flex-shrink: 0;
+}
 
 /* Corps de la notification */
 .notif-body { flex: 1; min-width: 0; }
@@ -4344,10 +4561,10 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 
 /* Topbar */
 .upv-topbar {
-  flex-shrink: 0; height: 54px;
+  flex-shrink: 0; height: calc(54px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: #fff;
   display: flex; align-items: center;
-  padding: 0 12px; gap: 10px;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 12px 0; gap: 10px;
   border-bottom: 1px solid #E5E7EB; z-index: 10;
 }
 .upv-back-btn {
@@ -4633,10 +4850,10 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 
 /* Topbar */
 .msg-topbar {
-  flex-shrink: 0; height: 56px;
+  flex-shrink: 0; height: calc(56px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: #fff; border-bottom: 1px solid #E5E7EB;
   display: flex; align-items: center; justify-content: center;
-  padding: 0 16px; position: relative;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 16px 0; position: relative;
 }
 .msg-title {
   font-size: 18px; font-weight: 700; color: #0D1B2A;
@@ -4859,10 +5076,10 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 
 /* Chat topbar */
 .chat-topbar {
-  flex-shrink: 0; height: 60px;
+  flex-shrink: 0; height: calc(60px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: #fff; border-bottom: 1px solid #E5E7EB;
   display: flex; align-items: center; gap: 10px;
-  padding: 0 12px;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 12px 0;
 }
 .chat-back-btn {
   width: 36px; height: 36px; border-radius: 50%;
@@ -5040,7 +5257,7 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   z-index: 401;
   max-height: 88vh; overflow-y: auto;
   animation: slideUp 0.26s cubic-bezier(0.4,0,0.2,1);
-  padding: 0 12px calc(24px + env(safe-area-inset-bottom,0));
+  padding: 0 12px calc(24px + var(--gw-sab, env(safe-area-inset-bottom,0)));
 }
 
 /* ── Bouton 3 points (⋮) ── */
@@ -5137,13 +5354,13 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 /* Topbar */
 .mk-topbar {
   flex-shrink: 0;
-  height: 56px;
+  height: calc(56px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: #fff;
   border-bottom: 1px solid #E5E7EB;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 16px 0;
 }
 .mk-title {
   font-size: 22px;
@@ -5191,8 +5408,8 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 .achat-screen.open   { transform: translateX(-50%) translateX(0); display: flex; }
 
 .achat-topbar {
-  flex-shrink: 0; height: 54px; background: #fff;
-  display: flex; align-items: center; padding: 0 14px; gap: 12px;
+  flex-shrink: 0; height: calc(54px + var(--gw-sat, env(safe-area-inset-top, 0px))); background: #fff;
+  display: flex; align-items: center; padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 14px 0; gap: 12px;
   border-bottom: 1px solid #E5E7EB;
 }
 .achat-back-btn {
@@ -5321,8 +5538,8 @@ body.dark-mode .feed-end-msg { color: #64748B; }
 .cart-screen.open   { transform: translateX(-50%) translateX(0); display: flex; }
 
 .cart-topbar {
-  flex-shrink: 0; height: 54px; background: #fff;
-  display: flex; align-items: center; padding: 0 14px; gap: 10px;
+  flex-shrink: 0; height: calc(54px + var(--gw-sat, env(safe-area-inset-top, 0px))); background: #fff;
+  display: flex; align-items: center; padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 14px 0; gap: 10px;
   border-bottom: 1px solid #E5E7EB;
 }
 .cart-back-btn {
@@ -5784,6 +6001,8 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   overflow: hidden;
   border-radius: 0 20px 20px 0;
   box-shadow: 4px 0 24px rgba(0,0,0,0.18);
+  /* Promote GPU layer en avance — évite le à-coup au premier tap */
+  will-change: transform;
 }
 .app-sidebar.open {
   transform: translateX(0);
@@ -5794,7 +6013,7 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   display: flex;
   align-items: center;
   gap: 13px;
-  padding: 40px 20px 20px;
+  padding: calc(40px + var(--gw-sat, env(safe-area-inset-top, 0px))) 20px 20px;
   background: linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 100%);
   border-bottom: 1px solid #E5E7EB;
   cursor: pointer;
@@ -6082,12 +6301,12 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 /* Topbar */
 .badge-topbar {
   flex-shrink: 0;
-  height: 56px;
+  height: calc(56px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: #fff;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 16px;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 16px 0;
   border-bottom: 1px solid #E5E7EB;
 }
 .badge-back-btn {
@@ -6459,10 +6678,10 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 .favoris-screen.open   { transform: translateX(-50%) translateX(0); display: flex; }
 
 .favoris-topbar {
-  flex-shrink: 0; height: 54px;
+  flex-shrink: 0; height: calc(54px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: #fff;
   display: flex; align-items: center;
-  padding: 0 14px; gap: 12px;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 14px 0; gap: 12px;
   border-bottom: 1px solid #E5E7EB;
 }
 .favoris-back-btn {
@@ -6578,8 +6797,8 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 .legal-screen.open   { transform: translateX(-50%) translateX(0); display: flex; }
 
 .legal-topbar {
-  flex-shrink: 0; height: 56px; background: #fff;
-  display: flex; align-items: center; padding: 0 14px; gap: 12px;
+  flex-shrink: 0; height: calc(56px + var(--gw-sat, env(safe-area-inset-top, 0px))); background: #fff;
+  display: flex; align-items: center; padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 14px 0; gap: 12px;
   border-bottom: 1px solid #E5E7EB;
   box-shadow: 0 1px 4px rgba(0,0,0,.05);
 }
@@ -6643,10 +6862,10 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 }
 
 .settings-topbar {
-  flex-shrink: 0; height: 54px;
+  flex-shrink: 0; height: calc(54px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: #fff;
   display: flex; align-items: center;
-  padding: 0 14px; gap: 12px;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 14px 0; gap: 12px;
   border-bottom: 1px solid #E5E7EB;
 }
 .settings-back-btn {
@@ -7038,7 +7257,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   z-index: 401;
   background: #fff; border-radius: 24px 24px 0 0;
   width: 100%; max-width: 430px;
-  padding: 0 0 env(safe-area-inset-bottom, 16px);
+  padding: 0 0 var(--gw-sab, env(safe-area-inset-bottom, 16px));
   display: flex; flex-direction: column; gap: 0;
   max-height: 88vh; overflow-y: auto;
   animation: slideUp 0.28s cubic-bezier(0.4,0,0.2,1);
@@ -7626,7 +7845,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 /* Top bar */
 .adm-topbar {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 28px;
+  padding: calc(14px + var(--gw-sat, env(safe-area-inset-top, 0px))) 28px 14px;
   background: #fff; border-bottom: 1px solid #E2E8F0;
   flex-shrink: 0;
 }
@@ -7834,7 +8053,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
   width: 100%; max-width: 430px;
   background: #fff; border-radius: 24px 24px 0 0;
-  z-index: 801; padding: 20px 20px calc(28px + env(safe-area-inset-bottom,0));
+  z-index: 801; padding: 20px 20px calc(28px + var(--gw-sab, env(safe-area-inset-bottom,0)));
   animation: slideUp .26s cubic-bezier(.4,0,.2,1);
   max-height: 80vh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 12px;
@@ -8001,7 +8220,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   background: #fff; border-radius: 24px 24px 0 0;
   z-index: 601; max-height: 92vh; overflow-y: auto;
   animation: slideUp .28s cubic-bezier(.4,0,.2,1);
-  padding: 0 0 calc(24px + env(safe-area-inset-bottom,0));
+  padding: 0 0 calc(24px + var(--gw-sab, env(safe-area-inset-bottom,0)));
 }
 .official-composer-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -8804,7 +9023,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: calc(14px + var(--gw-sat, env(safe-area-inset-top, 0px))) 16px 14px;
   background: #fff;
   border-bottom: 1px solid #F1F5F9;
   flex-shrink: 0;
@@ -9114,11 +9333,11 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
 /* ── Topbar ── */
 .dash-topbar {
   flex-shrink: 0;
-  height: 54px;
+  height: calc(54px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   background: #fff;
   display: flex;
   align-items: center;
-  padding: 0 14px;
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 14px 0;
   gap: 12px;
   border-bottom: 1px solid #E2E8F0;
   box-shadow: 0 1px 4px rgba(0,0,0,.06);
@@ -10276,7 +10495,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   z-index: 3001;
   background: #fff;
   border-radius: 24px 24px 0 0;
-  padding: 0 0 env(safe-area-inset-bottom, 16px);
+  padding: 0 0 var(--gw-sab, env(safe-area-inset-bottom, 16px));
   width: 100%; max-width: 430px;
   transition: transform .32s cubic-bezier(.32,0,.67,0);
   max-height: 88vh;
@@ -11757,10 +11976,8 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   color: #334155;
   line-height: 1.45;
   margin: 0 0 6px;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 /* Conteneur images de repost */
 .rp-orig-imgs {
@@ -12420,7 +12637,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  padding: 12px 16px;
+  padding: calc(12px + var(--gw-sat, env(safe-area-inset-top, 0px))) 16px 12px;
   background: #0F172A;
   gap: 12px;
   border-bottom: 1px solid rgba(255,255,255,.06);
@@ -12762,8 +12979,8 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  height: 48px;
-  padding: 0 6px;
+  height: calc(48px + var(--gw-sat, env(safe-area-inset-top, 0px)));
+  padding: var(--gw-sat, env(safe-area-inset-top, 0px)) 6px 0;
   background: #0F172A;
 }
 .vpd-topbar-btn {
@@ -12793,28 +13010,34 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   width: 100%;
   aspect-ratio: 16/9;
   max-height: 55vh; /* empêche la vidéo de remplir tout l'écran sur desktop (colonne large) et de masquer like/dislike/partage/commentaires */
-  object-fit: contain;
+  object-fit: cover; /* applique le même recadrage format YouTube que dans l'éditeur (au lieu de "contain" qui l'ignorait) */
   background: #000;
 }
-/* ── Plein écran natif : la limite de 55vh ne doit JAMAIS s'appliquer ici,
-     sinon la vidéo reste petite alors que le conteneur occupe tout l'écran ── */
+/* ── Plein écran natif : garde le format paysage 16:9 (style YouTube), avec
+     des bandes noires haut/bas sur un écran portrait au lieu d'étirer la
+     vidéo pour remplir tout l'écran (ce qui donnait un effet "format TikTok") */
 .vpd-video-area:fullscreen,
 .vpd-video-area:-webkit-full-screen {
   max-height: none !important;
   width: 100vw !important;
   height: 100vh !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .vpd-video-area:fullscreen video,
 .vpd-video-area:-webkit-full-screen video {
-  max-height: none !important;
-  width: 100%;
-  height: 100%;
+  max-height: 100% !important;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  aspect-ratio: 16/9;
 }
 
 /* Back button always visible on video (top-left) */
 .vpd-video-back-btn {
   position: absolute;
-  top: 10px;
+  top: calc(10px + var(--gw-sat, env(safe-area-inset-top, 0px)));
   left: 10px;
   z-index: 5;
   width: 36px; height: 36px;
@@ -13353,7 +13576,7 @@ body.dark-mode .sdb-toggle-track { background: #374151; }
   width: 100%;
   background: #fff;
   border-radius: 20px 20px 0 0;
-  padding: 12px 20px max(env(safe-area-inset-bottom,0px)+24px,24px);
+  padding: 12px 20px max(var(--gw-sab, env(safe-area-inset-bottom,0px))+24px,24px);
   max-height: 88vh;
   overflow-y: auto;
   scrollbar-width: none;
@@ -13962,39 +14185,84 @@ body:not(.dark-mode) .vm-close-btn { background: #F1F5F9; color: #475569; }
   #video-player-modal { left: 260px; }
 
   /* ═══════════════════════════════════════════════════════════
-     SHORTS — Layout TikTok Desktop
-     Modal plein écran (fond noir). Feed portrait centré à 420px.
-     Pas de flexbox sur le modal pour éviter les bugs GPU Chrome.
+     SHORTS — Layout desktop : vidéo portrait centrée + panneau info
   ═══════════════════════════════════════════════════════════ */
+
+  /* Modal full-screen, deux colonnes : vidéo | infos */
   #vs-modal {
-    background: #000 !important;
-    /* NB: display géré par JS (block/flex). On n'override pas display ici. */
+    display: none;             /* géré par JS */
+    left: 260px !important;    /* décalé de la sidebar */
+    background: #0A0A0A !important;
+  }
+  #vs-modal[style*="block"] {
+    display: flex !important;
+    align-items: stretch;
   }
 
-  /* Feed portrait centré par margin auto (pas de flex → pas de bugs GPU) */
+  /* Zone vidéo — portrait 420px, centré */
   #vs-feed {
-    width: 420px !important;
-    max-width: calc(100vw - 0px) !important;
+    flex-shrink: 0;
+    width: 390px !important;
+    min-width: 320px !important;
+    max-width: 420px !important;
     height: 100% !important;
-    margin-left: auto !important;
-    margin-right: auto !important;
+    margin: 0 auto !important;
+    box-shadow: 0 0 80px rgba(0,0,0,.9);
     position: relative;
-    box-shadow: 0 0 80px rgba(0,0,0,.6);
+    align-self: stretch;
   }
 
-  /* Chaque item adapte sa largeur au feed */
   .vs-item {
     width: 100%;
     height: 100vh;
+    height: 100dvh;
   }
 
-  /* ── CORRECTIF GPU : supprime le layer GPU qui blackscreen la vidéo ── */
-  .vs-video {
-    will-change: auto !important;
-    transform: none !important;
-    backface-visibility: visible !important;
-    -webkit-transform: none !important;
-    isolation: auto !important;
+  /* Panneau info à droite de la vidéo */
+  #vs-info-panel {
+    width: 340px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 24px 20px;
+    overflow-y: auto;
+    border-left: 1px solid rgba(255,255,255,.06);
+    background: #111;
+  }
+
+  /* Flèches de navigation desktop */
+  .vs-nav-arrow {
+    position: fixed;
+    right: calc(50% - 195px - 260px - 52px);
+    width: 44px; height: 44px;
+    background: rgba(255,255,255,.12);
+    border: 1.5px solid rgba(255,255,255,.2);
+    border-radius: 50%;
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    z-index: 20;
+    transition: background .15s, transform .1s;
+    backdrop-filter: blur(8px);
+    font-size: 18px;
+  }
+  .vs-nav-arrow:hover    { background: rgba(255,255,255,.25); transform: scale(1.08); }
+  .vs-nav-arrow:active   { transform: scale(.92); }
+  .vs-nav-arrow.vs-nav-up   { top: calc(50% - 54px); }
+  .vs-nav-arrow.vs-nav-down { top: calc(50% + 10px); }
+  .vs-nav-arrow:disabled { opacity: .2; cursor: not-allowed; }
+
+  /* Raccourci clavier tooltip */
+  .vs-kbd-hint {
+    position: fixed;
+    bottom: 20px;
+    left: calc(260px + 50%);
+    transform: translateX(-50%);
+    color: rgba(255,255,255,.35);
+    font-size: 11px;
+    letter-spacing: .5px;
+    pointer-events: none;
+    z-index: 5;
   }
 
   /* ── Chat : occupe toute la zone contenu (après sidebar) ── */
@@ -14149,3 +14417,76 @@ body:not(.dark-mode) #artiste-mini-player #artiste-pl-dur { color: #64748B !impo
 .vs-caption .gw-hashtag:hover {
   color: #C7D2FE;
 }
+
+/* ══ BANDEAU COOKIES RGPD ══ */
+.gw-cookie-banner {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(100% - 32px);
+  max-width: 480px;
+  background: #1E293B;
+  border: 1px solid rgba(129,140,248,.3);
+  border-radius: 16px;
+  padding: 16px;
+  z-index: 99999;
+  box-shadow: 0 8px 32px rgba(0,0,0,.4);
+  transition: transform .4s ease;
+}
+.gw-cookie-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.gw-cookie-icon { font-size: 22px; flex-shrink: 0; }
+.gw-cookie-content p {
+  font-size: 13px;
+  color: #CBD5E1;
+  line-height: 1.5;
+  margin: 0;
+}
+.gw-cookie-content a { color: #818CF8; text-decoration: none; }
+.gw-cookie-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.gw-cookie-btn {
+  padding: 8px 20px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+}
+.gw-cookie-refuse {
+  background: transparent;
+  border: 1.5px solid rgba(129,140,248,.4);
+  color: #94A3B8;
+}
+.gw-cookie-accept {
+  background: linear-gradient(135deg, #6366F1, #818CF8);
+  color: #fff;
+}
+
+/* ══ CHECKBOX 18+ ══ */
+.gw-check-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #94A3B8;
+  line-height: 1.5;
+}
+.gw-check-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  accent-color: #818CF8;
+  cursor: pointer;
+}
+.gw-check-label strong { color: #E2E8F0; }

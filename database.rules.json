@@ -188,7 +188,7 @@
       },
       "bans": {
         ".read":  "auth != null",
-        ".write": "auth != null"
+        ".write": false
       },
       "reports": {
         ".read":  "auth != null",
@@ -222,11 +222,11 @@
       },
       "settings_logo": {
         ".read":  true,
-        ".write": "auth != null"
+        ".write": false
       },
       "settings_jobs_enabled": {
         ".read":  true,
-        ".write": "auth != null"
+        ".write": false
       },
       "online": {
         ".read":  "auth != null",
@@ -240,7 +240,11 @@
       },
       "plans_config": {
         ".read":  true,
-        ".write": "auth != null"
+        ".write": false
+      },
+      "support_config": {
+        ".read":  true,
+        ".write": false
       },
       "ban_appeals": {
         ".read":  "auth != null",
@@ -260,11 +264,15 @@
       },
       "admins": {
         ".read":  "auth != null",
-        ".write": "auth != null"
+        ".write": false
       },
       "sadmin": {
         ".read":  "auth != null",
-        ".write": "auth != null"
+        ".write": false
+      },
+      "admin_secrets": {
+        ".read":  false,
+        ".write": false
       },
       "security_events": {
         ".read":  "auth != null",
@@ -373,6 +381,22 @@
         }
       },
       "recruiter_logos": {
+        ".read":  true,
+        ".write": "auth != null"
+      },
+      "ebook_access": {
+        "$listingId": {
+          ".read":  "auth != null",
+          ".write": "auth != null"
+        }
+      },
+      "mk_listing_stats": {
+        ".read":  true,
+        "$listingId": {
+          ".write": "auth != null"
+        }
+      },
+      "hashtags": {
         ".read":  true,
         ".write": "auth != null"
       }

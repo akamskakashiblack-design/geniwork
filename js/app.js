@@ -1,4 +1,4 @@
-﻿/* ═══════════════════════════════════════════
+/* ═══════════════════════════════════════════
    GENIWORK — JavaScript complet
    ═══════════════════════════════════════════ */
 
@@ -166,6 +166,120 @@ function _gwDeleteVideoBlob(id) {
   } catch(e) {}
 }
 
+/* ══════════════════════════════════════════
+   PUBLICATIONS EN ATTENTE — survit à une fermeture/tuerie de l'app
+   pendant l'envoi d'une vidéo. La vidéo est déjà en sécurité dans
+   IndexedDB (_gwSaveVideoBlob) ; on note juste qu'il reste à l'envoyer.
+══════════════════════════════════════════ */
+function _gwGetPendingPosts(email) {
+  try { return JSON.parse(localStorage.getItem('gw_pending_posts_' + email) || '[]'); } catch(e) { return []; }
+}
+function _gwSavePendingPosts(email, list) {
+  try { localStorage.setItem('gw_pending_posts_' + email, JSON.stringify(list)); } catch(e) {}
+}
+function _gwAddPendingPost(email, post) {
+  var list = _gwGetPendingPosts(email);
+  list.push(post);
+  _gwSavePendingPosts(email, list);
+}
+function _gwRemovePendingPost(email, postId) {
+  var list = _gwGetPendingPosts(email).filter(function(p) { return String(p.id) !== String(postId); });
+  _gwSavePendingPosts(email, list);
+}
+
+/* Vérifie au lancement de l'app si une vidéo n'a pas terminé son envoi */
+function _gwCheckPendingUploads() {
+  if (!_currentUser) return;
+  var pending = _gwGetPendingPosts(_currentUser.email);
+  pending.forEach(function(p) {
+    /* Détecte les vidéos en attente : pas d'URL OU blob URL (non valide après rechargement) */
+    var needsUpload = p.video && p.video.idbId &&
+      (!p.video.url || (typeof p.video.url === 'string' && p.video.url.startsWith('blob:')));
+    if (needsUpload) _gwShowPendingUploadBanner(p);
+  });
+}
+
+/* Bannière persistante "envoi interrompu" — propose de réessayer ou d'abandonner */
+function _gwShowPendingUploadBanner(post) {
+  var barId = 'gw-pending-up-' + post.id;
+  if (document.getElementById(barId)) return;
+  var bar = document.createElement('div');
+  bar.id = barId;
+  bar.style.cssText = [
+    'position:fixed;bottom:72px;left:50%;transform:translateX(-50%)',
+    'width:88%;max-width:420px;background:#FFFBEB;border:1.5px solid #FDE68A',
+    'border-radius:14px;box-shadow:0 4px 20px rgba(0,0,0,.18);padding:12px 14px',
+    'z-index:9999;display:flex;align-items:center;gap:10px'
+  ].join(';');
+  bar.innerHTML =
+    '<i class="fas fa-triangle-exclamation" style="color:#D97706;font-size:18px;flex-shrink:0"></i>' +
+    '<div style="flex:1;min-width:0">' +
+      '<div style="font-size:12.5px;font-weight:700;color:#92400E">Envoi vidéo interrompu</div>' +
+      '<div style="font-size:11px;color:#92400E">Votre vidéo est toujours là — relancez l\'envoi</div>' +
+    '</div>' +
+    '<button onclick="_gwRetryPendingUpload(\'' + String(post.id) + '\')" style="padding:7px 12px;background:#D97706;color:#fff;border:none;border-radius:8px;font-size:11.5px;font-weight:700;cursor:pointer;flex-shrink:0;white-space:nowrap">Réessayer</button>' +
+    '<button onclick="_gwDismissPendingUpload(\'' + String(post.id) + '\')" style="background:none;border:none;color:#92400E;cursor:pointer;font-size:14px;flex-shrink:0;padding:4px"><i class="fas fa-xmark"></i></button>';
+  document.body.appendChild(bar);
+}
+
+function _gwDismissPendingUpload(postId) {
+  var bar = document.getElementById('gw-pending-up-' + postId);
+  if (bar) bar.remove();
+  if (!_currentUser) return;
+  var pending = _gwGetPendingPosts(_currentUser.email);
+  var post = pending.find(function(p) { return String(p.id) === String(postId); });
+  if (post && post.video && post.video.idbId) _gwDeleteVideoBlob(post.video.idbId);
+  _gwRemovePendingPost(_currentUser.email, postId);
+}
+
+/* Relance l'envoi d'une vidéo restée en attente, à partir du blob sauvegardé localement */
+function _gwRetryPendingUpload(postId) {
+  if (!_currentUser) return;
+  var pending = _gwGetPendingPosts(_currentUser.email);
+  var post = pending.find(function(p) { return String(p.id) === String(postId); });
+  if (!post) return;
+
+  var bar = document.getElementById('gw-pending-up-' + postId);
+  if (bar) bar.remove();
+
+  if (!post.video || !post.video.idbId) { _gwRemovePendingPost(_currentUser.email, postId); return; }
+
+  _gwLoadVideoBlob(post.video.idbId, function(blob) {
+    if (!blob) {
+      showToast('Vidéo introuvable localement — republiez-la', 'err');
+      _gwRemovePendingPost(_currentUser.email, postId);
+      return;
+    }
+    _showVideoProgress(0);
+    var ext = (blob.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
+    _uploadBlobToStorage('videos/' + post.id + ext, blob,
+      function(url) {
+        _hideVideoProgress();
+        showToast('Vidéo envoyée ✓', 'ok');
+        if (_gwFbReady && _gwFbDB) {
+          _gwFbDB.ref('gw/post_videos/' + post.id).set({
+            url: url,
+            dur: post.video.duration || 0
+          }).catch(function(){});
+        }
+        var finalPost = JSON.parse(JSON.stringify(post));
+        finalPost.video.url = url;
+        persistNewPost(finalPost);
+        var dp = DEMO_POSTS.find(function(p) { return p.id === finalPost.id; });
+        if (dp) { dp.video = dp.video || {}; dp.video.url = url; }
+        else DEMO_POSTS.unshift(finalPost);
+        try { renderFeed(_getFeedPosts()); } catch(e){}
+        _gwRemovePendingPost(_currentUser.email, postId);
+      },
+      function() {
+        _hideVideoProgress();
+        showToast('Échec de l\'envoi — réessayez plus tard', 'err');
+      },
+      function(pct) { _showVideoProgress(pct); }
+    );
+  });
+}
+
 /* ── Init Firebase ─────────────────────────────────── */
 function _gwInitFirebase() {
   try {
@@ -196,6 +310,11 @@ function _gwInitFirebase() {
         console.warn('[GW Firebase] 🔴 DÉCONNECTÉ de Firebase');
       }
     });
+    /* Reconnexion immédiate quand l'app revient au premier plan (écran déverrouillé,
+       bascule WiFi↔4G, onglet réactivé) — évite le backoff exponentiel Firebase (≤60s) */
+    document.addEventListener('visibilitychange', function() {
+      if (!document.hidden && _gwFbDB) { try { _gwFbDB.goOnline(); } catch(e){} }
+    });
     /* Auth anonyme : DOIT être confirmée avant tout write Firebase
        (règles auth != null).  On lance sync + preload dans le then().  */
     _gwFbAuth.signInAnonymously()
@@ -206,12 +325,14 @@ function _gwInitFirebase() {
         _gwAuthWaiters = [];
         _gwFbSyncStart();
         _gwFbPreloadAndStart();
+        _gwLoadHashtagCache();
       })
       .catch(function(e) {
         console.warn('[GW Firebase] Auth anonyme échouée :', e.code || e);
         /* Démarrage quand même en mode dégradé (lectures publiques OK) */
         _gwFbSyncStart();
         _gwFbPreloadAndStart();
+        _gwLoadHashtagCache();
       });
   } catch(e) {
     console.error('[GW Firebase] ❌ Erreur init :', e);
@@ -287,11 +408,10 @@ function _gwUploadPendingVideos() {
   if (!_gwFbStorage || !_gwFbDB || !_gwFbReady || !_currentUser) return;
   var myEmail = _currentUser.email;
   var postsToFix = DEMO_POSTS.filter(function(p) {
-    return p.ownerEmail === myEmail &&
-           p.video &&
-           typeof p.video === 'object' &&
-           p.video.idbId &&
-           !p.video.url;
+    if (!p || p.ownerEmail !== myEmail) return false;
+    if (!p.video || typeof p.video !== 'object' || !p.video.idbId) return false;
+    /* Après reload : les posts avec upload échoué n'ont pas d'URL (blob URLs non persistées en localStorage) */
+    return !p.video.url;
   });
   if (!postsToFix.length) return;
   console.log('[GW Storage] 🔄 Ré-upload de', postsToFix.length, 'vidéo(s) en attente…');
@@ -366,7 +486,7 @@ function _gwUploadPendingOfficialVideos() {
 }
 
 /* Barre de progression vidéo — affichée dans le feed pendant l'upload */
-function _showVideoProgress(pct) {
+function _showVideoProgress(pct, label) {
   var bar = document.getElementById('gw-vid-upload-bar');
   if (!bar) {
     bar = document.createElement('div');
@@ -375,29 +495,34 @@ function _showVideoProgress(pct) {
       'position:fixed;bottom:72px;left:50%;transform:translateX(-50%)',
       'width:88%;max-width:420px;background:#fff;border-radius:14px',
       'box-shadow:0 4px 20px rgba(0,0,0,.18);padding:12px 16px;z-index:9999',
-      'display:flex;align-items:center;gap:10px'
+      'display:flex;align-items:center;gap:10px',
+      'animation:_gw-slide-up .25s ease'
     ].join(';');
     bar.innerHTML =
-      '<i class="fas fa-cloud-upload-alt" style="color:#6366F1;font-size:18px"></i>' +
-      '<div style="flex:1">' +
-        '<div style="font-size:12px;font-weight:700;color:#0F172A;margin-bottom:4px">Envoi de la vidéo…</div>' +
-        '<div style="background:#E2E8F0;border-radius:99px;height:6px;overflow:hidden">' +
-          '<div id="gw-vid-upload-fill" style="height:100%;background:linear-gradient(90deg,#6366F1,#8B5CF6);border-radius:99px;transition:width .3s;width:0%"></div>' +
+      '<i class="fas fa-cloud-upload-alt" id="gw-vid-upload-icon" style="color:#6366F1;font-size:18px;flex-shrink:0"></i>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div id="gw-vid-upload-label" style="font-size:12px;font-weight:700;color:#0F172A;margin-bottom:2px">Préparation…</div>' +
+        '<div style="font-size:10px;color:#64748B;margin-bottom:5px">Vous pouvez naviguer dans l\'app</div>' +
+        '<div style="background:#E2E8F0;border-radius:99px;height:7px;overflow:hidden">' +
+          '<div id="gw-vid-upload-fill" style="height:100%;background:linear-gradient(90deg,#6366F1,#8B5CF6);border-radius:99px;transition:width .4s ease;width:0%"></div>' +
         '</div>' +
       '</div>' +
-      '<span id="gw-vid-upload-pct" style="font-size:12px;font-weight:700;color:#6366F1;min-width:34px;text-align:right">0%</span>';
+      '<span id="gw-vid-upload-pct" style="font-size:13px;font-weight:800;color:#6366F1;min-width:36px;text-align:right">0%</span>';
     document.body.appendChild(bar);
   }
-  var fill = document.getElementById('gw-vid-upload-fill');
-  var pctEl = document.getElementById('gw-vid-upload-pct');
-  if (fill)  fill.style.width  = pct + '%';
-  if (pctEl) pctEl.textContent = pct + '%';
+  var fill    = document.getElementById('gw-vid-upload-fill');
+  var pctEl   = document.getElementById('gw-vid-upload-pct');
+  var labelEl = document.getElementById('gw-vid-upload-label');
+  if (fill)    fill.style.width  = pct + '%';
+  if (pctEl)   pctEl.textContent = pct + '%';
+  if (labelEl && label) labelEl.textContent = label;
 }
 function _hideVideoProgress() {
   var bar = document.getElementById('gw-vid-upload-bar');
   if (bar) {
+    bar.style.transition = 'opacity .4s,transform .4s';
     bar.style.opacity = '0';
-    bar.style.transition = 'opacity .4s';
+    bar.style.transform = 'translateX(-50%) translateY(20px)';
     setTimeout(function() { if (bar.parentNode) bar.parentNode.removeChild(bar); }, 450);
   }
 }
@@ -499,6 +624,42 @@ function _gwInitNotifications() {
   }).catch(function(e) { console.warn('[GW Push] SW register échoué :', e.message); });
 }
 
+/* ── Push natif Android (app installée via Capacitor) ──
+   _gwInitNotifications() ci-dessus utilise un service worker web (Notification
+   API + Firebase Messaging JS) : ça fonctionne dans un vrai navigateur, mais
+   PAS de façon fiable depuis la WebView d'une app Android installée — c'est
+   pour ça que les notifications n'arrivaient jamais sur le téléphone malgré
+   l'implémentation web. Le plugin natif @capacitor/push-notifications
+   enregistre l'app auprès de Firebase Cloud Messaging au niveau OS, ce qui
+   est le seul moyen fiable d'afficher une notification système sur Android. */
+function _gwInitNativePush() {
+  if (!_currentUser) return;
+  var isNative = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform();
+  if (!isNative) return;
+  var PN = window.Capacitor.Plugins && window.Capacitor.Plugins.PushNotifications;
+  if (!PN) return;
+
+  if (_gwNativePushBound) { PN.register().catch(function(){}); return; }
+  _gwNativePushBound = true;
+
+  PN.addListener('registration', function(token) {
+    if (!token || !token.value || !_currentUser) return;
+    _gwFbDB.ref('gw/fcm_tokens/' + _gwFbKey(_currentUser.email)).set(token.value).catch(function(){});
+  });
+  PN.addListener('registrationError', function(err) {
+    console.warn('[GW Push natif] Erreur d\'enregistrement :', err && err.error);
+  });
+  /* L'utilisateur tape la notification système → ouvre directement ses notifications */
+  PN.addListener('pushNotificationActionPerformed', function() {
+    try { showPage('p-notifs'); renderNotifs(); } catch(e) {}
+  });
+
+  PN.requestPermissions().then(function(res) {
+    if (res && res.receive === 'granted') PN.register();
+  }).catch(function(e) { console.warn('[GW Push natif] Permission refusée :', e.message); });
+}
+var _gwNativePushBound = false;
+
 /* Envoie une notification push à un utilisateur cible */
 function _gwSendPushNotif(toEmail, title, body, tag) {
   if (!toEmail || !_gwFbReady || !_gwFbDB) return;
@@ -563,6 +724,16 @@ function _gwFbSyncStart() {
     }
   });
 
+  /* ── Visibilité & confidentialité — synchronise les réglages de TOUS les
+     utilisateurs pour pouvoir filtrer recherche/fil/marketplace en temps réel ── */
+  _listen('privacy', 'gw_privacy_all', function() {
+    try {
+      var si = document.getElementById('search-input');
+      if (si && si.value.trim()) renderSrchResults(si.value.trim());
+    } catch(e){}
+    try { renderFeed(_getFeedPosts()); } catch(e){}
+  });
+
   /* ── Présence en ligne — watcher admin ── */
   _gwWatchOnlineUsers();
 
@@ -609,6 +780,17 @@ function _gwFbSyncStart() {
           vEl.load();
           vEl._gwThumbForced = false;
           _gwForceVideoThumb(vEl);
+        }
+        /* Si c'est un Short, mettre à jour le player Shorts si ouvert */
+        if (post.video && post.video.videoType === 'short') {
+          try {
+            var _vsIt = _vsItems.findIndex(function(x) { return x.postId === String(pid); });
+            if (_vsIt >= 0 && _vsItems[_vsIt].videoEl && !_vsItems[_vsIt].videoEl.src) {
+              _vsItems[_vsIt].videoEl.src = data.url;
+              try { _vsItems[_vsIt].videoEl.load(); } catch(e2){}
+              _vsItems[_vsIt].loaded = true;
+            }
+          } catch(e2){}
         }
         var wrap = document.getElementById('pvw-' + pid);
         if (wrap) {
@@ -860,6 +1042,8 @@ function _gwFbSyncStart() {
         }
       }, 1500);
     }
+    /* Likes des Shorts officiels — synchronise le compteur si le lecteur est ouvert */
+    try { _vsRefreshOfficialLikes(); } catch(e){}
     /* Pour chaque post vidéo sans URL → query gw/post_videos/{id} en parallèle */
     if (!Array.isArray(freshList) || !_gwFbDB) return;
     freshList.forEach(function(p) {
@@ -1004,6 +1188,11 @@ function _gwFbSyncStart() {
   /* ── Paiements / abonnements ── */
   _listen('payments', 'gw_payments', function() { _admSync('payments'); });
 
+  /* ── Config contact support (email + WhatsApp) ── */
+  _listen('support_config', 'gw_support_config', function() {
+    try { _gwLoadSupportContact(); } catch(e) {}
+  });
+
   /* ── Config plans (activé/désactivé par admin) ── */
   _listen('plans_config', 'gw_plans_config', function() {
     /* Si page abonnements ouverte → masquer/afficher les cartes en temps réel */
@@ -1123,16 +1312,37 @@ function _gwMergePost(snap) {
     return;
   }
 
-  /* Sauvegarde dans localStorage */
+  /* ── Fusionne les posts locaux non encore synchés (ex : écriture Firebase échouée) ── */
+  var incomingIds = {};
+  posts.forEach(function(p) { if (p && p.id) incomingIds[p.id] = true; });
+
+  /* Posts locaux absents de Firebase → les réintégrer dans le tableau avant sauvegarde */
+  var localOnly = [];
+  try {
+    var lsLocal = JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
+    lsLocal.forEach(function(lp) {
+      if (lp && lp.id && !incomingIds[lp.id]) {
+        /* Conserve les posts locaux avec idbId (vidéo locale) — Firebase ne les a pas encore */
+        if (lp.video && lp.video.idbId) { localOnly.push(lp); incomingIds[lp.id] = true; }
+      }
+    });
+  } catch(e2) {}
+  if (localOnly.length) {
+    posts = localOnly.concat(posts);
+    /* Retente l'écriture Firebase pour ces posts manquants */
+    if (_gwFbReady && _gwFbDB && email) {
+      try { _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts)).catch(function(){}); } catch(e3){}
+    }
+  }
+
+  /* Sauvegarde dans localStorage (inclut maintenant les posts locaux récupérés) */
   try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e){}
 
   /* ── Retire les posts supprimés de DEMO_POSTS pour cet utilisateur ── */
-  var incomingIds = {};
-  posts.forEach(function(p) { if (p && p.id) incomingIds[p.id] = true; });
   var removedAny = false;
   DEMO_POSTS = DEMO_POSTS.filter(function(p) {
     if (p.ownerEmail !== email) return true; /* pas de cet user → conserver */
-    if (incomingIds[p.id]) return true;       /* encore dans Firebase → conserver */
+    if (incomingIds[p.id]) return true;       /* encore dans Firebase ou local → conserver */
     /* Post supprimé → fermer les players si nécessaire */
     try {
       if (_vpCurrentPost && String(_vpCurrentPost.id) === String(p.id)) closeVideoPlayer();
@@ -1143,6 +1353,7 @@ function _gwMergePost(snap) {
 
   /* ── Ajoute/met à jour les posts ── */
   var changed = removedAny;
+  var _newShorts = [];
   posts.forEach(function(p) {
     if (!p || !p.id) return;
     if (!p.images) p.images = [];
@@ -1151,12 +1362,38 @@ function _gwMergePost(snap) {
       p.likers = loadPostLikers(p.id);
       DEMO_POSTS.push(p);
       changed = true;
-    } else if (p.video && p.video.url && existing.video && !existing.video.url) {
-      /* Met à jour l'URL vidéo si Firebase en a une mais pas la version locale */
-      existing.video.url = p.video.url;
-      var _vEl = document.getElementById('fv-' + p.id);
-      if (_vEl && !_vEl.src) _vEl.src = p.video.url;
-      changed = true;
+      if (p.video && typeof p.video === 'object' && p.video.videoType === 'short' && (p.video.url || p.video.idbId)) {
+        _newShorts.push(p);
+      }
+    } else if (p.video && typeof p.video === 'object' && existing.video && typeof existing.video === 'object') {
+      /* Synchronise les métadonnées vidéo depuis Firebase (source de vérité) */
+      var _vidChanged = false;
+      /* URL : prend Firebase sauf si on a déjà une URL valide (non-blob) */
+      if (p.video.url && (!existing.video.url || existing.video.url.startsWith('blob:') || existing.video.url === '' || existing.video.url === window.location.href)) {
+        existing.video.url = p.video.url;
+        var _vEl = document.getElementById('fv-' + p.id);
+        /* Corrige aussi le src="" (que le navigateur résout en URL de la page) */
+        if (_vEl && (!_vEl.getAttribute('src') || _vEl.getAttribute('src') === '' || _vEl.src.startsWith('blob:'))) {
+          _vEl.src = p.video.url;
+          _vEl.load();
+        }
+        _vidChanged = true;
+        /* Si c'est un Short qui avait été pré-sauvegardé sans URL, maintenant qu'on a
+           l'URL Firebase Storage, l'injecter dans le lecteur Shorts */
+        if (existing.video.videoType === 'short') {
+          _newShorts.push(existing);
+        }
+      }
+      /* Métadonnées d'édition — trim, recadrage, son, texte, effets, type */
+      var _vmKeys = ['videoType','trimStart','trimEnd','cropPos','cropZoom','muted','poster','textLayers','effects','filter','zoom','zoomDur','intro','outro'];
+      _vmKeys.forEach(function(k) {
+        if (p.video[k] !== undefined && p.video[k] !== null &&
+            JSON.stringify(existing.video[k]) !== JSON.stringify(p.video[k])) {
+          existing.video[k] = p.video[k];
+          _vidChanged = true;
+        }
+      });
+      if (_vidChanged) changed = true;
     }
   });
   if (changed) {
@@ -1164,6 +1401,12 @@ function _gwMergePost(snap) {
     try {
       if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
     } catch(e){}
+    /* Pré-résout les URLs des Shorts nouvellement reçus */
+    try { setTimeout(function() { _gwPreloadShortUrls(); }, 500); } catch(e){}
+    /* Injecte les nouveaux Shorts dans le player si ouvert */
+    if (_newShorts.length) {
+      try { setTimeout(function() { _vsInjectNewShorts(_newShorts); }, 700); } catch(e){}
+    }
   }
 }
 
@@ -1261,6 +1504,8 @@ var _gwOnlineRef = null;
 
 function _gwSetOnlinePresence(user) {
   if (!_gwFbReady || !_gwFbDB || !user) return;
+  /* Respecte "Afficher le statut en ligne" — ne publie même pas la présence si désactivé */
+  if (_privLoadForEmail(user.email).showOnline === false) return;
   var fbKey = _gwFbKey(user.email);
   var ref   = _gwFbDB.ref('gw/online/' + fbKey);
   _gwOnlineRef = ref;
@@ -1301,7 +1546,9 @@ function _gwWatchOnlineUsers() {
     /* Construire l'ensemble des emails en ligne */
     var onlineEmails = {};
     Object.values(data).forEach(function(entry) {
-      if (entry && entry.email) onlineEmails[entry.email.toLowerCase()] = true;
+      if (entry && entry.email && _privLoadForEmail(entry.email).showOnline !== false) {
+        onlineEmails[entry.email.toLowerCase()] = true;
+      }
     });
 
     /* Mettre à jour conv.online pour chaque DM */
@@ -1656,8 +1903,17 @@ function _googleLogin(gUser) {
     /* 3. Crée le compte si vraiment nouveau */
     var _isNewGoogleAccount = false;
     if (!existing) {
+      /* Évite toute collision de nom avec un membre existant (réservé "Geniwork"
+         ou nom déjà pris) — contrairement à l'inscription classique, Google ne
+         laisse pas choisir le nom, donc on désambiguïse automatiquement. */
+      var _gNom = _gwIsReservedName(gUser.nom) ? (gUser.nom + ' (Google)') : gUser.nom;
+      var _gSuffix = 2;
+      while (users.some(function(u) { return String(u.nom || '').trim().toLowerCase() === _gNom.trim().toLowerCase(); })) {
+        _gNom = gUser.nom + ' (' + _gSuffix + ')';
+        _gSuffix++;
+      }
       existing = {
-        nom:      gUser.nom,
+        nom:      _gNom,
         email:    email,
         password: null,
         verified: true,
@@ -1707,10 +1963,14 @@ function _googleLogin(gUser) {
 
 /* Importe la photo Google → profil Geniwork (canvas resize) */
 function _importGooglePhoto(email, nom, photoUrl) {
-  var profile = loadUserProfile(email) || getDefaultProfile({ nom: nom, email: email });
-  /* Règle absolue : si une photo existe déjà (quelle qu'elle soit),
-     on ne la remplace JAMAIS automatiquement.
-     L'utilisateur peut toujours changer sa photo manuellement dans le profil. */
+  /* On distingue "profil existant en local" de "profil absent" (réinstallation).
+     RÈGLE CRITIQUE : si aucun profil local n'existe, ne JAMAIS pousser vers Firebase
+     avec un profil minimal — ça écraserait le vrai profil Firebase (badge, plan…)
+     qui n'est pas encore arrivé via le sync async (~300 ms).
+     On sauvegarde en local seulement ; le sync Firebase fusionnera correctement ensuite. */
+  var existingProfile = loadUserProfile(email);
+  var profile = existingProfile || getDefaultProfile({ nom: nom, email: email });
+  /* Règle absolue : si une photo existe déjà, on ne la remplace JAMAIS automatiquement */
   if (profile.photo) return;
   var img = new Image();
   img.crossOrigin = 'anonymous';
@@ -1721,17 +1981,24 @@ function _importGooglePhoto(email, nom, photoUrl) {
     canvas.width  = Math.round(img.width  * ratio);
     canvas.height = Math.round(img.height * ratio);
     canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-    profile.photo       = canvas.toDataURL('image/jpeg', 0.72);
-    profile._googlePhoto = true;  /* marqueur : photo vient de Google */
-    saveUserProfile(email, profile);
-    /* Rafraîchit les avatars si l'utilisateur est déjà connecté */
+    profile.photo        = canvas.toDataURL('image/jpeg', 0.72);
+    profile._googlePhoto = true;
+    if (existingProfile) {
+      /* Profil local complet connu → save + push Firebase (inclut badge, plan, etc.) */
+      saveUserProfile(email, profile);
+    } else {
+      /* Pas de profil local (réinstallation / 1ère connexion) →
+         save en LOCAL SEULEMENT pour ne pas écraser Firebase avec un profil vide.
+         Le sync Firebase (gw/profiles) qui suit fusionnera photo + badge + plan correctement. */
+      _invalidateProfileCache(email);
+      try { localStorage.setItem('gw_profile_' + email, JSON.stringify(profile)); } catch(e){}
+      try { localStorage.setItem('gw_photo_' + email, profile.photo); } catch(e){}
+    }
     if (_currentUser && _currentUser.email === email) {
       _onProfileSaved();
     }
   };
-  img.onerror = function() {
-    /* Impossible de charger la photo (CORS) — on ignore */
-  };
+  img.onerror = function() { /* CORS — ignoré */ };
   img.src = photoUrl;
 }
 
@@ -2061,8 +2328,14 @@ function _gwHandleDeepLink() {
       return;
     }
 
-    var postId = params.get('p');
-    var ptype  = params.get('pt') || 'post';
+    /* URL param OU sessionStorage (préservé si l'utilisateur n'était pas connecté) */
+    var postId = params.get('p') || sessionStorage.getItem('gw_pending_post');
+    var ptype  = params.get('pt') || sessionStorage.getItem('gw_pending_ptype') || 'post';
+    if (postId) {
+      sessionStorage.removeItem('gw_pending_post');
+      sessionStorage.removeItem('gw_pending_ptype');
+      try { var bp = document.getElementById('gw-post-preview-banner'); if (bp) bp.remove(); } catch(e){}
+    }
     if (!postId) return;
 
     /* Nettoie l'URL sans recharger la page */
@@ -2104,11 +2377,19 @@ function _gwHandleDeepLink() {
 
 function _gwOpenDeepPost(post, ptype) {
   if (!post) return;
+  var isShort = ptype === 'vs' || (post.video && typeof post.video === 'object' && post.video.videoType === 'short');
+  if (isShort) {
+    /* Ouvre directement le lecteur Shorts positionné sur cette vidéo */
+    setTimeout(function() {
+      try { openVideoScroll(post.id); } catch(e) {}
+    }, 600);
+    return;
+  }
   navTo(null, 'p-home');
   setTimeout(function() {
     try {
       if (post.video && post.video.url) {
-        openVideoPlayer(post.video.url, post.video.duration || 0);
+        openVideoPlayer(post.video.url, post.video.duration || 0, post.video.cropPos, post.video.cropZoom, post.video.trimStart, post.video.trimEnd, post.video.muted, post.video.textLayers, post.video);
       } else {
         openComments(post.id);
       }
@@ -2158,6 +2439,90 @@ function _gwShowSongPreviewBanner(songId) {
             }
           }, 1000);
         }).catch(function(){});
+    } catch(e) {}
+  }, 1500);
+}
+
+/* ── Bannière de preview post/Short pour les utilisateurs non connectés ── */
+function _gwShowPostPreviewBanner(postId, ptype) {
+  setTimeout(function() {
+    try {
+      if (_currentUser) return;
+      var prev = document.getElementById('gw-post-preview-banner');
+      if (prev) prev.remove();
+
+      var isShort = ptype === 'vs';
+      var icon    = isShort ? 'fa-play-circle' : 'fa-file-alt';
+      var label   = isShort ? 'Voir le Short' : 'Voir la publication';
+
+      /* Essaie de charger le post depuis Firebase pour afficher miniature + auteur */
+      var FB_URL = _GW_FIREBASE_CONFIG ? _GW_FIREBASE_CONFIG.databaseURL : '';
+      var banner = document.createElement('div');
+      banner.id = 'gw-post-preview-banner';
+      banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:9999;padding:12px 16px 28px;background:linear-gradient(180deg,transparent 0%,#000 100%);pointer-events:none';
+
+      function _buildBanner(thumb, author, text) {
+        var card = document.createElement('div');
+        card.style.cssText = 'background:#0F172A;border:1px solid rgba(99,102,241,.4);border-radius:16px;padding:14px;display:flex;align-items:center;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.6);pointer-events:all;max-width:480px;margin:0 auto';
+        card.innerHTML =
+          '<div style="width:48px;height:48px;border-radius:10px;overflow:hidden;flex-shrink:0;background:linear-gradient(135deg,#6366F144,#A78BFA44);display:flex;align-items:center;justify-content:center">' +
+            (thumb ? '<img src="' + escHtml(thumb) + '" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display=\'none\'">' : '<i class="fas ' + icon + '" style="color:#818CF8;font-size:20px"></i>') +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:800;color:#F1F5F9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(author || 'Geniwork') + '</div>' +
+            '<div style="font-size:11px;color:#818CF8;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml((text || '').slice(0, 60) || 'Publication partagée sur Geniwork') + '</div>' +
+          '</div>' +
+          '<button onclick="goTo(\'screen-login\')" style="background:linear-gradient(135deg,#6366F1,#A78BFA);border:none;border-radius:10px;padding:8px 14px;color:#fff;font-size:12px;font-weight:700;cursor:pointer;flex-shrink:0;white-space:nowrap">' + label + ' →</button>';
+        banner.innerHTML = '';
+        banner.appendChild(card);
+        if (!document.getElementById('gw-post-preview-banner')) document.body.appendChild(banner);
+        var _rm = setInterval(function() {
+          if (_currentUser || !document.getElementById('gw-post-preview-banner')) {
+            clearInterval(_rm); try { banner.remove(); } catch(e) {}
+          }
+        }, 1000);
+      }
+
+      /* Affiche d'abord une bannière générique immédiatement */
+      document.body.appendChild(banner);
+      _buildBanner('', '', '');
+
+      /* Puis tente d'enrichir avec les données Firebase */
+      if (FB_URL) {
+        fetch(FB_URL + '/gw/posts.json?shallow=true')
+          .then(function() {
+            /* Cherche dans tous les auteurs */
+            return fetch(FB_URL + '/gw/posts.json');
+          })
+          .then(function(r) { return r.json(); })
+          .then(function(obj) {
+            if (!obj) return;
+            var found = null;
+            Object.keys(obj).forEach(function(k) {
+              if (found) return;
+              var arr = Array.isArray(obj[k]) ? obj[k] : Object.values(obj[k] || {});
+              arr.forEach(function(p) { if (p && String(p.id) === String(postId) && !found) found = p; });
+            });
+            if (!found) {
+              /* Essaie les posts officiels */
+              return fetch(FB_URL + '/gw/official_posts.json')
+                .then(function(r2) { return r2.json(); })
+                .then(function(o2) {
+                  var arr2 = o2 ? (Array.isArray(o2) ? o2 : Object.values(o2)) : [];
+                  return arr2.find(function(p) { return p && String(p.id) === String(postId); }) || null;
+                });
+            }
+            return found;
+          })
+          .then(function(post) {
+            if (!post) return;
+            var thumb = (post.video && post.video.thumb) || (post.images && post.images[0]) || '';
+            var author = post.author || post.nom || 'Geniwork';
+            var text = post.text || (post.video && post.video.title) || '';
+            _buildBanner(thumb, author, text);
+          })
+          .catch(function(){});
+      }
     } catch(e) {}
   }, 1500);
 }
@@ -2297,6 +2662,53 @@ function _gwFbPreloadAndStart() {
   });
 }
 
+/* Traite une URL de deep link Capacitor et stocke postId + ptype en sessionStorage.
+   Formats acceptés :
+     /p/ID?t=vs     → lien de partage direct (sharePost)
+     /?p=ID&pt=vs   → redirect de api/post.js après passage par le navigateur */
+function _gwProcessCapacitorDeepUrl(url) {
+  if (!url) return;
+  try {
+    var s      = String(url);
+    var postId = null;
+    var ptype  = 'post';
+
+    /* Format 1 : /p/ID (lien de partage natif) */
+    var m1 = s.match(/\/p\/([a-zA-Z0-9_\-]+)/);
+    if (m1) {
+      postId = m1[1];
+      var tM = s.match(/[?&]t=([^&]+)/);
+      ptype  = (tM && tM[1] === 'vs') ? 'vs' : 'post';
+    }
+
+    /* Format 2 : ?p=ID&pt=vs (redirect de api/post.js) */
+    if (!postId) {
+      var pM = s.match(/[?&]p=([a-zA-Z0-9_\-]+)/);
+      if (pM) {
+        postId = pM[1];
+        var ptM = s.match(/[?&]pt=([^&]+)/);
+        ptype   = (ptM && ptM[1] === 'vs') ? 'vs' : 'post';
+      }
+    }
+
+    if (!postId) return;
+
+    sessionStorage.setItem('gw_pending_post',  postId);
+    sessionStorage.setItem('gw_pending_ptype', ptype);
+
+    /* App déjà prête → navigue immédiatement, sinon _gwHandleDeepLink()
+       lira le sessionStorage après login */
+    if (_currentUser && _gwAppStarted) {
+      setTimeout(_gwHandleDeepLink, 400);
+    } else {
+      /* Affiche la bannière d'aperçu pendant le chargement/login */
+      setTimeout(function() {
+        try { _gwShowPostPreviewBanner(postId, ptype); } catch(e2) {}
+      }, 600);
+    }
+  } catch(e) {}
+}
+
 /* Lance l'initialisation GIS quand la page est prête */
 window.addEventListener('load', function() {
   /* ── Capture deep link song AVANT tout (persiste après redirection login) ── */
@@ -2306,11 +2718,38 @@ window.addEventListener('load', function() {
       var sid = p.get('song');
       if (sid) {
         sessionStorage.setItem('gw_pending_song', sid);
-        /* Nettoyer l'URL immédiatement */
         window.history.replaceState({}, '', window.location.pathname);
-        /* Si pas encore connecté → afficher la carte du son sur l'écran d'accueil */
         _gwShowSongPreviewBanner(sid);
       }
+      /* ── Capture deep link post/Short (persiste après connexion) ── */
+      var pid  = p.get('p');
+      var ptype = p.get('pt') || 'post';
+      if (pid) {
+        sessionStorage.setItem('gw_pending_post',  pid);
+        sessionStorage.setItem('gw_pending_ptype', ptype);
+        window.history.replaceState({}, '', window.location.pathname);
+        _gwShowPostPreviewBanner(pid, ptype);
+      }
+    } catch(e) {}
+  })();
+
+  /* ── Deep links Capacitor Android (App Links) ──
+     Capacitor charge toujours server.url à l'ouverture ; l'URL du deep link
+     est disponible via App.getLaunchUrl() (démarrage froid) ou l'event
+     appUrlOpen (app déjà ouverte). On stocke en sessionStorage pour que
+     _gwHandleDeepLink() navigue vers le contenu après authentification. */
+  (function() {
+    try {
+      var AppPlugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App;
+      if (!AppPlugin) return;
+      /* Démarrage froid via deep link */
+      AppPlugin.getLaunchUrl().then(function(r) {
+        if (r && r.url) _gwProcessCapacitorDeepUrl(r.url);
+      }).catch(function(){});
+      /* App déjà ouverte — l'utilisateur clique un lien partagé */
+      AppPlugin.addListener('appUrlOpen', function(event) {
+        _gwProcessCapacitorDeepUrl(event && event.url);
+      });
     } catch(e) {}
   })();
 
@@ -2326,6 +2765,9 @@ window.addEventListener('load', function() {
      pour que _gwFbReady = true quand initApp() est appelé ci-dessous.
      signInAnonymously() reste async → listeners retentés après auth. ── */
   _gwInitFirebase();
+
+  /* Charge les infos contact support depuis la config admin */
+  try { _gwLoadSupportContact(); } catch(e) {}
 
   /* Fast-path : lance l'app depuis localStorage (< 200 ms) */
   _gwInstantAutoLogin();
@@ -2669,6 +3111,16 @@ function doRegister() {
   // Réinitialise l'erreur email
   setEmailError(false);
 
+  /* ─ Validation 18+ ─ */
+  var age18 = document.getElementById('reg-age18');
+  var errAge = document.getElementById('err-age18');
+  if (age18 && !age18.checked) {
+    if (errAge) errAge.classList.remove('hidden');
+    showToast('Vous devez avoir 18 ans et accepter la politique de confidentialité', 'err');
+    return;
+  }
+  if (errAge) errAge.classList.add('hidden');
+
   /* ─ Validations ─ */
   if (!nom) {
     showToast('Veuillez entrer votre nom complet', 'err'); return;
@@ -2903,6 +3355,41 @@ function openCGU() {
 function onCguCheck(checkbox) {
   var btn = document.getElementById('cgu-accept-btn');
   btn.disabled = !checkbox.checked;
+}
+
+/* Ouvre l'écran CGU/Confidentialité depuis le menu (mode lecture seule avec bouton retour) */
+function openPrivacyFromSettings() {
+  var backBtn  = document.getElementById('cgu-settings-back');
+  var logoWrap = document.getElementById('cgu-logo-wrap');
+  var title    = document.getElementById('cgu-screen-title');
+  var subtitle = document.getElementById('cgu-screen-subtitle');
+  var footer   = document.getElementById('cgu-footer');
+  var body     = document.getElementById('cgu-body');
+
+  if (backBtn)  backBtn.classList.remove('hidden');
+  if (logoWrap) logoWrap.style.display = 'none';
+  if (title)    title.textContent = 'Confidentialité & CGU';
+  if (subtitle) subtitle.style.display = 'none';
+  if (footer)   footer.style.display = 'none';
+  if (body)     body.scrollTop = 0;
+
+  goTo('screen-cgu');
+}
+
+function closeCGUFromSettings() {
+  var backBtn  = document.getElementById('cgu-settings-back');
+  var logoWrap = document.getElementById('cgu-logo-wrap');
+  var title    = document.getElementById('cgu-screen-title');
+  var subtitle = document.getElementById('cgu-screen-subtitle');
+  var footer   = document.getElementById('cgu-footer');
+
+  if (backBtn)  backBtn.classList.add('hidden');
+  if (logoWrap) logoWrap.style.display = '';
+  if (title)    title.textContent = "Conditions d'utilisation";
+  if (subtitle) subtitle.style.display = '';
+  if (footer)   footer.style.display = '';
+
+  history.back();
 }
 
 /* Appelé quand l'utilisateur clique "Accepter et continuer" */
@@ -3246,9 +3733,37 @@ function _purgeDemoLegacy() {
 }
 _purgeDemoLegacy();
 
+/* Résout en tâche de fond les URLs de TOUS les Shorts dès la connexion.
+   Toutes les requêtes Firebase partent en parallèle → cache localStorage rempli
+   → plus aucune attente Firebase lors de l'ouverture du player Shorts. */
+function _gwPreloadShortUrls() {
+  try {
+    var shorts = _vsBuildList();
+    shorts.forEach(function(post) {
+      var pid = String(post.id);
+      if (_gwVidUrlCache[pid] || _gwVidBlobCache[pid]) return;
+      /* Vérifie localStorage d'abord (gratuit, synchrone) */
+      try {
+        var ls = localStorage.getItem('gw_vurl_' + pid);
+        if (ls && !ls.startsWith('blob:')) { _gwVidUrlCache[pid] = ls; return; }
+        if (ls && ls.startsWith('blob:')) localStorage.removeItem('gw_vurl_' + pid);
+      } catch(e2) {}
+      /* URL dans le post */
+      var pu = typeof post.video === 'string' ? post.video : (post.video && post.video.url ? post.video.url : '');
+      if (pu && !pu.startsWith('blob:')) { _gwVidUrlCache[pid] = pu; try { localStorage.setItem('gw_vurl_' + pid, pu); } catch(e3){} return; }
+      /* Firebase — requête parallèle pour chaque URL manquante */
+      _gwResolveVideoUrl(post, function() {});
+    });
+  } catch(e) {}
+}
+
 function initApp(user) {
   _currentUser = user;
   try { _jobApplyFeatureVisibility(); } catch(e){}
+  setTimeout(function() { try { _gwCheckPendingUploads(); } catch(e){} }, 1200);
+  /* Pré-résolution des URLs Shorts en arrière-plan, 4 s après login
+     (laisse la page se charger complètement avant de consommer du réseau) */
+  setTimeout(function() { try { _gwPreloadShortUrls(); } catch(e){} }, 2000);
 
   /* Crée / renouvelle la session sécurisée */
   if (!_gwLoadSession()) {
@@ -3504,9 +4019,18 @@ function initApp(user) {
     try { _gwUploadPendingOfficialVideos(); } catch(e2) {}
   }, 6000);
 
-  /* Initialise les notifications push (service worker + permission + token FCM) */
+  /* Initialise les notifications push (service worker + permission + token FCM).
+     Dans l'app Android installée, seul le chemin natif fonctionne de façon fiable
+     (la WebView ne délivre pas de vraies notifications système via service worker
+     web) — on évite donc d'enregistrer un token web qui écraserait le token natif
+     valide au même endroit dans Firebase. */
   setTimeout(function() {
-    try { _gwInitNotifications(); } catch(e) {}
+    var isNativeApp = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform();
+    if (isNativeApp) {
+      try { _gwInitNativePush(); } catch(e2) {}
+    } else {
+      try { _gwInitNotifications(); } catch(e) {}
+    }
   }, 2000);
 
   /* Appliquer les sections activées/désactivées par l'admin dès le chargement */
@@ -3805,9 +4329,20 @@ function navTo(btn, pageId) {
     b.classList.toggle('active', b.getAttribute('data-sdb-page') === pageId);
   });
 
-  /* Refresh feed au retour sur Accueil */
+  /* Refresh feed au retour sur Accueil.
+     Si le feed est déjà rendu et que le nombre de posts n'a pas changé,
+     on fait juste un scroll-to-top sans rebuild DOM (navigation instantanée). */
   if (pageId === 'p-home') {
-    _feedDoRefresh();
+    var _allNow = getAllPosts();
+    var _feedList = document.getElementById('feed-list');
+    var _hasRendered = _feedList && _feedList.children.length > 1; /* >1 = le loader + au moins une carte */
+    if (_hasRendered && _allNow.length === _feedLastPostCount) {
+      /* Pas de nouveaux posts → scroll to top uniquement */
+      var _fs = document.getElementById('feed-scroll');
+      if (_fs) _fs.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+      _feedDoRefresh();
+    }
     try { _gwApplyMkSections(); } catch(e) {}
   }
 
@@ -5012,6 +5547,19 @@ function _privSave(data) {
   }
 }
 
+/* Lit les réglages de confidentialité de N'IMPORTE QUEL utilisateur (pas seulement
+   soi-même) — alimenté par le cache 'gw_privacy_all' tenu à jour en temps réel par
+   le listener Firebase global (voir _gwFbSyncStart). Synchrone, donc utilisable
+   pour filtrer des listes (recherche, fil, marketplace) sans attendre un fetch. */
+function _privLoadForEmail(email) {
+  if (!email) return Object.assign({}, _PRIV_DEFAULTS);
+  if (_currentUser && email === _currentUser.email) return _privLoad();
+  try {
+    var all = JSON.parse(localStorage.getItem('gw_privacy_all') || '{}');
+    return Object.assign({}, _PRIV_DEFAULTS, all[_gwFbKey(email)] || {});
+  } catch(e) { return Object.assign({}, _PRIV_DEFAULTS); }
+}
+
 function openPrivacySettings() {
   var screen = document.getElementById('privacy-settings-screen');
   if (!screen) return;
@@ -5061,6 +5609,12 @@ function _privToggle(key, value) {
       _privSave(data);
     }
   }
+  /* Retire immédiatement la présence en ligne si désactivée en cours de session */
+  if (key === 'showOnline' && !value && _gwOnlineRef) {
+    try { _gwOnlineRef.remove().catch(function(){}); } catch(e){}
+  } else if (key === 'showOnline' && value && _currentUser) {
+    try { _gwSetOnlinePresence(_currentUser); } catch(e){}
+  }
   _privShowFeedback(key, value);
 }
 
@@ -5079,7 +5633,7 @@ function _privShowFeedback(key, value) {
     profileVisible:    value ? 'Profil visible' : 'Profil masqué',
     showInSearch:      value ? 'Visible dans les recherches' : 'Masqué des recherches',
     postsVisible:      value ? 'Publications visibles' : 'Publications masquées',
-    showInMarketplace: value ? 'Visible dans le Marketplace' : 'Masqué du Marketplace',
+    showInMarketplace: value ? 'Visible dans Le Souk' : 'Masqué du Souk',
     showOnline:        value ? 'Statut en ligne activé' : 'Statut en ligne masqué',
     readReceipts:      value ? 'Accusés de lecture activés' : 'Accusés de lecture désactivés',
     showStats:         value ? 'Statistiques visibles' : 'Statistiques masquées'
@@ -5127,6 +5681,7 @@ function openSupportScreen() {
   if (!screen) return;
   screen.classList.remove('hidden');
   requestAnimationFrame(function() { screen.classList.add('open'); });
+  try { _gwLoadSupportContact(); } catch(e) {}
   /* Attache l'événement du bouton Signaler */
   var btn = screen.querySelector('.support-report-btn');
   if (btn) {
@@ -5534,7 +6089,9 @@ function loadPersistedUserPosts(email) {
 }
 
 function savePersistedUserPosts(email, posts) {
-  localStorage.setItem(_userPostsKey(email), JSON.stringify(posts));
+  /* try-catch obligatoire : QuotaExceededError ici bloquait la suite et empêchait
+     l'écriture Firebase — le Short disparaissait pour tout le monde après rechargement */
+  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e) {}
   if (_gwFbReady && _gwFbDB && email) {
     /* Images sont maintenant des URLs Storage (ou base64 <200KB) → écriture directe */
     var fbPosts = _gwCapFirebasePosts(posts).map(function(p) {
@@ -5544,6 +6101,17 @@ function savePersistedUserPosts(email, posts) {
         copy.images = copy.images.map(function(img) {
           return (!img || (img.startsWith('data:') && img.length > 200000)) ? '' : img;
         }).filter(function(img) { return img !== ''; });
+      }
+      /* Retirer les champs locaux-seulement du payload Firebase */
+      if (copy.video && typeof copy.video === 'object') {
+        copy.video = Object.assign({}, copy.video);
+        /* poster = miniature base64 locale, inutile (et lourde) pour les autres utilisateurs */
+        if (copy.video.poster && typeof copy.video.poster === 'string' &&
+            copy.video.poster.startsWith('data:') && copy.video.poster.length > 50000) {
+          delete copy.video.poster;
+        }
+        /* idbId conservé dans Firebase : permet à _gwUploadPendingVideos de retrouver
+           et ré-uploader la vidéo automatiquement si l'upload a échoué ou l'app s'est fermée */
       }
       return copy;
     });
@@ -5613,7 +6181,10 @@ function _getFeedPosts() {
     seen[key] = true;
     /* Les offres d'emploi restent exclusivement dans la page Emploi, jamais dans le fil */
     if (p.type === 'job') return false;
-    return !(p.video && p.video.videoType === 'short');
+    if (p.video && p.video.videoType === 'short') return false;
+    /* Respecte "Publications visibles" — l'auteur voit toujours ses propres posts */
+    if (p.ownerEmail && !(_currentUser && p.ownerEmail === _currentUser.email) && _privLoadForEmail(p.ownerEmail).postsVisible === false) return false;
+    return true;
   });
 }
 
@@ -5661,6 +6232,18 @@ function _initFeedVideoObserver() {
 
         if (entry.isIntersecting) {
           if (!video.src) { return; } /* src pas encore chargée, skip */
+          /* Applique la découpe (début/fin) pendant le défilement du feed */
+          if (!video._gwTrimBound && (video.dataset.trimStart || video.dataset.trimEnd)) {
+            _gwApplyVideoTrim(video, parseFloat(video.dataset.trimStart) || 0, parseFloat(video.dataset.trimEnd) || null);
+          }
+          /* Zoom/Intro/Outro choisis dans l'éditeur */
+          if (!video._gwFxBound && video.dataset.fx) {
+            video._gwFxBound = true;
+            try {
+              var fx = JSON.parse(video.dataset.fx);
+              _gwApplyVideoFx(video.closest('.post-video-wrap'), video, fx);
+            } catch(eFx) {}
+          }
           /* Buffer agressif dès que visible */
           video.preload = 'auto';
           /* Pause toutes les autres vidéos du feed */
@@ -5678,6 +6261,16 @@ function _initFeedVideoObserver() {
               }
             }
           });
+          /* Ne masque la couverture qu'une fois qu'une vraie image vidéo s'affiche
+             réellement. 'playing' seul ne suffit pas : sur certains Android bas
+             de gamme/petits écrans, cet événement se déclenche avant que la
+             première image soit décodée/peinte (GPU lent), laissant apparaître
+             un flash noir. 'timeupdate' ne se déclenche qu'une fois la position
+             de lecture réellement avancée — donc une image a forcément été rendue. */
+          if (overlay && !video._gwOverlayHideBound) {
+            video._gwOverlayHideBound = true;
+            video.addEventListener('timeupdate', function() { overlay.style.opacity = '0'; }, { once: true });
+          }
           /* Lance la lecture : immédiate si buffer prêt, sinon attend canplay */
           if (video.readyState >= 3) {
             video.play().catch(function(){});
@@ -5690,7 +6283,6 @@ function _initFeedVideoObserver() {
               video.addEventListener('canplay', onCp);
             });
           }
-          if (overlay)    overlay.style.opacity    = '0';
           if (mutedBadge) {
             mutedBadge.style.opacity = '1';
             /* Met l'icône à jour selon l'état mute actuel */
@@ -6102,11 +6694,124 @@ function _buildCollabFeedCard(post) {
       (skillsHtml ? '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px">' + skillsHtml + '</div>' : '') +
       '<button onclick="event.stopPropagation();showPage(\'p-marketplace\');setTimeout(function(){_collabOpenDetail(\'' + escHtml(cl.id || '') + '\');},300)" ' +
         'style="width:100%;padding:10px;background:#F5F3FF;color:#6366F1;border:1.5px solid #C7D2FE;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">' +
-        '<i class="fas fa-arrow-right" style="margin-right:6px"></i>Voir la demande dans le Marketplace' +
+        '<i class="fas fa-arrow-right" style="margin-right:6px"></i>Voir la demande dans Le Souk' +
       '</button>' +
     '</div>';
 
   return card;
+}
+
+/* ── Rend les textes/emojis ajoutés dans l'éditeur vidéo, par-dessus la vidéo
+   (recadrage/découpe/son s'appliquent à la lecture sans réencodage ; les
+   calques texte font de même : on les superpose en HTML/CSS plutôt que de
+   les "graver" dans le fichier, identique partout où la vidéo est jouée) */
+function _gwRenderTextLayersHtml(textLayers) {
+  if (!textLayers || !textLayers.length) return '';
+  var html = '<div class="gw-video-text-layers" style="position:absolute;inset:0;overflow:hidden;pointer-events:none">';
+  textLayers.forEach(function(l) {
+    /* Les guillemets doubles dans font-family (ex: "Courier New") cassent
+       l'attribut style="..." une fois injectés en HTML — on les remplace par
+       des guillemets simples, valides en CSS pour un nom de police */
+    var fontSafe = (l.font || 'sans-serif').replace(/"/g, "'");
+    var shadowCss = l.shadow ? '0 2px 10px rgba(0,0,0,.95),0 0 3px #000' : '1px 1px 4px rgba(0,0,0,.8)';
+    html += '<div style="position:absolute;left:' + (l.x != null ? l.x : 50) + '%;top:' + (l.y != null ? l.y : 40) + '%;' +
+      'transform:translate(-50%,-50%);font-size:' + (l.size || 28) + 'px;font-family:' + fontSafe + ';' +
+      'font-weight:' + (l.weight || 600) + ';letter-spacing:' + (l.spacing || 'normal') + ';' +
+      'color:' + (l.color || '#fff') + ';text-shadow:' + shadowCss + ';white-space:nowrap;line-height:1.2">' +
+      escHtml(l.text || '') + '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+/* ── Effets overlay (vignette/grain) ajoutés dans l'éditeur — superposés à la
+   vidéo en CSS pur, sans réencodage, comme les calques texte ── */
+function _gwRenderVideoOverlaysHtml(effects) {
+  if (!effects) return '';
+  var html = '';
+  if (effects.vignette) {
+    html += '<div style="position:absolute;inset:0;pointer-events:none;' +
+      'background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.55) 100%)"></div>';
+  }
+  if (effects.grain) {
+    html += '<div style="position:absolute;inset:0;pointer-events:none;opacity:.18;mix-blend-mode:overlay;' +
+      'background-image:url(\'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22>' +
+      '<filter id=%22n%22><feTurbulence type=%22fractalNoise%22 baseFrequency=%220.9%22 numOctaves=%222%22 stitchTiles=%22stitch%22/></filter>' +
+      '<rect width=%22100%25%22 height=%22100%25%22 filter=%22url(%23n)%22/></svg>\')"></div>';
+  }
+  return html;
+}
+
+/* ── Applique glow (filtre CSS) + zoom/intro/outro (animation CSS) à un
+   conteneur vidéo, identique partout où la vidéo est jouée (feed, lecteur,
+   Shorts) — l'animation cible le conteneur (wrapEl), pas la balise <video>
+   elle-même, pour ne pas entrer en conflit avec le transform:scale() du
+   recadrage/zoom déjà appliqué directement sur <video> */
+function _gwVideoFilterCss(video) {
+  var parts = [];
+  if (video.filter && video.filter !== 'none') parts.push(video.filter);
+  if (video.effects && video.effects.glow) parts.push('brightness(1.15) saturate(1.25)');
+  return parts.join(' ');
+}
+
+function _gwApplyVideoFx(wrapEl, videoEl, video) {
+  if (!wrapEl || !video) return;
+  if (videoEl) videoEl.style.filter = _gwVideoFilterCss(video);
+
+  /* Le wrap/video peuvent être réutilisés pour plusieurs publications successives
+     (lecteur plein écran, Shorts) : on stocke les réglages courants sur l'élément
+     plutôt que de les figer dans la closure de l'écouteur, sinon rouvrir une autre
+     vidéo garderait les anciens réglages (zoom/intro/outro) de la 1ère ouverture. */
+  wrapEl._gwFxZoom    = video.zoom    || null;
+  wrapEl._gwFxZoomDur = video.zoomDur || 2;
+  wrapEl._gwFxIntro   = video.intro   || null;
+  wrapEl._gwFxOutro   = video.outro   || null;
+
+  function zoomAnim() {
+    var dur = wrapEl._gwFxZoomDur + 's';
+    if (wrapEl._gwFxZoom === 'in')    return 'gwZoomIn '    + dur + ' ease-in-out forwards';
+    if (wrapEl._gwFxZoom === 'out')   return 'gwZoomOut '   + dur + ' ease-in-out forwards';
+    if (wrapEl._gwFxZoom === 'enter') return 'gwZoomEnter ' + dur + ' ease-out forwards';
+    return '';
+  }
+  function introAnim() {
+    var intro = wrapEl._gwFxIntro;
+    if (intro === 'fade')  return 'gwIntroFade 0.8s ease forwards';
+    if (intro === 'slide') return 'gwIntroSlide 0.8s ease forwards';
+    if (intro === 'pop')   return 'gwIntroPop 0.6s cubic-bezier(.34,1.56,.64,1) forwards';
+    return '';
+  }
+  function outroAnimName() {
+    var outro = wrapEl._gwFxOutro;
+    if (outro === 'fade')  return 'gwOutroFade';
+    if (outro === 'slide') return 'gwOutroSlide';
+    if (outro === 'blur')  return 'gwOutroBlur';
+    return '';
+  }
+
+  wrapEl.style.animation = wrapEl._gwFxIntro ? introAnim() : (wrapEl._gwFxZoom ? zoomAnim() : '');
+
+  if (!wrapEl._gwFxBound) {
+    wrapEl._gwFxBound = true;
+    wrapEl.addEventListener('animationend', function() {
+      /* Ne réagit qu'à la fin de l'intro : retombe ensuite sur le zoom continu s'il y en a un */
+      if (wrapEl.style.animationName && wrapEl.style.animationName.indexOf('gwIntro') === 0) {
+        wrapEl.style.animation = wrapEl._gwFxZoom ? zoomAnim() : '';
+      }
+    });
+  }
+  if (videoEl && !videoEl._gwFxOutroBound) {
+    videoEl._gwFxOutroBound = true;
+    videoEl.addEventListener('timeupdate', function() {
+      if (!wrapEl._gwFxOutro) return;
+      var d = videoEl._gwTrimEnd || videoEl.duration;
+      if (!d) return;
+      var name = outroAnimName();
+      if ((d - videoEl.currentTime) <= 0.8 && wrapEl.style.animationName !== name) {
+        wrapEl.style.animation = name + ' 0.8s ease forwards';
+      }
+    });
+  }
 }
 
 function buildPostCard(post) {
@@ -6147,7 +6852,20 @@ function buildPostCard(post) {
 
   /* Vidéo HTML */
   var videoHtml = '';
-  if (post.video && (post.video.idbId || post.video.url)) {
+  if (post.youtubeId) {
+    /* Lien YouTube publié par l'admin → vignette + player */
+    var ytThumbFeed = 'https://img.youtube.com/vi/' + escHtml(post.youtubeId) + '/hqdefault.jpg';
+    videoHtml =
+      '<div style="position:relative;border-radius:10px;overflow:hidden;aspect-ratio:16/9;background:#000;cursor:pointer;margin:8px 0" onclick="_openYoutubePlayer(\'' + escHtml(post.youtubeId) + '\')">' +
+        '<img src="' + ytThumbFeed + '" alt="" style="width:100%;height:100%;object-fit:cover"/>' +
+        '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">' +
+          '<div style="width:64px;height:64px;background:rgba(255,0,0,.9);border-radius:50%;display:flex;align-items:center;justify-content:center">' +
+            '<i class="fab fa-youtube" style="color:#fff;font-size:30px"></i>' +
+          '</div>' +
+        '</div>' +
+        '<span style="position:absolute;top:8px;left:8px;background:rgba(0,0,0,.7);color:#fff;font-size:11px;padding:3px 8px;border-radius:20px;display:flex;align-items:center;gap:4px"><i class="fab fa-youtube" style="color:#FF0000"></i>YouTube</span>' +
+      '</div>';
+  } else if (post.video && (post.video.idbId || post.video.url)) {
     var vDur   = escHtml(formatDuration(post.video.duration || 0));
     var vidId  = 'fv-' + post.id;
     var vType  = (post.video && post.video.videoType) || 'video';
@@ -6166,21 +6884,37 @@ function buildPostCard(post) {
       ? 'position:relative;overflow:hidden;border-radius:10px;max-width:240px;margin:0 auto;aspect-ratio:9/16;background:#000'
       : 'position:relative;overflow:hidden;border-radius:10px;aspect-ratio:16/9;background:#000';
     var vZoom  = (post.video.cropZoom && post.video.cropZoom > 1) ? post.video.cropZoom : 1;
+    var vFilterCss = _gwVideoFilterCss(post.video);
     var vidStyle  = 'width:100%;height:100%;object-fit:cover;object-position:' + vCrop + ';' +
       (vZoom > 1 ? 'transform:scale(' + vZoom + ');transform-origin:center center;' : '') +
+      (vFilterCss ? 'filter:' + vFilterCss + ';' : '') +
       'display:block;pointer-events:none';
     var typeBadge = isShrt
       ? '<span class="post-video-type-badge post-video-type-short"><i class="fas fa-mobile-screen-button"></i> SHORT</span>'
       : '<span class="post-video-type-badge post-video-type-video"><i class="fas fa-video"></i> VIDÉO</span>';
 
     var vPoster = post.video.poster ? ' poster="' + post.video.poster + '"' : '';
+    var vTrimAttr = (post.video.trimStart || post.video.trimEnd)
+      ? ' data-trim-start="' + (post.video.trimStart || 0) + '" data-trim-end="' + (post.video.trimEnd || '') + '"'
+      : '';
+    /* Zoom/Intro/Outro choisis dans l'éditeur — appliqués au conteneur (pas à
+       <video>) par _gwApplyVideoFx une fois la vidéo visible/lancée */
+    var vFxAttr = (post.video.zoom || post.video.intro || post.video.outro || post.video.filter || (post.video.effects && post.video.effects.glow))
+      ? ' data-fx=\'' + escHtml(JSON.stringify({ effects: post.video.effects, filter: post.video.filter, zoom: post.video.zoom, zoomDur: post.video.zoomDur, intro: post.video.intro, outro: post.video.outro })) + '\''
+      : '';
     videoHtml =
       '<div class="post-video-wrap" id="pvw-' + post.id + '" style="' + wrapStyle + '" onclick="_openVideoFromPost(\'' + post.id + '\',' + (post.video.duration || 0) + ')">' +
-        '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + vPoster + ' preload="auto" autoplay muted playsinline webkit-playsinline loop ' +
-          'style="' + vidStyle + ';will-change:transform;transform:translateZ(0)"></video>' +
-        '<div class="post-video-thumb-overlay" id="fvo-' + post.id + '">' +
+        '<video id="' + vidId + '" ' + (vSrc ? 'src="' + vSrc + '"' : '') + vPoster + vTrimAttr + vFxAttr + ' preload="auto" autoplay muted playsinline webkit-playsinline loop ' +
+          /* Pas de transform/will-change ici : forcer une couche GPU sur <video>
+             provoque un écran noir sur certains Android bas/moyenne gamme
+             (même bug déjà corrigé pour le lecteur Shorts — voir .vs-video) */
+          'style="' + vidStyle + '"></video>' +
+        '<div class="post-video-thumb-overlay" id="fvo-' + post.id + '"' +
+          (post.video.poster ? ' style="background-image:url(\'' + post.video.poster + '\');background-size:cover;background-position:' + vCrop + '"' : '') + '>' +
           '<div class="post-video-play-ico"><i class="fas fa-play"></i></div>' +
         '</div>' +
+        _gwRenderTextLayersHtml(post.video.textLayers) +
+        _gwRenderVideoOverlaysHtml(post.video.effects) +
         '<div class="post-video-muted-badge" id="fvm-' + post.id + '" onclick="event.stopPropagation();_gwFeedToggleMute(\'' + post.id + '\',\'fv-\',\'fvm-\')">' +
           '<i class="fas fa-volume-mute"></i>' +
         '</div>' +
@@ -6256,7 +6990,7 @@ function buildPostCard(post) {
     var gridClass = 'grid-' + count;
     imagesHtml = '<div class="post-images ' + gridClass + '">';
     post.images.slice(0, count).forEach(function(src, i) {
-      imagesHtml += '<img class="post-img" src="' + escHtml(src) + '" alt="" loading="lazy"' +
+      imagesHtml += '<img class="post-img" src="' + escHtml(src) + '" alt="" loading="lazy" decoding="async"' +
         ' onclick="openPhotoViewer(' + post.id + ',' + i + ')"/>';
     });
     imagesHtml += '</div>';
@@ -6388,11 +7122,11 @@ function buildPostCard(post) {
     '</div>' +
     '<div class="post-body">' +
       (post.type === 'repost' && post.repostOf
-        ? (shortText ? '<p class="post-text" id="ptxt-' + post.id + '">' + escHtml(shortText) +
+        ? (shortText ? '<p class="post-text" id="ptxt-' + post.id + '">' + _gwRenderTaggedText(shortText, post.tags) +
             (needMore ? '… <button class="see-more" onclick="expandPost(' + post.id + ')">Voir plus</button>' : '') +
             '</p>' : '') +
           repostCardHtml
-        : '<p class="post-text" id="ptxt-' + post.id + '">' + escHtml(shortText) +
+        : '<p class="post-text" id="ptxt-' + post.id + '">' + _gwRenderTaggedText(shortText, post.tags) +
           (needMore ? '… <button class="see-more" onclick="expandPost(' + post.id + ')">Voir plus</button>' : '') +
           '</p>' +
           videoHtml + imagesHtml + docHtml
@@ -6487,7 +7221,7 @@ function expandPost(postId) {
   }
   if (!post) return;
   var el = document.getElementById('ptxt-' + postId);
-  if (el) el.innerHTML = escHtml(post.text || '');
+  if (el) el.innerHTML = _gwRenderTaggedText(post.text || '', post.tags);
 }
 
 /* Expand le texte du post original cité dans un repost */
@@ -6507,7 +7241,9 @@ function expandComment(commentId) {
   var el = document.getElementById('ctxt-' + commentId);
   if (!el) return;
   var full = el.getAttribute('data-full') || '';
-  el.textContent = full;
+  var tags = [];
+  try { tags = JSON.parse(el.getAttribute('data-tags') || '[]'); } catch(e) {}
+  el.innerHTML = _gwRenderTaggedText(full, tags);
 }
 
 /* ══════════════════════════════════════════
@@ -6907,21 +7643,27 @@ function _incrementVideoViews(postId) {
       if (result.committed) {
         var newCount = result.snapshot.val();
         localStorage.setItem('gw_vid_views_' + postId, newCount);
-        var badge = document.getElementById('vid-views-' + postId);
-        if (badge) badge.textContent = _fmtViews(newCount);
+        var b1 = document.getElementById('vid-views-' + postId);
+        if (b1) b1.textContent = _fmtViews(newCount);
+        var b2 = document.getElementById('vs-views-' + postId);
+        if (b2) b2.textContent = _fmtViews(newCount);
       }
     }).catch(function() {
       /* Fallback local si Firebase indisponible */
       var v = _getVideoViews(postId) + 1;
       localStorage.setItem('gw_vid_views_' + postId, v);
-      var badge = document.getElementById('vid-views-' + postId);
-      if (badge) badge.textContent = _fmtViews(v);
+      var b1 = document.getElementById('vid-views-' + postId);
+      if (b1) b1.textContent = _fmtViews(v);
+      var b2 = document.getElementById('vs-views-' + postId);
+      if (b2) b2.textContent = _fmtViews(v);
     });
   } else {
     var v = _getVideoViews(postId) + 1;
     localStorage.setItem('gw_vid_views_' + postId, v);
-    var badge = document.getElementById('vid-views-' + postId);
-    if (badge) badge.textContent = _fmtViews(v);
+    var b1 = document.getElementById('vid-views-' + postId);
+    if (b1) b1.textContent = _fmtViews(v);
+    var b2 = document.getElementById('vs-views-' + postId);
+    if (b2) b2.textContent = _fmtViews(v);
   }
   return _getVideoViews(postId);
 }
@@ -6940,11 +7682,30 @@ var _MILE_COMMENTS = [10, 50, 100, 500, 1000, 5000];
 var _MILE_FOLLOWS  = [100, 500, 1000, 2000, 3000, 5000, 10000, 50000, 100000];
 
 function _mileDone(key)  { return localStorage.getItem('gw_mile_' + key) === '1'; }
-function _mileMark(key)  {
-  localStorage.setItem('gw_mile_' + key, '1');
-  if (_gwFbReady && _gwFbDB && _currentUser) {
-    _gwFbDB.ref('gw/milestones/' + _gwFbKey(_currentUser.email) + '/' + key).set(true).catch(function(){});
+function _mileMark(key)  { localStorage.setItem('gw_mile_' + key, '1'); }
+
+/* Réclame un palier de façon atomique et partagée entre TOUS les appareils
+   (sur le post/profil lui-même, pas sur l'appareil du spectateur) — sinon
+   chaque nouveau spectateur qui ouvre une vidéo déjà populaire repart de zéro
+   localement et re-déclenche TOUS les paliers déjà franchis, spammant le
+   propriétaire de notifications en double. cb(true) = palier célébré pour la
+   première fois (notifier) ; cb(false) = déjà célébré par quelqu'un d'autre. */
+function _mileClaim(key, cb) {
+  if (_mileDone(key)) { cb(false); return; }
+  if (!_gwFbReady || !_gwFbDB) {
+    /* Hors-ligne : pas de garantie inter-appareils, mais évite au moins de
+       re-notifier depuis ce même appareil à la prochaine ouverture */
+    _mileMark(key);
+    cb(true);
+    return;
   }
+  _gwFbDB.ref('gw/milestones/' + key).transaction(function(current) {
+    return current === true ? undefined : true;
+  }).then(function(result) {
+    var claimed = !!result.committed;
+    if (claimed) _mileMark(key);
+    cb(claimed);
+  }).catch(function() { cb(false); });
 }
 function _mileLabel(n) {
   if (n >= 1000000) return (n / 1000000) + 'M';
@@ -6976,9 +7737,10 @@ function _showMilestoneToast(emoji, msg) {
 function _checkViewMilestone(postId, ownerEmail, count) {
   if (!ownerEmail) return;
   _MILE_VIEWS.forEach(function(m) {
+    if (count < m) return;
     var mkey = 'views_' + postId + '_' + m;
-    if (count >= m && !_mileDone(mkey)) {
-      _mileMark(mkey);
+    _mileClaim(mkey, function(claimed) {
+      if (!claimed) return;
       var msg = 'Votre vidéo a atteint ' + _mileLabel(m) + ' vues !';
       pushNotif(ownerEmail, {
         id: genNotifId(), type: 'milestone', fromUser: null,
@@ -6986,7 +7748,7 @@ function _checkViewMilestone(postId, ownerEmail, count) {
         at: Date.now(), time: 'À l\'instant', unread: true
       });
       if (_currentUser && _currentUser.email === ownerEmail) _showMilestoneToast('👁️', msg);
-    }
+    });
   });
 }
 
@@ -6994,9 +7756,10 @@ function _checkViewMilestone(postId, ownerEmail, count) {
 function _checkLikeMilestone(postId, ownerEmail, count) {
   if (!ownerEmail) return;
   _MILE_LIKES.forEach(function(m) {
+    if (count < m) return;
     var mkey = 'likes_' + postId + '_' + m;
-    if (count >= m && !_mileDone(mkey)) {
-      _mileMark(mkey);
+    _mileClaim(mkey, function(claimed) {
+      if (!claimed) return;
       var msg = 'Votre publication a atteint ' + _mileLabel(m) + ' likes !';
       pushNotif(ownerEmail, {
         id: genNotifId(), type: 'milestone', fromUser: null,
@@ -7004,7 +7767,7 @@ function _checkLikeMilestone(postId, ownerEmail, count) {
         at: Date.now(), time: 'À l\'instant', unread: true
       });
       if (_currentUser && _currentUser.email === ownerEmail) _showMilestoneToast('❤️', msg);
-    }
+    });
   });
 }
 
@@ -7012,9 +7775,10 @@ function _checkLikeMilestone(postId, ownerEmail, count) {
 function _checkCommentMilestone(postId, ownerEmail, count) {
   if (!ownerEmail) return;
   _MILE_COMMENTS.forEach(function(m) {
+    if (count < m) return;
     var mkey = 'comments_' + postId + '_' + m;
-    if (count >= m && !_mileDone(mkey)) {
-      _mileMark(mkey);
+    _mileClaim(mkey, function(claimed) {
+      if (!claimed) return;
       var msg = 'Votre publication a atteint ' + _mileLabel(m) + ' commentaires !';
       pushNotif(ownerEmail, {
         id: genNotifId(), type: 'milestone', fromUser: null,
@@ -7022,7 +7786,7 @@ function _checkCommentMilestone(postId, ownerEmail, count) {
         at: Date.now(), time: 'À l\'instant', unread: true
       });
       if (_currentUser && _currentUser.email === ownerEmail) _showMilestoneToast('💬', msg);
-    }
+    });
   });
 }
 
@@ -7030,9 +7794,10 @@ function _checkCommentMilestone(postId, ownerEmail, count) {
 function _checkFollowerMilestone(profileEmail, profileKey, count) {
   if (!profileEmail) return;
   _MILE_FOLLOWS.forEach(function(m) {
+    if (count < m) return;
     var mkey = 'follows_' + profileKey + '_' + m;
-    if (count >= m && !_mileDone(mkey)) {
-      _mileMark(mkey);
+    _mileClaim(mkey, function(claimed) {
+      if (!claimed) return;
       var msg = 'Vous avez atteint ' + _mileLabel(m) + ' abonnés !';
       pushNotif(profileEmail, {
         id: genNotifId(), type: 'milestone', fromUser: null,
@@ -7040,7 +7805,7 @@ function _checkFollowerMilestone(profileEmail, profileKey, count) {
         at: Date.now(), time: 'À l\'instant', unread: true
       });
       if (_currentUser && _currentUser.email === profileEmail) _showMilestoneToast('🏆', msg);
-    }
+    });
   });
 }
 
@@ -7052,9 +7817,16 @@ function _openOfficialVideo(postId) {
   /* Comptage vue */
   _incrementVideoViews('off_' + postId);
   var dur = (typeof post.video === 'object' && post.video.duration) ? post.video.duration : 0;
+  var cropPos  = (typeof post.video === 'object' && post.video.cropPos)  ? post.video.cropPos  : null;
+  var cropZoom = (typeof post.video === 'object' && post.video.cropZoom) ? post.video.cropZoom : null;
+  var trimStart = (typeof post.video === 'object' && post.video.trimStart) ? post.video.trimStart : 0;
+  var trimEnd   = (typeof post.video === 'object' && post.video.trimEnd)   ? post.video.trimEnd   : null;
+  var muted     = (typeof post.video === 'object') ? !!post.video.muted : false;
+  var textLayers = (typeof post.video === 'object') ? post.video.textLayers : null;
+  var fx = (typeof post.video === 'object') ? post.video : null;
   /* URL déjà en mémoire ? */
   var url = typeof post.video === 'string' ? post.video : (post.video.url || '');
-  if (url) { openVideoPlayer(url, dur); return; }
+  if (url) { openVideoPlayer(url, dur, cropPos, cropZoom, trimStart, trimEnd, muted, textLayers, fx); return; }
 
   /* Fallback Firebase : récupère l'URL Storage depuis gw/post_videos/{postId} */
   function _tryStorageFallback() {
@@ -7071,7 +7843,7 @@ function _openOfficialVideo(postId) {
             p2.video.url = d.url;
             try { localStorage.setItem('gw_official_posts', JSON.stringify(all)); } catch(e2){}
           }
-          openVideoPlayer(d.url, dur);
+          openVideoPlayer(d.url, dur, cropPos, cropZoom, trimStart, trimEnd, muted, textLayers, fx);
         } else {
           showToast('Vidéo introuvable', 'err');
         }
@@ -7085,7 +7857,7 @@ function _openOfficialVideo(postId) {
 
   /* Résoudre via cache commun (IndexedDB → Firebase) */
   _gwResolveVideoUrl(post, function(url) {
-    if (url) { openVideoPlayer(url, dur); }
+    if (url) { openVideoPlayer(url, dur, cropPos, cropZoom, trimStart, trimEnd, muted, textLayers, fx); }
     else { _tryStorageFallback(); }
   });
 }
@@ -7123,7 +7895,7 @@ function _openVideoClassic(post, duration) {
   /* Si URL déjà résolue → lecture directe */
   if (_gwVidUrlCache[postId] || post.video.url) {
     var readyUrl = _gwVidUrlCache[postId] || post.video.url;
-    openVideoPlayer(readyUrl, duration);
+    openVideoPlayer(readyUrl, duration, post.video.cropPos, post.video.cropZoom, post.video.trimStart, post.video.trimEnd, post.video.muted, post.video.textLayers, post.video);
     _vpPopulateDetail(post);
     return;
   }
@@ -7137,16 +7909,17 @@ function _openVideoClassic(post, duration) {
   }
   _gwResolveVideoUrl(post, function(url) {
     if (!url) { showToast('Vidéo non disponible sur cet appareil', 'err'); return; }
-    openVideoPlayer(url, duration);
+    openVideoPlayer(url, duration, post.video.cropPos, post.video.cropZoom, post.video.trimStart, post.video.trimEnd, post.video.muted, post.video.textLayers, post.video);
     _vpPopulateDetail(post);
   });
 }
 
 /* ── Helper: build a single comment item HTML ── */
 function _vpBuildCommentHtml(c) {
-  var cPr    = (c.email && loadUserProfile(c.email)) || {};
-  var cNom   = c.author || cPr.nom || (c.email ? c.email.split('@')[0] : 'Utilisateur');
-  var cBadge = cPr.badge ? '<i class="fas fa-circle-check vpd-verified"></i>' : '';
+  var cEmail = c.authorEmail || c.email || '';
+  var cPr    = (cEmail && loadUserProfile(cEmail)) || {};
+  var cNom   = c.authorName || c.author || cPr.nom || (cEmail ? cEmail.split('@')[0] : 'Utilisateur');
+  var cBadge = getBadgeHtml(cEmail);
   var cAva   = cPr.photo
     ? '<img class="vpd-comment-avatar" src="' + escHtml(cPr.photo) + '" onerror="this.style.display=\'none\'" />'
     : '<div class="vpd-comment-avatar-initials">' + escHtml(cNom.charAt(0).toUpperCase()) + '</div>';
@@ -7154,10 +7927,10 @@ function _vpBuildCommentHtml(c) {
     cAva +
     '<div class="vpd-comment-body">' +
       '<div class="vpd-comment-author">' + escHtml(cNom) + ' ' + cBadge +
-        '<span class="vpd-comment-time">· ' + _timeAgo(c.at || 0) + '</span>' +
+        '<span class="vpd-comment-time">· ' + (c.timeDisplay || _timeAgo(c.at || 0)) + '</span>' +
       '</div>' +
-      '<div class="vpd-comment-text" id="vpdctxt-' + c.id + '" data-full="' + escHtml(c.text || '') + '">' +
-        escHtml((c.text || '').length > 120 ? (c.text || '').slice(0, 120) : (c.text || '')) +
+      '<div class="vpd-comment-text" id="vpdctxt-' + c.id + '" data-full="' + escHtml(c.text || '') + '" data-tags="' + escHtml(JSON.stringify(c.tags || [])) + '">' +
+        _gwRenderTaggedText((c.text || '').length > 120 ? (c.text || '').slice(0, 120) : (c.text || ''), c.tags) +
         ((c.text || '').length > 120
           ? '… <span class="see-more" style="cursor:pointer;color:#2563EB;font-weight:600" onclick="event.stopPropagation();_vpdExpandComment(\'' + c.id + '\')">Voir plus</span>'
           : '') +
@@ -7170,11 +7943,50 @@ function _vpBuildCommentHtml(c) {
 function _vpdExpandComment(commentId) {
   var el = document.getElementById('vpdctxt-' + commentId);
   if (!el) return;
-  el.textContent = el.getAttribute('data-full') || '';
+  var full = el.getAttribute('data-full') || '';
+  var tags = [];
+  try { tags = JSON.parse(el.getAttribute('data-tags') || '[]'); } catch(e) {}
+  el.innerHTML = _gwRenderTaggedText(full, tags);
 }
 
 /* ── Populates YouTube-style detail sections (title/author/desc/comments/related) ── */
 var _vpCurrentPost = null;
+
+/* Reconstruit le bloc commentaires (compteur + aperçu défilant) — appelée à
+   l'ouverture de la vidéo ET chaque fois qu'un commentaire est ajouté, pour
+   que le compteur et le défilement ne restent jamais figés à l'état initial */
+function _vpRefreshCommentsPreview(post) {
+  if (_vpCommentsTimer) { clearInterval(_vpCommentsTimer); _vpCommentsTimer = null; }
+  var commWrap = document.getElementById('vpd-comments-wrap');
+  if (!commWrap) return;
+  var cList  = getAllComments(post.id).slice().reverse();
+  var cCount = cList.length;
+  var previewHtml = cCount > 0
+    ? '<div id="vpd-comment-preview" class="vpd-comment-preview">' + _vpBuildCommentHtml(cList[0]) + '</div>'
+    : '<div class="vpd-no-comments">Soyez le premier à commenter ✨</div>';
+  commWrap.innerHTML =
+    '<div class="vpd-comments-hdr">' +
+      '<span class="vpd-comments-title">Commentaires (' + cCount + ')</span>' +
+      '<button class="vpd-voir-tout-btn" onclick="openComments(' + post.id + ')">Voir tout</button>' +
+    '</div>' +
+    previewHtml +
+    '<div class="vpd-add-comment" onclick="openComments(' + post.id + ')">' +
+      '<div class="vpd-add-comment-placeholder"><i class="fas fa-pen-to-square"></i> Ajouter un commentaire...</div>' +
+    '</div>';
+  /* Lance le défilement si plusieurs commentaires */
+  if (cList.length > 1) {
+    var _cIdx = 0;
+    _vpCommentsTimer = setInterval(function() {
+      _cIdx = (_cIdx + 1) % cList.length;
+      var el = document.getElementById('vpd-comment-preview');
+      if (!el) { clearInterval(_vpCommentsTimer); _vpCommentsTimer = null; return; }
+      el.style.opacity = '0';
+      setTimeout(function() {
+        if (el) { el.innerHTML = _vpBuildCommentHtml(cList[_cIdx]); el.style.opacity = '1'; }
+      }, 300);
+    }, 3500);
+  }
+}
 
 function _vpPopulateDetail(post) {
   _vpCurrentPost = post;
@@ -7222,7 +8034,7 @@ function _vpPopulateDetail(post) {
   var profKey  = post.ownerEmail ? getProfileKey({ nom: nom, email: post.ownerEmail }) : '';
   var following = profKey ? isFollowing(profKey) : false;
   var subs      = profKey ? _getTotalFollowers(profKey, false) : 0;
-  var badge     = pr.badge ? '<i class="fas fa-circle-check vpd-author-verified"></i>' : '';
+  var badge     = getBadgeHtml(post.ownerEmail);
   var isOwn     = email && post.ownerEmail === email;
 
   var suivreBtn = document.getElementById('vpd-suivre-btn');
@@ -7270,37 +8082,7 @@ function _vpPopulateDetail(post) {
   }
 
   /* Comments — count + cycling preview + add-comment bar */
-  if (_vpCommentsTimer) { clearInterval(_vpCommentsTimer); _vpCommentsTimer = null; }
-  var commWrap = document.getElementById('vpd-comments-wrap');
-  if (commWrap) {
-    var cList  = getAllComments(post.id).slice().reverse();
-    var cCount = cList.length;
-    var previewHtml = cCount > 0
-      ? '<div id="vpd-comment-preview" class="vpd-comment-preview">' + _vpBuildCommentHtml(cList[0]) + '</div>'
-      : '<div class="vpd-no-comments">Soyez le premier à commenter ✨</div>';
-    commWrap.innerHTML =
-      '<div class="vpd-comments-hdr">' +
-        '<span class="vpd-comments-title">Commentaires (' + cCount + ')</span>' +
-        '<button class="vpd-voir-tout-btn" onclick="openComments(' + post.id + ')">Voir tout</button>' +
-      '</div>' +
-      previewHtml +
-      '<div class="vpd-add-comment" onclick="openComments(' + post.id + ')">' +
-        '<div class="vpd-add-comment-placeholder"><i class="fas fa-pen-to-square"></i> Ajouter un commentaire...</div>' +
-      '</div>';
-    /* Start cycling if more than 1 comment */
-    if (cList.length > 1) {
-      var _cIdx = 0;
-      _vpCommentsTimer = setInterval(function() {
-        _cIdx = (_cIdx + 1) % cList.length;
-        var el = document.getElementById('vpd-comment-preview');
-        if (!el) { clearInterval(_vpCommentsTimer); _vpCommentsTimer = null; return; }
-        el.style.opacity = '0';
-        setTimeout(function() {
-          if (el) { el.innerHTML = _vpBuildCommentHtml(cList[_cIdx]); el.style.opacity = '1'; }
-        }, 300);
-      }, 3500);
-    }
-  }
+  _vpRefreshCommentsPreview(post);
 
   /* Related videos */
   var relEl = document.getElementById('vpd-related');
@@ -7721,6 +8503,25 @@ function saveCommentReact(cid, react) {
 
 /* Tous les commentaires d'un post = demo (fixes) + utilisateurs (localStorage) */
 function getAllComments(postId) {
+  /* ── Publications officielles (post, vidéo ou short) — stockage séparé (_offGetPosts) ── */
+  var offPost = _offGetPosts().find(function(p) { return String(p.id) === String(postId); });
+  if (offPost) {
+    return (Array.isArray(offPost.comments) ? offPost.comments : []).map(function(c) {
+      return {
+        id:          c.id,
+        postId:      offPost.id,
+        parentId:    null,
+        authorEmail: c.email || '',
+        authorName:  c.nom || 'Membre',
+        text:        c.text,
+        tags:        c.tags || [],
+        at:          c.at || 0,
+        timeDisplay: c.time || 'Récent',
+        readOnly:    true
+      };
+    });
+  }
+
   var post = getAllPosts().find(function(p) { return p.id === postId; });
   var demo = (post && Array.isArray(post.comments)) ? post.comments.map(function(c, i) {
     return {
@@ -7786,6 +8587,29 @@ function renderCommentsList(postId) {
 }
 
 function buildCommentEl(c, isReply) {
+  /* Commentaires officiels : lecture seule dans cette modale unifiée (pas d'édition/
+     suppression/réaction ici — l'id de post officiel est une chaîne 'off_…', pas un
+     nombre, donc pas compatible avec editComment/likeComment qui attendent un id de
+     publication classique). */
+  if (c.readOnly) {
+    var displayCommentNameRO = getDisplayName(c.authorEmail || null, c.authorName);
+    var elRO = document.createElement('div');
+    elRO.className = 'comment-item' + (isReply ? ' comment-reply' : '');
+    elRO.id = 'comment-' + c.id;
+    elRO.innerHTML =
+      getAvatarHtml(c.authorEmail || null, displayCommentNameRO, 'sm') +
+      '<div class="comment-content">' +
+        '<div class="comment-bubble">' +
+          '<div class="comment-header">' +
+            '<span class="comment-author">' + escHtml(displayCommentNameRO) + '</span>' +
+            '<span class="comment-time">' + escHtml(c.at ? _timeAgo(c.at) : (c.timeDisplay || '')) + '</span>' +
+          '</div>' +
+          '<div class="comment-text" id="ctxt-' + c.id + '">' + _gwRenderTaggedText(c.text || '', c.tags) + '</div>' +
+        '</div>' +
+      '</div>';
+    return elRO;
+  }
+
   var isOwn   = _currentUser && c.authorEmail === _currentUser.email && !c.isDemo;
   var react   = getCommentReact(c.id);
   var email   = _currentUser ? _currentUser.email : '';
@@ -7820,12 +8644,12 @@ function buildCommentEl(c, isReply) {
       '<div class="comment-bubble">' +
         '<div class="comment-header">' +
           '<span class="comment-author">' + escHtml(displayCommentName) + '</span>' +
-          '<span class="comment-time">' + escHtml(c.timeDisplay) + '</span>' +
+          '<span class="comment-time">' + escHtml(c.at ? _timeAgo(c.at) : (c.timeDisplay || '')) + '</span>' +
           (c.edited ? '<span class="edited-label">(modifié)</span>' : '') +
           ownBtns +
         '</div>' +
-        '<div class="comment-text" id="ctxt-' + c.id + '" data-full="' + escHtml(c.text || '') + '">' +
-          escHtml((c.text || '').length > 200 ? (c.text || '').slice(0, 200) : (c.text || '')) +
+        '<div class="comment-text" id="ctxt-' + c.id + '" data-full="' + escHtml(c.text || '') + '" data-tags="' + escHtml(JSON.stringify(c.tags || [])) + '">' +
+          _gwRenderTaggedText((c.text || '').length > 200 ? (c.text || '').slice(0, 200) : (c.text || ''), c.tags) +
           ((c.text || '').length > 200
             ? '… <span class="rp-voir-plus" style="color:#2563EB;cursor:pointer;font-weight:600" onclick="expandComment(\'' + c.id + '\')">Voir plus</span>'
             : '') +
@@ -7907,6 +8731,273 @@ function _insertEmoji(emoji) {
   inp.focus();
 }
 
+/* ══════════════════════════════════════════
+   SYSTÈME DE TAG (@mention) — autocomplétion + rendu coloré + notification
+══════════════════════════════════════════ */
+
+/* Branche la détection "@" sur un champ texte (composer ou commentaire) */
+function _gwAttachMentionSupport(inputEl) {
+  if (!inputEl || inputEl._gwMentionAttached) return;
+  inputEl._gwMentionAttached = true;
+  inputEl.addEventListener('input', function() { _gwMentionOnInput(inputEl); });
+  inputEl.addEventListener('blur', function() { setTimeout(_gwCloseMentionDropdown, 150); });
+}
+
+function _gwMentionOnInput(el) {
+  try {
+    var val = el.value || '';
+    var pos = el.selectionStart;
+    var before = val.slice(0, pos);
+    var m = before.match(/@([^\s@]{0,30})$/);
+    if (!m) { _gwCloseMentionDropdown(); return; }
+    var query = m[1].toLowerCase();
+    var users = getUsers().filter(function(u) {
+      if (_currentUser && u.email === _currentUser.email) return false;
+      var nom = getDisplayName(u.email, u.nom) || '';
+      return nom.toLowerCase().indexOf(query) !== -1;
+    }).slice(0, 6);
+    if (!users.length) { _gwCloseMentionDropdown(); return; }
+    _gwShowMentionDropdown(el, users, m[0].length);
+  } catch(e) { _gwCloseMentionDropdown(); }
+}
+
+function _gwShowMentionDropdown(el, users, matchLen) {
+  var dd = document.getElementById('gw-mention-dropdown');
+  if (!dd) {
+    dd = document.createElement('div');
+    dd.id = 'gw-mention-dropdown';
+    dd.className = 'gw-mention-dropdown';
+    document.body.appendChild(dd);
+  }
+  var rect = el.getBoundingClientRect();
+  /* Hauteur visible réelle (tient compte du clavier virtuel quand l'API existe) */
+  var viewportH = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  var viewportW = (window.visualViewport && window.visualViewport.width)  || window.innerWidth;
+  var MARGIN    = 8;
+  var TOPBAR_H  = 64; /* évite de passer sous la barre du haut */
+
+  var spaceAbove = rect.top - TOPBAR_H - MARGIN;
+  var spaceBelow = viewportH - rect.bottom - MARGIN;
+
+  /* Choisit le côté qui offre le plus de place, avec une hauteur mini utile */
+  var openBelow = spaceBelow >= 120 || spaceBelow >= spaceAbove;
+  var available = Math.max(120, openBelow ? spaceBelow : spaceAbove);
+
+  dd.style.position  = 'fixed';
+  dd.style.maxHeight = Math.min(260, available) + 'px';
+  dd.style.left      = Math.max(MARGIN, Math.min(rect.left, viewportW - 280 - MARGIN)) + 'px';
+  dd.style.width     = Math.min(Math.max(rect.width, 220), 280) + 'px';
+  if (openBelow) {
+    dd.style.top       = (rect.bottom + MARGIN) + 'px';
+    dd.style.transform = 'none';
+  } else {
+    dd.style.top       = rect.top + 'px';
+    dd.style.transform = 'translateY(-100%) translateY(-' + MARGIN + 'px)';
+  }
+  dd.style.display   = 'block';
+  dd.innerHTML = users.map(function(u) {
+    var nom    = getDisplayName(u.email, u.nom);
+    var photo  = (loadUserProfile(u.email) || {}).photo || '';
+    var avatar = photo
+      ? '<img src="' + photo + '" class="gw-mention-av">'
+      : '<span class="gw-mention-av-ph">' + escHtml((nom || '?').charAt(0).toUpperCase()) + '</span>';
+    var safeEmail = (u.email || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    var safeNom   = (nom || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    var safeInputId = el.id;
+    return '<div class="gw-mention-item" onmousedown="event.preventDefault();_gwPickMention(\'' + safeInputId + '\',\'' + safeEmail + '\',\'' + safeNom + '\',' + matchLen + ')">' +
+      avatar + '<span>' + escHtml(nom) + getBadgeHtml(u.email) + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+function _gwCloseMentionDropdown() {
+  var dd = document.getElementById('gw-mention-dropdown');
+  if (dd) dd.style.display = 'none';
+}
+
+function _gwPickMention(inputId, email, nom, matchLen) {
+  var el = document.getElementById(inputId);
+  if (!el) return;
+  var pos    = el.selectionStart;
+  var val    = el.value;
+  var before = val.slice(0, pos - matchLen);
+  var after  = val.slice(pos);
+  var insert = '@' + nom + ' ';
+  el.value   = before + insert + after;
+  var newPos = (before + insert).length;
+  el.focus();
+  try { el.setSelectionRange(newPos, newPos); } catch(e) {}
+  var tags = _gwGetPendingTags(el);
+  if (!tags.some(function(t) { return t.email === email; })) tags.push({ email: email, nom: nom });
+  _gwCloseMentionDropdown();
+}
+
+function _gwGetPendingTags(el) {
+  if (!el) return [];
+  if (!el._gwPendingTags) el._gwPendingTags = [];
+  return el._gwPendingTags;
+}
+
+/* ══════════════════════════════════════════
+   SYSTÈME HASHTAGS
+══════════════════════════════════════════ */
+
+var _gwHashtagCache = {};
+
+function _gwLoadHashtagCache() {
+  if (!_gwFbDB) return;
+  _gwFbDB.ref('gw/hashtags').once('value').then(function(snap) {
+    _gwHashtagCache = snap.val() || {};
+  }).catch(function(){});
+}
+
+function _gwExtractHashtags(text) {
+  var matches = (text || '').match(/#([a-zA-ZÀ-ɏ0-9_]{1,50})/g) || [];
+  return matches.map(function(m) { return m.slice(1).toLowerCase(); })
+    .filter(function(t, i, arr) { return arr.indexOf(t) === i; });
+}
+
+function _gwSaveHashtags(text) {
+  if (!_gwFbDB || !text) return;
+  var tags = _gwExtractHashtags(text);
+  tags.forEach(function(tag) {
+    _gwFbDB.ref('gw/hashtags/' + tag + '/count').transaction(function(cur) {
+      return (cur || 0) + 1;
+    }).then(function(res) {
+      if (res.snapshot) _gwHashtagCache[tag] = { count: res.snapshot.val() };
+    }).catch(function(){});
+    _gwFbDB.ref('gw/hashtags/' + tag + '/lastUsed').set(Date.now()).catch(function(){});
+  });
+}
+
+function _gwHashtagSuggest(ta) {
+  try {
+    var val    = ta.value || '';
+    var pos    = ta.selectionStart;
+    var before = val.slice(0, pos);
+    var m = before.match(/#([a-zA-ZÀ-ɏ0-9_]{0,50})$/);
+    var dd = document.getElementById('gw-hashtag-suggest');
+    if (!dd) return;
+    if (!m) { dd.style.display = 'none'; return; }
+    var query = m[1].toLowerCase();
+    var suggestions = Object.keys(_gwHashtagCache)
+      .filter(function(t) { return query.length === 0 || t.indexOf(query) === 0; })
+      .sort(function(a, b) {
+        var ca = (_gwHashtagCache[a] && _gwHashtagCache[a].count) || 0;
+        var cb = (_gwHashtagCache[b] && _gwHashtagCache[b].count) || 0;
+        return cb - ca;
+      })
+      .slice(0, 6);
+    if (!suggestions.length) { dd.style.display = 'none'; return; }
+    dd.style.display = 'block';
+    dd.innerHTML = suggestions.map(function(tag) {
+      var cnt = (_gwHashtagCache[tag] && _gwHashtagCache[tag].count) || 0;
+      var safeTag = tag.replace(/'/g, "\\'");
+      return '<div style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155" ' +
+        'onmousedown="event.preventDefault();_gwPickHashtag(\'' + safeTag + '\',\'pub-text\')">' +
+        '<span style="color:#A78BFA;font-weight:700">#' + escHtml(tag) + '</span>' +
+        '<span style="font-size:11px;color:#94A3B8">' + cnt + ' utilisation' + (cnt > 1 ? 's' : '') + '</span>' +
+        '</div>';
+    }).join('');
+  } catch(e) {
+    var dd2 = document.getElementById('gw-hashtag-suggest');
+    if (dd2) dd2.style.display = 'none';
+  }
+}
+
+function _gwPickHashtag(tag, inputId) {
+  var el = document.getElementById(inputId);
+  if (!el) return;
+  var pos    = el.selectionStart;
+  var val    = el.value;
+  var before = val.slice(0, pos);
+  var after  = val.slice(pos);
+  var m = before.match(/#([a-zA-ZÀ-ɏ0-9_]{0,50})$/);
+  if (m) before = before.slice(0, before.length - m[0].length);
+  el.value = before + '#' + tag + ' ' + after;
+  var newPos = (before + '#' + tag + ' ').length;
+  el.focus();
+  try { el.setSelectionRange(newPos, newPos); } catch(e) {}
+  var dd = document.getElementById('gw-hashtag-suggest');
+  if (dd) dd.style.display = 'none';
+}
+
+function _gwOpenHashtagFeed(tag) {
+  var allPosts = getAllPosts().concat(_offGetPosts ? _offGetPosts() : []);
+  var filtered = allPosts.filter(function(p) {
+    return (p.text || '').toLowerCase().indexOf('#' + tag) !== -1;
+  });
+  showPage('p-home');
+  setTimeout(function() {
+    if (!filtered.length) { showToast('Aucune publication avec #' + tag, 'info'); return; }
+    renderFeed(filtered);
+    showToast('#' + tag + ' — ' + filtered.length + ' publication(s)', 'ok');
+  }, 300);
+}
+
+/* Ferme le dropdown hashtag si on clique ailleurs */
+(function() {
+  var _taEl = document.getElementById('pub-text');
+  if (_taEl) _taEl.addEventListener('blur', function() {
+    setTimeout(function() {
+      var dd = document.getElementById('gw-hashtag-suggest');
+      if (dd) dd.style.display = 'none';
+    }, 150);
+  });
+})();
+
+/* Rend un texte avec ses tags colorés/cliquables — échappe le texte en amont,
+   donc toujours appeler avec le texte BRUT (jamais déjà échappé). */
+function _gwRenderTaggedText(text, tags) {
+  var escaped = escHtml(text || '');
+  if (tags && tags.length) {
+    tags.forEach(function(t) {
+      if (!t || !t.nom) return;
+      var escName = escHtml(t.nom).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      var pattern;
+      try { pattern = new RegExp('@' + escName, 'g'); } catch(e) { return; }
+      var safeEmail = (t.email || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      var safeNomJs = (t.nom   || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      escaped = escaped.replace(pattern,
+        '<span class="gw-tag-mention" onclick="event.stopPropagation();openUserProfile({email:\'' + safeEmail + '\',nom:\'' + safeNomJs + '\'})">@' + escHtml(t.nom) + getBadgeHtml(t.email) + '</span>'
+      );
+    });
+  }
+  /* Rend les #hashtags en violet/cliquable */
+  escaped = escaped.replace(/#([a-zA-ZÀ-ɏ0-9_]{1,50})/g, function(match, tag) {
+    var safeTag = tag.toLowerCase().replace(/'/g, "\\'");
+    return '<span class="gw-hashtag" onclick="event.stopPropagation();_gwOpenHashtagFeed(\'' + safeTag + '\')" ' +
+      'style="color:#8B5CF6;font-weight:600;cursor:pointer">#' + escHtml(tag) + '</span>';
+  });
+  return escaped;
+}
+
+/* Notifie chaque utilisateur taggé (sauf soi-même) — réutilise le routing des
+   notifications de commentaire (ouvre la publication + les commentaires) */
+function _gwNotifyTags(tags, postId, fromUser) {
+  if (!tags || !tags.length || !fromUser) return;
+  tags.forEach(function(t) {
+    if (!t || !t.email || t.email === fromUser.email) return;
+    pushNotif(t.email, {
+      id:       genNotifId(),
+      type:     'tag',
+      title:    '🏷️ Vous avez été taggé(e)',
+      body:     (fromUser.nom || 'Quelqu\'un') + ' vous a taggé(e) dans une publication',
+      fromUser: { nom: fromUser.nom, email: fromUser.email, role: 'Membre Geniwork' },
+      postId:   postId,
+      msg:      'vous a taggé(e)',
+      at:       Date.now(), time: 'À l\'instant',
+      unread:   true
+    });
+  });
+}
+
+/* Active l'autocomplétion @mention sur les deux champs concernés */
+try {
+  _gwAttachMentionSupport(document.getElementById('pub-text'));
+  _gwAttachMentionSupport(document.getElementById('comment-input'));
+} catch(e) {}
+
 function submitComment() {
   var input    = document.getElementById('comment-input');
   var text     = input.value.trim();
@@ -7918,6 +9009,44 @@ function submitComment() {
     if (_gwShowRestrictionAlert('comment')) return;
   }
 
+  /* ── Publication officielle (post, vidéo ou short) — stockage séparé ── */
+  var _offPosts = _offGetPosts();
+  var _offTarget = _offPosts.find(function(p) { return String(p.id) === String(_currentPostId); });
+  if (_offTarget) {
+    var _offCmtTags = _gwGetPendingTags(input).slice();
+    if (!Array.isArray(_offTarget.comments)) _offTarget.comments = [];
+    _offTarget.comments.push({
+      id:    'oc_' + Date.now(),
+      nom:   _currentUser.nom || 'Membre',
+      email: _currentUser.email,
+      text:  text,
+      tags:  _offCmtTags,
+      at:    Date.now(), time: 'À l\'instant'
+    });
+    _offSavePosts(_offPosts);
+    input.value = '';
+    input._gwPendingTags = [];
+    cancelReply();
+    renderCommentsList(_currentPostId);
+    updatePostCommentCount(_currentPostId);
+    _gwNotifyTags(_offCmtTags, _currentPostId, _currentUser);
+    return;
+  }
+
+  /* ── Respecte "Autoriser les commentaires" de l'auteur du post ── */
+  var _cPost = getAllPosts().find(function(p) { return String(p.id) === String(_currentPostId); });
+  if (_cPost && _cPost.ownerEmail && _cPost.ownerEmail !== _currentUser.email) {
+    var _cPriv = _privLoadForEmail(_cPost.ownerEmail);
+    if (_cPriv.commentsFrom === 'disabled') {
+      showToast('Les commentaires sont désactivés sur cette publication', 'err');
+      return;
+    }
+    if (_cPriv.commentsFrom === 'followers' && !isFollowing(_cPost.ownerEmail)) {
+      showToast('Seuls les abonnés peuvent commenter cette publication', 'err');
+      return;
+    }
+  }
+
   /* ── Analyse du contenu ── */
   var _cc = _gwCheckContent(text);
   if (_cc.flagged) {
@@ -7927,6 +9056,8 @@ function submitComment() {
     return;
   }
 
+  var _cmtTags = _gwGetPendingTags(input).slice();
+
   var newC = {
     id:          'c_' + genNotifId(),
     postId:      _currentPostId,
@@ -7934,7 +9065,8 @@ function submitComment() {
     authorEmail: _currentUser.email,
     authorName:  _currentUser.nom,
     text:        text,
-    timeDisplay: 'À l\'instant',
+    tags:        _cmtTags,
+    at:          Date.now(),
     edited:      false,
     isDemo:      false
   };
@@ -7946,7 +9078,10 @@ function submitComment() {
     _gwFbDB.ref('gw/comments/' + _currentPostId + '/' + newC.id).set(newC).catch(function(){});
   }
 
+  _gwNotifyTags(_cmtTags, _currentPostId, _currentUser);
+
   input.value = '';
+  input._gwPendingTags = [];
   cancelReply();
   renderCommentsList(_currentPostId);
   updatePostCommentCount(_currentPostId);
@@ -8110,6 +9245,10 @@ function updatePostCommentCount(postId) {
   if (vsEl) vsEl.textContent = total > 0 ? _fmtViews(total) : '0';
   var countEl = document.getElementById('comments-count');
   if (countEl && _currentPostId === postId) countEl.textContent = total > 0 ? '(' + total + ')' : '';
+  /* Rafraîchit le bloc commentaires de la vue détaillée vidéo (compteur figé sinon) */
+  if (_vpCurrentPost && String(_vpCurrentPost.id) === String(postId)) {
+    try { _vpRefreshCommentsPreview(_vpCurrentPost); } catch(e) {}
+  }
 }
 
 /* ══════════════════════════════════════════
@@ -8391,25 +9530,184 @@ function _renderFavServices() {
 function _getShareCount(postId) {
   return parseInt(localStorage.getItem('gw_shares_' + postId) || '0', 10);
 }
-function _incShareCount(postId) {
-  var n = _getShareCount(postId) + 1;
-  localStorage.setItem('gw_shares_' + postId, n);
-  return n;
+/* Incrément atomique Firebase + protection un-partage-par-utilisateur.
+   Appelle cb(newCount) une fois le chiffre confirmé. */
+function _incShareCount(postId, cb) {
+  /* Mise à jour optimiste locale immédiate */
+  var local = _getShareCount(postId) + 1;
+  localStorage.setItem('gw_shares_' + postId, local);
+  if (cb) cb(local);
+
+  if (!_gwFbReady || !_gwFbDB || !_currentUser) return;
+
+  var emailKey  = _gwFbKey(_currentUser.email);
+  var flagRef   = _gwFbDB.ref('gw/user_shares/' + emailKey + '/' + postId);
+  var countRef  = _gwFbDB.ref('gw/share_counts/' + postId);
+
+  /* Vérifie d'abord si cet utilisateur a déjà partagé cette publication */
+  flagRef.once('value').then(function(snap) {
+    if (snap.val()) return; /* déjà partagé — ne pas incrémenter à nouveau */
+    return flagRef.set(true).then(function() {
+      return countRef.transaction(function(cur) { return (cur || 0) + 1; });
+    }).then(function(result) {
+      if (result && result.committed) {
+        var real = result.snapshot.val();
+        localStorage.setItem('gw_shares_' + postId, real);
+        if (cb) cb(real);
+        /* Mettre à jour tous les badges partage visibles */
+        var b1 = document.getElementById('vs-shares-' + postId);
+        if (b1) b1.textContent = _fmtViews(real);
+        var b2 = document.getElementById('vpd-share-cnt');
+        if (b2) b2.textContent = _fmtViews(real);
+      }
+    });
+  }).catch(function() {});
 }
 
+/* Variable temporaire partagée entre la sheet et ses handlers */
+var _gwShareCtx = null;
+
 function sharePost(postId) {
-  var post      = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
-  var shareUrl  = window.location.origin + '/p/' + postId;
+  var post     = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
+  var isShort  = post && post.video && typeof post.video === 'object' && post.video.videoType === 'short';
+  var shareUrl = window.location.origin + '/p/' + postId + (isShort ? '?t=vs' : '');
   var shareText = post
-    ? (post.author || '') + ' sur Geniwork' + (post.text ? ' : ' + post.text.slice(0, 80) + '…' : '')
+    ? (post.author || 'Geniwork') + ' sur Geniwork' + (post.text ? ' : ' + post.text.slice(0, 80) + '…' : '')
     : 'Découvrez cette publication sur Geniwork !';
 
-  if (navigator.share) {
-    navigator.share({ title: 'Geniwork', text: shareText, url: shareUrl })
-      .then(function() { notifyShare(post); })
+  _gwShareCtx = { post: post, url: shareUrl, text: shareText };
+  _gwOpenShareSheet(post, shareUrl, shareText);
+}
+
+function _gwOpenShareSheet(post, shareUrl, shareText) {
+  /* Ferme une éventuelle sheet précédente */
+  ['gw-share-bg', 'gw-share-card'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.remove();
+  });
+
+  /* ── Données du post ── */
+  var thumb  = '';
+  var author = 'Geniwork';
+  var snippet= '';
+  if (post) {
+    author  = post.author || post.nom || 'Geniwork';
+    snippet = post.text ? post.text.slice(0, 100) : '';
+    if (post.video && typeof post.video === 'object') {
+      thumb = post.video.thumb || post.video.poster || (post.images && post.images[0]) || '';
+      if (!snippet && post.video.title) snippet = post.video.title;
+    } else if (post.images && post.images.length) {
+      thumb = post.images[0];
+    }
+  }
+
+  /* ── Icônes des apps ── */
+  var eu   = encodeURIComponent(shareUrl);
+  var et   = encodeURIComponent(shareText);
+  var emsg = encodeURIComponent(shareText + '\n' + shareUrl);
+  var apps = [
+    { name: 'Copier', ico: 'fas fa-link',     bg: '#6366F1', href: null },
+    { name: 'Plus',   ico: 'fas fa-ellipsis', bg: '#64748B', href: null }
+  ];
+
+  var appsHtml = apps.map(function(a) {
+    var click = a.href
+      ? '_gwShareOpenExternal(' + JSON.stringify(a.href) + ')'
+      : (a.name === 'Copier' ? '_gwShareCopy()' : '_gwShareNative()');
+    return '<div class="gw-share-app" onclick="' + click + '">' +
+      '<div class="gw-share-app-ico" style="background:' + a.bg + '">' +
+        '<i class="' + a.ico + '"></i>' +
+      '</div>' +
+      '<span>' + escHtml(a.name) + '</span>' +
+    '</div>';
+  }).join('');
+
+  var thumbHtml = thumb
+    ? '<div class="gw-share-thumb"><img src="' + escHtml(thumb) + '" onerror="this.parentNode.innerHTML=\'<i class=\\\"fas fa-photo-film\\\"></i>\'"></div>'
+    : '<div class="gw-share-thumb"><i class="fas fa-photo-film"></i></div>';
+
+  /* ── Construction du DOM ── */
+  var bg = document.createElement('div');
+  bg.id = 'gw-share-bg';
+  bg.onclick = function() { _gwCloseShareSheet(); };
+
+  var card = document.createElement('div');
+  card.id = 'gw-share-card';
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="gw-share-preview">' +
+      thumbHtml +
+      '<div class="gw-share-meta">' +
+        '<div class="gw-share-author">' + escHtml(author) + '</div>' +
+        (snippet ? '<div class="gw-share-snippet">' + escHtml(snippet) + '</div>' : '') +
+      '</div>' +
+    '</div>' +
+    '<div class="gw-share-apps">' + appsHtml + '</div>' +
+    '<button class="gw-share-cancel" onclick="_gwCloseShareSheet()">Annuler</button>';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+}
+
+function _gwCloseShareSheet() {
+  ['gw-share-bg', 'gw-share-card'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.remove();
+  });
+}
+
+/* Partage via Capacitor Share (Android natif) ou ancre (navigateur web).
+   Android 11+ bloque les intents vers apps tierces sans déclaration <queries>
+   dans le manifest. Capacitor.Plugins.Share contourne cela car il utilise
+   ACTION_SEND (intent système toujours autorisé) → ouvre le sélecteur natif. */
+function _gwShareOpenExternal(webUrl) {
+  _gwCloseShareSheet();
+  /* ── Capacitor Android : Share plugin natif ── */
+  if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Share) {
+    var ctx = _gwShareCtx || {};
+    window.Capacitor.Plugins.Share.share({
+      title:       'GENIWORK',
+      text:        ctx.text || 'Découvrez cette publication sur GENIWORK !',
+      url:         ctx.url  || webUrl,
+      dialogTitle: 'Partager via'
+    }).then(function(result) {
+      if (ctx.post && result && result.activityType) { try { notifyShare(ctx.post); } catch(e) {} }
+    }).catch(function() {});
+    return;
+  }
+  /* ── Navigateur web : ouvre l'URL sociale dans un nouvel onglet ── */
+  var a = document.createElement('a');
+  a.setAttribute('href', webUrl);
+  a.setAttribute('target', '_blank');
+  a.setAttribute('rel', 'noopener noreferrer');
+  a.style.cssText = 'position:fixed;opacity:0;pointer-events:none;top:0;left:0';
+  document.body.appendChild(a);
+  try { a.click(); } catch(e) {}
+  setTimeout(function() { try { document.body.removeChild(a); } catch(e2) {} }, 300);
+}
+
+function _gwShareCopy() {
+  if (!_gwShareCtx) return;
+  _gwCopyLink(_gwShareCtx.url, _gwShareCtx.post);
+  _gwCloseShareSheet();
+}
+
+function _gwShareNative() {
+  if (!_gwShareCtx) return;
+  var ctx = _gwShareCtx;
+  _gwCloseShareSheet();
+  /* Capacitor Share en priorité (fiable sur Android 11+), puis Web Share API */
+  var capShare = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Share;
+  if (capShare) {
+    capShare.share({
+      title: 'GENIWORK', text: ctx.text, url: ctx.url, dialogTitle: 'Partager via'
+    }).then(function(r) {
+      if (ctx.post && r && r.activityType) { try { notifyShare(ctx.post); } catch(e) {} }
+    }).catch(function() {});
+  } else if (navigator.share) {
+    navigator.share({ title: 'GENIWORK', text: ctx.text, url: ctx.url })
+      .then(function() { if (ctx.post) notifyShare(ctx.post); })
       .catch(function() {});
   } else {
-    _gwCopyLink(shareUrl, post);
+    _gwCopyLink(ctx.url, ctx.post);
   }
 }
 
@@ -8436,12 +9734,13 @@ function _gwCopyLink(text, post) {
 
 function notifyShare(post) {
   if (!post) return;
-  /* Increment share counter and update the video player button if visible */
-  var newCount = _incShareCount(post.id);
-  var sCnt = document.getElementById('vpd-share-cnt');
-  if (sCnt) sCnt.textContent = _fmtViews(newCount);
-  var sCntVs = document.getElementById('vs-shares-' + post.id);
-  if (sCntVs) sCntVs.textContent = _fmtViews(newCount);
+  /* Increment share counter (Firebase async) and update visible badges */
+  _incShareCount(post.id, function(newCount) {
+    var sCnt = document.getElementById('vpd-share-cnt');
+    if (sCnt) sCnt.textContent = _fmtViews(newCount);
+    var sCntVs = document.getElementById('vs-shares-' + post.id);
+    if (sCntVs) sCntVs.textContent = _fmtViews(newCount);
+  });
   if (!post.ownerEmail || !_currentUser || post.ownerEmail === _currentUser.email) return;
   var _shType    = post.video ? 'votre vidéo' : (post.images && post.images.length ? 'votre photo' : 'votre publication');
   var _shPreview = ((post.video && post.video.title) || post.text || '').slice(0, 60);
@@ -8922,6 +10221,38 @@ function openPhotoViewer(postId, idx) {
   document.body.style.overflow = 'hidden';
 }
 
+function openOfficialPhotoViewer(src) {
+  if (!src) return;
+  _viewerPhotos = [src];
+  _viewerIdx    = 0;
+  if (!document.getElementById('photo-viewer')) {
+    var v = document.createElement('div');
+    v.id        = 'photo-viewer';
+    v.className = 'photo-viewer hidden';
+    v.innerHTML =
+      '<div class="pv-counter-top" id="pv-counter"></div>' +
+      '<button class="pv-close" onclick="closePhotoViewer()"><i class="fas fa-times"></i></button>' +
+      '<button class="pv-prev hidden" id="pv-prev" onclick="prevPhoto()"><i class="fas fa-chevron-left"></i></button>' +
+      '<div class="pv-img-wrap"><img id="pv-img" src="" alt=""/></div>' +
+      '<button class="pv-next hidden" id="pv-next" onclick="nextPhoto()"><i class="fas fa-chevron-right"></i></button>' +
+      '<div class="pv-dots" id="pv-dots"></div>' +
+      '<div class="pv-footer">' +
+        '<span class="pv-footer-left">Geniwork</span>' +
+        '<button class="pv-dl" onclick="downloadCurrentPhoto()"><i class="fas fa-download"></i> Télécharger</button>' +
+      '</div>';
+    document.body.appendChild(v);
+    var tx = 0;
+    v.addEventListener('touchstart', function(e) { tx = e.touches[0].clientX; }, { passive: true });
+    v.addEventListener('touchend', function(e) {
+      var dx = e.changedTouches[0].clientX - tx;
+      if (dx < -50) nextPhoto(); else if (dx > 50) prevPhoto();
+    }, { passive: true });
+  }
+  updateViewer();
+  document.getElementById('photo-viewer').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
 function updateViewer() {
   var img     = document.getElementById('pv-img');
   var counter = document.getElementById('pv-counter');
@@ -8990,6 +10321,16 @@ function downloadAllPhotos(postId) {
 }
 
 function downloadImage(src, filename) {
+  /* Dans l'app Android (Capacitor), l'attribut <a download> est silencieusement
+     ignoré par la WebView — il ne se passe rien quand on clique. On passe donc
+     par les plugins Filesystem + Share déjà inclus dans l'app pour proposer
+     l'enregistrement via la feuille de partage native. */
+  var isNative = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform();
+  if (isNative) {
+    _gwNativeSaveImage(src, filename);
+    return;
+  }
+
   if (src.startsWith('data:')) {
     /* Base64 → lien direct */
     var a = document.createElement('a');
@@ -9016,6 +10357,83 @@ function downloadImage(src, filename) {
         /* Fallback si CORS bloque */
         window.open(src, '_blank');
       });
+  }
+}
+
+/* ── Téléchargement natif Android : enregistre directement dans la galerie
+   (album "Geniwork") via le plugin Media. Si le plugin n'est pas dispo (ancienne
+   build pas encore mise à jour), retombe sur le partage natif. ── */
+var _GW_GALLERY_ALBUM = 'Geniwork';
+var _gwGalleryAlbumId = null;
+
+function _gwNativeSaveImage(src, filename) {
+  var Media = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Media;
+  if (Media) {
+    _gwGetGalleryAlbumId(Media, function(albumId) {
+      Media.savePhoto({ path: src, albumIdentifier: albumId || undefined })
+        .then(function() { showToast('Photo enregistrée dans la galerie ✓', 'ok'); })
+        .catch(function() { _gwNativeSaveImageFallback(src, filename); });
+    });
+    return;
+  }
+  _gwNativeSaveImageFallback(src, filename);
+}
+
+/* Trouve (ou crée) l'album "Geniwork" et met en cache son identifiant */
+function _gwGetGalleryAlbumId(Media, cb) {
+  if (_gwGalleryAlbumId) { cb(_gwGalleryAlbumId); return; }
+  Media.getAlbums().then(function(res) {
+    var existing = (res.albums || []).find(function(a) { return a.name === _GW_GALLERY_ALBUM; });
+    if (existing) { _gwGalleryAlbumId = existing.identifier; cb(existing.identifier); return; }
+    Media.createAlbum({ name: _GW_GALLERY_ALBUM })
+      .then(function() { return Media.getAlbums(); })
+      .then(function(res2) {
+        var created = (res2.albums || []).find(function(a) { return a.name === _GW_GALLERY_ALBUM; });
+        _gwGalleryAlbumId = created ? created.identifier : null;
+        cb(_gwGalleryAlbumId);
+      })
+      .catch(function() { cb(null); });
+  }).catch(function() { cb(null); });
+}
+
+/* ── Solution de repli : écrit le fichier puis ouvre la feuille de partage
+   native (utilisée si le plugin Media est indisponible ou échoue) ── */
+function _gwNativeSaveImageFallback(src, filename) {
+  var FS    = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem;
+  var Share = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Share;
+  if (!FS) { window.open(src, '_blank'); return; }
+
+  function writeAndShare(base64) {
+    if (!base64) { showToast('Échec du téléchargement de la photo', 'err'); return; }
+    FS.writeFile({ path: filename, data: base64, directory: 'CACHE' })
+      .then(function(res) {
+        var fileUri = res && res.uri;
+        if (Share && fileUri) {
+          Share.share({ url: fileUri, title: 'Photo Geniwork' }).catch(function(){});
+        } else {
+          showToast('Photo enregistrée ✓', 'ok');
+        }
+      })
+      .catch(function() { showToast('Échec de l\'enregistrement de la photo', 'err'); });
+  }
+
+  if (src.indexOf('data:') === 0) {
+    var idx = src.indexOf(',');
+    writeAndShare(idx !== -1 ? src.slice(idx + 1) : src);
+  } else {
+    fetch(src)
+      .then(function(r) { return r.blob(); })
+      .then(function(blob) {
+        var reader = new FileReader();
+        reader.onloadend = function() {
+          var result = reader.result || '';
+          var i = result.indexOf(',');
+          writeAndShare(i !== -1 ? result.slice(i + 1) : null);
+        };
+        reader.onerror = function() { writeAndShare(null); };
+        reader.readAsDataURL(blob);
+      })
+      .catch(function() { showToast('Échec du téléchargement de la photo', 'err'); });
   }
 }
 
@@ -9399,7 +10817,7 @@ function _gwShowCameraUI() {
       'style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0"></video>' +
 
     /* Barre top — toggle Photo / Short toujours visible */
-    '<div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:linear-gradient(to bottom,rgba(0,0,0,.6),transparent);z-index:3">' +
+    '<div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:calc(16px + var(--gw-sat, env(safe-area-inset-top, 0px))) 20px 16px;background:linear-gradient(to bottom,rgba(0,0,0,.6),transparent);z-index:3">' +
       '<button onclick="_gwCloseCamera()" style="width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.45);border:none;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>' +
       /* Toggle Photo ↔ Short */
       '<div style="display:flex;gap:6px;background:rgba(0,0,0,.35);border-radius:30px;padding:4px">' +
@@ -9414,7 +10832,7 @@ function _gwShowCameraUI() {
     '</div>' +
 
     /* Timer enregistrement (Short seulement) */
-    (isVideo ? '<div id="gw-cam-timer" style="position:absolute;top:68px;left:50%;transform:translateX(-50%);background:rgba(220,38,38,.85);color:#fff;font-size:13px;font-weight:800;padding:4px 14px;border-radius:20px;display:none;z-index:4"><i class="fas fa-circle" style="font-size:8px;margin-right:5px;animation:blink 1s infinite"></i><span id="gw-cam-time">0:00</span></div>' : '') +
+    (isVideo ? '<div id="gw-cam-timer" style="position:absolute;top:calc(68px + var(--gw-sat, env(safe-area-inset-top, 0px)));left:50%;transform:translateX(-50%);background:rgba(220,38,38,.85);color:#fff;font-size:13px;font-weight:800;padding:4px 14px;border-radius:20px;display:none;z-index:4"><i class="fas fa-circle" style="font-size:8px;margin-right:5px;animation:blink 1s infinite"></i><span id="gw-cam-time">0:00</span></div>' : '') +
 
     /* Barre bas */
     '<div style="position:absolute;bottom:0;left:0;right:0;padding:28px 20px 40px;background:linear-gradient(to top,rgba(0,0,0,.65),transparent);display:flex;align-items:center;justify-content:center;gap:32px;z-index:3">' +
@@ -9584,12 +11002,15 @@ var _VED_FILTERS = [
   { id:'vintage',  name:'Vintage',  css:'sepia(.5) contrast(1.1) brightness(.95)' },
   { id:'neon',     name:'Néon',     css:'saturate(2.5) brightness(1.1) contrast(1.2)' },
 ];
+/* weight/spacing forcent une apparence distincte même quand la police nommée
+   (Arial Black, Trebuchet MS…) n'existe pas sur l'appareil (ex: Android) et que
+   le navigateur retombe silencieusement sur la police par défaut */
 var _VED_FONTS = [
-  { id:'sans',   name:'Moderne',  css:'sans-serif' },
-  { id:'black',  name:'Bold',     css:'"Arial Black",sans-serif' },
-  { id:'serif',  name:'Élégant',  css:'Georgia,serif' },
-  { id:'mono',   name:'Tech',     css:'"Courier New",monospace' },
-  { id:'round',  name:'Doux',     css:'"Trebuchet MS",sans-serif' },
+  { id:'sans',   name:'Moderne',  css:'sans-serif',              weight:600, spacing:'normal' },
+  { id:'black',  name:'Bold',     css:'"Arial Black",sans-serif', weight:900, spacing:'normal' },
+  { id:'serif',  name:'Élégant',  css:'Georgia,serif',            weight:400, spacing:'normal' },
+  { id:'mono',   name:'Tech',     css:'"Courier New",monospace',  weight:700, spacing:'1px' },
+  { id:'round',  name:'Doux',     css:'"Trebuchet MS",sans-serif', weight:300, spacing:'.5px' },
 ];
 var _VED_COLORS = ['#FFFFFF','#000000','#F43F5E','#F97316','#EAB308','#22C55E','#3B82F6','#8B5CF6','#EC4899','#14B8A6','#F1F5F9','#0F172A'];
 var _VED_EMOJIS = [
@@ -9612,8 +11033,9 @@ function _gwOpenVideoEditor() {
   _ved.layers=[]; _ved.layerId=0; _ved.filter='none'; _ved.effects={};
   _ved.trim={start:0,end:null}; _ved.mode='trim';
   _ved.textFont='sans-serif'; _ved.textColor='#FFFFFF'; _ved.textSize=28;
+  _ved.textWeight=600; _ved.textSpacing='normal';
   /* Nouveaux états */
-  _ved.cuts=[]; _ved.clips=[]; _ved.muted=true;
+  _ved.muted=true;
   _ved.zoom=null; _ved.zoomDur=2; _ved.intro=null; _ved.outro=null;
   _ved.cropPos  = (_pickedVideo && _pickedVideo.cropPos) ? Object.assign({}, _pickedVideo.cropPos) : { x: 50, y: 50 };
   _ved.cropZoom = (_pickedVideo && _pickedVideo.cropZoom) ? _pickedVideo.cropZoom : 1;
@@ -9632,7 +11054,7 @@ function _gwOpenVideoEditor() {
   ov.innerHTML =
     '<div id="gw-ved-card" style="width:100%;max-width:560px;height:100%;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;background:#0A0A0A">' +
     /* Top bar */
-    '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px 10px;background:#111;flex-shrink:0">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;padding:calc(12px + var(--gw-sat, env(safe-area-inset-top, 0px))) 16px 10px;background:#111;flex-shrink:0">' +
       '<button onclick="_gwVedCancel()" style="background:rgba(255,255,255,.1);border:none;color:#fff;font-size:13px;font-weight:600;padding:8px 14px;border-radius:20px;cursor:pointer">✕ Annuler</button>' +
       '<span style="color:#fff;font-size:14px;font-weight:700">' + (isShort?'📱 Éditer Short':'🎬 Éditer Vidéo') + '</span>' +
       '<button onclick="_gwVedConfirm()" style="background:#7C3AED;border:none;color:#fff;font-size:13px;font-weight:700;padding:8px 16px;border-radius:20px;cursor:pointer">Utiliser ✓</button>' +
@@ -9669,9 +11091,11 @@ function _gwOpenVideoEditor() {
 
     /* Barre de trim */
     '<div style="padding:10px 16px 6px;background:#111;flex-shrink:0">' +
-      '<div style="position:relative;height:34px;background:#1E293B;border-radius:8px">' +
+      /* La portion en dehors du cadre violet n'a plus de fond visible (transparente) —
+         elle "disparaît" visuellement, seule la tranche retenue reste affichée comme une barre */
+      '<div style="position:relative;height:34px;background:transparent;border-radius:8px">' +
+        '<div id="gw-ved-trimzone" style="position:absolute;top:0;bottom:0;left:0%;right:0%;background:#1E293B;border:2px solid #7C3AED;border-radius:8px;pointer-events:none;box-sizing:border-box;overflow:hidden"></div>' +
         '<div id="gw-ved-prog"     style="position:absolute;top:0;bottom:0;left:0;width:0%;background:rgba(124,58,237,.3);border-radius:8px;pointer-events:none"></div>' +
-        '<div id="gw-ved-trimzone" style="position:absolute;top:0;bottom:0;left:0%;right:0%;border:2px solid #7C3AED;border-radius:8px;pointer-events:none;box-sizing:border-box"></div>' +
         '<input type="range" id="gw-ved-ts" min="0" max="100" value="0"   step="0.1" oninput="_gwVedTrimInput()" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:3">' +
         '<input type="range" id="gw-ved-te" min="0" max="100" value="100" step="0.1" oninput="_gwVedTrimInput()" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:3">' +
         '<div id="gw-ved-hs" style="position:absolute;top:0;bottom:0;left:0;width:6px;background:#7C3AED;border-radius:3px 0 0 3px;pointer-events:none"></div>' +
@@ -9720,15 +11144,10 @@ function _gwOpenVideoEditor() {
   v.addEventListener('timeupdate', function() {
     if (!v.duration) return;
     var ct = v.currentTime;
-    /* Saute les portions marquées pour suppression */
-    for (var ci = 0; ci < _ved.cuts.length; ci++) {
-      if (ct >= _ved.cuts[ci].start && ct < _ved.cuts[ci].end) {
-        v.currentTime = _ved.cuts[ci].end;
-        return;
-      }
-    }
-    /* Boucle sur le trim */
-    if (_ved.trim.end && ct > _ved.trim.end) {
+    /* Boucle sur le trim (style TikTok : début/fin réglés par les curseurs) */
+    if (ct < (_ved.trim.start || 0)) {
+      v.currentTime = _ved.trim.start || 0;
+    } else if (_ved.trim.end && ct > _ved.trim.end) {
       v.currentTime = _ved.trim.start || 0;
     }
     var p = (ct / v.duration) * 100;
@@ -9950,38 +11369,6 @@ function _gwVedShowPanel(mode) {
   }
 
   if (mode === 'trim') {
-    /* ── Liste des portions supprimées ── */
-    var cutsHtml = '';
-    if (_ved.cuts.length) {
-      cutsHtml = '<div style="margin-top:8px">' +
-        '<p style="color:#64748B;font-size:10px;margin:0 0 5px;text-transform:uppercase;letter-spacing:.5px">Portions supprimées</p>';
-      _ved.cuts.forEach(function(cut, i) {
-        cutsHtml += '<div style="display:flex;align-items:center;justify-content:space-between;' +
-          'background:#1E293B;border-radius:8px;padding:6px 10px;margin-bottom:4px">' +
-          '<span style="color:#F87171;font-size:12px">✂ ' + _vedFmt(cut.start) + ' → ' + _vedFmt(cut.end) + '</span>' +
-          '<button onclick="_gwVedRemoveCut(' + i + ')" ' +
-            'style="background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);' +
-            'border-radius:6px;color:#F87171;font-size:11px;cursor:pointer;padding:2px 8px">Restaurer</button>' +
-        '</div>';
-      });
-      cutsHtml += '</div>';
-    }
-    /* ── Liste des clips ajoutés ── */
-    var clipsHtml = '';
-    if (_ved.clips.length) {
-      clipsHtml = '<div style="margin-top:8px">' +
-        '<p style="color:#64748B;font-size:10px;margin:0 0 5px;text-transform:uppercase;letter-spacing:.5px">Clips ajoutés</p>';
-      _ved.clips.forEach(function(cl, i) {
-        clipsHtml += '<div style="display:flex;align-items:center;justify-content:space-between;' +
-          'background:#1E293B;border-radius:8px;padding:6px 10px;margin-bottom:4px">' +
-          '<span style="color:#A78BFA;font-size:12px">📹 Clip ' + (i+1) + ' · ' + _vedFmt(cl.duration) + '</span>' +
-          '<button onclick="_gwVedRemoveClip(' + i + ')" ' +
-            'style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);' +
-            'border-radius:6px;color:#F87171;font-size:11px;cursor:pointer;padding:2px 8px">✕</button>' +
-        '</div>';
-      });
-      clipsHtml += '</div>';
-    }
     panel.innerHTML =
       '<div style="padding:12px 16px">' +
         /* Son toggle */
@@ -9996,27 +11383,12 @@ function _gwVedShowPanel(mode) {
             'color:#fff;font-size:11px;font-weight:700;padding:5px 13px;cursor:pointer">' +
             (_ved.muted ? '🔇 Désactivé' : '🔊 Activé') + '</button>' +
         '</div>' +
-        /* Instructions */
+        /* Instructions — logique TikTok : les curseurs définissent directement
+           le début et la fin de la vidéo finale, tout le reste est coupé */
         '<p style="color:#64748B;font-size:11px;margin:0 0 8px;line-height:1.5">' +
-          'Réglez les <span style="color:#A78BFA">curseurs</span> sur la barre ci-dessus, ' +
-          'puis supprimez la portion ou gardez-la.' +
+          'Glissez les <span style="color:#A78BFA">curseurs</span> sur la barre ci-dessus pour choisir le début et la fin. ' +
+          'Tout ce qui est en dehors sera coupé à la publication.' +
         '</p>' +
-        /* Bouton supprimer */
-        '<button onclick="_gwVedMarkCut()" ' +
-          'style="width:100%;padding:9px;background:rgba(239,68,68,.12);' +
-          'border:1.5px solid rgba(239,68,68,.35);border-radius:10px;' +
-          'color:#F87171;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:4px">' +
-          '✂&nbsp; Supprimer la portion sélectionnée' +
-        '</button>' +
-        cutsHtml +
-        clipsHtml +
-        /* Bouton ajouter clip */
-        '<button onclick="_gwVedAddClip()" ' +
-          'style="width:100%;padding:9px;background:rgba(124,58,237,.08);' +
-          'border:1.5px dashed rgba(124,58,237,.5);border-radius:10px;' +
-          'color:#A78BFA;font-size:12px;font-weight:700;cursor:pointer;margin-top:8px">' +
-          '＋&nbsp; Ajouter un clip Short' +
-        '</button>' +
       '</div>';
   }
   else if (mode === 'filter') {
@@ -10175,67 +11547,6 @@ function _gwVedToggleSound() {
   _gwVedShowPanel('trim');
 }
 
-/* ── Découpe : marquer la portion sélectionnée pour suppression ── */
-function _gwVedMarkCut() {
-  var v = document.getElementById('gw-ved-vid');
-  if (!v || !v.duration) return;
-  var s = _ved.trim.start || 0;
-  var e = _ved.trim.end   || v.duration;
-  if (e - s < 0.3) { showToast('Sélectionnez une portion plus grande', 'err'); return; }
-  /* Vérifie que ce n'est pas toute la vidéo */
-  if (s <= 0.05 && e >= v.duration - 0.05) { showToast('Impossible de supprimer toute la vidéo', 'err'); return; }
-  _ved.cuts.push({ start: s, end: e });
-  /* Remet les curseurs à 0–100 */
-  _ved.trim.start = 0;
-  _ved.trim.end   = v.duration;
-  var sEl = document.getElementById('gw-ved-ts'), eEl = document.getElementById('gw-ved-te');
-  if (sEl) sEl.value = 0;
-  if (eEl) eEl.value = 100;
-  ['gw-ved-hs','gw-ved-trimzone'].forEach(function(id){
-    var el = document.getElementById(id); if (el) el.style.left = '0%';
-  });
-  var he = document.getElementById('gw-ved-he'), tz = document.getElementById('gw-ved-trimzone');
-  if (he) he.style.right = '0%';
-  if (tz) tz.style.right = '0%';
-  document.getElementById('gw-ved-ts-lbl') && (document.getElementById('gw-ved-ts-lbl').textContent = '0:00');
-  document.getElementById('gw-ved-te-lbl') && (document.getElementById('gw-ved-te-lbl').textContent = _vedFmt(v.duration));
-  showToast('Portion supprimée ✂', 'ok');
-  _gwVedShowPanel('trim');
-}
-
-function _gwVedRemoveCut(i) {
-  _ved.cuts.splice(i, 1);
-  _gwVedShowPanel('trim');
-}
-
-/* ── Clips supplémentaires ── */
-function _gwVedAddClip() {
-  var inp = document.createElement('input');
-  inp.type = 'file'; inp.accept = 'video/*';
-  inp.onchange = function() {
-    var file = inp.files && inp.files[0];
-    if (!file) return;
-    var url = URL.createObjectURL(file);
-    var cl = { url: url, blob: file, name: file.name, duration: 0 };
-    _ved.clips.push(cl);
-    /* Récupère la durée */
-    var tmp = document.createElement('video');
-    tmp.src = url;
-    tmp.onloadedmetadata = function() {
-      cl.duration = tmp.duration;
-      if (_ved.mode === 'trim') _gwVedShowPanel('trim');
-    };
-    showToast('Clip ajouté ✓', 'ok');
-    _gwVedShowPanel('trim');
-  };
-  inp.click();
-}
-
-function _gwVedRemoveClip(i) {
-  _ved.clips.splice(i, 1);
-  _gwVedShowPanel('trim');
-}
-
 /* ── Zoom ── */
 function _gwVedSetZoom(type) {
   _ved.zoom = type || null;
@@ -10250,8 +11561,8 @@ function _gwVedSetZoomDur(val) {
 }
 function _gwVedZoomAnim() {
   var dur = (_ved.zoomDur || 2) + 's';
-  if (_ved.zoom === 'in')    return 'gwZoomIn '    + dur + ' ease-in-out infinite alternate';
-  if (_ved.zoom === 'out')   return 'gwZoomOut '   + dur + ' ease-in-out infinite alternate';
+  if (_ved.zoom === 'in')    return 'gwZoomIn '    + dur + ' ease-in-out forwards';
+  if (_ved.zoom === 'out')   return 'gwZoomOut '   + dur + ' ease-in-out forwards';
   if (_ved.zoom === 'enter') return 'gwZoomEnter ' + dur + ' ease-out forwards';
   return '';
 }
@@ -10399,18 +11710,25 @@ function _gwVedApplyTextStyle(prop, value) {
   var el   = document.getElementById('gw-ved-lyr-' + _ved.activeLayer);
   var span = el && el.querySelector('span');
   if (!span) return;
-  if (prop === 'font')  span.style.fontFamily = value;
-  if (prop === 'color') span.style.color      = value;
-  if (prop === 'size')  span.style.fontSize   = value + 'px';
+  if (prop === 'font')    span.style.fontFamily    = value;
+  if (prop === 'color')   span.style.color         = value;
+  if (prop === 'size')    span.style.fontSize      = value + 'px';
+  if (prop === 'weight')  span.style.fontWeight    = value;
+  if (prop === 'spacing') span.style.letterSpacing = value;
 }
 
 function _gwVedSetFont(css, id) {
-  _ved.textFont = css;
+  var preset = _VED_FONTS.find(function(f) { return f.id === id; }) || {};
+  _ved.textFont    = css;
+  _ved.textWeight  = preset.weight  || 600;
+  _ved.textSpacing = preset.spacing || 'normal';
   _VED_FONTS.forEach(function(f) {
     var b = document.getElementById('gw-ved-fn-' + f.id);
     if (b) b.style.background = f.id === id ? '#7C3AED' : '#1E293B';
   });
   _gwVedApplyTextStyle('font', css);
+  _gwVedApplyTextStyle('weight', _ved.textWeight);
+  _gwVedApplyTextStyle('spacing', _ved.textSpacing);
 }
 function _gwVedSetColor(c) {
   _ved.textColor = c;
@@ -10432,13 +11750,14 @@ function _gwVedAddText() {
   var inp = document.getElementById('gw-ved-tinput');
   var txt = (inp ? inp.value : '').trim();
   if (!txt) { showToast('Entrez du texte', ''); return; }
-  _gwVedAddLayer({ type:'text', text:txt, font:_ved.textFont, color:_ved.textColor, size:_ved.textSize });
+  _gwVedAddLayer({ type:'text', text:txt, font:_ved.textFont, color:_ved.textColor, size:_ved.textSize,
+    weight:_ved.textWeight, spacing:_ved.textSpacing });
   if (inp) inp.value = '';
 }
 
 /* ── Ajouter emoji ── */
 function _gwVedAddEmoji(e) {
-  _gwVedAddLayer({ type:'emoji', text:e, font:'sans-serif', color:'#fff', size:48 });
+  _gwVedAddLayer({ type:'emoji', text:e, font:'sans-serif', color:'#fff', size:48, weight:600, spacing:'normal' });
 }
 
 /* ── Créer un layer draggable ── */
@@ -10463,6 +11782,8 @@ function _gwVedAddLayer(opts) {
   span.style.cssText =
     'font-size:' + opts.size + 'px;' +
     'font-family:' + opts.font + ';' +
+    'font-weight:' + (opts.weight || 600) + ';' +
+    'letter-spacing:' + (opts.spacing || 'normal') + ';' +
     'color:' + opts.color + ';' +
     'text-shadow:' + (_ved.effects.shadow ? '0 2px 10px rgba(0,0,0,.95),0 0 3px #000' : '1px 1px 4px rgba(0,0,0,.8)') + ';' +
     'white-space:nowrap;line-height:1.2;pointer-events:none';
@@ -10585,13 +11906,32 @@ function _gwVedConfirm() {
           pos.x = ((er.left + er.width/2  - wr.left) / wr.width)  * 100;
           pos.y = ((er.top  + er.height/2 - wr.top)  / wr.height) * 100;
         }
-        return Object.assign({}, l, pos);
+        return Object.assign({}, l, pos, { shadow: !!_ved.effects.shadow });
       })
     };
+    /* Effets overlay (vignette/glow/grain), zoom et intro/outro choisis dans
+       l'éditeur — appliqués partout où la vidéo est jouée, comme le son/texte */
+    _pickedVideo.effects = _pickedVideo.editorData.effects;
+    _pickedVideo.filter  = (_ved.filter && _ved.filter !== 'none') ? _ved.filter : null;
+    _pickedVideo.zoom    = _ved.zoom    || null;
+    _pickedVideo.zoomDur = _ved.zoomDur || 2;
+    _pickedVideo.intro   = _ved.intro   || null;
+    _pickedVideo.outro   = _ved.outro   || null;
+    /* Texte/emoji ajoutés dans l'éditeur — superposés à la vidéo partout où elle
+       est jouée (feed, lecteur, Shorts), pas seulement dans l'aperçu de l'éditeur */
+    _pickedVideo.textLayers = _pickedVideo.editorData.layers;
+    /* Découpe style TikTok : les curseurs définissent directement le début et
+       la fin retenus — sans ré-encodage côté client, on conserve ces bornes
+       comme métadonnées et on les applique automatiquement à la lecture
+       (voir _gwApplyVideoTrim) pour que tout le monde voie la même tranche. */
     _pickedVideo.trimStart = _ved.trim.start > 0.1 ? _ved.trim.start : 0;
-    _pickedVideo.trimEnd   = _ved.trim.end;
+    _pickedVideo.trimEnd   = (_ved.trim.end && _ved.trim.end < _pickedVideo.duration - 0.1) ? _ved.trim.end : null;
     _pickedVideo.cropPos   = Object.assign({}, _ved.cropPos);
     _pickedVideo.cropZoom  = _ved.cropZoom || 1;
+    _pickedVideo.muted     = !!_ved.muted;
+    _pickedVideo.trimmedDuration = Math.max(0,
+      (_pickedVideo.trimEnd != null ? _pickedVideo.trimEnd : (_pickedVideo.duration || 0)) - _pickedVideo.trimStart
+    );
     /* Recapture la couverture avec le cadrage/zoom final — asynchrone car peut nécessiter
        un seek explicite (forcer le décodage d'une frame) avant de fermer l'éditeur.        */
     _gwVedCapturePoster(function() {
@@ -10877,7 +12217,7 @@ function renderVideoPreview() {
     '</div>' +
     '<button class="rm-video" onclick="removeVideo()"><i class="fas fa-times"></i></button>' +
     '<div class="pub-video-meta">' +
-      '<span><i class="fas fa-clock"></i> ' + formatDuration(_pickedVideo.duration) + '</span>' +
+      '<span><i class="fas fa-clock"></i> ' + formatDuration(_pickedVideo.trimmedDuration != null ? _pickedVideo.trimmedDuration : _pickedVideo.duration) + '</span>' +
       '<span><i class="fas fa-hdd"></i> '   + formatFileSize(_pickedVideo.size)     + '</span>' +
       '<span><i class="fas fa-film"></i> '  + escHtml(_pickedVideo.name.slice(0, 22)) + '</span>' +
     '</div>' + metaTag;
@@ -11182,38 +12522,65 @@ var _vpFlashTimer = null;
    • Fin de vidéo → countdown 10 s → vidéo suivante
    • Comptage de vues : 1 vue / utilisateur / vidéo
 ══════════════════════════════════════════ */
-var _vsItems    = [];   /* [{postId,post,el,videoEl,loaded}] */
+var _vsItems         = [];
+var _vsCurIdx        = -1;
+var _vsObserver      = null;
+var _vsRafId         = null;
+var _vsEndTimer      = null;
+var _vsCountN        = 10;
+var _vsGlobalMuted   = true;  /* true = muet au démarrage ; false = son actif */
+var _vsLikesRef      = null;
+var _vsSharesRef     = null;
+var _vsViewsRef      = null;
+var _vsUserScrolling = false;
+var _vsKbHandler     = null;
 
-/* ── Cache mémoire des URLs vidéo (évite les appels Firebase répétés) ──
-   Clé : String(post.id), Valeur : URL (blob: ou https://)              */
+/* ── Cache mémoire des URLs vidéo ── */
 var _gwVidUrlCache = {};
 
-/* Résout l'URL d'une vidéo — cache mémoire → post.video.url → IndexedDB → Firebase */
+/* ── Cache blob ── */
+var _gwVidBlobCache = {};
+
+/* Résout l'URL d'une vidéo : blob cache → mémoire → localStorage → post.video.url → Firebase */
 function _gwResolveVideoUrl(post, cb) {
   var postId = String(post.id);
-  /* 1. Cache mémoire */
-  if (_gwVidUrlCache[postId]) { cb(_gwVidUrlCache[postId]); return; }
-  /* 2. URL déjà dans le post */
-  var url = typeof post.video === 'string' ? post.video
-          : (post.video && post.video.url ? post.video.url : '');
-  if (url) { _gwVidUrlCache[postId] = url; cb(url); return; }
-  /* 3. Blob IndexedDB (appareil d'origine) */
+  if (_gwVidBlobCache[postId]) { cb(_gwVidBlobCache[postId]); return; }
+  var memUrl = _gwVidUrlCache[postId];
+  if (memUrl && !memUrl.startsWith('blob:')) { cb(memUrl); return; }
+  try {
+    var lsUrl = localStorage.getItem('gw_vurl_' + postId);
+    if (lsUrl) {
+      if (lsUrl.startsWith('blob:')) { localStorage.removeItem('gw_vurl_' + postId); }
+      else { _gwVidUrlCache[postId] = lsUrl; if (typeof post.video === 'object' && !post.video.url) post.video.url = lsUrl; cb(lsUrl); return; }
+    }
+  } catch(e) {}
+  var url = typeof post.video === 'string' ? post.video : (post.video && post.video.url ? post.video.url : '');
+  if (url && !url.startsWith('blob:')) {
+    _gwVidUrlCache[postId] = url;
+    try { localStorage.setItem('gw_vurl_' + postId, url); } catch(e) {}
+    cb(url); return;
+  }
   var idbId = post.video && post.video.idbId ? post.video.idbId : null;
-  if (idbId) {
-    _gwLoadVideoBlob(idbId, function(blob) {
-      if (blob) {
-        var bUrl = URL.createObjectURL(blob);
-        if (typeof post.video === 'object') post.video.url = bUrl;
-        _gwVidUrlCache[postId] = bUrl;
-        cb(bUrl);
-      } else {
-        _gwResolveVideoUrlFromFb(post, cb);
-      }
+  if (_gwFbReady && _gwFbDB) {
+    _gwResolveVideoUrlFromFb(post, function(fbUrl) {
+      if (fbUrl) { cb(fbUrl); return; }
+      if (idbId) {
+        _gwLoadVideoBlob(idbId, function(blob) {
+          if (blob) { var bUrl = URL.createObjectURL(blob); _gwVidUrlCache[postId] = bUrl; cb(bUrl); }
+          else { cb(''); }
+        });
+      } else { cb(''); }
     });
     return;
   }
-  /* 4. Firebase */
-  _gwResolveVideoUrlFromFb(post, cb);
+  if (idbId) {
+    _gwLoadVideoBlob(idbId, function(blob) {
+      if (blob) { var bUrl = URL.createObjectURL(blob); _gwVidUrlCache[postId] = bUrl; cb(bUrl); }
+      else { cb(''); }
+    });
+    return;
+  }
+  cb('');
 }
 
 function _gwResolveVideoUrlFromFb(post, cb) {
@@ -11224,49 +12591,24 @@ function _gwResolveVideoUrlFromFb(post, cb) {
     if (d && d.url) {
       if (typeof post.video === 'object') post.video.url = d.url;
       _gwVidUrlCache[postId] = d.url;
+      try { localStorage.setItem('gw_vurl_' + postId, d.url); } catch(e) {}
       cb(d.url);
     } else { cb(''); }
   }).catch(function() { cb(''); });
 }
 
-/* Pré-charge silencieusement l'URL + metadata d'un item shorts (idx) */
-function _vsPreloadItem(idx) {
-  if (idx < 0 || idx >= _vsItems.length) return;
-  var item = _vsItems[idx];
-  if (item.loaded || item._preloading) return;
-  item._preloading = true;
-  _gwResolveVideoUrl(item.post, function(url) {
-    if (!url || item.loaded) return;
-    if (typeof item.post.video === 'object') item.post.video.url = url;
-    _gwVidUrlCache[String(item.postId)] = url;
-    /* Pose la src + buffer réel pour la vidéo suivante */
-    if (!item.videoEl.src) {
-      item.videoEl.src     = url;
-      item.videoEl.preload = 'auto'; /* buffer les premières secondes */
-      item.videoEl.load();
-    }
-  });
-}
-var _vsCurIdx   = -1;
-var _vsObserver = null;
-var _vsEndTimer = null;
-var _vsCountN   = 10;
-var _vsRafId    = null;
-var _vsLikesRef = null;
+/* ══════════════════════════════════════════
+   VIDEO SCROLL PLAYER — réécriture propre
+══════════════════════════════════════════ */
 
-/* ── Collecte uniquement les Shorts (videoType='short'), tri plus récent → plus ancien ── */
+/* ── Collecte les Shorts, tri plus récent en premier ── */
 function _vsBuildList() {
-  var result = [];
-  var seenIds = {};
-
+  var result = [], seenIds = {};
   getAllPosts().forEach(function(p) {
     if (!p) return;
-    /* Repost d'une vidéo short : injecte la vidéo originale dans un clone léger */
     if (p.type === 'repost' && p.repostOf) {
       var rv = p.repostOf.video;
-      if (!rv || typeof rv !== 'object') return;
-      var hasRv = rv.url || rv.idbId;
-      if (!hasRv || rv.videoType !== 'short') return;
+      if (!rv || typeof rv !== 'object' || !(rv.url || rv.idbId) || rv.videoType !== 'short') return;
       if (!seenIds[String(p.id)]) {
         seenIds[String(p.id)] = true;
         result.push({ id: p.id, author: p.author, role: p.role, at: p.at, time: p.time,
@@ -11279,408 +12621,544 @@ function _vsBuildList() {
     if (!p.video) return;
     var hasMedia = (typeof p.video === 'string' && p.video) ||
                    (typeof p.video === 'object' && (p.video.url || p.video.idbId));
-    var isShort  = p.video && p.video.videoType === 'short';
-    if (hasMedia && isShort && !seenIds[String(p.id)]) {
-      seenIds[String(p.id)] = true;
-      result.push(p);
+    if (hasMedia && p.video.videoType === 'short' && !seenIds[String(p.id)]) {
+      seenIds[String(p.id)] = true; result.push(p);
     }
   });
-
-  /* Shorts officiels (publiés via le panel admin) */
   _offGetPosts().forEach(function(p) {
     if (!p || !p.video || typeof p.video !== 'object') return;
-    if (p.video.videoType !== 'short') return;
-    var hasMedia = p.video.url || p.video.idbId;
-    if (!hasMedia) return;
-    if (seenIds[String(p.id)]) return;
+    if (p.video.videoType !== 'short' || !(p.video.url || p.video.idbId) || seenIds[String(p.id)]) return;
     seenIds[String(p.id)] = true;
-    /* Adapte le format pour le player short */
-    result.push({
-      id:          p.id,
-      author:      p.publishedByNom || 'Geniwork',
-      role:        'Officiel',
-      at:          p.publishedAt ? new Date(p.publishedAt).getTime() : 0,
-      time:        _offTimeAgo(p.publishedAt),
-      text:        p.text || '',
-      images:      p.images || [],
-      video:       p.video,
-      ownerEmail:  p.publishedBy || '',
-      isOfficial:  true,
-      baseLikes:   p.baseLikes || 0,
-      likers:      p.likers || [],
-      comments:    p.comments || []
-    });
+    result.push({ id: p.id, author: 'Geniwork', role: 'Officiel',
+                  at: p.publishedAt ? new Date(p.publishedAt).getTime() : 0,
+                  time: _offTimeAgo(p.publishedAt), text: p.text || '',
+                  images: p.images || [], video: p.video, ownerEmail: p.publishedBy || '',
+                  isOfficial: true, baseLikes: p.baseLikes || 0,
+                  likers: p.likers || [], comments: p.comments || [] });
   });
-
   return result.sort(function(a, b) {
-    var ta = Number(b.id) || (b.at || 0);
-    var tb = Number(a.id) || (a.at || 0);
-    return ta - tb;
+    return (Number(b.id) || b.at || 0) - (Number(a.id) || a.at || 0);
   });
 }
 
-/* ── Ouvre le player scroll, commence sur la vidéo du post donné ── */
+/* ── Injecte les nouveaux Shorts dans le player ouvert (sync temps réel) ── */
+function _vsInjectNewShorts(newPosts) {
+  try {
+    var modal = document.getElementById('vs-modal');
+    if (!modal || modal.style.display !== 'block') return;
+    var feedEl = document.getElementById('vs-feed');
+    if (!feedEl) return;
+    var existingIds = {};
+    _vsItems.forEach(function(item) { existingIds[item.postId] = true; });
+    var added = 0;
+    newPosts.forEach(function(post) {
+      if (!post || !post.video || post.video.videoType !== 'short') return;
+      if (!(post.video.url || post.video.idbId)) return;
+      if (existingIds[String(post.id)]) return;
+      var newIdx = _vsItems.length;
+      var item = _vsCreateItem(post, newIdx);
+      feedEl.appendChild(item.el);
+      if (_vsObserver) try { _vsObserver.observe(item.el); } catch(e2){}
+      _vsItems.push(item);
+      added++;
+    });
+    if (added > 0) {
+      showToast(added === 1 ? 'Nouveau Short disponible ↓' : added + ' nouveaux Shorts disponibles ↓', '');
+    }
+  } catch(e) {}
+}
+
+/* ── Crée un élément DOM pour un post vidéo ── */
+function _vsCreateItem(post, idx) {
+  var nom, photo, ownerKey, followed, isOwn;
+  if (post.isOfficial) {
+    nom      = 'Geniwork';
+    photo    = (_admGetOfficialLogo ? _admGetOfficialLogo() : null) || '';
+    ownerKey = GW_OFFICIAL_KEY;
+    followed = isFollowing(GW_OFFICIAL_KEY);
+    isOwn    = false;
+  } else {
+    var pr   = post.ownerEmail ? (loadUserProfile(post.ownerEmail) || {}) : {};
+    nom      = pr.nom || (post.ownerEmail ? post.ownerEmail.split('@')[0] : 'Utilisateur');
+    photo    = pr.photo || '';
+    ownerKey = post.ownerEmail || '';
+    followed = ownerKey ? isFollowing(ownerKey) : false;
+    isOwn    = _currentUser && post.ownerEmail === _currentUser.email;
+  }
+  var isRepost = post.type === 'repost';
+  var likers, likes;
+  if (post.isOfficial) {
+    likers = Array.isArray(post.likers) ? post.likers : [];
+    likes  = (post.baseLikes || 0) + likers.length;
+  } else {
+    likers = loadPostLikers(post.id);
+    likes  = likers.length;
+  }
+  var isLiked = _currentUser && likers.indexOf(_currentUser.email) !== -1;
+  var caption = (post.content || post.text || '').substring(0, 120);
+  var pidStr  = String(post.id);
+
+  var avHtml = photo
+    ? '<img src="' + escHtml(photo) + '" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid #fff;flex-shrink:0" onerror="this.style.display=\'none\'">'
+    : '<div style="width:36px;height:36px;border-radius:50%;background:#4F46E5;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:14px;flex-shrink:0;border:2px solid #fff">' + escHtml(nom.charAt(0).toUpperCase()) + '</div>';
+
+  var _vsPoster = (post.video && typeof post.video === 'object' && post.video.poster)
+    ? post.video.poster
+    : (post.images && post.images[0] ? post.images[0] : '');
+  var _vsPosterAttr = _vsPoster ? ' poster="' + escHtml(_vsPoster) + '"' : '';
+
+  var el = document.createElement('div');
+  el.className = 'vs-item';
+  el.setAttribute('data-idx', idx);
+  el.setAttribute('data-post-id', pidStr);
+
+  el.innerHTML =
+    '<video class="vs-video"' + _vsPosterAttr + ' playsinline webkit-playsinline preload="none"></video>' +
+    _gwRenderTextLayersHtml(post.video && post.video.textLayers) +
+    _gwRenderVideoOverlaysHtml(post.video && post.video.effects) +
+    '<div class="vs-tap-zone" onclick="vsHandleTap(' + idx + ', event)"></div>' +
+    '<div class="vs-flash" id="vs-flash-' + idx + '"><i class="fas fa-play" style="font-size:62px;color:rgba(255,255,255,.85)"></i></div>' +
+    '<div class="vs-author-row">' +
+      avHtml +
+      '<div style="display:flex;flex-direction:column;gap:2px;min-width:0">' +
+        (isRepost ? '<span style="font-size:11px;background:rgba(255,255,255,.15);border-radius:4px;padding:1px 6px;color:rgba(255,255,255,.85);align-self:flex-start">Republie</span>' : '') +
+        '<span class="vs-author">@' + escHtml(nom) + getBadgeHtml(post.ownerEmail) + '</span>' +
+        (caption ? '<span class="vs-caption">' + escHtml(caption) + '</span>' : '') +
+      '</div>' +
+      (!isOwn ? '<button class="vs-follow-btn" id="vs-follow-' + pidStr + '"' +
+        (post.isOfficial
+          ? ' onclick="vsFollowOfficial(\'' + pidStr + '\');event.stopPropagation()">'
+          : ' onclick="vsFollow(\'' + pidStr + '\',\'' + escHtml(post.ownerEmail || '') + '\',\'' + escHtml(ownerKey) + '\');event.stopPropagation()">') +
+        (followed ? 'Suivi' : '+ Suivre') + '</button>' : '') +
+    '</div>' +
+    '<div class="vs-side">' +
+    '<button class="vs-side-btn vs-like-btn' + (isLiked ? ' vs-liked' : '') + '" id="vs-like-btn-' + pidStr + '" onclick="vsLike(\'' + pidStr + '\');event.stopPropagation()"><i class="fas fa-heart"></i><span id="vs-likes-' + pidStr + '">' + _fmtViews(likes) + '</span></button>' +
+    '<button class="vs-side-btn" onclick="vsOpenComments(\'' + pidStr + '\');event.stopPropagation()"><i class="fas fa-comment"></i><span id="vs-coms-' + pidStr + '">' + _fmtViews(getAllComments(pidStr).length) + '</span></button>' +
+    '<button class="vs-side-btn vs-fav-btn" id="vs-fav-btn-' + pidStr + '" onclick="vsFavorite(\'' + pidStr + '\');event.stopPropagation()"><i class="fas fa-bookmark' + (isFavorite(pidStr) ? ' vs-fav-active' : '') + '"></i>' +
+    '<span>' + (isFavorite(pidStr) ? 'Sauve' : 'Sauver') + '</span>' +
+    '<span style="font-size:11px;color:rgba(255,255,255,.7)" data-fav-cnt="' + pidStr + '"></span>' +
+    '</button>' +
+    '<button class="vs-side-btn" onclick="sharePost(\'' + pidStr + '\');event.stopPropagation()"><i class="fas fa-share-nodes"></i><span>Partager</span>' +
+    '<span id="vs-shares-' + pidStr + '" style="font-size:11px;color:rgba(255,255,255,.7)"></span></button>' +
+    '<div class="vs-side-btn" style="pointer-events:none"><i class="fas fa-eye"></i><span id="vs-views-' + pidStr + '">' + _fmtViews(_getVideoViews(pidStr)) + '</span></div>' +
+    '<button class="vs-side-btn" onclick="vsShowMenu(\'' + pidStr + '\',\'' + escHtml(post.ownerEmail || '') + '\');event.stopPropagation()"><i class="fas fa-ellipsis-vertical" style="font-size:22px"></i><span>Plus</span></button>' +
+    '</div>' +
+    '<div class="vs-prog-bar"><div class="vs-prog-fill" id="vs-prog-' + idx + '"></div></div>';
+
+  return { postId: pidStr, post: post, el: el, videoEl: el.querySelector('.vs-video'), loaded: false };
+}
+
+/* ── Met à jour l'icône du bouton son global ── */
+function _vsUpdateSoundBtn() {
+  var ico = document.getElementById('vs-sound-ico');
+  if (ico) ico.className = _vsGlobalMuted ? 'fas fa-volume-xmark' : 'fas fa-volume-high';
+}
+
+function _vsDoPlay(v) {
+  v.muted = false;
+  var p = v.play();
+  if (!p) return;
+  p.catch(function() {
+    v.muted = true;
+    v.play().catch(function(){});
+  });
+}
+
+function _vsDoPlayMuted(v) {
+  v.muted = true;
+  v.play().catch(function(){});
+}
+
+/* ── Récupération automatique d'un freeze (stall) ── */
+function _vsStallRecovery(item, idx, v) {
+  clearTimeout(item._stallTimer);
+  item._stallTimer = setTimeout(function() {
+    if (_vsCurIdx !== idx || v.paused) return;
+    var ct = v.currentTime;
+    v.load();
+    v.addEventListener('canplay', function _sr() {
+      v.removeEventListener('canplay', _sr);
+      if (_vsCurIdx !== idx) return;
+      try { v.currentTime = ct > 0 ? ct : (v._gwTrimStart || 0); } catch(e){}
+      _vsGlobalMuted ? _vsDoPlayMuted(v) : _vsDoPlay(v);
+    }, { once: true });
+  }, 2000);
+}
+
+function _vsActivate(idx) {
+  if (idx < 0 || idx >= _vsItems.length) return;
+  _vsCurIdx = idx;
+
+  /* Pause toutes les autres vidéos */
+  _vsItems.forEach(function(it, i) {
+    if (i !== idx) { try { it.videoEl.pause(); } catch(e){} }
+  });
+
+  _vsClearEndTimer();
+
+  var item = _vsItems[idx];
+  var vd   = (item.post.video && typeof item.post.video === 'object') ? item.post.video : {};
+
+  /* Applique le réglage son du créateur (comme openVideoPlayer) */
+  _vsGlobalMuted = (vd.muted !== false); /* false uniquement si le créateur a activé le son */
+  _vsUpdateSoundBtn();
+
+  function _start() {
+    if (_vsCurIdx !== idx) return;
+    var v = item.videoEl;
+    v.loop         = true;
+    v.preload      = 'auto';
+    v.playsInline  = true;
+    /* Comme openVideoPlayer (vidéo classique) — évite qu'un Short hérite d'une
+       vitesse de lecture différente de 1× (état résiduel des contrôles média
+       système sur certains téléphones/WebView Android) */
+    v.playbackRate = 1;
+
+    /* Recadrage/zoom défini dans l'éditeur — comme openVideoPlayer */
+    var _crop = (vd.cropPos && typeof vd.cropPos === 'object') ? vd.cropPos : { x: 50, y: 50 };
+    var _zoom = (vd.cropZoom && vd.cropZoom > 1) ? vd.cropZoom : 1;
+    v.style.objectPosition = _crop.x + '% ' + _crop.y + '%';
+    v.style.transform      = _zoom > 1 ? 'scale(' + _zoom + ')' : '';
+    v.style.transformOrigin = 'center center';
+
+    v.onplay    = function() { item.el.classList.add('vs-playing'); item.el.classList.remove('vs-buffering'); _vsStartRaf(idx); };
+    v.onplaying = function() { item.el.classList.remove('vs-buffering'); clearTimeout(item._stallTimer); };
+    v.onpause   = function() { item.el.classList.remove('vs-playing'); clearTimeout(item._stallTimer); };
+    v.onwaiting = function() { item.el.classList.add('vs-buffering'); _vsStallRecovery(item, idx, v); };
+    v.onstalled = function() { item.el.classList.add('vs-buffering'); _vsStallRecovery(item, idx, v); };
+
+    _gwApplyVideoTrim(v, vd.trimStart, vd.trimEnd);
+    _gwApplyVideoFx(item.el, v, vd);
+
+    var ts = v._gwTrimStart || 0;
+    if (Math.abs(v.currentTime - ts) > 0.5) { try { v.currentTime = ts; } catch(e){} }
+
+    _incrementVideoViews(item.postId);
+    var vBadge = document.getElementById('vs-views-' + item.postId);
+    if (vBadge) vBadge.textContent = _fmtViews(_getVideoViews(item.postId));
+
+    if (v.readyState >= 3) {
+      _vsGlobalMuted ? _vsDoPlayMuted(v) : _vsDoPlay(v);
+    } else {
+      v.muted = true;
+      try { v.play().catch(function(){}); } catch(e){}
+      v.addEventListener('canplay', function _cp() {
+        v.removeEventListener('canplay', _cp);
+        if (_vsCurIdx !== idx) return;
+        v.pause();
+        _vsGlobalMuted ? _vsDoPlayMuted(v) : _vsDoPlay(v);
+      }, { once: true });
+    }
+
+    setTimeout(function() {
+      if (_vsCurIdx !== idx) return;
+      /* Précharge 2 Shorts à l'avance (pas juste le suivant) pour que le
+         défilement reste fluide même en swipant vite plusieurs fois de suite */
+      _vsPreload(idx + 1);
+      _vsPreload(idx + 2);
+      _vsUpdateDesktopPanel();
+    }, 600);
+  }
+
+  if (item.videoEl.src) {
+    _start();
+  } else {
+    _gwResolveVideoUrl(item.post, function(url) {
+      if (!url) return;
+      _gwVidUrlCache[item.postId] = url;
+      if (typeof item.post.video === 'object') item.post.video.url = url;
+      item.videoEl.src = url;
+      item.videoEl.preload = 'auto';
+      try { item.videoEl.load(); } catch(e){}
+      item.loaded = true;
+      _start();
+    });
+  }
+
+  /* Précharge la vidéo suivante avec les URLs déjà connues */
+  var next = _vsItems[idx + 1];
+  if (next && !next.videoEl.src && !next.loaded) {
+    var nUrl = _gwVidUrlCache[next.postId];
+    if (!nUrl) {
+      var np = next.post;
+      nUrl = typeof np.video === 'string' ? np.video : (np.video && np.video.url ? np.video.url : '');
+      if (!nUrl) { try { var _nls = localStorage.getItem('gw_vurl_' + next.postId); if (_nls && !_nls.startsWith('blob:')) nUrl = _nls; } catch(e){} }
+      if (nUrl && nUrl.startsWith('blob:')) nUrl = '';
+      if (nUrl) _gwVidUrlCache[next.postId] = nUrl;
+    }
+    if (nUrl) {
+      next.videoEl.src = nUrl;
+      next.videoEl.preload = 'auto';
+      try { next.videoEl.load(); } catch(e){}
+      next.loaded = true;
+    }
+  }
+}
+
+/* ── Précharge metadata ── */
+function _vsPreload(idx) {
+  if (idx < 0 || idx >= _vsItems.length) return;
+  var item = _vsItems[idx];
+  if (item.loaded || item._preloading) return;
+  item._preloading = true;
+  _gwResolveVideoUrl(item.post, function(url) {
+    item._preloading = false;
+    if (!url || item.videoEl.src) return;
+    _gwVidUrlCache[item.postId] = url;
+    if (typeof item.post.video === 'object') item.post.video.url = url;
+    item.videoEl.src = url;
+    item.videoEl.preload = 'auto';
+    try {
+      var vd = (item.post.video && typeof item.post.video === 'object') ? item.post.video : {};
+      _gwApplyVideoTrim(item.videoEl, vd.trimStart, vd.trimEnd);
+      _gwApplyVideoFx(item.el, item.videoEl, vd);
+      item.videoEl.load();
+    } catch(e){}
+    item.loaded = true;
+  });
+}
+
+/* ── Progress bar ── */
+function _vsStartRaf(idx) {
+  if (_vsRafId) { cancelAnimationFrame(_vsRafId); _vsRafId = null; }
+  var bar = document.getElementById('vs-prog-' + idx);
+  function tick() {
+    var item = _vsItems[idx];
+    if (!item || _vsCurIdx !== idx) return;
+    var v = item.videoEl;
+    if (v.duration > 0 && bar) {
+      var ts = v._gwTrimStart || 0, te = v._gwTrimEnd || v.duration;
+      bar.style.width = Math.min(100, Math.max(0, ((v.currentTime - ts) / Math.max(0.001, te - ts)) * 100)) + '%';
+    }
+    if (!v.paused && !v.ended) _vsRafId = requestAnimationFrame(tick);
+  }
+  _vsRafId = requestAnimationFrame(tick);
+}
+
+/* ── IntersectionObserver ── */
+function _vsSetupObserver() {
+  if (_vsObserver) { _vsObserver.disconnect(); _vsObserver = null; }
+  _vsObserver = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.intersectionRatio >= 0.8) {
+        var idx = parseInt(entry.target.getAttribute('data-idx'), 10);
+        if (idx !== _vsCurIdx) _vsActivate(idx);
+      }
+    });
+  }, { threshold: [0.8] });
+  _vsItems.forEach(function(item) { _vsObserver.observe(item.el); });
+  var feedEl = document.getElementById('vs-feed');
+  if (feedEl && 'onscrollend' in feedEl) {
+    feedEl.onscrollend = function() {
+      var h = feedEl.clientHeight || window.innerHeight;
+      if (!h) return;
+      var ni = Math.max(0, Math.min(Math.round(feedEl.scrollTop / h), _vsItems.length - 1));
+      if (ni !== _vsCurIdx) _vsActivate(ni);
+    };
+  }
+}
+
+/* ── Ouvre le player ── */
 function openVideoScroll(startPostId) {
   var modal = document.getElementById('vs-modal');
   if (!modal) return;
-
-  /* Pause le feed principal */
-  document.querySelectorAll('[id^="fv-"]').forEach(function(v) {
-    try { if (!v.paused) v.pause(); } catch(e){}
-  });
+  document.querySelectorAll('[id^="fv-"]').forEach(function(v) { try { if (!v.paused) v.pause(); } catch(e){} });
 
   var posts = _vsBuildList();
   if (!posts.length) { showToast('Aucune vidéo disponible', ''); return; }
 
   var startIdx = posts.findIndex(function(p) { return String(p.id) === String(startPostId); });
-  if (startIdx === -1) startIdx = 0;
+  if (startIdx < 0) startIdx = 0;
 
-  /* Reconstruit le feed */
+  /* Reset état son : commence muet, bouton haut-droite pour activer */
+  _vsGlobalMuted = true;
+  _vsUpdateSoundBtn();
+
   var feedEl = document.getElementById('vs-feed');
   feedEl.innerHTML = '';
-  _vsItems = [];
-  posts.forEach(function(post, idx) {
-    var item = _vsCreateItem(post, idx);
+  _vsItems  = [];
+  _vsCurIdx = -1;
+  posts.forEach(function(post, i) {
+    var item = _vsCreateItem(post, i);
     feedEl.appendChild(item.el);
     _vsItems.push(item);
   });
 
-  /* Réinitialise le panel fin */
   _vsClearEndTimer();
-  _vsCurIdx = startIdx;
-
-  /* Affiche */
   modal.style.display = 'block';
+  feedEl.scrollTop = startIdx * (feedEl.clientHeight || window.innerHeight);
 
-  /* Scroll immédiat vers la vidéo de départ (sans animation) */
-  feedEl.scrollTop = startIdx * (window.innerHeight || screen.height);
-
-  /* ── RÉSOLUTION PARALLÈLE de toutes les URLs dès l'ouverture ──
-     Chaque URL résolue → src posée immédiatement → browser buffere
-     pendant que l'utilisateur regarde la vidéo courante           */
-  _vsItems.forEach(function(item) {
-    if (item._preloading || item.loaded) return;
-    item._preloading = true;
-    _gwResolveVideoUrl(item.post, function(url) {
-      if (!url) return;
-      if (typeof item.post.video === 'object') item.post.video.url = url;
-      _gwVidUrlCache[String(item.postId)] = url;
-      if (!item.videoEl.src) {
-        item.videoEl.src     = url;
-        item.videoEl.preload = 'auto';
-        item.videoEl.load(); /* commence à bufferer en fond */
-      }
-    });
+  posts.forEach(function(post) {
+    var pid = String(post.id);
+    if (_gwVidUrlCache[pid]) return;
+    var direct = typeof post.video === 'string' ? post.video : (post.video && post.video.url ? post.video.url : '');
+    if (direct && !direct.startsWith('blob:')) { _gwVidUrlCache[pid] = direct; return; }
+    try { var ls = localStorage.getItem('gw_vurl_' + pid); if (ls && !ls.startsWith('blob:')) { _gwVidUrlCache[pid] = ls; return; } } catch(e){}
+    if (_gwFbReady && _gwFbDB) {
+      _gwFbDB.ref('gw/post_videos/' + pid).once('value').then(function(snap) {
+        var d = snap.val();
+        if (!d || !d.url) return;
+        _gwVidUrlCache[pid] = d.url;
+        try { localStorage.setItem('gw_vurl_' + pid, d.url); } catch(e){}
+        if (typeof post.video === 'object') post.video.url = d.url;
+        var fi = _vsItems.findIndex(function(x){ return x.postId === pid; });
+        if (fi >= 0 && !_vsItems[fi].videoEl.src && Math.abs(fi - _vsCurIdx) <= 2) {
+          _vsItems[fi].videoEl.src = d.url; _vsItems[fi].videoEl.preload = 'auto';
+          try { _vsItems[fi].videoEl.load(); } catch(e){}
+          _vsItems[fi].loaded = true;
+        }
+      }).catch(function(){});
+    }
   });
 
-  /* Joue la vidéo de départ */
   _vsActivate(startIdx);
-
-  /* Observer pour auto-play au scroll */
   _vsSetupObserver();
 
-  /* ── Rafraîchit les compteurs de favoris depuis Firebase dès l'ouverture ──
-     Nécessaire car child_added peut avoir tiré avant que le DOM VS soit prêt  */
+  /* ── Desktop : flèches de navigation + panneau info + clavier ── */
+  var _isDesktop = window.innerWidth >= 768;
+  if (_isDesktop) { _vsSetupDesktop(modal); }
+
+  var _touchY = 0;
+  feedEl.addEventListener('touchstart', function(e) { _touchY = e.touches[0].clientY; _vsUserScrolling = true; }, { passive: true });
+  feedEl.addEventListener('touchend',   function()  { setTimeout(function(){ _vsUserScrolling = false; }, 600); }, { passive: true });
+  feedEl.addEventListener('touchmove',  function(e) {
+    var dy = _touchY - e.touches[0].clientY;
+    if (dy > 40)       { _vsPreload(_vsCurIdx + 1); }
+    else if (dy < -40) { _vsPreload(_vsCurIdx - 1); }
+  }, { passive: true });
+
   if (_gwFbReady && _gwFbDB) {
     _gwFbDB.ref('gw/favcounts').once('value', function(snap) {
       snap.forEach(function(child) {
-        var pid = child.key;
-        var cnt = child.val();
+        var pid = child.key, cnt = child.val();
         if (typeof cnt !== 'number') return;
         localStorage.setItem('gw_fav_count_' + pid, cnt);
         document.querySelectorAll('[data-fav-cnt="' + pid + '"]').forEach(function(el) {
-          el.textContent = cnt > 0 ? _fmtViews(cnt) : '0';
-          el.style.display = cnt > 0 ? '' : 'none';
+          el.textContent = cnt > 0 ? _fmtViews(cnt) : '0'; el.style.display = cnt > 0 ? '' : 'none';
         });
       });
     });
-
-    /* ── Écoute les likes en temps réel pour tous les viewers ── */
-    if (_vsLikesRef) { _vsLikesRef.off(); _vsLikesRef = null; }
+    if (_vsLikesRef)  { _vsLikesRef.off();  _vsLikesRef  = null; }
     _vsLikesRef = _gwFbDB.ref('gw/likes');
     _vsLikesRef.on('value', function(snap) {
       var data = snap.val() || {};
       _vsItems.forEach(function(item) {
-        var pid = item.postId;
-        var likerMap = data[pid] || {};
-        var cnt = Object.keys(likerMap).length;
-        var el = document.getElementById('vs-likes-' + pid);
+        var el = document.getElementById('vs-likes-' + item.postId);
+        if (el) el.textContent = _fmtViews(Object.keys(data[item.postId] || {}).length);
+      });
+    });
+    if (_vsViewsRef)  { _vsViewsRef.off();  _vsViewsRef  = null; }
+    _vsViewsRef = _gwFbDB.ref('gw/vid_views');
+    _vsViewsRef.on('value', function(snap) {
+      var data = snap.val() || {};
+      _vsItems.forEach(function(item) {
+        var cnt = parseInt(data[item.postId], 10) || 0;
+        localStorage.setItem('gw_vid_views_' + item.postId, cnt);
+        var el = document.getElementById('vs-views-' + item.postId);
         if (el) el.textContent = _fmtViews(cnt);
       });
     });
-  }
-}
-
-/* ── Crée un élément DOM pour un post vidéo ── */
-function _vsCreateItem(post, idx) {
-  var pr      = post.ownerEmail ? (loadUserProfile(post.ownerEmail) || {}) : {};
-  var nom     = pr.nom || (post.ownerEmail ? post.ownerEmail.split('@')[0] : 'Utilisateur');
-  var photo   = pr.photo || '';
-  var ownerKey = post.ownerEmail ? _gwFbKey(post.ownerEmail) : '';
-  var followed = ownerKey ? isFollowing(ownerKey) : false;
-  var isOwn    = _currentUser && post.ownerEmail === _currentUser.email;
-  var isRepost = post.type === 'repost';
-
-  var likers  = loadPostLikers(post.id);
-  var likes   = likers.length;
-  var isLiked = _currentUser && likers.indexOf(_currentUser.email) !== -1;
-  var caption = (post.content || post.text || '').substring(0, 120);
-  var postIdStr = String(post.id);
-
-  /* Avatar mini */
-  var avHtml = photo
-    ? '<img src="' + escHtml(photo) + '" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid #fff;flex-shrink:0" onerror="this.style.display=\'none\'">'
-    : '<div style="width:36px;height:36px;border-radius:50%;background:#4F46E5;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:14px;flex-shrink:0;border:2px solid #fff">' + escHtml(nom.charAt(0).toUpperCase()) + '</div>';
-
-  var el = document.createElement('div');
-  el.className = 'vs-item';
-  el.setAttribute('data-idx',     idx);
-  el.setAttribute('data-post-id', postIdStr);
-
-  el.innerHTML =
-    /* Vidéo */
-    '<video class="vs-video" playsinline webkit-playsinline x5-playsinline preload="metadata"></video>' +
-    /* Zone tap (play/pause au toucher) */
-    '<div class="vs-tap-zone" onclick="vsTogglePlay(' + idx + ')"></div>' +
-    /* Flash icône centrale au tap */
-    '<div class="vs-flash" id="vs-flash-' + idx + '">' +
-    '<i class="fas fa-play" style="font-size:62px;color:rgba(255,255,255,.85);filter:drop-shadow(0 2px 8px rgba(0,0,0,.5))"></i></div>' +
-
-    /* ── MINI PROFIL bas-gauche ── */
-    '<div class="vs-author-row">' +
-      avHtml +
-      '<div style="display:flex;flex-direction:column;gap:2px;min-width:0">' +
-        (isRepost ? '<span style="font-size:11px;background:rgba(255,255,255,.15);border-radius:4px;padding:1px 6px;color:rgba(255,255,255,.85);align-self:flex-start">🔁 Republié</span>' : '') +
-        '<span class="vs-author">@' + escHtml(nom) + '</span>' +
-        (caption ? '<span class="vs-caption">' + escHtml(caption) + '</span>' : '') +
-      '</div>' +
-      (!isOwn
-        ? '<button class="vs-follow-btn" id="vs-follow-' + postIdStr + '"' +
-          ' onclick="vsFollow(\'' + postIdStr + '\',\'' + escHtml(post.ownerEmail || '') + '\',\'' + escHtml(ownerKey) + '\');event.stopPropagation()">' +
-          (followed ? 'Suivi' : '+ Suivre') + '</button>'
-        : '') +
-    '</div>' +
-
-    /* ── BOUTONS LATÉRAUX droits ── */
-    '<div class="vs-side">' +
-    /* Like */
-    '<button class="vs-side-btn vs-like-btn' + (isLiked ? ' vs-liked' : '') + '" id="vs-like-btn-' + postIdStr + '"' +
-    ' onclick="vsLike(\'' + postIdStr + '\');event.stopPropagation()">' +
-    '<i class="fas fa-heart"></i><span id="vs-likes-' + postIdStr + '">' + _fmtViews(likes) + '</span></button>' +
-    /* Commentaires */
-    '<button class="vs-side-btn" onclick="vsOpenComments(\'' + postIdStr + '\');event.stopPropagation()">' +
-    '<i class="fas fa-comment"></i><span id="vs-coms-' + postIdStr + '">' + _fmtViews(getAllComments(postIdStr).length) + '</span></button>' +
-    /* Favoris */
-    '<button class="vs-side-btn vs-fav-btn" id="vs-fav-btn-' + postIdStr + '"' +
-    ' onclick="vsFavorite(\'' + postIdStr + '\');event.stopPropagation()">' +
-    '<i class="fas fa-bookmark' + (isFavorite(postIdStr) ? ' vs-fav-active' : '') + '"></i>' +
-    '<span>' + (isFavorite(postIdStr) ? 'Sauvé' : 'Sauver') + '</span>' +
-    (function(){ var fc=_getFavCount(postIdStr); return fc>0 ? '<span style="font-size:11px;color:rgba(255,255,255,.7)" data-fav-cnt="'+postIdStr+'">'+_fmtViews(fc)+'</span>' : '<span style="font-size:11px;display:none" data-fav-cnt="'+postIdStr+'">0</span>'; })() +
-    '</button>' +
-    /* Partager */
-    '<button class="vs-side-btn" onclick="sharePost(\'' + postIdStr + '\');event.stopPropagation()">' +
-    '<i class="fas fa-share-nodes"></i><span>Partager</span>' +
-    '<span id="vs-shares-' + postIdStr + '" style="font-size:11px;color:rgba(255,255,255,.7)">' +
-    (_getShareCount(postIdStr) > 0 ? _fmtViews(_getShareCount(postIdStr)) : '') + '</span></button>' +
-    /* Vues */
-    '<div class="vs-side-btn" style="pointer-events:none">' +
-    '<i class="fas fa-eye"></i><span id="vs-views-' + postIdStr + '">' + _fmtViews(_getVideoViews(postIdStr)) + '</span></div>' +
-    /* ••• Menu options */
-    '<button class="vs-side-btn" onclick="vsShowMenu(\'' + postIdStr + '\',\'' + escHtml(post.ownerEmail || '') + '\');event.stopPropagation()">' +
-    '<i class="fas fa-ellipsis-vertical" style="font-size:22px"></i><span>Plus</span></button>' +
-    '</div>' +
-
-    /* Barre de progression */
-    '<div class="vs-prog-bar"><div class="vs-prog-fill" id="vs-prog-' + idx + '"></div></div>';
-
-  return {
-    postId:  postIdStr,
-    post:    post,
-    el:      el,
-    videoEl: el.querySelector('.vs-video'),
-    loaded:  false
-  };
-}
-
-/* ── Charge la source vidéo d'un item (lazy) ── */
-function _vsLoadSrc(item, callback) {
-  if (item.loaded) { callback && callback(); return; }
-  var videoEl = item.videoEl;
-  _gwResolveVideoUrl(item.post, function(url) {
-    if (url && videoEl.src !== url) { videoEl.src = url; }
-    if (url) videoEl.load();
-    item.loaded = true;
-    item._preloading = false;
-    callback && callback();
-  });
-}
-
-/* Gardé pour compatibilité — utilise maintenant _gwResolveVideoUrlFromFb */
-function _vsFetchFb(post, cb) { _gwResolveVideoUrlFromFb(post, cb); }
-
-/* ── Lance la lecture d'un item (URL déjà dans videoEl.src) ── */
-function _vsStartPlayback(idx, item) {
-  if (_vsCurIdx !== idx) return;
-  var v = item.videoEl;
-
-  if (v.currentTime > 0.1) v.currentTime = 0;
-
-  _incrementVideoViews(item.postId);
-  var vBadge = document.getElementById('vs-views-' + item.postId);
-  if (vBadge) vBadge.textContent = _fmtViews(_getVideoViews(item.postId));
-
-  v.onended = function() { _vsStartEndCountdown(idx); };
-  v.onplay  = function() { _vsSetPlayIco(idx, true);  _vsStartRaf(idx); _vsForceRender(v); };
-  v.onpause = function() { _vsSetPlayIco(idx, false); };
-
-  if (v.readyState >= 3) {
-    v.play().catch(function(){});
-  } else {
-    var playPromise = v.play();
-    if (playPromise !== undefined) {
-      playPromise.catch(function() {
-        var _onCanPlay = function() {
-          v.removeEventListener('canplay', _onCanPlay);
-          if (_vsCurIdx === idx) v.play().catch(function(){});
-        };
-        v.addEventListener('canplay', _onCanPlay);
+    if (_vsSharesRef) { _vsSharesRef.off(); _vsSharesRef = null; }
+    _vsSharesRef = _gwFbDB.ref('gw/share_counts');
+    _vsSharesRef.on('value', function(snap) {
+      var data = snap.val() || {};
+      _vsItems.forEach(function(item) {
+        var cnt = parseInt(data[item.postId], 10) || 0;
+        var el = document.getElementById('vs-shares-' + item.postId);
+        if (el) el.textContent = cnt > 0 ? _fmtViews(cnt) : '';
       });
-    }
-  }
-  _vsSetPlayIco(idx, true);
-}
-
-/* Force le rendu GPU sur desktop quand l'image ne sort pas (son présent, image noire) */
-function _vsForceRender(v) {
-  if (window.innerWidth < 768) return;
-  /* Technique : modifier opacity sur deux frames consécutifs force Chrome
-     à recréer le compositing layer et à afficher le frame vidéo courant */
-  requestAnimationFrame(function() {
-    v.style.opacity = '0.999';
-    requestAnimationFrame(function() {
-      v.style.opacity = '';
-      /* Si toujours pas de frame visible après 400ms → reload du décodeur */
-      setTimeout(function() {
-        if (!v.paused && v.readyState >= 2 && v.videoWidth === 0) {
-          var t = v.currentTime;
-          v.load();
-          v.currentTime = t;
-          v.play().catch(function(){});
-        }
-      }, 400);
     });
-  });
+  }
 }
 
-/* ── Active (charge + joue) un item — comportement TikTok ── */
-function _vsActivate(idx) {
-  if (idx < 0 || idx >= _vsItems.length) return;
-  _vsCurIdx = idx;
-
-  /* Pause les autres + libère le buffer des vidéos lointaines */
-  _vsItems.forEach(function(it, i) {
-    if (i === idx) return;
-    try { it.videoEl.pause(); } catch(e){}
-    if (Math.abs(i - idx) > 2) {
-      it.videoEl.removeAttribute('src');
-      it.videoEl.load();
-      it.loaded = false;
-    }
-  });
-
-  _vsClearEndTimer();
-
-  var item = _vsItems[idx];
-
-  /* Si la src est déjà dans l'élément vidéo (posée par la résolution parallèle) → play direct */
-  if (item.videoEl.src) {
-    item.loaded = true;
-    item.videoEl.preload = 'auto';
-    _vsStartPlayback(idx, item);
-    /* pré-charge les suivantes */
-    _vsPreloadItem(idx + 1);
-    _vsPreloadItem(idx + 2);
-    _vsPreloadItem(idx - 1);
-    return;
-  }
-
-  /* URL en cache mémoire → pose src et joue */
-  var knownUrl = _gwVidUrlCache[String(item.postId)] ||
-                 (item.post.video && typeof item.post.video === 'object' && item.post.video.url) ||
-                 (typeof item.post.video === 'string' ? item.post.video : '');
-
-  if (knownUrl) {
-    item.videoEl.src     = knownUrl;
-    item.videoEl.preload = 'auto';
-    item.loaded = true;
-    _vsStartPlayback(idx, item);
+/* ── Bouton son global (icône haut-droite) ── */
+function vsToggleGlobalMute() {
+  _vsGlobalMuted = !_vsGlobalMuted;
+  _vsUpdateSoundBtn();
+  var item = _vsItems[_vsCurIdx];
+  if (!item) return;
+  var v = item.videoEl;
+  if (_vsGlobalMuted) {
+    v.muted = true;
   } else {
-    /* URL pas encore résolue → attend (résolution parallèle en cours) */
-    _vsLoadSrc(item, function() {
-      if (_vsCurIdx !== idx) return;
-      item.videoEl.preload = 'auto';
-      _vsStartPlayback(idx, item);
-    });
+    /* Tap direct → Chrome autorise le son */
+    if (!v.paused) { v.pause(); }
+    _vsDoPlay(v);
   }
-
-  _vsPreloadItem(idx + 1);
-  _vsPreloadItem(idx + 2);
-  _vsPreloadItem(idx - 1);
 }
 
-/* ── IntersectionObserver : auto-play quand visible à 50 %+ ── */
-function _vsSetupObserver() {
-  if (_vsObserver) _vsObserver.disconnect();
-  _vsObserver = new IntersectionObserver(function(entries) {
-    entries.forEach(function(entry) {
-      if (entry.intersectionRatio >= 0.5) {
-        var idx = parseInt(entry.target.getAttribute('data-idx'), 10);
-        if (idx !== _vsCurIdx) _vsActivate(idx);
-      }
-    });
-  }, { threshold: [0.5] });
-  _vsItems.forEach(function(item) { _vsObserver.observe(item.el); });
-}
-
-/* ── Progress bar animée via rAF ── */
-function _vsStartRaf(idx) {
-  if (_vsRafId) { cancelAnimationFrame(_vsRafId); _vsRafId = null; }
-  function tick() {
-    var item = _vsItems[idx];
-    if (!item) return;
-    var v = item.videoEl;
-    if (v.duration > 0) {
-      var bar = document.getElementById('vs-prog-' + idx);
-      if (bar) bar.style.width = ((v.currentTime / v.duration) * 100) + '%';
-    }
-    if (!v.paused && !v.ended && _vsCurIdx === idx) {
-      _vsRafId = requestAnimationFrame(tick);
-    }
-  }
-  _vsRafId = requestAnimationFrame(tick);
-}
-
-/* ── Toggle play/pause (clic utilisateur) ── */
+/* ── Toggle play/pause ── */
 function vsTogglePlay(idx) {
   var item = _vsItems[idx];
   if (!item) return;
   var v = item.videoEl;
   if (v.paused) {
-    v.play().catch(function(){});
-    _vsFlash(idx, 'fa-play');
-    _vsStartRaf(idx);
+    _vsGlobalMuted ? _vsDoPlayMuted(v) : _vsDoPlay(v);
+    _vsFlash(idx, 'fa-play'); _vsStartRaf(idx);
   } else {
-    v.pause();
-    _vsFlash(idx, 'fa-pause');
+    v.pause(); _vsFlash(idx, 'fa-pause');
   }
 }
 
-function _vsSetPlayIco(idx, playing) {
-  var ico = document.getElementById('vs-play-ico-' + idx);
-  if (ico) ico.innerHTML = '<i class="fas ' + (playing ? 'fa-pause' : 'fa-play') + '"></i>';
-  /* Cache le spinner dès que la vidéo joue */
+/* ── Détecte le double-tap (like, comme TikTok/Instagram) vs le tap simple
+   (lecture/pause) sur la zone tactile d'un Short. Le tap simple est retardé
+   le temps de voir si un second tap arrive juste après. ── */
+var _vsLastTap  = { idx: -1, time: 0 };
+var _vsTapTimer = null;
+function vsHandleTap(idx, event) {
+  var now      = Date.now();
+  var isDouble = (idx === _vsLastTap.idx) && (now - _vsLastTap.time < 300);
+  _vsLastTap = { idx: idx, time: isDouble ? 0 : now }; /* reset pour éviter qu'un 3e tap rapproché compte comme un nouveau double */
+
+  if (isDouble) {
+    if (_vsTapTimer) { clearTimeout(_vsTapTimer); _vsTapTimer = null; }
+    _vsDoubleTapLike(idx, event);
+    return;
+  }
+  _vsTapTimer = setTimeout(function() {
+    _vsTapTimer = null;
+    vsTogglePlay(idx);
+  }, 280);
+}
+
+/* Vrai si l'utilisateur courant a déjà liké ce Short (sans le modifier) */
+function _vsIsLiked(item) {
+  if (!_currentUser || !item) return false;
+  if (item.post && item.post.isOfficial) {
+    var oLikers = Array.isArray(item.post.likers) ? item.post.likers : [];
+    return oLikers.indexOf(_currentUser.email) !== -1;
+  }
+  return loadPostLikers(item.postId).indexOf(_currentUser.email) !== -1;
+}
+
+/* Double-tap : like uniquement (jamais unlike, comme TikTok/Instagram) + animation cœur */
+function _vsDoubleTapLike(idx, event) {
   var item = _vsItems[idx];
-  if (item && item.el) item.el.classList.toggle('vs-playing', playing);
+  if (!item) return;
+  if (!_vsIsLiked(item)) vsLike(item.postId);
+  _vsShowHeartBurst(item, event);
+}
+
+function _vsShowHeartBurst(item, event) {
+  var rect = item.el.getBoundingClientRect();
+  var x = (event && typeof event.clientX === 'number' && event.clientX > 0) ? (event.clientX - rect.left) : (rect.width  / 2);
+  var y = (event && typeof event.clientY === 'number' && event.clientY > 0) ? (event.clientY - rect.top)  : (rect.height / 2);
+  var heart = document.createElement('i');
+  heart.className = 'fas fa-heart';
+  heart.style.cssText =
+    'position:absolute;left:' + x + 'px;top:' + y + 'px;' +
+    'color:#fff;font-size:84px;text-shadow:0 2px 14px rgba(0,0,0,.4);' +
+    'pointer-events:none;z-index:60;';
+  item.el.appendChild(heart);
+  try {
+    var anim = heart.animate([
+      { transform: 'translate(-50%,-50%) scale(0)',    opacity: 0 },
+      { transform: 'translate(-50%,-50%) scale(1.2)',  opacity: 1, offset: 0.35 },
+      { transform: 'translate(-50%,-50%) scale(1)',    opacity: 1, offset: 0.6  },
+      { transform: 'translate(-50%,-50%) scale(1)',    opacity: 0 }
+    ], { duration: 800, easing: 'ease-out' });
+    anim.onfinish = function() { heart.remove(); };
+  } catch(e) { setTimeout(function() { heart.remove(); }, 800); }
 }
 
 function _vsFlash(idx, iconClass) {
@@ -11691,16 +13169,14 @@ function _vsFlash(idx, iconClass) {
   setTimeout(function() { flash.style.opacity = '0'; }, 500);
 }
 
-/* ── Countdown fin de vidéo ── */
 function _vsStartEndCountdown(fromIdx) {
-  if (fromIdx + 1 >= _vsItems.length) return; /* dernière vidéo */
+  if (fromIdx + 1 >= _vsItems.length) return;
   var panel = document.getElementById('vs-end-panel');
   if (!panel) return;
   _vsCountN = 10;
   var countEl = document.getElementById('vs-countdown');
   if (countEl) countEl.textContent = '10';
   panel.classList.add('show');
-
   _vsEndTimer = setInterval(function() {
     _vsCountN--;
     if (countEl) countEl.textContent = _vsCountN;
@@ -11714,148 +13190,301 @@ function _vsClearEndTimer() {
   if (panel) panel.classList.remove('show');
 }
 
-/* ── Vidéo suivante (manuel ou auto) ── */
 function vsPlayNext() {
   _vsClearEndTimer();
-  var nextIdx = _vsCurIdx + 1;
-  if (nextIdx >= _vsItems.length) return;
+  if (_vsUserScrolling) return;
+  var ni = _vsCurIdx + 1;
+  if (ni >= _vsItems.length) return;
   var feedEl = document.getElementById('vs-feed');
-  if (feedEl) {
-    feedEl.scrollTo({ top: nextIdx * (feedEl.clientHeight || window.innerHeight), behavior: 'smooth' });
-  }
-  _vsActivate(nextIdx);
+  if (feedEl) feedEl.scrollTo({ top: ni * (feedEl.clientHeight || window.innerHeight), behavior: 'smooth' });
+  _vsActivate(ni);
 }
 
-/* ── Annule le countdown ── */
 function vsCancelNext() { _vsClearEndTimer(); }
 
-/* ── Suivre/ne plus suivre depuis le scroll player ── */
 function vsFollow(postId, ownerEmail, ownerKey) {
   if (!ownerEmail) return;
   var pr = loadUserProfile(ownerEmail) || {};
   _doFollowToggle({ nom: pr.nom || ownerEmail.split('@')[0], email: ownerEmail, role: pr.role || '' });
-  /* Met à jour le bouton */
   var btn = document.getElementById('vs-follow-' + postId);
-  if (btn) {
-    var nowFollowed = isFollowing(ownerKey);
-    btn.textContent = nowFollowed ? 'Suivi' : '+ Suivre';
-    btn.classList.toggle('vs-following', nowFollowed);
-  }
+  if (btn) { var f = isFollowing(ownerKey); btn.textContent = f ? 'Suivi' : '+ Suivre'; btn.classList.toggle('vs-following', f); }
 }
 
-/* ── Menu ••• options de la vidéo ── */
-function vsShowMenu(postId, ownerEmail) {
-  /* Pause la vidéo courante pendant le menu */
-  var item = _vsItems[_vsCurIdx];
-  if (item) { try { item.videoEl.pause(); _vsSetPlayIco(_vsCurIdx, false); } catch(e){} }
+function vsFollowOfficial(postId) {
+  _toggleFollowOfficial();
+  var btn = document.getElementById('vs-follow-' + postId);
+  if (btn) { var f = isFollowing(GW_OFFICIAL_KEY); btn.textContent = f ? 'Suivi' : '+ Suivre'; btn.classList.toggle('vs-following', f); if (f) showToast('Vous suivez Geniwork', 'ok'); }
+}
 
+function vsShowMenu(postId, ownerEmail) {
+  var item = _vsItems[_vsCurIdx];
+  if (item) { try { item.videoEl.pause(); } catch(e){} }
   var isOwn = _currentUser && ownerEmail === _currentUser.email;
   var btns = [];
-
   if (!isOwn) {
-    btns.push({ label: '🚫 Masquer cette vidéo',      fn: function() { vsHideShort(postId); } });
-    btns.push({ label: '🔇 Bloquer cet utilisateur',  fn: function() { blockUser(postId); } });
-    btns.push({ label: '⚠️ Signaler la vidéo',        fn: function() { reportPost(postId); } });
+    btns.push({ label: 'Masquer cette video',    fn: function() { vsHideShort(postId); } });
+    btns.push({ label: 'Bloquer cet utilisateur', fn: function() { blockUser(postId); } });
+    btns.push({ label: 'Signaler la video',       fn: function() { reportPost(postId); } });
   }
-  btns.push({ label: '🔁 Republier cette vidéo',      fn: function() { doRepost(postId); } });
-  if (isOwn) {
-    btns.push({ label: '🗑 Supprimer',                fn: function() { deletePost(postId); closeVideoScroll(); } });
-  }
-  btns.push({ label: 'Annuler',                       fn: function() {} });
-
-  /* Sheet bottom */
+  btns.push({ label: 'Republier cette video', fn: function() { doRepost(postId); } });
+  if (isOwn) btns.push({ label: 'Supprimer', fn: function() { deletePost(postId); closeVideoScroll(); } });
+  btns.push({ label: 'Annuler', fn: function() {} });
   var sheet = document.createElement('div');
   sheet.style.cssText = 'position:fixed;inset:0;z-index:900;display:flex;flex-direction:column;justify-content:flex-end';
   sheet.innerHTML =
     '<div onclick="this.parentNode.remove()" style="flex:1;background:rgba(0,0,0,.5)"></div>' +
-    '<div style="background:#1E293B;border-radius:20px 20px 0 0;padding:12px 0 max(env(safe-area-inset-bottom,0px),20px)">' +
+    '<div style="background:#1E293B;border-radius:20px 20px 0 0;padding:12px 0 max(var(--gw-sab,env(safe-area-inset-bottom,0px)),20px)">' +
     '<div style="width:40px;height:4px;background:rgba(255,255,255,.3);border-radius:2px;margin:0 auto 16px"></div>' +
     btns.map(function(b, i) {
-      var isCancel = b.label === 'Annuler';
-      return '<button data-vs-menu-idx="' + i + '" style="width:100%;background:none;border:none;' +
-        (isCancel ? 'color:#94A3B8;' : 'color:#F1F5F9;') +
-        'font-size:16px;padding:14px 20px;text-align:left;cursor:pointer;' +
-        (i < btns.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,.07);' : '') + '">' +
-        b.label + '</button>';
-    }).join('') +
-    '</div>';
-
-  /* Attache les handlers après injection dans le DOM */
+      return '<button data-vi="' + i + '" style="width:100%;background:none;border:none;color:' +
+        (b.label === 'Annuler' ? '#94A3B8' : '#F1F5F9') +
+        ';font-size:16px;padding:14px 20px;text-align:left;cursor:pointer;' +
+        (i < btns.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,.07);' : '') + '">' + b.label + '</button>';
+    }).join('') + '</div>';
   document.body.appendChild(sheet);
-  sheet.querySelectorAll('[data-vs-menu-idx]').forEach(function(btn) {
-    var i = parseInt(btn.getAttribute('data-vs-menu-idx'), 10);
+  sheet.querySelectorAll('[data-vi]').forEach(function(btn) {
+    var i = parseInt(btn.getAttribute('data-vi'), 10);
     btn.onclick = function() { sheet.remove(); btns[i].fn(); };
   });
 }
 
-/* ── Masquer un Short de la session courante ── */
 function vsHideShort(postId) {
-  /* Retire du scroll player sans supprimer le post */
-  _vsItems = _vsItems.filter(function(item) { return item.postId !== String(postId); });
-  /* Retire l'élément du DOM */
   var feedEl = document.getElementById('vs-feed');
-  if (feedEl) {
-    var el = feedEl.querySelector('[data-post-id="' + postId + '"]');
-    if (el) el.remove();
-    /* Réindexe les data-idx */
-    feedEl.querySelectorAll('.vs-item').forEach(function(el2, i) { el2.setAttribute('data-idx', i); });
-  }
-  /* Rejoue le suivant ou ferme si plus rien */
-  if (_vsItems.length === 0) { closeVideoScroll(); return; }
-  var nextIdx = Math.min(_vsCurIdx, _vsItems.length - 1);
+  var el = feedEl && feedEl.querySelector('[data-post-id="' + postId + '"]');
+  if (el) el.remove();
+  _vsItems = _vsItems.filter(function(it) { return it.postId !== String(postId); });
+  if (feedEl) feedEl.querySelectorAll('.vs-item').forEach(function(e, i) { e.setAttribute('data-idx', i); });
+  if (!_vsItems.length) { closeVideoScroll(); return; }
+  var ni = Math.min(_vsCurIdx, _vsItems.length - 1);
+  _vsCurIdx = -1;
   _vsSetupObserver();
-  _vsActivate(nextIdx);
-  showToast('Vidéo masquée', 'ok');
+  _vsActivate(ni);
+  showToast('Video masquee', 'ok');
 }
 
-/* ── Like depuis le scroll player ── */
 function vsLike(postId) {
-  likePost(postId);
-  var post = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
-  if (post) {
-    var likers = loadPostLikers(post.id);
-    /* Compteur */
-    var el = document.getElementById('vs-likes-' + postId);
-    if (el) el.textContent = _fmtViews(likers.length);
-    /* Colore le cœur si liké */
-    var btn = document.getElementById('vs-like-btn-' + postId);
-    if (btn) {
-      var isLiked = _currentUser && likers.indexOf(_currentUser.email) !== -1;
-      btn.classList.toggle('vs-liked', isLiked);
-    }
+  var item = _vsItems.find(function(it) { return it.postId === String(postId); });
+  if (item && item.post.isOfficial) {
+    if (!_currentUser) { showToast('Connectez-vous pour liker', 'err'); return; }
+    var posts = _offGetPosts();
+    var p = posts.find(function(x) { return String(x.id) === String(postId); });
+    if (!p) return;
+    var oLikers = Array.isArray(p.likers) ? p.likers : [];
+    var oIdx    = oLikers.indexOf(_currentUser.email);
+    var oLiked;
+    if (oIdx === -1) { oLikers.push(_currentUser.email); oLiked = true; }
+    else             { oLikers.splice(oIdx, 1);          oLiked = false; }
+    p.likers = oLikers; _offSavePosts(posts); item.post.likers = oLikers;
+    var oEl  = document.getElementById('vs-likes-' + postId);    if (oEl)  oEl.textContent  = _fmtViews((p.baseLikes || 0) + oLikers.length);
+    var oBtn = document.getElementById('vs-like-btn-' + postId); if (oBtn) oBtn.classList.toggle('vs-liked', oLiked);
+    return;
   }
+  likePost(postId);
+  var likers = loadPostLikers(postId);
+  var el  = document.getElementById('vs-likes-' + postId);    if (el)  el.textContent = _fmtViews(likers.length);
+  var btn = document.getElementById('vs-like-btn-' + postId); if (btn) btn.classList.toggle('vs-liked', !!(_currentUser && likers.indexOf(_currentUser.email) !== -1));
 }
 
-/* ── Ouvre les commentaires depuis le scroll player ── */
-function vsOpenComments(postId) {
-  openComments(postId);
+function _vsRefreshOfficialLikes() {
+  if (!_vsItems || !_vsItems.length) return;
+  var officialPosts = _offGetPosts();
+  _vsItems.forEach(function(item) {
+    if (!item.post || !item.post.isOfficial) return;
+    var fresh = officialPosts.find(function(p) { return String(p.id) === String(item.postId); });
+    if (!fresh) return;
+    var likers = Array.isArray(fresh.likers) ? fresh.likers : [];
+    item.post.likers = likers; item.post.baseLikes = fresh.baseLikes;
+    var el  = document.getElementById('vs-likes-' + item.postId);    if (el)  el.textContent = _fmtViews((fresh.baseLikes || 0) + likers.length);
+    var btn = document.getElementById('vs-like-btn-' + item.postId); if (btn) btn.classList.toggle('vs-liked', !!(_currentUser && likers.indexOf(_currentUser.email) !== -1));
+  });
 }
 
-/* ── Favori depuis le scroll player ── */
+function vsOpenComments(postId) { openComments(postId); }
+
 function vsFavorite(postId) {
   toggleFavorite(postId);
   var fav = isFavorite(postId);
   var btn = document.getElementById('vs-fav-btn-' + postId);
   if (btn) {
-    var ico = btn.querySelector('i');
-    var lbl = btn.querySelector('span');
+    var ico = btn.querySelector('i'), lbl = btn.querySelector('span');
     if (ico) ico.className = 'fas fa-bookmark' + (fav ? ' vs-fav-active' : '');
-    if (lbl) lbl.textContent = fav ? 'Sauvé' : 'Sauver';
+    if (lbl) lbl.textContent = fav ? 'Sauve' : 'Sauver';
   }
-  showToast(fav ? '🔖 Ajouté aux favoris' : 'Retiré des favoris', fav ? 'ok' : '');
+  showToast(fav ? 'Ajoute aux favoris' : 'Retire des favoris', fav ? 'ok' : '');
 }
 
-/* ── Ferme le player scroll ── */
+/* ── Desktop : construit les flèches + panneau info ── */
+function _vsSetupDesktop(modal) {
+  /* Nettoie si déjà présents */
+  ['vs-nav-up','vs-nav-down','vs-info-panel','vs-kbd-hint'].forEach(function(id) {
+    var old = document.getElementById(id); if (old) old.remove();
+  });
+
+  /* Flèche Haut */
+  var btnUp = document.createElement('button');
+  btnUp.id = 'vs-nav-up';
+  btnUp.className = 'vs-nav-arrow vs-nav-up';
+  btnUp.innerHTML = '<i class="fas fa-chevron-up"></i>';
+  btnUp.title = 'Vidéo précédente (↑)';
+  btnUp.onclick = function() {
+    if (_vsCurIdx <= 0) return;
+    var feedEl = document.getElementById('vs-feed');
+    var ni = _vsCurIdx - 1;
+    if (feedEl) feedEl.scrollTo({ top: ni * (feedEl.clientHeight || window.innerHeight), behavior: 'smooth' });
+    _vsActivate(ni);
+  };
+  modal.appendChild(btnUp);
+
+  /* Flèche Bas */
+  var btnDown = document.createElement('button');
+  btnDown.id = 'vs-nav-down';
+  btnDown.className = 'vs-nav-arrow vs-nav-down';
+  btnDown.innerHTML = '<i class="fas fa-chevron-down"></i>';
+  btnDown.title = 'Vidéo suivante (↓)';
+  btnDown.onclick = function() {
+    if (_vsCurIdx >= _vsItems.length - 1) return;
+    var feedEl = document.getElementById('vs-feed');
+    var ni = _vsCurIdx + 1;
+    if (feedEl) feedEl.scrollTo({ top: ni * (feedEl.clientHeight || window.innerHeight), behavior: 'smooth' });
+    _vsActivate(ni);
+  };
+  modal.appendChild(btnDown);
+
+  /* Panneau info */
+  var panel = document.createElement('div');
+  panel.id = 'vs-info-panel';
+  panel.innerHTML = '<div id="vs-info-content"></div>';
+  modal.appendChild(panel);
+
+  /* Hint clavier */
+  var hint = document.createElement('div');
+  hint.id = 'vs-kbd-hint';
+  hint.className = 'vs-kbd-hint';
+  hint.textContent = '↑ ↓ naviguer   Espace pause   Échap fermer';
+  modal.appendChild(hint);
+
+  /* Raccourcis clavier */
+  if (_vsKbHandler) { document.removeEventListener('keydown', _vsKbHandler); }
+  _vsKbHandler = function(e) {
+    if (!document.getElementById('vs-modal') || document.getElementById('vs-modal').style.display === 'none') return;
+    var feedEl = document.getElementById('vs-feed');
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (_vsCurIdx < _vsItems.length - 1) {
+        var ni = _vsCurIdx + 1;
+        if (feedEl) feedEl.scrollTo({ top: ni * (feedEl.clientHeight || window.innerHeight), behavior: 'smooth' });
+        _vsActivate(ni);
+      }
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (_vsCurIdx > 0) {
+        var pi = _vsCurIdx - 1;
+        if (feedEl) feedEl.scrollTo({ top: pi * (feedEl.clientHeight || window.innerHeight), behavior: 'smooth' });
+        _vsActivate(pi);
+      }
+    } else if (e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      var item = _vsItems[_vsCurIdx];
+      if (item) { if (item.videoEl.paused) { item.videoEl.play().catch(function(){}); _vsFlash(_vsCurIdx, 'fa-play'); } else { item.videoEl.pause(); _vsFlash(_vsCurIdx, 'fa-pause'); } }
+    } else if (e.key === 'Escape') {
+      closeVideoScroll();
+    }
+  };
+  document.addEventListener('keydown', _vsKbHandler);
+
+  /* Met à jour le panneau au changement de vidéo */
+  _vsUpdateDesktopPanel();
+}
+
+/* ── Met à jour le panneau info desktop avec la vidéo courante ── */
+function _vsUpdateDesktopPanel() {
+  var panel = document.getElementById('vs-info-content');
+  if (!panel) return;
+  var item = _vsItems[_vsCurIdx];
+  if (!item) { panel.innerHTML = ''; return; }
+  var post = item.post;
+  var vd   = (post.video && typeof post.video === 'object') ? post.video : {};
+  var pr   = post.ownerEmail ? (loadUserProfile(post.ownerEmail) || {}) : {};
+  var nom  = post.isOfficial ? 'Geniwork' : (pr.nom || (post.ownerEmail ? post.ownerEmail.split('@')[0] : 'Utilisateur'));
+  var photo = post.isOfficial ? ((_admGetOfficialLogo ? _admGetOfficialLogo() : null) || '') : (pr.photo || '');
+  var caption = (post.content || post.text || '');
+  var likers  = post.isOfficial ? (Array.isArray(post.likers) ? post.likers : []) : loadPostLikers(post.id);
+  var likes   = post.isOfficial ? ((post.baseLikes || 0) + likers.length) : likers.length;
+
+  var avHtml = photo
+    ? '<img src="' + escHtml(photo) + '" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,.2)" onerror="this.style.display=\'none\'">'
+    : '<div style="width:48px;height:48px;border-radius:50%;background:#4F46E5;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:20px">' + escHtml(nom.charAt(0).toUpperCase()) + '</div>';
+
+  panel.innerHTML =
+    /* Compteur vidéos */
+    '<div style="color:rgba(255,255,255,.4);font-size:12px;margin-bottom:20px;letter-spacing:.5px">' + (_vsCurIdx + 1) + ' / ' + _vsItems.length + '</div>' +
+
+    /* Auteur */
+    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">' +
+      avHtml +
+      '<div>' +
+        '<div style="color:#fff;font-weight:700;font-size:15px">@' + escHtml(nom) + getBadgeHtml(post.ownerEmail) + '</div>' +
+        (pr.role || post.role ? '<div style="color:rgba(255,255,255,.45);font-size:12px;margin-top:2px">' + escHtml(pr.role || post.role || '') + '</div>' : '') +
+      '</div>' +
+    '</div>' +
+
+    /* Caption */
+    (caption ? '<div style="color:rgba(255,255,255,.8);font-size:14px;line-height:1.6;margin-bottom:20px;white-space:pre-wrap">' + _gwRenderTaggedText(escHtml(caption)) + '</div>' : '') +
+
+    /* Stats */
+    '<div style="display:flex;gap:24px;margin-bottom:24px">' +
+      '<div style="display:flex;flex-direction:column;align-items:center;gap:4px">' +
+        '<span style="color:#fff;font-weight:700;font-size:18px">' + _fmtViews(likes) + '</span>' +
+        '<span style="color:rgba(255,255,255,.45);font-size:11px">Likes</span>' +
+      '</div>' +
+      '<div style="display:flex;flex-direction:column;align-items:center;gap:4px">' +
+        '<span style="color:#fff;font-weight:700;font-size:18px">' + _fmtViews(_getVideoViews(item.postId)) + '</span>' +
+        '<span style="color:rgba(255,255,255,.45);font-size:11px">Vues</span>' +
+      '</div>' +
+      '<div style="display:flex;flex-direction:column;align-items:center;gap:4px">' +
+        '<span style="color:#fff;font-weight:700;font-size:18px">' + _fmtViews(getAllComments(item.postId).length) + '</span>' +
+        '<span style="color:rgba(255,255,255,.45);font-size:11px">Commentaires</span>' +
+      '</div>' +
+    '</div>' +
+
+    /* Actions */
+    '<div style="display:flex;flex-direction:column;gap:10px">' +
+      '<button onclick="vsLike(\'' + item.postId + '\')" style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#fff;border-radius:12px;padding:13px 16px;font-size:14px;font-weight:600;cursor:pointer;text-align:left;display:flex;align-items:center;gap:10px">' +
+        '<i class="fas fa-heart" style="color:#F43F5E;font-size:18px"></i>Liker' +
+      '</button>' +
+      '<button onclick="vsOpenComments(\'' + item.postId + '\')" style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#fff;border-radius:12px;padding:13px 16px;font-size:14px;font-weight:600;cursor:pointer;text-align:left;display:flex;align-items:center;gap:10px">' +
+        '<i class="fas fa-comment" style="color:#60A5FA;font-size:18px"></i>Commenter' +
+      '</button>' +
+      '<button onclick="sharePost(\'' + item.postId + '\')" style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#fff;border-radius:12px;padding:13px 16px;font-size:14px;font-weight:600;cursor:pointer;text-align:left;display:flex;align-items:center;gap:10px">' +
+        '<i class="fas fa-share-nodes" style="color:#A78BFA;font-size:18px"></i>Partager' +
+      '</button>' +
+    '</div>';
+
+  /* Maj état flèches */
+  var btnUp   = document.getElementById('vs-nav-up');
+  var btnDown = document.getElementById('vs-nav-down');
+  if (btnUp)   btnUp.disabled   = (_vsCurIdx === 0);
+  if (btnDown) btnDown.disabled = (_vsCurIdx === _vsItems.length - 1);
+}
+
+/* ── Ferme le player ── */
 function closeVideoScroll() {
   _vsClearEndTimer();
-  if (_vsRafId) { cancelAnimationFrame(_vsRafId); _vsRafId = null; }
-  if (_vsObserver) { _vsObserver.disconnect(); _vsObserver = null; }
-  if (_vsLikesRef) { _vsLikesRef.off(); _vsLikesRef = null; }
+  if (_vsRafId)    { cancelAnimationFrame(_vsRafId); _vsRafId    = null; }
+  if (_vsObserver) { _vsObserver.disconnect();       _vsObserver = null; }
+  if (_vsLikesRef)  { _vsLikesRef.off();  _vsLikesRef  = null; }
+  if (_vsSharesRef) { _vsSharesRef.off(); _vsSharesRef = null; }
+  if (_vsViewsRef)  { _vsViewsRef.off();  _vsViewsRef  = null; }
+  if (_vsKbHandler) { document.removeEventListener('keydown', _vsKbHandler); _vsKbHandler = null; }
+  ['vs-nav-up','vs-nav-down','vs-info-panel','vs-kbd-hint'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.remove();
+  });
   _vsItems.forEach(function(item) {
+    clearTimeout(item._stallTimer);
     try { item.videoEl.pause(); item.videoEl.src = ''; item.videoEl.load(); } catch(e){}
   });
-  _vsItems   = [];
-  _vsCurIdx  = -1;
+  _vsItems  = [];
+  _vsCurIdx = -1;
   var modal = document.getElementById('vs-modal');
   if (modal) modal.style.display = 'none';
   _initFeedVideoObserver();
@@ -13435,6 +15064,7 @@ function _artisteSubmitPost() {
 /* ══════════════════════════════════════════ */
 
 function openMarketplaceCollab() {
+  if (_admGetPlansConfig().collabEnabled === false) return;
   var navBtn = document.querySelector('[data-page="p-marketplace"]');
   navTo(navBtn, 'p-marketplace');
   renderMarketplaceUserServices();
@@ -13587,6 +15217,7 @@ function _vdRenderFeatured(post) {
   var pr    = (post.ownerEmail && loadUserProfile(post.ownerEmail)) || {};
   var nom   = pr.nom || (post.ownerEmail ? post.ownerEmail.split('@')[0] : 'Utilisateur');
   var vSrc  = (post.video.url && !post.video.url.startsWith('blob:')) ? escHtml(post.video.url) : '';
+  var vPoster = post.video.poster ? ' poster="' + post.video.poster + '"' : '';
   var title = escHtml((post.text || post.content || 'Apprenez à votre rythme').substring(0, 60));
   var views = _fmtViews(_getVideoViews(post.id));
   var pid   = post.id;
@@ -13595,7 +15226,7 @@ function _vdRenderFeatured(post) {
     '<div class="vd-featured-card" onclick="_openVideoFromPost(\'' + pid + '\',' + dur + ')">' +
       '<div class="vd-featured-thumb">' +
         (vSrc
-          ? '<video src="' + vSrc + '" preload="metadata" muted playsinline></video>'
+          ? '<video src="' + vSrc + '"' + vPoster + ' preload="metadata" muted playsinline style="width:100%;height:100%;object-fit:cover"></video>'
           : '<div style="width:100%;height:100%;background:linear-gradient(135deg,#1E3A5F,#0D1B2E);display:flex;align-items:center;justify-content:center"><i class="fas fa-video" style="color:#3B82F6;font-size:40px;opacity:.45"></i></div>') +
         '<div class="vd-featured-overlay"></div>' +
         '<div class="vd-featured-play-wrap"><button class="vd-featured-play-btn"><i class="fas fa-play" style="margin-left:3px"></i></button></div>' +
@@ -13642,17 +15273,18 @@ function _vdRenderList(videos) {
     var pr      = (p.ownerEmail && loadUserProfile(p.ownerEmail)) || {};
     var nom     = pr.nom || (p.ownerEmail ? p.ownerEmail.split('@')[0] : 'Utilisateur');
     var vSrc    = (p.video.url && !p.video.url.startsWith('blob:')) ? escHtml(p.video.url) : '';
+    var vPoster = p.video.poster ? ' poster="' + p.video.poster + '"' : '';
     var dur     = formatDuration(p.video.duration || 0);
     var views   = _fmtViews(_getVideoViews(p.id));
     var ago     = _timeAgo(p.at || p.id);
     var title   = escHtml((p.text || p.content || 'Vidéo').substring(0, 60));
-    var badge   = pr.badge ? '<i class="fas fa-circle-check vd-verified"></i>' : '';
+    var badge   = getBadgeHtml(p.ownerEmail);
     var pid     = p.id;
     var pdur    = p.video.duration || 0;
     return '<div class="vd-list-item" onclick="_openVideoFromPost(\'' + pid + '\',' + pdur + ')">' +
       '<div class="vd-list-thumb">' +
         (vSrc
-          ? '<video src="' + vSrc + '" preload="metadata" muted playsinline></video>'
+          ? '<video src="' + vSrc + '"' + vPoster + ' preload="metadata" muted playsinline style="width:100%;height:100%;object-fit:cover"></video>'
           : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><i class="fas fa-video" style="color:#3B82F6;opacity:.4;font-size:20px"></i></div>') +
         '<span class="vd-list-dur">' + dur + '</span>' +
       '</div>' +
@@ -13673,10 +15305,48 @@ function closeVideosDiscover() {
   if (modal) modal.style.display = 'none';
 }
 
-function openVideoPlayer(src, duration) {
+/* Applique la découpe style TikTok (début/fin uniquement) pendant la lecture —
+   sans ré-encodage côté client, c'est le seul moyen de garantir que les autres
+   utilisateurs voient exactement la même tranche que celle choisie à l'édition.
+   L'élément vidéo étant réutilisé entre plusieurs lectures, les bornes actives
+   sont stockées sur l'élément lui-même et remplacées à chaque appel. */
+function _gwApplyVideoTrim(videoEl, trimStart, trimEnd) {
+  if (!videoEl) return;
+  videoEl._gwTrimStart = trimStart > 0 ? trimStart : 0;
+  videoEl._gwTrimEnd   = (trimEnd && trimEnd > videoEl._gwTrimStart) ? trimEnd : null;
+  if (videoEl._gwTrimBound) return;
+  videoEl._gwTrimBound = true;
+  videoEl.addEventListener('timeupdate', function() {
+    var s = videoEl._gwTrimStart || 0;
+    var e = videoEl._gwTrimEnd;
+    if (videoEl.currentTime < s) {
+      videoEl.currentTime = s;
+    } else if (e && videoEl.currentTime >= e) {
+      if (videoEl.loop) {
+        videoEl.currentTime = s;
+      } else {
+        videoEl.pause();
+        videoEl.currentTime = e;
+        videoEl.dispatchEvent(new Event('ended'));
+      }
+    }
+  });
+}
+
+function openVideoPlayer(src, duration, cropPos, cropZoom, trimStart, trimEnd, muted, textLayers, fx) {
   var modal = document.getElementById('video-player-modal');
   var video = document.getElementById('vp-video');
   if (!modal || !video) return;
+  _gwApplyVideoTrim(video, trimStart, trimEnd);
+  /* Respecte le choix "Son" fait par l'auteur dans l'éditeur (vidéo régulière) */
+  video.muted = !!muted;
+  /* Texte/emoji ajoutés dans l'éditeur — superposés à la vidéo, comme dans son aperçu */
+  var vpTextLayers = document.getElementById('vp-text-layers');
+  if (vpTextLayers) vpTextLayers.innerHTML = _gwRenderTextLayersHtml(textLayers);
+  /* Effets overlay (vignette/grain) + glow/zoom/intro/outro choisis dans l'éditeur */
+  var vpOverlays = document.getElementById('vp-overlays');
+  if (vpOverlays) vpOverlays.innerHTML = _gwRenderVideoOverlaysHtml(fx && fx.effects);
+  _gwApplyVideoFx(document.getElementById('vp-area'), video, fx || {});
 
   /* Pause toutes les vidéos du feed pendant la lecture plein écran */
   document.querySelectorAll('[id^="fv-"]').forEach(function(v) {
@@ -13688,11 +15358,20 @@ function openVideoPlayer(src, duration) {
     if (mb) mb.style.opacity = '0';
   });
 
+  /* Recadrage format YouTube choisi dans l'éditeur — applique le même cadrage
+     qu'à la publication (sinon "contain" par défaut affiche la vidéo brute,
+     non recadrée, ce qui contredit le choix fait avant publication) */
+  var _vpCrop = (cropPos && typeof cropPos === 'object') ? cropPos : { x: 50, y: 50 };
+  var _vpZoom = (cropZoom && cropZoom > 1) ? cropZoom : 1;
+  video.style.objectPosition = _vpCrop.x + '% ' + _vpCrop.y + '%';
+
   /* Source — preload auto + force le navigateur à commencer le buffer immédiatement */
   video.preload = 'auto';
   video.playsInline = true;
-  video.style.willChange = 'transform';
-  video.style.transform  = 'translateZ(0)';
+  /* Pas de translateZ(0) : force une couche 3D GPU qui blackscreen la vidéo
+     sur certains Android bas/moyenne gamme. scale() seul suffit pour le zoom. */
+  video.style.transform  = _vpZoom > 1 ? ('scale(' + _vpZoom + ')') : '';
+  video.style.transformOrigin = 'center center';
   video.src = src;
   video.load(); /* force le fetch immédiat — évite la saccade au premier play */
   video.currentTime = 0;
@@ -13733,7 +15412,10 @@ function openVideoPlayer(src, duration) {
 
   /* Events vidéo */
   video.onloadedmetadata = function() {
-    var d = video.duration;
+    /* La vidéo brute n'est jamais réellement tronquée (découpe = lecture
+       virtuelle) — video.duration renvoie donc toujours la durée d'origine.
+       On affiche la durée découpée (fin de coupe) si elle existe, sinon brute. */
+    var d = (video._gwTrimEnd) ? video._gwTrimEnd : video.duration;
     if (durEl) durEl.textContent = formatDuration(d);
     if (seek)  seek.max = d;
   };
@@ -14318,9 +16000,13 @@ function publierPost() {
     if (btn) { btn.disabled = false; btn.innerHTML = 'Publier'; }
   }
 
+  try {
+
   var postId      = Date.now();
   var videoBlob   = _pickedVideo ? (_pickedVideo.file || _pickedVideo.blob || null) : null;
   var videoIdbId  = _pickedVideo ? ('vid_' + postId) : null;
+  /* Capture le type de vidéo avant reset UI (utilisé plus bas pour la compression) */
+  var _pubIsShort = _pickedVideo && _pickedVideo.videoType === 'short';
   var docBlob     = _pickedDoc   ? (_pickedDoc.file  || null) : null;
   var docIdbId    = _pickedDoc   ? ('doc_' + postId) : null;
   /* Capturé maintenant : l'upload réel est désormais différé après le scan
@@ -14337,14 +16023,26 @@ function publierPost() {
 
   /* Vidéo : on stocke l'idbId + le blobUrl courant + le type (short/video) + meta */
   var videoData = _pickedVideo
-    ? { idbId: videoIdbId, url: _pickedVideo.url, duration: _pickedVideo.duration, size: _pickedVideo.size,
+    ? { idbId: videoIdbId, url: _pickedVideo.url,
+        duration: (_pickedVideo.trimmedDuration != null ? _pickedVideo.trimmedDuration : _pickedVideo.duration),
+        size: _pickedVideo.size,
         videoType: _pickedVideo.videoType || 'video',
         vidType:  (_pubVidMeta && _pubVidMeta.vidType)  || '',
         category: (_pubVidMeta && _pubVidMeta.category) || '',
         title:    (_pubVidMeta && _pubVidMeta.title)    || '',
-        cropPos:  _pickedVideo.cropPos  || { x: 50, y: 50 },
-        cropZoom: _pickedVideo.cropZoom || 1,
-        poster:   _pickedVideo.poster   || '' }
+        cropPos:   _pickedVideo.cropPos  || { x: 50, y: 50 },
+        cropZoom:  _pickedVideo.cropZoom || 1,
+        trimStart: _pickedVideo.trimStart || 0,
+        trimEnd:   _pickedVideo.trimEnd   || null,
+        muted:     !!_pickedVideo.muted,
+        textLayers: _pickedVideo.textLayers || [],
+        effects:   _pickedVideo.effects || {},
+        filter:    _pickedVideo.filter  || null,
+        zoom:      _pickedVideo.zoom    || null,
+        zoomDur:   _pickedVideo.zoomDur || 2,
+        intro:     _pickedVideo.intro   || null,
+        outro:     _pickedVideo.outro   || null,
+        poster:    _pickedVideo.poster   || '' }
     : null;
 
   /* Document : idbId + url courante + métadonnées */
@@ -14384,6 +16082,7 @@ function publierPost() {
     likers:     [],
     comments:   [],
     ownerEmail: _currentUser ? _currentUser.email : null,
+    tags:       _gwGetPendingTags(document.getElementById('pub-text')).slice(),
     type:       quoteData ? 'repost' : undefined,
     repostOf:   quoteData || undefined
   };
@@ -14391,6 +16090,13 @@ function publierPost() {
   /* Sauvegarde les blobs dans IndexedDB pour persistance */
   if (videoBlob && videoIdbId) { _gwSaveVideoBlob(videoIdbId, videoBlob, function() {}); }
   if (docBlob   && docIdbId)   { _gwSaveDocBlob(docIdbId, docBlob, function() {}); }
+
+  /* Trace l'envoi en attente — si l'app est fermée pendant l'envoi de la vidéo,
+     elle sera proposée à nouveau (bouton Réessayer) au prochain lancement, car
+     la vidéo est déjà en sécurité dans IndexedDB. */
+  if (_currentUser && videoBlob) {
+    _gwAddPendingPost(_currentUser.email, JSON.parse(JSON.stringify(newPost)));
+  }
 
   /* ── Scan NSFW sur données LOCALES (base64/blob) — avant tout upload ──
      On scanne _imagesSnapshot (base64) + vidéo locale pour éviter les
@@ -14422,16 +16128,31 @@ function publierPost() {
 
   /* Affichage immédiat local avec les base64 */
   DEMO_POSTS.unshift(newPost);
+
+
+  /* Cache le blob URL du Short pour lecture immédiate dans le player (session courante) */
+  if (_pickedVideo && _pickedVideo.url && _pickedVideo.videoType === 'short') {
+    _gwVidBlobCache[String(postId)] = _pickedVideo.url;
+  }
   if (_currentUser) _incDailyCount('posts', _currentUser.email);
   renderFeed(_getFeedPosts());
+  if (_currentUser) _gwNotifyTags(newPost.tags, newPost.id, _currentUser);
+  _gwSaveHashtags(text);
+  var _pubTextEl = document.getElementById('pub-text');
+  if (_pubTextEl) _pubTextEl._gwPendingTags = [];
 
   /* ── Upload médias vers Firebase Storage puis sauvegarde définitive ── */
   function _finalizePost(finalImages, finalVideoUrl, finalDocUrl) {
+   try {
     /* ── Sécurité NSFW : si ce post a été bloqué par le scan, ne JAMAIS l'écrire dans Firebase ── */
     if (_gwNsfwBlockedPosts[String(newPost.id)]) {
       console.warn('[GW-NSFW] _finalizePost ignoré — post bloqué pour nudité', newPost.id);
       return;
     }
+    /* Note : si l'upload vidéo a échoué (finalVideoUrl null), le toast d'erreur a déjà
+       été affiché par le callback onFail de _uploadBlobToStorage. On continue ici pour
+       sauvegarder les métadonnées dans Firebase (idbId seulement) afin que
+       _gwUploadPendingVideos puisse ré-uploader automatiquement au prochain démarrage. */
     newPost.images = finalImages;
     var postToStore = JSON.parse(JSON.stringify(newPost));
     if (postToStore.video) {
@@ -14460,6 +16181,15 @@ function publierPost() {
       if (finalDocUrl   && dp.doc)   dp.doc.url   = finalDocUrl;
     }
     renderFeed(_getFeedPosts());
+    if (_currentUser) _gwRemovePendingPost(_currentUser.email, newPost.id);
+   } catch(_fpErr) {
+     /* Ne JAMAIS laisser une exception ici passer inaperçue : sans ce filet, le post
+        reste uploadé sur Storage/post_videos mais n'est jamais écrit dans gw/posts —
+        il "disparaît" silencieusement pour tout le monde, y compris l'auteur au
+        prochain démarrage (persistNewPost n'a jamais été appelé). */
+     console.error('[GW] ❌ _finalizePost a échoué — post NON sauvegardé :', newPost.id, _fpErr);
+     showToast('⚠️ Échec de la sauvegarde du post (' + (_fpErr && _fpErr.message || _fpErr) + ')', 'err');
+   }
   }
 
   /* ── Attend confirmation de l'auth anonyme Firebase ET résultat du scan NSFW
@@ -14491,24 +16221,37 @@ function publierPost() {
       });
     }
     if (videoBlob) {
-      var _vExt = (videoBlob.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
-      _showVideoProgress(0);
-      _uploadBlobToStorage('videos/' + postId + _vExt, videoBlob,
-        function(url) {
-          _uploadedVideoUrl = url;
-          _hideVideoProgress();
-          showToast('Vidéo synchronisée ✓', 'ok');
-          if (_gwFbReady && _gwFbDB) {
-            _gwFbDB.ref('gw/post_videos/' + postId).set({
-              url: url,
-              dur: newPost.video ? (newPost.video.duration || 0) : 0
-            }).catch(function(){});
+      function _doVidUpload(blobToUp) {
+        var _vExt = (blobToUp.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
+        _showVideoProgress(0, 'Envoi de la vidéo…');
+        _uploadBlobToStorage('videos/' + postId + _vExt, blobToUp,
+          function(url) {
+            _uploadedVideoUrl = url;
+            _showVideoProgress(100, 'Vidéo envoyée ✓');
+            setTimeout(function() { _hideVideoProgress(); }, 800);
+            if (_gwFbReady && _gwFbDB) {
+              _gwFbDB.ref('gw/post_videos/' + postId).set({
+                url: url,
+                dur: newPost.video ? (newPost.video.duration || 0) : 0
+              }).catch(function(){});
+            }
+            _onUploadDone();
+          },
+          function(e) {
+            var _errCode = e && (e.code || e.message || String(e));
+            console.error('[GW Storage] ❌ Échec upload vidéo :', _errCode);
+            showToast('⚠️ Vidéo non uploadée (' + (_errCode || 'inconnu') + ')', 'err');
+            _hideVideoProgress();
+            _onUploadDone();
+          },
+          function(pct) {
+            /* Upload réel : barre de 0 → 100 % */
+            _showVideoProgress(pct, 'Envoi de la vidéo…');
           }
-          _onUploadDone();
-        },
-        function() { _hideVideoProgress(); _onUploadDone(); },
-        function(pct) { _showVideoProgress(pct); }
-      );
+        );
+      }
+      /* La découpe a déjà été traitée dans l'éditeur — upload direct 0→100% */
+      _doVidUpload(videoBlob);
     }
     if (docBlob) {
       var _dExt = _docExtSnapshot ? ('.' + _docExtSnapshot) : '.bin';
@@ -14558,6 +16301,12 @@ function publierPost() {
 
   var scroll = document.getElementById('feed-scroll');
   if (scroll) scroll.scrollTop = 0;
+
+  } catch(err) {
+    console.error('[GW] publierPost erreur :', err && (err.message || err));
+    _unlockPubBtn();
+    showToast('Erreur lors de la publication — réessayez', 'err');
+  }
 }
 
 /* ancienne toggleSidebar supprimée — voir la nouvelle au-dessus */
@@ -14784,12 +16533,12 @@ function markAllRead() {
 })();
 
 function getNotifIcon(type) {
-  var icons = { like: 'fa-heart', comment: 'fa-comment', share: 'fa-share-nodes', follow: 'fa-user-plus', system: 'fa-bell', milestone: 'fa-trophy', bug_report: 'fa-bug', plan_limit: 'fa-lock', official: 'fa-bullhorn', artiste_approved: 'fa-microphone', artiste_copyright_notice: 'fa-scale-balanced' };
+  var icons = { like: 'fa-heart', comment: 'fa-comment', share: 'fa-share-nodes', follow: 'fa-user-plus', system: 'fa-bell', milestone: 'fa-trophy', bug_report: 'fa-bug', plan_limit: 'fa-lock', official: 'fa-bullhorn', artiste_approved: 'fa-microphone', artiste_copyright_notice: 'fa-scale-balanced', tag: 'fa-at' };
   return icons[type] || 'fa-bell';
 }
 
 function getNotifBadgeCls(type) {
-  var cls = { like: 'nb-like', comment: 'nb-comment', share: 'nb-share', follow: 'nb-follow', system: 'nb-system', milestone: 'nb-milestone', bug_report: 'nb-system', plan_limit: 'nb-system', official: 'nb-system', artiste_approved: 'nb-milestone', artiste_copyright_notice: 'nb-system' };
+  var cls = { like: 'nb-like', comment: 'nb-comment', share: 'nb-share', follow: 'nb-follow', system: 'nb-system', milestone: 'nb-milestone', bug_report: 'nb-system', plan_limit: 'nb-system', official: 'nb-system', artiste_approved: 'nb-milestone', artiste_copyright_notice: 'nb-system', tag: 'nb-tag' };
   return cls[type] || 'nb-system';
 }
 
@@ -14876,7 +16625,7 @@ function _openNotifDetail(notif) {
             '<i class="fas fa-microphone"></i> Publier un son' +
           '</button>'
         : notif.postId
-          ? '<button class="ndd-btn-primary" onclick="_nddGoPost(' + notif.postId + ')">' +
+          ? '<button class="ndd-btn-primary" onclick="_nddGoPost(' + notif.postId + ',\'' + (notif.type || '') + '\')">' +
               '<i class="fas fa-arrow-right"></i> Voir la publication' +
             '</button>'
           : (notif.fromUser
@@ -14904,18 +16653,39 @@ function _openNotifDetail(notif) {
   });
 }
 
-function _nddGoPost(postId) {
+function _nddGoPost(postId, notifType) {
   _closeGenericSheet('notif-detail');
+
+  /* Notification de commentaire → ouvre directement les commentaires (lisibles,
+     pas juste le compteur) une fois la publication affichée */
+  function _maybeOpenComments() {
+    if (notifType === 'comment' || notifType === 'tag') {
+      setTimeout(function() { try { openComments(postId); } catch(e) {} }, 350);
+    }
+  }
 
   /* Cherche le post dans le cache */
   var _targetPost = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
 
   if (!_targetPost) {
+    /* Publication officielle (post/vidéo/short Geniwork) — stockage séparé */
+    var _offPost = _offGetPosts().find(function(p) { return String(p.id) === String(postId); });
+    if (_offPost) {
+      if (_offPost.video && _offPost.video.videoType === 'short') {
+        try { openVideoScroll(postId); } catch(e) {}
+      } else if (_offPost.video) {
+        try { _openVideoClassic(_offPost, _offPost.video.duration || 0); } catch(e) {}
+      } else {
+        try { openOfficialProfile(); } catch(e) {}
+      }
+      _maybeOpenComments();
+      return;
+    }
     /* Pas encore chargé → attend 1,2s (Firebase sync) puis réessaie */
     showToast('Chargement de la publication…', 'info');
     setTimeout(function() {
       var p2 = getAllPosts().find(function(p) { return String(p.id) === String(postId); });
-      if (p2) { _openPostQuickView(p2); }
+      if (p2) { _openPostQuickView(p2); _maybeOpenComments(); }
       else { showToast('Publication introuvable', 'warn'); }
     }, 1200);
     return;
@@ -14924,11 +16694,13 @@ function _nddGoPost(postId) {
   if (_targetPost.video) {
     /* Vidéo → lecteur dédié */
     try { _openVideoFromPost(String(postId), _targetPost.video.duration || 0); } catch(e) {}
+    _maybeOpenComments();
     return;
   }
 
   /* Image / texte → bottom-sheet rapide */
   _openPostQuickView(_targetPost);
+  _maybeOpenComments();
 }
 
 /* ── Affiche un post dans un overlay bottom-sheet ── */
@@ -15997,6 +17769,32 @@ function openEditLocation() {
   }, 350);
 }
 
+/* Reverse-geocode lat/lng → ville + pays via Nominatim */
+function _locReverseGeocode(lat, lng, btn) {
+  fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&accept-language=fr')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var addr    = data.address || {};
+      var city    = addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
+      var country = addr.country || '';
+      var ci = document.getElementById('loc-city-inp');
+      var co = document.getElementById('loc-country-inp');
+      if (ci) ci.value = city;
+      if (co) { co.value = country; co.style.background = '#F0FDF4'; }
+      var resBox = document.getElementById('loc-gps-result');
+      var resTxt = document.getElementById('loc-gps-text');
+      if (resBox && resTxt) { resTxt.textContent = (city ? city + ', ' : '') + country; resBox.style.display = 'block'; }
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-check" style="font-size:16px;color:#16A34A"></i> Position détectée !';
+        btn.style.borderColor = '#16A34A';
+        btn.style.background  = 'linear-gradient(135deg,#F0FDF4,#DCFCE7)';
+        btn.style.color       = '#166534';
+      }
+    })
+    .catch(function() { _locGPSError('Impossible de récupérer l\'adresse — saisissez manuellement'); });
+}
+
 /* Détecte la position GPS et remplit les champs ville + pays */
 function _locDetectGPS() {
   var btn = document.getElementById('loc-gps-btn');
@@ -16005,44 +17803,32 @@ function _locDetectGPS() {
     btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:16px"></i> Détection en cours…';
   }
 
+  /* Utilise le plugin Capacitor Geolocation sur Android (demande la permission native) */
+  var capGeo = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Geolocation;
+  if (capGeo) {
+    capGeo.requestPermissions().then(function(permResult) {
+      var state = (permResult && (permResult.location || permResult.coarseLocation)) || 'denied';
+      if (state === 'denied' || state === 'prompt-with-rationale') {
+        _locGPSError('Permission refusée — activez la localisation dans Paramètres > Applis > GENIWORK');
+        return;
+      }
+      return capGeo.getCurrentPosition({ timeout: 10000, maximumAge: 60000 });
+    }).then(function(pos) {
+      if (!pos) return;
+      _locReverseGeocode(pos.coords.latitude, pos.coords.longitude, btn);
+    }).catch(function() {
+      _locGPSError('GPS indisponible — saisissez manuellement');
+    });
+    return;
+  }
+
+  /* Fallback : navigator.geolocation (web) */
   if (!navigator.geolocation) {
     _locGPSError('GPS non supporté par votre navigateur');
     return;
   }
-
   navigator.geolocation.getCurrentPosition(
-    function(pos) {
-      var lat = pos.coords.latitude;
-      var lng = pos.coords.longitude;
-      fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat=' + lat + '&lon=' + lng + '&accept-language=fr')
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-          var addr    = data.address || {};
-          var city    = addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
-          var country = addr.country || '';
-          /* Remplit les champs */
-          var ci = document.getElementById('loc-city-inp');
-          var co = document.getElementById('loc-country-inp');
-          if (ci) ci.value = city;
-          if (co) { co.value = country; co.style.background = '#F0FDF4'; }
-          /* Affiche le résultat */
-          var resBox  = document.getElementById('loc-gps-result');
-          var resTxt  = document.getElementById('loc-gps-text');
-          if (resBox && resTxt) {
-            resTxt.textContent = (city ? city + ', ' : '') + country;
-            resBox.style.display = 'block';
-          }
-          /* Remet le bouton en état normal */
-          if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-check" style="font-size:16px;color:#16A34A"></i> Position détectée !';
-            btn.style.borderColor = '#16A34A';
-            btn.style.background  = 'linear-gradient(135deg,#F0FDF4,#DCFCE7)';
-            btn.style.color       = '#166534';
-          }
-        })
-        .catch(function() { _locGPSError('Impossible de récupérer l\'adresse — saisissez manuellement'); });
-    },
+    function(pos) { _locReverseGeocode(pos.coords.latitude, pos.coords.longitude, btn); },
     function(err) {
       var msg = err.code === 1
         ? 'Permission GPS refusée — saisissez manuellement'
@@ -16453,6 +18239,14 @@ function saveReviews(profileKey, reviews) {
 function openUserProfileView(userInfo) {
   if (!userInfo || !userInfo.nom) return;
 
+  /* Respecte "Profil visible" — bloque l'ouverture du profil d'un autre utilisateur qui l'a masqué */
+  if (!userInfo._isOfficial && userInfo.email && !(_currentUser && userInfo.email === _currentUser.email)) {
+    if (_privLoadForEmail(userInfo.email).profileVisible === false) {
+      showToast('Ce profil n\'est pas visible', 'err');
+      return;
+    }
+  }
+
   /* ── Compte officiel Geniwork ── */
   if (userInfo._isOfficial) {
     userInfo = { nom: 'Geniwork', email: null, role: 'Compte officiel certifié', _isOfficial: true };
@@ -16651,10 +18445,20 @@ function openUserProfileView(userInfo) {
   if (!isDemo && _currentUser && userInfo.email === _currentUser.email) {
     dispFllw = getFollowing().length;
   }
-  _t('upv-stat-projects',  dispProj);
-  _t('upv-stat-rating',    avg ? avg + ' ★' : '—');
-  _t('upv-stat-followers', followers);
-  _t('upv-stat-following', dispFllw);
+  /* Respecte "Statistiques de profil visibles" — masque les chiffres aux autres si désactivé */
+  var _isOwnProfileView = !isDemo && _currentUser && userInfo.email === _currentUser.email;
+  var _statsHidden = !isDemo && !_isOwnProfileView && _privLoadForEmail(userInfo.email).showStats === false;
+  if (_statsHidden) {
+    _t('upv-stat-projects',  '—');
+    _t('upv-stat-rating',    '—');
+    _t('upv-stat-followers', '—');
+    _t('upv-stat-following', '—');
+  } else {
+    _t('upv-stat-projects',  dispProj);
+    _t('upv-stat-rating',    avg ? avg + ' ★' : '—');
+    _t('upv-stat-followers', followers);
+    _t('upv-stat-following', dispFllw);
+  }
 
   /* Bio */
   var bioEl = document.getElementById('upv-bio');
@@ -16955,6 +18759,17 @@ function _postPubCategory(p) {
 function renderProfilPosts(email, nom, container) {
   if (!container) return;
   container.innerHTML = '';
+
+  /* Respecte "Publications visibles" — masque les posts d'un autre utilisateur qui l'a désactivé */
+  if (email && !(_currentUser && email === _currentUser.email) && _privLoadForEmail(email).postsVisible === false) {
+    container.innerHTML =
+      '<div class="profil-posts-empty">' +
+        '<i class="fas fa-eye-slash"></i>' +
+        '<p>Publications masquées</p>' +
+        '<small>Cet utilisateur a choisi de masquer ses publications</small>' +
+      '</div>';
+    return;
+  }
 
   function _doRenderPosts(allPosts) {
     container.innerHTML = '';
@@ -19429,7 +21244,14 @@ function _renderChatMessages(conv) {
 
 function _scrollChatToBottom() {
   var box = document.getElementById('chat-messages');
-  if (box) box.scrollTop = box.scrollHeight;
+  if (!box) return;
+  box.scrollTop = box.scrollHeight;
+  /* Refire après la prochaine passe layout — nécessaire quand la barre de réponse
+     se cache ou quand le clavier mobile change la hauteur de la vue */
+  requestAnimationFrame(function() {
+    var b = document.getElementById('chat-messages');
+    if (b) b.scrollTop = b.scrollHeight;
+  });
 }
 
 /* ══════════════════════════════════════════
@@ -19535,6 +21357,8 @@ function _dmClose() {
 ══════════════════════════════════════════════════════════════════ */
 function _dmOpen(conv) {
   _dmClose();
+  /* Force la reconnexion Firebase immédiate avant d'attacher le listener */
+  if (_gwFbDB) { try { _gwFbDB.goOnline(); } catch(e){} }
   if (!conv || conv.isGroup || !conv.email || !_currentUser) return;
 
   /* Firebase requis pour les DM */
@@ -19670,6 +21494,13 @@ function _dmOpen(conv) {
   }, 200);
 }
 
+/* Debounce renderConversations pour ne pas re-rendre 30× lors du chargement de l'historique */
+var _renderConvTimer = null;
+function _renderConvDebounced() {
+  clearTimeout(_renderConvTimer);
+  _renderConvTimer = setTimeout(renderConversations, 120);
+}
+
 /* ── Rend un message dans le DOM + met à jour l'état de la conversation ── */
 function _dmRenderMsg(msg, ref, fbKey) {
   if (_dmRef !== ref || _dmRefKey !== fbKey) return;
@@ -19691,8 +21522,9 @@ function _dmRenderMsg(msg, ref, fbKey) {
   _scrollChatToBottom();
 
   /* ── Si message reçu (pas de moi) → marquer immédiatement comme lu dans Firebase ──
-     La conversation est ouverte, donc le destinataire voit le message instantanément. */
-  if (!isMine && msg.read !== true && _gwFbDB) {
+     La conversation est ouverte, donc le destinataire voit le message instantanément.
+     Respecte "Accusés de lecture" : si désactivé, le lecteur reste invisible côté expéditeur. */
+  if (!isMine && msg.read !== true && _gwFbDB && _privLoad().readReceipts !== false) {
     _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + idStr + '/read').set(true).catch(function(){});
   }
 
@@ -19709,7 +21541,7 @@ function _dmRenderMsg(msg, ref, fbKey) {
        '📎 ' + (msg.fileName || 'Fichier'));
     conv2.lastMsg = lbl;
     conv2.lastAt  = msg.at || Date.now();
-    renderConversations();
+    _renderConvDebounced();
   }
 }
 
@@ -19971,7 +21803,7 @@ function _buildBubbleHtml(m, isMine) {
         '<div style="padding:9px 10px 4px">' +
           catLabel +
           '<div style="font-size:12.5px;font-weight:800;color:#0F172A;margin:4px 0 2px;line-height:1.3">' + escHtml(m.listingTitle || 'Annonce') + '</div>' +
-          '<div style="font-size:14px;font-weight:800;color:#6366F1">' + parseFloat(m.listingPrice || 0).toFixed(2) + ' €</div>' +
+          '<div style="font-size:14px;font-weight:800;color:#6366F1">' + _gwFmtPrice(m.listingPrice || 0, m.listingCurrency || 'EUR') + '</div>' +
         '</div>' +
         '<button onclick="_mkOpenDetail(\'' + safeId + '\')" style="width:100%;padding:9px 0;background:#6366F1;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px">' +
           '<i class="fas fa-eye"></i>Voir l\'annonce' +
@@ -20330,6 +22162,20 @@ function sendChatMessage() {
   /* ── Vérification restriction ── */
   if (_gwIsRestricted(_currentUser.email)) {
     if (_gwShowRestrictionAlert('message')) return;
+  }
+
+  /* ── Respecte "Recevoir des messages de" du destinataire ── */
+  var _convCheck = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (_convCheck && !_convCheck.isGroup && _convCheck.email) {
+    var _recipPriv = _privLoadForEmail(_convCheck.email);
+    if (_recipPriv.messagesFrom === 'none') {
+      showToast('Cet utilisateur n\'accepte aucun message', 'err');
+      return;
+    }
+    if (_recipPriv.messagesFrom === 'followers' && !isFollowing(_convCheck.email)) {
+      showToast('Cet utilisateur n\'accepte les messages que de ses abonnés', 'err');
+      return;
+    }
   }
 
   /* ── Analyse du contenu ── */
@@ -21822,7 +23668,7 @@ function _setSvcItemType(type) {
   if (titleEl) titleEl.textContent = type === 'produit' ? 'Ajouter un produit / article' : 'Ajouter un service';
   var noticeEl = document.getElementById('svc-form-notice');
   if (noticeEl) noticeEl.innerHTML = '<i class="fas fa-circle-info"></i> ' +
-    (type === 'produit' ? 'Visible dans la Marketplace' : 'Visible sur votre profil uniquement');
+    (type === 'produit' ? 'Visible dans Le Souk' : 'Visible sur votre profil uniquement');
   /* Réinitialise les photos quand on change de type (nouveau formulaire) */
   _svcPickedImages = [];
   _rebuildSvcFormInner(null);
@@ -22168,7 +24014,7 @@ function _toggleSvcMarketplace(svcId) {
   saveUserServices(_currentUser.email, list);
   renderProfileServices();
   renderMarketplaceUserServices();
-  showToast(svc.showInMarketplace ? 'Publié dans la Marketplace ✓' : 'Retiré de la Marketplace', 'ok');
+  showToast(svc.showInMarketplace ? 'Publié dans Le Souk ✓' : 'Retiré du Souk', 'ok');
 }
 
 function _deleteSvc(svcId) {
@@ -22199,6 +24045,7 @@ function renderMarketplaceUserServices() {
   try {
     var users = JSON.parse(localStorage.getItem('gw_users') || '[]');
     users.forEach(function(u) {
+      if (_privLoadForEmail(u.email).showInMarketplace === false) return;
       loadUserServices(u.email).forEach(function(svc) {
         if (svc.showInMarketplace) all.push(svc);
       });
@@ -22206,7 +24053,7 @@ function renderMarketplaceUserServices() {
     /* Aussi le currentUser si pas encore dans gw_users */
     if (_currentUser) {
       var alreadyIn = users.some(function(u) { return u.email === _currentUser.email; });
-      if (!alreadyIn) {
+      if (!alreadyIn && _privLoadForEmail(_currentUser.email).showInMarketplace !== false) {
         loadUserServices(_currentUser.email).forEach(function(svc) {
           if (svc.showInMarketplace) all.push(svc);
         });
@@ -22340,7 +24187,7 @@ function setMkCat(btn, cat) {
   if (!artisteHeader && mkTopbar && mkTopbar.parentNode) {
     artisteHeader = document.createElement('div');
     artisteHeader.id = 'mk-artiste-header';
-    artisteHeader.style.cssText = 'display:none;align-items:center;gap:12px;padding:14px 16px 10px;position:sticky;top:0;z-index:10;background:var(--bg-page,#0F172A)';
+    artisteHeader.style.cssText = 'display:none;align-items:center;gap:12px;padding:calc(14px + var(--gw-sat, env(safe-area-inset-top, 0px))) 16px 10px;position:sticky;top:0;z-index:10;background:var(--bg-page,#0F172A)';
     artisteHeader.innerHTML =
       '<button onclick="setMkCat(document.querySelector(\'.mk-cat\'),\'all\')" ' +
         'style="background:#1E293B;border:none;border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;color:#94A3B8;font-size:15px">' +
@@ -22444,9 +24291,13 @@ function setMkCat(btn, cat) {
     else document.querySelectorAll('.mk-cards-row').forEach(function(r){ r.style.display = ''; });
   }
 
-  /* Section Collaboration */
+  /* Section Collaboration — respecte le toggle admin */
   var collabSection = document.getElementById('mk-collab-section');
-  if (collabSection) collabSection.style.display = (isArtiste ? 'none' : (cat === 'all' || cat === 'collab') ? '' : 'none');
+  if (collabSection) {
+    var _collabCfg = _admGetPlansConfig();
+    var _collabAllowed = _collabCfg.collabEnabled !== false;
+    collabSection.style.display = (!_collabAllowed || isArtiste) ? 'none' : (cat === 'all' || cat === 'collab') ? '' : 'none';
+  }
 }
 
 function filterMarketplace(q) {
@@ -22646,7 +24497,7 @@ function _mkOpenMyPurchases() {
 
   /* ── Header ── */
   var html =
-    '<div style="position:sticky;top:0;background:#fff;z-index:10;padding:14px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #E2E8F0;box-shadow:0 1px 4px rgba(0,0,0,.05)">' +
+    '<div style="position:sticky;top:0;background:#fff;z-index:10;padding:calc(14px + var(--gw-sat, env(safe-area-inset-top, 0px))) 16px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #E2E8F0;box-shadow:0 1px 4px rgba(0,0,0,.05)">' +
       '<button onclick="_mkCloseScreen(\'mk-purchases-screen\')" style="width:36px;height:36px;border:none;background:#F1F5F9;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;color:#374151;cursor:pointer"><i class="fas fa-arrow-left"></i></button>' +
       '<div>' +
         '<div style="font-size:17px;font-weight:800;color:#0F172A">Mes achats</div>' +
@@ -22707,7 +24558,16 @@ function _mkOpenMySales() {
   var email    = _currentUser.email;
   var listings = _mkGetListings().filter(function(l){ return l.sellerEmail === email; });
   var txns     = _mkGetTxns().filter(function(t){ return (t.sellerEmail||'').indexOf(email) !== -1; });
-  var totalNet = txns.reduce(function(s,t){ return s + (t.sellerNet || (t.amount-(t.commission||0))); }, 0);
+
+  /* Le solde affiché se réinitialise chaque mois — l'historique complet reste
+     consultable dans "Commandes reçues" et téléchargeable */
+  var now        = new Date();
+  var monthTxns  = txns.filter(function(t){
+    var d = new Date(t.date);
+    return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+  });
+  var monthNet   = monthTxns.reduce(function(s,t){ return s + (t.sellerNet || (t.amount-(t.commission||0))); }, 0);
+  var moisLabel  = now.toLocaleDateString('fr-FR', { month:'long', year:'numeric' });
 
   var existing = document.getElementById('mk-sales-screen');
   if (existing) existing.remove();
@@ -22720,7 +24580,7 @@ function _mkOpenMySales() {
 
   /* ── Header ── */
   var html =
-    '<div style="position:sticky;top:0;background:#fff;z-index:10;padding:14px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #E2E8F0;box-shadow:0 1px 4px rgba(0,0,0,.05)">' +
+    '<div style="position:sticky;top:0;background:#fff;z-index:10;padding:calc(14px + var(--gw-sat, env(safe-area-inset-top, 0px))) 16px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #E2E8F0;box-shadow:0 1px 4px rgba(0,0,0,.05)">' +
       '<button onclick="_mkCloseScreen(\'mk-sales-screen\')" style="width:36px;height:36px;border:none;background:#F1F5F9;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;color:#374151;cursor:pointer"><i class="fas fa-arrow-left"></i></button>' +
       '<div>' +
         '<div style="font-size:17px;font-weight:800;color:#0F172A">Mes ventes</div>' +
@@ -22734,9 +24594,10 @@ function _mkOpenMySales() {
     '<div style="margin:16px;background:linear-gradient(135deg,#059669,#10B981);border-radius:16px;padding:18px;color:#fff">' +
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
         '<div>' +
-          '<div style="font-size:11px;opacity:.8;margin-bottom:4px">Total gagné (net)</div>' +
-          '<div style="font-size:30px;font-weight:800">' + totalNet.toFixed(2) + ' €</div>' +
-          '<div style="font-size:11px;opacity:.7;margin-top:4px">' + txns.length + ' vente(s) · après 1% commission</div>' +
+          '<div style="font-size:11px;opacity:.8;margin-bottom:4px">Total gagné (net) · ' + escHtml(moisLabel) + '</div>' +
+          '<div style="font-size:30px;font-weight:800">' + monthNet.toFixed(2) + ' €</div>' +
+          '<div style="font-size:11px;opacity:.7;margin-top:4px">' + monthTxns.length + ' vente(s) ce mois · après 1% commission</div>' +
+          '<div style="font-size:10px;opacity:.6;margin-top:6px"><i class="fas fa-rotate" style="margin-right:4px"></i>Solde réinitialisé chaque mois</div>' +
         '</div>' +
         '<div style="text-align:right">' +
           '<div style="font-size:11px;opacity:.8">Annonces actives</div>' +
@@ -22796,7 +24657,10 @@ function _mkOpenMySales() {
 
   /* ── Commandes reçues ── */
   html += '<div style="padding:0 16px 24px">' +
-    '<div style="font-size:13px;font-weight:800;color:#0F172A;margin:6px 0 10px">📦 Commandes reçues</div>';
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin:6px 0 10px">' +
+      '<div style="font-size:13px;font-weight:800;color:#0F172A">📦 Commandes reçues</div>' +
+      (txns.length ? '<button onclick="_mkDownloadSalesHistory(\'' + email.replace(/'/g,"\\'") + '\')" style="padding:6px 11px;background:#EEF2FF;color:#6366F1;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-download" style="margin-right:4px"></i>Télécharger l\'historique</button>' : '') +
+    '</div>';
 
   if (!txns.length) {
     html += '<div style="text-align:center;padding:20px;background:#fff;border-radius:14px;color:#94A3B8;font-size:13px">Aucune commande reçue pour l\'instant.</div>';
@@ -22827,6 +24691,42 @@ function _mkOpenMySales() {
   html += '</div>';
 
   screen.innerHTML = html;
+}
+
+/* ── Télécharge l'historique complet des ventes (CSV) ── */
+function _mkDownloadSalesHistory(email) {
+  var txns = _mkGetTxns().filter(function(t){ return (t.sellerEmail||'').indexOf(email) !== -1; });
+  if (!txns.length) { showToast('Aucune vente à exporter', 'err'); return; }
+
+  var rows = [['Date', 'Annonce', 'Acheteur', 'Montant brut', 'Commission', 'Net reçu', 'Devise', 'Statut']];
+  txns.slice().reverse().forEach(function(t) {
+    var net = t.sellerNet != null ? t.sellerNet : (t.amount - (t.commission||0));
+    rows.push([
+      new Date(t.date).toLocaleString('fr-FR'),
+      t.listingTitle || '',
+      t.buyerEmail || '',
+      (t.amount||0).toFixed(2),
+      (t.commission||0).toFixed(2),
+      net.toFixed(2),
+      t.currency || 'EUR',
+      t.status || ''
+    ]);
+  });
+
+  var csv = rows.map(function(r) {
+    return r.map(function(cell) { return '"' + String(cell).replace(/"/g,'""') + '"'; }).join(',');
+  }).join('\r\n');
+
+  var blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement('a');
+  a.href = url;
+  a.download = 'geniwork-historique-ventes-' + new Date().toISOString().slice(0,10) + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showToast('Historique téléchargé ✓', 'ok');
 }
 
 /* ── Modifier le prix d'une annonce ── */
@@ -22924,6 +24824,7 @@ function renderAchatServices() {
     var users = JSON.parse(localStorage.getItem('gw_users') || '[]');
     users.forEach(function(u) {
       if (_currentUser && u.email === _currentUser.email) return;
+      if (_privLoadForEmail(u.email).showInMarketplace === false) return;
       loadUserServices(u.email).forEach(function(svc) {
         if (svc.showInMarketplace) { svc._ownerEmail = u.email; all.push(svc); }
       });
@@ -23088,7 +24989,7 @@ function openMkNotifs() {
   card.innerHTML =
     '<div class="cam-sheet-handle"></div>' +
     '<div class="mk-notifs-head">' +
-      '<span class="mk-notifs-title">Notifications Marketplace</span>' +
+      '<span class="mk-notifs-title">Notifications Le Souk</span>' +
       (notifs.length ? '<button class="mk-notifs-clear" onclick="_clearMkNotifs()">Tout effacer</button>' : '') +
     '</div>' +
     '<div class="mk-notifs-list">' + itemsHtml + '</div>';
@@ -23587,6 +25488,8 @@ function renderSrchResults(query) {
 
   /* Utilisateurs inscrits — toujours le nom actuel du profil */
   getUsers().forEach(function(u) {
+    /* Respecte "Apparaître dans les recherches" — sauf pour soi-même */
+    if (!(_currentUser && u.email === _currentUser.email) && _privLoadForEmail(u.email).showInSearch === false) return;
     var currentNom  = getDisplayName(u.email, u.nom);
     var currentRole = getDisplayRole(u.email, 'Membre Geniwork');
     if (currentNom.toLowerCase().indexOf(q) !== -1 ||
@@ -23598,6 +25501,7 @@ function renderSrchResults(query) {
 
   /* Auteurs des posts démo — nom toujours à jour */
   getAllPosts().forEach(function(p) {
+    if (p.ownerEmail && !(_currentUser && p.ownerEmail === _currentUser.email) && _privLoadForEmail(p.ownerEmail).showInSearch === false) return;
     var currentNom  = getDisplayName(p.ownerEmail, p.author);
     var currentRole = getDisplayRole(p.ownerEmail, p.role);
     var key = currentNom.toLowerCase();
@@ -23610,6 +25514,7 @@ function renderSrchResults(query) {
 
   /* ── Recherche de publications — texte + nom auteur à jour ── */
   var matchedPosts = getAllPosts().filter(function(p) {
+    if (p.ownerEmail && !(_currentUser && p.ownerEmail === _currentUser.email) && _privLoadForEmail(p.ownerEmail).postsVisible === false) return false;
     var currentNom = getDisplayName(p.ownerEmail, p.author);
     return (p.text       && p.text.toLowerCase().indexOf(q)      !== -1) ||
            currentNom.toLowerCase().indexOf(q)                   !== -1  ||
@@ -23833,6 +25738,125 @@ function _handleBackButton(e) {
 }
 
 document.addEventListener('backbutton', _handleBackButton, false);
+
+/* ══════════════════════════════════════════
+   GESTE DE RETOUR — glisser de droite à gauche
+   Ferme l'écran/panneau ouvert le plus profond. Ne fait JAMAIS de navigation
+   navigateur ni ne quitte l'app (contrairement à _handleBackButton) — c'est
+   précisément ce qui avait causé la page blanche lors de la tentative précédente.
+   Si rien n'est ouvert : ne fait rien (no-op), pas de fallback risqué.
+══════════════════════════════════════════ */
+var _GW_SWIPE_BACK_TARGETS = [
+  /* ── Panneaux imbriqués dans le chat (les plus "profonds") ── */
+  { check: function() { var el = document.getElementById('chat-profile-panel'); return !!(el && el.classList.contains('open')); }, close: function() { closeChatProfilePanel(); } },
+  { check: function() { var el = document.getElementById('comments-panel'); return !!(el && !el.classList.contains('hidden')); }, close: function() { closeComments(); } },
+  { check: function() { var bg = document.getElementById('job-detail-bg'); return !!bg; }, close: function() { var bg=document.getElementById('job-detail-bg'),card=document.getElementById('job-detail-card'); if(bg) bg.remove(); if(card) card.remove(); } },
+  { check: function() { var v = document.getElementById('photo-viewer'); return !!(v && !v.classList.contains('hidden')); }, close: function() { closePhotoViewer(); } },
+  { check: function() { var m = document.getElementById('video-player-modal'); return !!(m && m.style.display !== 'none' && m.style.display !== ''); }, close: function() { closeVideoPlayer(); } },
+  { check: function() { var m = document.getElementById('vs-modal'); return !!(m && m.style.display !== 'none' && m.style.display !== ''); }, close: function() { closeVideoScroll(); } },
+  { check: function() { var m = document.getElementById('vd-modal'); return !!(m && m.style.display !== 'none' && m.style.display !== ''); }, close: function() { closeVideosDiscover(); } },
+  { check: function() { return _isScreenOpen('user-profile-view'); }, close: function() { closeUserProfileView(); } },
+  { check: function() { var m = document.getElementById('project-form-modal'); return !!(m && m.classList.contains('open') && !m.classList.contains('hidden')); }, close: function() { closeProjectForm(); } },
+  { check: function() { var el = document.getElementById('chat-screen'); return !!(el && el.classList.contains('open') && !el.classList.contains('hidden')); }, close: function() { closeChat(); } },
+  { check: function() { var el = document.getElementById('search-overlay'); return !!(el && el.classList.contains('open') && !el.classList.contains('hidden')); }, close: function() { closeSearch(); } },
+  { check: function() { return _isScreenOpen('change-pwd-screen'); }, close: function() { closeChangePwdScreen(); } },
+  { check: function() { return _isScreenOpen('legal-cgu-screen'); }, close: function() { closeLegalScreen('cgu'); } },
+  { check: function() { return _isScreenOpen('legal-privacy-screen'); }, close: function() { closeLegalScreen('privacy'); } },
+  { check: function() { return _isScreenOpen('privacy-settings-screen'); }, close: function() { closePrivacySettings(); } },
+  { check: function() { return _isScreenOpen('support-screen'); }, close: function() { closeSupportScreen(); } },
+  { check: function() { return _isScreenOpen('badge-screen'); }, close: function() { closeBadgePage(); } },
+  { check: function() { return _isScreenOpen('favoris-screen'); }, close: function() { closeFavorisScreen(); } },
+  { check: function() { return _isScreenOpen('cart-screen'); }, close: function() { closeCartScreen(); } },
+  { check: function() { return _isScreenOpen('achat-screen'); }, close: function() { closeAchatScreen(); } },
+  { check: function() { return _isScreenOpen('dash-screen'); }, close: function() { closeDashboard(); } },
+  { check: function() { return _isScreenOpen('sub-screen'); }, close: function() { closeSubPage(); } },
+  { check: function() { return _isScreenOpen('settings-screen'); }, close: function() { closeAppSettings(); } },
+  { check: function() { var sb = document.getElementById('app-sidebar'); return !!(sb && sb.classList.contains('open')); }, close: function() { closeSidebar(); } }
+];
+
+function _gwTriggerSwipeBack() {
+  for (var i = 0; i < _GW_SWIPE_BACK_TARGETS.length; i++) {
+    try {
+      if (_GW_SWIPE_BACK_TARGETS[i].check()) {
+        _GW_SWIPE_BACK_TARGETS[i].close();
+        return true;
+      }
+    } catch(e) { /* un écran défaillant ne doit jamais bloquer le geste */ }
+  }
+  /* ── Filet de sécurité générique ──
+     Pour tout écran/modale ouvert qu'on n'a pas listé explicitement ci-dessus :
+     cherche SON propre bouton retour/fermer déjà câblé (onclick="closeXxx()" ou
+     équivalent) et clique-le. Ne fait JAMAIS de navigation ni n'invente de logique
+     — réutilise uniquement ce que l'écran sait déjà faire lui-même. */
+  try {
+    var nodes = document.querySelectorAll(
+      '[class*="-screen"]:not(.hidden), [class*="-modal"]:not(.hidden), [class*="-overlay"]:not(.hidden), [class*="-panel"]:not(.hidden)'
+    );
+    for (var j = nodes.length - 1; j >= 0; j--) {
+      var el = nodes[j];
+      if (!el || el.id === 'screen-app') continue;
+      var rect = el.getBoundingClientRect();
+      if (rect.width < 10 || rect.height < 10) continue;
+      var btn = el.querySelector('[onclick*="close"]');
+      if (btn) { btn.click(); return true; }
+    }
+  } catch(e) { /* silencieux */ }
+  return false;
+}
+
+/* Empêche le geste de se déclencher dans un élément qui défile horizontalement
+   (carrousels, stories, listes scroll-x) pour ne pas interférer avec leur scroll */
+function _gwHasHorizontalScrollAncestor(el) {
+  var depth = 0;
+  while (el && el !== document.body && depth < 12) {
+    try {
+      if (el.scrollWidth > el.clientWidth + 4) {
+        var st = window.getComputedStyle(el);
+        if (st.overflowX === 'auto' || st.overflowX === 'scroll') return true;
+      }
+    } catch(e) {}
+    el = el.parentElement;
+    depth++;
+  }
+  return false;
+}
+
+(function _gwInitSwipeBack() {
+  var _sbStartX = 0, _sbStartY = 0, _sbStartTarget = null, _sbTracking = false;
+  var SWIPE_MIN_DX  = 70;  /* distance horizontale minimale */
+  var SWIPE_MAX_DY   = 60;  /* tolérance verticale — doit rester un geste horizontal */
+
+  document.addEventListener('touchstart', function(e) {
+    try {
+      if (!e.touches || e.touches.length !== 1) { _sbTracking = false; return; }
+      var tag = e.target && e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) {
+        _sbTracking = false; return;
+      }
+      var t = e.touches[0];
+      _sbStartX = t.clientX; _sbStartY = t.clientY;
+      _sbStartTarget = e.target;
+      _sbTracking = true;
+    } catch(err) { _sbTracking = false; }
+  }, { passive: true });
+
+  document.addEventListener('touchend', function(e) {
+    try {
+      if (!_sbTracking) return;
+      _sbTracking = false;
+      var t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      var dx = t.clientX - _sbStartX;
+      var dy = t.clientY - _sbStartY;
+      /* Glissement droite → gauche */
+      if (dx < -SWIPE_MIN_DX && Math.abs(dy) < SWIPE_MAX_DY) {
+        if (!_gwHasHorizontalScrollAncestor(_sbStartTarget)) {
+          _gwTriggerSwipeBack();
+        }
+      }
+    } catch(err) { /* silencieux — un geste raté ne doit jamais casser l'app */ }
+  }, { passive: true });
+})();
 
 /* ══════════════════════════════════════════
    PAGE ABONNEMENTS — 3 NIVEAUX
@@ -24584,7 +26608,7 @@ function _renderDashboard() {
   /* Sources de trafic */
   var tSrc = [
     { label:'Recherche',       pct:45, color:'#6366F1' },
-    { label:'Marketplace',     pct:30, color:'#10B981' },
+    { label:'Le Souk',         pct:30, color:'#10B981' },
     { label:'Réseaux sociaux', pct:15, color:'#8B5CF6' },
     { label:'Accès direct',    pct:10, color:'#F59E0B' }
   ];
@@ -25166,21 +27190,27 @@ function _gwIsRestricted(email) {
 /* ── Analyser un texte — retourne { flagged, type, reason } ── */
 function _gwCheckContent(text) {
   if (!text) return { flagged: false, type: null, reason: null };
-  var lower = text.toLowerCase()
+  /* Supprimer les adresses email avant analyse pour éviter les faux positifs
+     (ex: "passion@gmail.com" contient "ass" mais n'est pas du contenu sexuel) */
+  var clean = text.replace(/[\w.+%-]+@[\w.-]+\.[a-z]{2,}/gi, '');
+  var lower = clean.toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')  /* retire accents pour comparaison */
     .replace(/[^a-z0-9\s\+]/g, ' ');                   /* normalise ponctuation */
   var words = lower.split(/\s+/);
   var wordSet = new Set(words);
 
-  /* Contenu sexuel */
+  /* Contenu sexuel :
+     - phrase (avec espace) → indexOf (sous-chaîne)
+     - mot seul            → wordSet (mot exact, évite "class"→"ass") */
   for (var i = 0; i < _GW_SEXUAL_WORDS.length; i++) {
     var sw = _GW_SEXUAL_WORDS[i].toLowerCase()
       .normalize('NFD').replace(/[̀-ͯ]/g, '');
-    if (wordSet.has(sw) || lower.indexOf(sw) !== -1) {
+    var isPhrase = sw.indexOf(' ') !== -1;
+    if (isPhrase ? lower.indexOf(sw) !== -1 : wordSet.has(sw)) {
       return { flagged: true, type: 'sexual', reason: 'Contenu à caractère sexuel ou nudité détecté' };
     }
   }
-  /* Discours haineux */
+  /* Discours haineux (toujours des phrases → indexOf reste correct) */
   for (var j = 0; j < _GW_HATE_WORDS.length; j++) {
     var hw = _GW_HATE_WORDS[j].toLowerCase()
       .normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -25840,7 +27870,63 @@ function _gwApplyMkSections() {
 }
 function _admSavePlansConfig(cfg) {
   localStorage.setItem('gw_plans_config', JSON.stringify(cfg));
-  _gwFbSet('plans_config', cfg); /* Sync Firebase → tous les appareils */
+  _admApi('moderate', { token: _admSessionToken, action: 'setPlansConfig', config: cfg }); /* Sync Firebase → tous les appareils */
+}
+
+/* ── Config contact support ── */
+function _admGetSupportConfig() {
+  try {
+    var defaults = { email: 'support@geniwork.com', waLink: 'https://wa.me/message/geniwork' };
+    var stored = JSON.parse(localStorage.getItem('gw_support_config') || '{}');
+    return Object.assign(defaults, stored);
+  } catch(e) { return { email: 'support@geniwork.com', waLink: 'https://wa.me/message/geniwork' }; }
+}
+function _admSaveSupportConfig(cfg) {
+  localStorage.setItem('gw_support_config', JSON.stringify(cfg));
+  _admApi('moderate', { token: _admSessionToken, action: 'setSupportConfig', config: cfg });
+}
+/* Met à jour les liens email/WhatsApp dans la page support */
+function _gwLoadSupportContact() {
+  var cfg = _admGetSupportConfig();
+  var emailLink = document.getElementById('support-email-link');
+  var emailText = document.getElementById('support-email-text');
+  var waLink    = document.getElementById('support-wa-link');
+  var waText    = document.getElementById('support-wa-text');
+  if (emailLink) emailLink.href = 'mailto:' + cfg.email;
+  if (emailText) emailText.textContent = cfg.email;
+  /* Construction du lien WhatsApp : numéro seul → wa.me/NUMERO */
+  var waHref = cfg.waLink || '';
+  if (waHref && !/^https?:\/\//i.test(waHref)) {
+    waHref = 'https://wa.me/' + waHref.replace(/\D/g, '');
+  }
+  if (waLink) waLink.href = waHref || '#';
+  if (waText) waText.textContent = waHref ? 'Réponse rapide' : 'Non configuré';
+}
+function _admSaveSupportEmail() {
+  if (!_adminUser || !_admHasAction('change_settings')) { showToast('Réservé au Super Admin', 'err'); return; }
+  var input = document.getElementById('adm-support-email-input');
+  if (!input) return;
+  var email = (input.value || '').trim();
+  if (!email || !email.includes('@')) { showToast('Email invalide', 'err'); return; }
+  var cfg = _admGetSupportConfig();
+  cfg.email = email;
+  _admSaveSupportConfig(cfg);
+  _gwLoadSupportContact();
+  _admLog('SUPPORT_EMAIL_UPDATE', email);
+  showToast('Email support mis à jour ✓', 'ok');
+}
+function _admSaveSupportWa() {
+  if (!_adminUser || !_admHasAction('change_settings')) { showToast('Réservé au Super Admin', 'err'); return; }
+  var input = document.getElementById('adm-support-wa-input');
+  if (!input) return;
+  var wa = (input.value || '').trim();
+  if (!wa) { showToast('Numéro ou lien WhatsApp requis', 'err'); return; }
+  var cfg = _admGetSupportConfig();
+  cfg.waLink = wa;
+  _admSaveSupportConfig(cfg);
+  _gwLoadSupportContact();
+  _admLog('SUPPORT_WA_UPDATE', wa);
+  showToast('WhatsApp mis à jour ✓', 'ok');
 }
 
 function openBusinessAI() {
@@ -25926,9 +28012,19 @@ function _admSavePaypalEmail() {
 
 /* ── État admin ── */
 var _adminUser    = null;    /* admin connecté */
+var _admSessionToken = null; /* jeton signé serveur (voir /api/admin/login) */
 var _adminTab     = 'dashboard';
 var _admTapCount  = 0;
 var _admTapTimer  = null;
+
+/* ── Appelle un endpoint /api/admin/* et renvoie la réponse JSON parsée ── */
+function _admApi(pathName, payload) {
+  return fetch('/api/admin/' + pathName, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(payload || {})
+  }).then(function(r) { return r.json().then(function(data) { return { status: r.status, data: data }; }); });
+}
 
 /* ══════════════════════════════════════════
    SYSTÈME DE PERMISSIONS PAR RÔLE
@@ -26005,11 +28101,9 @@ function _admIsSA() {
 
 /* ── Helpers localStorage admin ── */
 function _admGetSuperAdmin()      { try { return JSON.parse(localStorage.getItem('gw_sadmin')); } catch(e){ return null; } }
-function _admSetSuperAdmin(d)     { localStorage.setItem('gw_sadmin', JSON.stringify(d)); if (!_gwFbSkip) _gwFbSet('sadmin', d); }
 function _admGetAdmins()          { try { return JSON.parse(localStorage.getItem('gw_admins') || '[]'); } catch(e){ return []; } }
-function _admSaveAdmins(list)     { localStorage.setItem('gw_admins', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('admins', list); }
 function _admGetBans()            { try { return JSON.parse(localStorage.getItem('gw_bans') || '[]'); } catch(e){ return []; } }
-function _admSaveBans(list)       { localStorage.setItem('gw_bans', JSON.stringify(list)); if (!_gwFbSkip) _gwFbSet('bans', list); }
+function _admSaveBans(list)       { localStorage.setItem('gw_bans', JSON.stringify(list)); _admApi('moderate', { token: _admSessionToken, action: 'setBans', bans: list }); }
 function _admGetBadgeReqs()       { try { return JSON.parse(localStorage.getItem('gw_badge_requests') || '[]'); } catch(e){ return []; } }
 function _admSaveBadgeReqs(list) {
   localStorage.setItem('gw_badge_requests', JSON.stringify(list));
@@ -26169,11 +28263,13 @@ function _admSetup() {
   var btn = document.querySelector('#adm-setup-form .adm-btn-primary');
   if (btn) { btn.disabled = true; btn.textContent = 'Création…'; }
 
-  var salt = _gwSalt();
-  _gwHashPwd(pwd, salt).then(function(hashed) {
-    _admSetSuperAdmin({ email: email, nom: nom, pwHash: hashed, createdAt: new Date().toISOString() });
-    _adminUser = { email: email, nom: nom, role: 'Super Admin' };
+  _admApi('setup', { nom: nom, email: email, password: pwd }).then(function(res) {
     if (btn) { btn.disabled = false; btn.textContent = 'Créer le compte admin'; }
+    if (res.status !== 200 || !res.data.ok) {
+      showToast(res.data.error || 'Erreur lors de la création', 'err'); return;
+    }
+    _admSessionToken = res.data.token;
+    _adminUser = res.data.user;
     showToast('Compte admin créé ✓', 'ok');
     setTimeout(function() { _admOpenPanel(); }, 800);
   }).catch(function() {
@@ -26283,62 +28379,35 @@ function _admLogin() {
   if (!selectedRole) { _loginErr('Sélectionnez votre rôle'); return; }
   if (!pwd)          { _loginErr('Mot de passe requis'); return; }
 
-  var bruteKey = 'admin:' + email;
-  if (!_gwCheckBrute(bruteKey)) {
-    _loginErr('Trop de tentatives. Attendez ' + _gwLockedSeconds(bruteKey) + 's.'); return;
-  }
-
-  var sa = _admGetSuperAdmin();
-  var targetHash = null;
-  var targetUser = null;
-
-  if (sa && sa.email.toLowerCase() === email) {
-    /* Super Admin */
-    targetHash = sa.pwHash;
-    targetUser = { email: sa.email, nom: sa.nom, role: 'Super Admin' };
-  } else {
-    /* Admin délégué — cherche dans gw_admins */
-    var adminEntry = _admGetAdmins().find(function(a){ return a.email.toLowerCase() === email; });
-    if (adminEntry) {
-      /* Mot de passe stocké dans pwHash de l'entry (défini par SA) ou dans gw_users */
-      if (adminEntry.pwHash) {
-        targetHash = adminEntry.pwHash;
-        targetUser = { email: adminEntry.email, nom: adminEntry.nom, role: adminEntry.role };
-      } else {
-        var u = findUser(email);
-        if (u) { targetHash = u.password; targetUser = { email: u.email, nom: u.nom, role: adminEntry.role }; }
-      }
-    }
-  }
-
-  if (!targetUser) {
-    _gwRecordFail(bruteKey);
-    try { _secOnAdminFail(email); } catch(e){}
-    _loginErr('Aucun compte administrateur trouvé pour cet email'); return;
-  }
-
-  /* ── Vérification du rôle ── */
-  if (selectedRole !== targetUser.role) {
-    _gwRecordFail(bruteKey);
-    try { _secOnAdminFail(email); } catch(e){}
-    _loginErr('Rôle incorrect. Votre rôle attribué est différent de celui sélectionné.'); return;
-  }
-
   var btn = document.querySelector('#adm-login-form .adm-btn-primary');
   if (btn) { btn.disabled = true; btn.textContent = 'Vérification…'; }
 
-  _gwVerifyPwd(pwd, targetHash).then(function(ok) {
+  /* La vérification (mot de passe + anti brute-force) se fait désormais
+     entièrement côté serveur — /api/admin/login est la seule source de
+     vérité, le navigateur ne peut plus "se connecter" en appelant une
+     fonction JS directement. */
+  _admApi('login', { email: email, password: pwd }).then(function(res) {
     if (btn) { btn.disabled = false; btn.textContent = 'Se connecter'; }
-    if (!ok) {
-      _gwRecordFail(bruteKey);
+
+    if (res.status !== 200 || !res.data.ok) {
       try { _secOnAdminFail(email); } catch(e){}
-      _loginErr('Mot de passe incorrect'); return;
+      _loginErr(res.data.error || 'Connexion refusée'); return;
     }
-    _gwResetBrute(bruteKey);
+
+    var targetUser = res.data.user;
+
+    if (selectedRole !== targetUser.role) {
+      _loginErr('Rôle incorrect. Votre rôle attribué est différent de celui sélectionné.'); return;
+    }
+
+    _admSessionToken = res.data.token;
     _adminUser = targetUser;
     _admLog('LOGIN', 'Admin panel · rôle : ' + targetUser.role);
     showToast('Bienvenue, ' + targetUser.nom + ' !', 'ok');
     setTimeout(function() { _admOpenPanel(); }, 600);
+  }).catch(function() {
+    if (btn) { btn.disabled = false; btn.textContent = 'Se connecter'; }
+    _loginErr('Erreur réseau, réessayez.');
   });
 }
 
@@ -26347,6 +28416,7 @@ function _admLogout() {
   if (confirm('Se déconnecter du panneau admin ?')) {
     _admLog('LOGOUT', 'Admin panel');
     _adminUser = null;
+    _admSessionToken = null;
     goTo('screen-login');
   }
 }
@@ -26495,8 +28565,9 @@ function _admGetOfficialLogo() {
   return raw;
 }
 function _admSaveOfficialLogo(data) {
-  if (data) { localStorage.setItem('gw_official_logo', data); _gwFbSet('settings_logo', data); }
-  else      { localStorage.removeItem('gw_official_logo');    _gwFbSet('settings_logo', null); }
+  if (data) localStorage.setItem('gw_official_logo', data);
+  else      localStorage.removeItem('gw_official_logo');
+  _admApi('moderate', { token: _admSessionToken, action: 'setSettingsLogo', data: data || null });
 }
 
 /**
@@ -26581,7 +28652,7 @@ function _admSwitchTab(tab) {
     badges      : 'Vérification des badges',
     team        : 'Équipe & Tâches',
     publi       : 'Publications officielles',
-    marketplace : 'Marketplace',
+    marketplace : 'Le Souk',
     recruiters  : 'Vérifications recruteurs',
     notifs      : 'Notifications & Communication',
     settings    : 'Paramètres système',
@@ -28473,7 +30544,7 @@ function _admBuildMarketplace() {
   var usersWithSvc = users.filter(function(u){ return (loadUserServices(u.email)||[]).length > 0; }).length;
   var avgSvcs      = users.length ? (totalSvcs / users.length).toFixed(1) : 0;
 
-  var html = '<div class="adm-tab-header"><h2>Marketplace</h2><p>Services, offres et demandes artiste</p></div>' +
+  var html = '<div class="adm-tab-header"><h2>Le Souk</h2><p>Services, offres et demandes artiste</p></div>' +
     '<div class="adm-dash">' +
     /* ── Section Demandes Artiste ── */
     '<div style="margin-bottom:24px">' + _admBuildArtisteRequests() + '</div>' +
@@ -28677,8 +30748,8 @@ function _admShowUserInbox(email, nom) {
     : '<div style="width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,#6366F1,#4F46E5);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#fff;flex-shrink:0">' + escHtml(ini) + '</div>';
 
   /* Icônes par type */
-  var typeIcons = { info:'fa-circle-info', system:'fa-gear', promo:'fa-gift', alert:'fa-triangle-exclamation', news:'fa-newspaper', ban_lifted:'fa-unlock', restriction:'fa-circle-exclamation', like:'fa-heart', follow:'fa-user-plus', comment:'fa-comment', message:'fa-envelope', badge:'fa-certificate' };
-  var typeColors = { info:'#3B82F6', system:'#6B7280', promo:'#F59E0B', alert:'#EF4444', news:'#8B5CF6', ban_lifted:'#10B981', restriction:'#EA580C', like:'#EC4899', follow:'#6366F1', comment:'#14B8A6', message:'#0EA5E9', badge:'#F59E0B' };
+  var typeIcons = { info:'fa-circle-info', system:'fa-gear', promo:'fa-gift', alert:'fa-triangle-exclamation', news:'fa-newspaper', ban_lifted:'fa-unlock', restriction:'fa-circle-exclamation', like:'fa-heart', follow:'fa-user-plus', comment:'fa-comment', message:'fa-envelope', badge:'fa-certificate', tag:'fa-at' };
+  var typeColors = { info:'#3B82F6', system:'#6B7280', promo:'#F59E0B', alert:'#EF4444', news:'#8B5CF6', ban_lifted:'#10B981', restriction:'#EA580C', like:'#EC4899', follow:'#6366F1', comment:'#14B8A6', message:'#0EA5E9', badge:'#F59E0B', tag:'#DC2626' };
 
   var notifsHtml = '';
   if (!notifs.length) {
@@ -28856,7 +30927,7 @@ function _admBuildSettings() {
   html += '</div>';
 
   /* ── Sections Marketplace ── */
-  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-store" style="color:#F97316;margin-right:6px"></i>Sections Marketplace</div>';
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-store" style="color:#F97316;margin-right:6px"></i>Sections Le Souk</div>';
   html += '<div class="adm-settings-section">';
   html += settingsToggleHtml('ebook',      'Ebook 📚',                    '📚', cfg.ebookEnabled !== false);
   html += settingsToggleHtml('collab',     'Collaborateurs 🤝',           '🤝', cfg.collabEnabled !== false);
@@ -28980,6 +31051,37 @@ function _admBuildSettings() {
           '4. Relance l\'application' +
         '</div>') +
   '</div>';
+
+  /* ── Contact Support ── */
+  var supCfg = _admGetSupportConfig();
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-headset" style="color:#25D366;margin-right:6px"></i>Contact Support</div>';
+  html += '<div class="adm-settings-section">';
+  html += '<div style="font-size:12px;color:#6B7280;margin-bottom:14px">Ces informations s\'affichent dans la page Support de l\'application pour que les utilisateurs puissent vous contacter.</div>';
+  /* Email */
+  html += '<div style="margin-bottom:14px">';
+  html += '<div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px"><i class="fas fa-envelope" style="color:#3B82F6;margin-right:4px"></i>Adresse email support</div>';
+  html += '<div style="display:flex;gap:8px">' +
+    '<input type="email" id="adm-support-email-input" placeholder="support@geniwork.com" value="' + escHtml(supCfg.email || '') + '" ' +
+      'style="flex:1;padding:10px 12px;border:1px solid #D1D5DB;border-radius:10px;font-size:13px;outline:none">' +
+    '<button onclick="_admSaveSupportEmail()" style="background:linear-gradient(135deg,#3B82F6,#2563EB);color:#fff;border:none;border-radius:10px;padding:10px 16px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">' +
+      '<i class="fas fa-save"></i> Enregistrer' +
+    '</button>' +
+  '</div>';
+  html += '<div style="font-size:11px;color:#6B7280;margin-top:4px">Les utilisateurs verront cet email et pourront cliquer dessus pour vous écrire.</div>';
+  html += '</div>';
+  /* WhatsApp */
+  html += '<div>';
+  html += '<div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px"><i class="fab fa-whatsapp" style="color:#25D366;margin-right:4px"></i>Numéro ou lien WhatsApp</div>';
+  html += '<div style="display:flex;gap:8px">' +
+    '<input type="text" id="adm-support-wa-input" placeholder="Ex: +33612345678 ou https://wa.me/33612345678" value="' + escHtml(supCfg.waLink || '') + '" ' +
+      'style="flex:1;padding:10px 12px;border:1px solid #D1D5DB;border-radius:10px;font-size:13px;outline:none">' +
+    '<button onclick="_admSaveSupportWa()" style="background:linear-gradient(135deg,#25D366,#128C7E);color:#fff;border:none;border-radius:10px;padding:10px 16px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">' +
+      '<i class="fas fa-save"></i> Enregistrer' +
+    '</button>' +
+  '</div>';
+  html += '<div style="font-size:11px;color:#6B7280;margin-top:4px">Entre le numéro avec indicatif pays (ex: +33612345678) ou un lien wa.me complet. Le clic redirige l\'utilisateur directement sur WhatsApp.</div>';
+  html += '</div>';
+  html += '</div>';
 
   /* ── Danger zone ── */
   html += '<div class="adm-dash-title" style="margin-top:20px;color:#EF4444"><i class="fas fa-triangle-exclamation" style="color:#EF4444;margin-right:6px"></i>Zone sensible</div>';
@@ -29699,8 +31801,10 @@ function _admDeleteUser(email) {
   var prefixes = ['gw_profile_','gw_services_','gw_projects_','gw_favorites_','gw_cart_','gw_reports_','gw_privacy_','gw_blocked_','gw_badge_'];
   prefixes.forEach(function(p){ localStorage.removeItem(p + email); });
 
-  /* Retire des admins */
-  _admSaveAdmins(_admGetAdmins().filter(function(a){ return a.email.toLowerCase() !== email.toLowerCase(); }));
+  /* Retire des admins (si le compte supprimé était administrateur) */
+  if (_admGetAdmins().some(function(a){ return a.email.toLowerCase() === email.toLowerCase(); })) {
+    _admApi('manage', { token: _admSessionToken, action: 'revoke', email: email });
+  }
 
   /* Invalide la session */
   try {
@@ -29745,68 +31849,51 @@ function _admOpenPromote(email, nom) {
 function _admSavePromote(email, nom) {
   var roleEl = document.getElementById('adm-promote-role');
   var role = roleEl ? roleEl.value : 'Administrateur';
-  var admins = _admGetAdmins();
-  /* Évite les doublons */
-  admins = admins.filter(function(a){ return a.email.toLowerCase() !== email.toLowerCase(); });
-  admins.push({ email: email, nom: nom, role: role, addedBy: _adminUser ? _adminUser.email : '?', addedAt: new Date().toISOString() });
-  _admSaveAdmins(admins);
-  _admLog('PROMOTE:' + role, email);
-  _admCloseModal();
-  showToast(nom + ' nommé ' + role + ' ✓', 'ok');
-  _admRender();
+  _admApi('manage', { token: _admSessionToken, action: 'promote', email: email, nom: nom, role: role }).then(function(res) {
+    if (res.status !== 200 || !res.data.ok) { showToast(res.data.error || 'Erreur', 'err'); return; }
+    _admLog('PROMOTE:' + role, email);
+    _admCloseModal();
+    showToast(nom + ' nommé ' + role + ' ✓', 'ok');
+    _admRender();
+  });
 }
 
 /* ── Approuver une demande d'accès ── */
 function _admApproveRequest(id) {
   if (!_adminUser || !_admIsSA()) { showToast('Réservé au Super Admin', 'err'); return; }
-  var reqs = _admGetRequests();
-  var req  = reqs.find(function(r){ return r.id === id; });
-  if (!req) return;
+  _admApi('manage', { token: _admSessionToken, action: 'approveRequest', requestId: id }).then(function(res) {
+    if (res.status !== 200 || !res.data.ok) { showToast(res.data.error || 'Erreur', 'err'); return; }
 
-  /* Vérifie que cet email n'est pas déjà admin */
-  var already = _admGetAdmins().some(function(a){ return a.email.toLowerCase() === req.email.toLowerCase(); });
-  if (already) { showToast('Cet email est déjà administrateur', 'err'); return; }
+    /* Notifie le membre */
+    try {
+      var notif = { id: genNotifId(), type: 'system',
+        msg: '✅ Votre demande d\'accès admin a été approuvée ! Rôle : ' + res.data.approvedRole + '. Vous pouvez maintenant vous connecter.',
+        at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
+      var ns = getNotifs(res.data.approvedEmail); ns.unshift(notif); saveNotifs(res.data.approvedEmail, ns);
+    } catch(e) {}
 
-  /* Ajoute dans gw_admins avec le mot de passe hashé de la demande */
-  var admins = _admGetAdmins();
-  admins.push({ email: req.email, nom: req.nom, role: req.role, pwHash: req.pwHash, grantedBy: _adminUser.email, grantedAt: new Date().toISOString() });
-  _admSaveAdmins(admins);
-
-  /* Marque la demande comme approuvée */
-  req.status = 'approved'; req.resolvedAt = new Date().toISOString();
-  _admSaveRequests(reqs);
-
-  /* Notifie le membre */
-  try {
-    var notif = { id: genNotifId(), type: 'system',
-      msg: '✅ Votre demande d\'accès admin a été approuvée ! Rôle : ' + req.role + '. Vous pouvez maintenant vous connecter.',
-      at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
-    var ns = getNotifs(req.email); ns.unshift(notif); saveNotifs(req.email, ns);
-  } catch(e) {}
-
-  _admLog('APPROVE_REQUEST', req.email + ' · ' + req.role);
-  showToast(req.nom + ' approuvé en tant que ' + req.role + ' ✓', 'ok');
-  _admRender();
+    _admLog('APPROVE_REQUEST', res.data.approvedEmail + ' · ' + res.data.approvedRole);
+    showToast(res.data.approvedEmail + ' approuvé en tant que ' + res.data.approvedRole + ' ✓', 'ok');
+    _admRender();
+  });
 }
 
 /* ── Rejeter une demande d'accès ── */
 function _admRejectRequest(id) {
   if (!_adminUser || !_admIsSA()) { showToast('Réservé au Super Admin', 'err'); return; }
   if (!confirm('Refuser cette demande d\'accès ?')) return;
-  var reqs = _admGetRequests();
-  var req  = reqs.find(function(r){ return r.id === id; });
-  if (!req) return;
-  req.status = 'rejected'; req.resolvedAt = new Date().toISOString();
-  _admSaveRequests(reqs);
-  try {
-    var notif = { id: genNotifId(), type: 'system',
-      msg: '❌ Votre demande d\'accès admin a été refusée. Contactez le Super Admin pour plus d\'informations.',
-      at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
-    var ns = getNotifs(req.email); ns.unshift(notif); saveNotifs(req.email, ns);
-  } catch(e) {}
-  _admLog('REJECT_REQUEST', req.email);
-  showToast('Demande refusée', 'ok');
-  _admRender();
+  _admApi('manage', { token: _admSessionToken, action: 'rejectRequest', requestId: id }).then(function(res) {
+    if (res.status !== 200 || !res.data.ok) { showToast(res.data.error || 'Erreur', 'err'); return; }
+    try {
+      var notif = { id: genNotifId(), type: 'system',
+        msg: '❌ Votre demande d\'accès admin a été refusée. Contactez le Super Admin pour plus d\'informations.',
+        at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
+      var ns = getNotifs(res.data.rejectedEmail); ns.unshift(notif); saveNotifs(res.data.rejectedEmail, ns);
+    } catch(e) {}
+    _admLog('REJECT_REQUEST', res.data.rejectedEmail);
+    showToast('Demande refusée', 'ok');
+    _admRender();
+  });
 }
 
 /* ── Réinitialiser le mot de passe d'un membre (Super Admin uniquement) ── */
@@ -29820,19 +31907,8 @@ function _admResetMemberPassword(email, nom) {
   if (!newPwd) return;
   if (newPwd.length < 6) { showToast('Mot de passe trop court (6 min)', 'err'); return; }
 
-  var salt = _gwSalt();
-  _gwHashPwd(newPwd, salt).then(function(hashed) {
-    /* Met à jour le pwHash dans gw_admins */
-    var admins = _admGetAdmins();
-    var entry  = admins.find(function(a){ return a.email.toLowerCase() === email.toLowerCase(); });
-    if (entry) {
-      entry.pwHash = hashed;
-      _admSaveAdmins(admins);
-    }
-    /* Met aussi à jour dans gw_users si le compte existe */
-    var users = getUsers();
-    var u = users.find(function(x){ return x.email.toLowerCase() === email.toLowerCase(); });
-    if (u) { u.password = hashed; saveUsers(users); }
+  _admApi('manage', { token: _admSessionToken, action: 'resetPassword', email: email, newPassword: newPwd }).then(function(res) {
+    if (res.status !== 200 || !res.data.ok) { showToast(res.data.error || 'Erreur', 'err'); return; }
 
     /* Notifie le membre */
     try {
@@ -29859,31 +31935,31 @@ function _admChangeRole(email) {
   if (!newRole) return;
   newRole = newRole.trim();
   if (roles.indexOf(newRole) === -1) { showToast('Rôle invalide', 'err'); return; }
-  var admins = _admGetAdmins();
-  var entry  = admins.find(function(a){ return a.email.toLowerCase() === email.toLowerCase(); });
-  if (!entry) { showToast('Membre introuvable', 'err'); return; }
-  var oldRole = entry.role;
-  entry.role = newRole;
-  _admSaveAdmins(admins);
-  try {
-    var notif = { id: genNotifId(), type: 'system',
-      msg: '👤 Votre rôle admin a été modifié : ' + oldRole + ' → ' + newRole,
-      at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
-    var ns = getNotifs(email); ns.unshift(notif); saveNotifs(email, ns);
-  } catch(e) {}
-  _admLog('CHANGE_ROLE', email + ' : ' + oldRole + ' → ' + newRole);
-  showToast('Rôle mis à jour : ' + newRole + ' ✓', 'ok');
-  _admRender();
+
+  _admApi('manage', { token: _admSessionToken, action: 'changeRole', email: email, role: newRole }).then(function(res) {
+    if (res.status !== 200 || !res.data.ok) { showToast(res.data.error || 'Erreur', 'err'); return; }
+    try {
+      var notif = { id: genNotifId(), type: 'system',
+        msg: '👤 Votre rôle admin a été modifié : ' + res.data.oldRole + ' → ' + res.data.newRole,
+        at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null };
+      var ns = getNotifs(email); ns.unshift(notif); saveNotifs(email, ns);
+    } catch(e) {}
+    _admLog('CHANGE_ROLE', email + ' : ' + res.data.oldRole + ' → ' + res.data.newRole);
+    showToast('Rôle mis à jour : ' + res.data.newRole + ' ✓', 'ok');
+    _admRender();
+  });
 }
 
 /* ── Retirer le rôle admin ── */
 function _admRevokeAdmin(email) {
   if (!_adminUser || !_admIsSA()) { showToast('Réservé au Super Admin', 'err'); return; }
   if (!confirm('Retirer les droits d\'administration à ' + email + ' ?')) return;
-  _admSaveAdmins(_admGetAdmins().filter(function(a){ return a.email.toLowerCase() !== email.toLowerCase(); }));
-  _admLog('REVOKE', email);
-  showToast('Droits admin retirés ✓', 'ok');
-  _admRender();
+  _admApi('manage', { token: _admSessionToken, action: 'revoke', email: email }).then(function(res) {
+    if (res.status !== 200 || !res.data.ok) { showToast(res.data.error || 'Erreur', 'err'); return; }
+    _admLog('REVOKE', email);
+    showToast('Droits admin retirés ✓', 'ok');
+    _admRender();
+  });
 }
 
 /* ══════════════════════════════════════════
@@ -30481,7 +32557,7 @@ function _admOpenDelegate(email, nom) {
 
   var allTabs    = ['analytics','payments','reports','users','badges','team','publi','marketplace','notifs','settings'];
   var allActions = ['ban','unban','delete_user','send_notif','publish','approve_badge','dismiss_report','warn_user','change_settings','manage_team'];
-  var tabLabels  = { analytics:'Statistiques', payments:'Paiements', reports:'Signalements', users:'Utilisateurs', badges:'Badges', team:'Équipe', publi:'Publications', marketplace:'Marketplace', notifs:'Notifications', settings:'Paramètres' };
+  var tabLabels  = { analytics:'Statistiques', payments:'Paiements', reports:'Signalements', users:'Utilisateurs', badges:'Badges', team:'Équipe', publi:'Publications', marketplace:'Le Souk', notifs:'Notifications', settings:'Paramètres' };
   var actLabels  = { ban:'Bannir', unban:'Débannir', delete_user:'Supprimer util.', send_notif:'Envoyer notif', publish:'Publier', approve_badge:'Approuver badge', dismiss_report:'Ignorer signalement', warn_user:'Avertir', change_settings:'Paramètres', manage_team:'Gérer équipe' };
 
   function togRow(key, label, isOn) {
@@ -31079,6 +33155,21 @@ function _admBuildPubli() {
           '<button onclick="_admOffRemoveVideo()" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:50%;width:28px;height:28px;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>' +
         '</div>' +
 
+        /* Champ URL YouTube */
+        '<div id="adm-off-yt-wrap" style="margin:6px 0">' +
+          '<input id="adm-off-yt-input" placeholder="🎬 Coller un lien YouTube (optionnel)…" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1.5px solid #E5E7EB;border-radius:8px;font-size:13px;outline:none" oninput="_admOffYtCheck(this.value)"/>' +
+          '<div id="adm-off-yt-preview" style="display:none;position:relative;border-radius:10px;overflow:hidden;aspect-ratio:16/9;background:#000;cursor:pointer;margin-top:6px" onclick="var ytid=this.dataset.ytid;if(ytid)_openYoutubePlayer(ytid)">' +
+            '<img id="adm-off-yt-thumb" src="" alt="" style="width:100%;height:100%;object-fit:cover"/>' +
+            '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">' +
+              '<div style="width:54px;height:54px;background:rgba(255,0,0,.9);border-radius:50%;display:flex;align-items:center;justify-content:center">' +
+                '<i class="fab fa-youtube" style="color:#fff;font-size:26px"></i>' +
+              '</div>' +
+            '</div>' +
+            '<button onclick="event.stopPropagation();_admOffRemoveYt()" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:50%;width:28px;height:28px;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center"><i class="fas fa-times"></i></button>' +
+            '<span style="position:absolute;bottom:8px;left:8px;background:rgba(0,0,0,.7);color:#fff;font-size:11px;padding:3px 7px;border-radius:20px"><i class="fab fa-youtube" style="color:#FF0000;margin-right:4px"></i>YouTube</span>' +
+          '</div>' +
+        '</div>' +
+
         '<div class="adm-publi-composer-footer">' +
           '<div style="display:flex;gap:8px">' +
             '<button class="adm-publi-img-btn" title="Ajouter une image" onclick="document.getElementById(\'adm-off-img-input\').click()"><i class="fas fa-image"></i></button>' +
@@ -31157,6 +33248,16 @@ function _admBuildPubli() {
   }
   html += '</div>' +
 
+  /* ── Outil : recompresser les anciens Shorts ── */
+  '<div style="background:#F5F3FF;border:1px solid #DDD6FE;border-radius:12px;padding:14px;margin-bottom:16px">' +
+    '<div style="font-size:13px;font-weight:700;color:#5B21B6;margin-bottom:6px"><i class="fas fa-compress-arrows-alt"></i> Recompresser les anciens Shorts</div>' +
+    '<div style="font-size:12px;color:#6B7280;margin-bottom:10px">Les Shorts uploadés avant la compression automatique sont souvent > 50 Mo et lents à charger. Cet outil les recompresse en ~10 Mo.</div>' +
+    '<div id="adm-recomp-status" style="font-size:12px;color:#5B21B6;margin-bottom:8px;display:none"></div>' +
+    '<button id="adm-recomp-btn" class="adm-publi-send-btn" style="background:linear-gradient(135deg,#5B21B6,#7C3AED);font-size:12px;padding:8px 16px" onclick="_admRecompressAllShorts()">' +
+      '<i class="fas fa-compress-arrows-alt"></i> Lancer la recompression' +
+    '</button>' +
+  '</div>' +
+
   /* ── Historique des publications ── */
   '<div>' +
     '<div class="adm-team-section-title" style="padding-bottom:8px">Historique des publications (' + posts.length + ')</div>';
@@ -31204,6 +33305,141 @@ function _admBuildPubli() {
   return html;
 }
 
+/* ── Recompresse tous les Shorts existants qui ont une URL Firebase Storage ──
+   Télécharge chaque Short, le compresse à 1.5 Mbps, ré-uploade et met à jour
+   l'URL dans Firebase RTDB + localStorage. Traitement séquentiel pour ne pas
+   saturer la connexion. */
+function _admRecompressAllShorts() {
+  var btn    = document.getElementById('adm-recomp-btn');
+  var status = document.getElementById('adm-recomp-status');
+  if (!btn || !status) return;
+
+  /* Collecte tous les Shorts avec une URL Storage (admin + utilisateurs) */
+  var allPosts = (_offGetPosts() || []).concat(DEMO_POSTS || []);
+  var shorts = allPosts.filter(function(p) {
+    if (!p || !p.video || typeof p.video !== 'object') return false;
+    if (p.video.videoType !== 'short') return false;
+    var url = p.video.url || '';
+    /* Garde uniquement les URLs Firebase Storage (pas les blobs/base64) */
+    return url && !url.startsWith('blob:') && !url.startsWith('data:');
+  });
+
+  /* Déduplique par ID */
+  var seen = {};
+  shorts = shorts.filter(function(p) {
+    if (seen[String(p.id)]) return false;
+    seen[String(p.id)] = true;
+    return true;
+  });
+
+  if (!shorts.length) {
+    status.style.display = 'block';
+    status.textContent = 'Aucun Short avec URL Firebase trouvé.';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Recompression en cours…';
+  status.style.display = 'block';
+
+  var done = 0, skipped = 0, errors = 0;
+  var total = shorts.length;
+
+  function _updateStatus(current) {
+    status.innerHTML =
+      '<b>' + current + ' / ' + total + '</b> — ' +
+      done + ' compressé(s), ' + skipped + ' ignoré(s), ' + errors + ' erreur(s)';
+  }
+
+  function _processNext(idx) {
+    if (idx >= total) {
+      /* Terminé */
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-check"></i> Terminé (' + done + ' recompressé(s))';
+      status.innerHTML = '<b style="color:#059669">Terminé !</b> ' + done + ' Short(s) recompressé(s), ' + skipped + ' ignoré(s), ' + errors + ' erreur(s).';
+      showToast('Recompression terminée : ' + done + ' Short(s) ✓', 'ok');
+      return;
+    }
+
+    var post = shorts[idx];
+    var videoUrl = post.video.url;
+    var postId   = String(post.id);
+
+    _updateStatus(idx + 1);
+    status.innerHTML += '<br><span style="color:#9CA3AF">Traitement : ' + postId + '…</span>';
+
+    /* Télécharge la vidéo via fetch */
+    fetch(videoUrl)
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.blob();
+      })
+      .then(function(origBlob) {
+        var origMB = Math.round(origBlob.size / 1024 / 1024);
+
+        /* Skip si déjà petit (< 8 Mo) ou déjà WebM */
+        var isWebm = origBlob.type && origBlob.type.indexOf('webm') !== -1;
+        if (isWebm || origBlob.size < 8 * 1024 * 1024) {
+          skipped++;
+          _processNext(idx + 1);
+          return;
+        }
+
+        /* Compresse */
+        _gwCompressShortVideo(origBlob, null, function(compBlob, wasCompressed) {
+          if (!wasCompressed || compBlob.size >= origBlob.size * 0.98) {
+            /* Pas de gain → ignore */
+            skipped++;
+            _processNext(idx + 1);
+            return;
+          }
+
+          var compMB = Math.round(compBlob.size / 1024 / 1024);
+
+          if (!_gwFbStorage) {
+            errors++;
+            _processNext(idx + 1);
+            return;
+          }
+
+          /* Ré-uploade vers Firebase Storage (même chemin, extension .webm) */
+          var newPath = 'videos/' + postId + '.webm';
+          _uploadBlobToStorage(newPath, compBlob,
+            function(newUrl) {
+              /* Met à jour l'URL dans Firebase RTDB */
+              if (_gwFbReady && _gwFbDB) {
+                _gwFbDB.ref('gw/post_videos/' + postId).update({ url: newUrl }).catch(function(){});
+              }
+              /* Met à jour en mémoire */
+              if (post.video) post.video.url = newUrl;
+              _gwVidUrlCache[postId] = newUrl;
+              /* Met à jour dans localStorage (posts officiels) */
+              var offPosts = _offGetPosts();
+              var op = offPosts.find(function(p) { return String(p.id) === postId; });
+              if (op && op.video) { op.video.url = newUrl; _offSavePosts(offPosts); }
+
+              done++;
+              _updateStatus(idx + 1);
+              status.innerHTML += '<br><span style="color:#059669">' + postId + ' : ' + origMB + ' Mo → ' + compMB + ' Mo ✓</span>';
+              _processNext(idx + 1);
+            },
+            function() {
+              errors++;
+              _processNext(idx + 1);
+            },
+            null /* pas de barre de progression ici */
+          );
+        });
+      })
+      .catch(function(e) {
+        errors++;
+        _processNext(idx + 1);
+      });
+  }
+
+  _processNext(0);
+}
+
 function _admPublisherCard(email, nom, grantedBy, canRevoke) {
   var initials = getInitials(nom || 'G');
   return '<div class="adm-publisher-card">' +
@@ -31228,8 +33464,10 @@ function _admPublishOfficial() {
   var vidWrap = document.getElementById('adm-off-vid-preview-wrap');
   var imgData = (imgPrev && imgPrev.style.display !== 'none') ? imgPrev.src : null;
   var hasVid  = (vidPrev && vidWrap && vidWrap.style.display !== 'none' && vidPrev.src);
+  var ytInput = document.getElementById('adm-off-yt-input');
+  var ytId    = _getYoutubeId((ytInput && ytInput.value) || '');
 
-  if (!text && !imgData && !hasVid) { showToast('Écrivez un message ou ajoutez un média avant de publier', 'err'); return; }
+  if (!text && !imgData && !hasVid && !ytId) { showToast('Écrivez un message ou ajoutez un média avant de publier', 'err'); return; }
 
   /* ── Réinitialise le formulaire (helper) ── */
   function _resetAdmForm() {
@@ -31239,8 +33477,16 @@ function _admPublishOfficial() {
     var imgInp = document.getElementById('adm-off-img-input');
     if (imgInp) imgInp.value = '';
     _admOffRemoveVideo();
+    _admOffRemoveYt();
     showToast('Publication officielle envoyée ✓', 'ok');
     _admRender();
+  }
+
+  /* ── Lien YouTube : publie directement sans upload ── */
+  if (ytId && !hasVid) {
+    _offPublishPost(text, imgData, _adminUser ? _adminUser.nom : 'Geniwork', null, null, ytId);
+    _resetAdmForm();
+    return;
   }
 
   /* ── Vidéo : upload vers Firebase Storage puis publie ── */
@@ -31549,6 +33795,55 @@ function _admOffRemoveVideo() {
   if (inp)  { inp.value = ''; }
 }
 
+/* ── YouTube helpers ── */
+function _getYoutubeId(url) {
+  if (!url) return null;
+  var m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|v\/|shorts\/))([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+function _admOffYtCheck(val) {
+  var ytId    = _getYoutubeId(val);
+  var preview = document.getElementById('adm-off-yt-preview');
+  var thumb   = document.getElementById('adm-off-yt-thumb');
+  if (ytId && preview && thumb) {
+    thumb.src = 'https://img.youtube.com/vi/' + ytId + '/hqdefault.jpg';
+    preview.dataset.ytid = ytId;
+    preview.style.display = 'block';
+    /* Si une vidéo locale est sélectionnée, on la retire (conflit) */
+    _admOffRemoveVideo();
+  } else if (preview) {
+    preview.style.display = 'none';
+  }
+}
+
+function _admOffRemoveYt() {
+  var input   = document.getElementById('adm-off-yt-input');
+  var preview = document.getElementById('adm-off-yt-preview');
+  if (input)   input.value = '';
+  if (preview) { preview.style.display = 'none'; preview.dataset.ytid = ''; }
+}
+
+function _openYoutubePlayer(ytId) {
+  if (!ytId) return;
+  var old = document.getElementById('gw-yt-player-modal');
+  if (old) old.remove();
+  var modal = document.createElement('div');
+  modal.id = 'gw-yt-player-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:10000;display:flex;align-items:center;justify-content:center;padding:12px';
+  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+  modal.innerHTML =
+    '<div style="width:min(680px,100%);position:relative">' +
+      '<button onclick="document.getElementById(\'gw-yt-player-modal\').remove()" style="position:absolute;top:-40px;right:0;background:none;border:none;color:#fff;font-size:28px;line-height:1;cursor:pointer"><i class="fas fa-times"></i></button>' +
+      '<div style="aspect-ratio:16/9;width:100%">' +
+        '<iframe src="https://www.youtube.com/embed/' + encodeURIComponent(ytId) + '?autoplay=1&rel=0" ' +
+          'style="width:100%;height:100%;border:none;border-radius:12px" ' +
+          'allow="autoplay;encrypted-media;fullscreen" allowfullscreen></iframe>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(modal);
+}
+
 /* ── Préview vidéo Short officiel ── */
 function _admOffShortPreviewVideo(input) {
   if (!input.files || !input.files[0]) return;
@@ -31559,9 +33854,12 @@ function _admOffShortPreviewVideo(input) {
     showToast('Format non supporté. Utilisez MP4, MOV, MKV…', 'err');
     input.value = ''; return;
   }
-  if (file.size > 500 * 1024 * 1024) {
-    showToast('Fichier trop lourd — maximum 500 Mo', 'err');
+  if (file.size > 200 * 1024 * 1024) {
+    showToast('Fichier trop lourd — maximum 200 Mo pour un Short. Compressez la vidéo avant l\'envoi.', 'err');
     input.value = ''; return;
+  }
+  if (file.size > 50 * 1024 * 1024) {
+    showToast('Fichier de ' + Math.round(file.size / 1024 / 1024) + ' Mo — l\'upload sera lent. Préférez des vidéos < 50 Mo pour une diffusion rapide.', '');
   }
   if (_admOffShortVidBlobUrl) URL.revokeObjectURL(_admOffShortVidBlobUrl);
   _admOffShortVidBlobUrl = URL.createObjectURL(file);
@@ -31596,56 +33894,200 @@ function _admOffRemoveShort() {
   if (thumb) { thumb.src = ''; thumb.style.display = 'none'; delete thumb._editedData; }
 }
 
+/* ── Compression/découpe vidéo côté client avant upload Short ──
+   Re-encode en WebM VP8 via canvas + MediaRecorder.
+   trimStart/trimEnd (secondes) : si fournis, seul le segment découpé est encodé —
+   réduit directement la taille à uploader proportionnellement à la durée conservée.
+   Callback(fichierFinal, wasProcessed). */
+function _gwCompressShortVideo(file, onProgress, callback, trimStart, trimEnd) {
+  var _tsFrom  = (trimStart && trimStart > 0.05) ? trimStart : 0;
+  var _hasTrim = (_tsFrom > 0.05) || (trimEnd != null && trimEnd > 0);
+  var SKIP_MB  = 8;
+  /* Si pas de découpe ET fichier petit → on envoie tel quel */
+  if (!_hasTrim && (file.size < SKIP_MB * 1024 * 1024 || typeof MediaRecorder === 'undefined')) {
+    callback(file, false); return;
+  }
+  if (typeof MediaRecorder === 'undefined') { callback(file, false); return; }
+
+  var mimes = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];
+  var mime = null;
+  for (var _mi = 0; _mi < mimes.length; _mi++) {
+    if (MediaRecorder.isTypeSupported(mimes[_mi])) { mime = mimes[_mi]; break; }
+  }
+  if (!mime) { callback(file, false); return; }
+
+  var video = document.createElement('video');
+  video.muted = true; video.playsInline = true;
+  var objUrl = URL.createObjectURL(file);
+  video.src = objUrl;
+
+  video.onerror = function() { URL.revokeObjectURL(objUrl); callback(file, false); };
+
+  video.onloadedmetadata = function() {
+    var fullDur  = video.duration || 120;
+    var segEnd   = (trimEnd != null && trimEnd > 0 && trimEnd < fullDur) ? trimEnd : fullDur;
+    var segStart = Math.min(_tsFrom, segEnd - 0.5);
+    var segDur   = Math.max(0.5, segEnd - segStart);
+
+    var origW = video.videoWidth  || 720;
+    var origH = video.videoHeight || 1280;
+    var MAX_W = 1080;
+    var scale = Math.min(1, MAX_W / origW);
+    var w = Math.round(origW * scale / 2) * 2;
+    var h = Math.round(origH * scale / 2) * 2;
+    var BASE_BPS = 1200000;
+    var BASE_PIX = 720 * 1280;
+    var videoBps = Math.round(BASE_BPS * (w * h) / BASE_PIX);
+    videoBps = Math.max(600000, Math.min(2500000, videoBps));
+
+    var canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    var ctx = canvas.getContext('2d');
+    var stream = canvas.captureStream(30);
+
+    try {
+      var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      var src = audioCtx.createMediaElementSource(video);
+      var dest = audioCtx.createMediaStreamDestination();
+      src.connect(dest); src.connect(audioCtx.destination);
+      dest.stream.getAudioTracks().forEach(function(t) { stream.addTrack(t); });
+      video._gwAudioCtx = audioCtx;
+    } catch(_ae) { video._gwAudioCtx = null; }
+
+    var recorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: videoBps });
+    } catch(_re) {
+      if (video._gwAudioCtx) video._gwAudioCtx.close();
+      URL.revokeObjectURL(objUrl);
+      callback(file, false); return;
+    }
+
+    var chunks = [];
+    var rafId  = null;
+    var _stopped = false;
+
+    function _stopRecorder() {
+      if (_stopped) return;
+      _stopped = true;
+      clearTimeout(safety);
+      cancelAnimationFrame(rafId);
+      try { video.pause(); } catch(e) {}
+      if (recorder.state === 'recording') recorder.stop();
+    }
+
+    recorder.ondataavailable = function(e) { if (e.data && e.data.size > 0) chunks.push(e.data); };
+
+    recorder.onstop = function() {
+      if (video._gwAudioCtx) video._gwAudioCtx.close();
+      URL.revokeObjectURL(objUrl);
+      var blob = new Blob(chunks, { type: mime.split(';')[0] });
+      /* Pour la découpe : on accepte toujours le résultat (segment plus court = forcément utile).
+         Pour la compression pure : uniquement si vraiment plus petit. */
+      var useResult = blob.size > 0 && (_hasTrim || blob.size < file.size * 0.98);
+      if (useResult) {
+        var cFile = new File([blob], file.name.replace(/\.[^.]+$/, '.webm'), { type: blob.type });
+        callback(cFile, true);
+      } else {
+        callback(file, false);
+      }
+    };
+
+    /* Arrêt de sécurité : segDur + 15 s de marge */
+    var safety = setTimeout(function() { _stopRecorder(); }, (segDur + 15) * 1000);
+
+    function drawFrame() {
+      if (video.ended || video.paused || _stopped) return;
+      try { ctx.drawImage(video, 0, 0, w, h); } catch(_de) {}
+      if (onProgress) onProgress(Math.min(0.99, (video.currentTime - segStart) / segDur));
+      /* Arrêt au point de fin de la découpe */
+      if (_hasTrim && video.currentTime >= segEnd - 0.05) { _stopRecorder(); return; }
+      rafId = requestAnimationFrame(drawFrame);
+    }
+
+    video.onended = function() { _stopRecorder(); };
+
+    function _startRecord() {
+      recorder.start(250);
+      video.play().then(function() { drawFrame(); }).catch(function() { _stopRecorder(); });
+    }
+
+    /* Si la vidéo doit commencer après le début : on seek d'abord */
+    if (segStart > 0.05) {
+      video.currentTime = segStart;
+      video.addEventListener('seeked', function _onSeeked() {
+        video.removeEventListener('seeked', _onSeeked);
+        _startRecord();
+      });
+    } else {
+      _startRecord();
+    }
+  };
+}
+
 /* ── Publie un Short officiel ── */
 function _admPublishOfficialShort() {
   if (!_adminUser || !_admHasAction('publish')) { showToast('Accès non autorisé', 'err'); return; }
   if (!_admOffShortVidFile) { showToast('Sélectionnez une vidéo pour le short', 'err'); return; }
 
-  var text     = _gwSanitize((document.getElementById('adm-off-short-text') || {}).value || '', 500).trim();
-  var thumbEl  = document.getElementById('adm-off-short-thumb-preview');
+  var text      = _gwSanitize((document.getElementById('adm-off-short-text') || {}).value || '', 500).trim();
+  var thumbEl   = document.getElementById('adm-off-short-thumb-preview');
   var thumbData = (thumbEl && thumbEl.style.display !== 'none' && thumbEl._editedData) ? thumbEl._editedData : null;
-  var shortId  = 'off_short_' + Date.now();
-  var vidFile  = _admOffShortVidFile;
-  var idbId    = 'vid_off_short_' + Date.now();
-  var nom      = _adminUser ? _adminUser.nom : 'Geniwork';
+  var shortId   = 'off_short_' + Date.now();
+  var idbId     = 'vid_off_short_' + Date.now();
+  var nom       = _adminUser ? _adminUser.nom : 'Geniwork';
 
-  function _resetShortForm() {
-    var ta = document.getElementById('adm-off-short-text');
-    if (ta) ta.value = '';
-    _admOffRemoveShort();
-    showToast('Short officiel publié ✓', 'ok');
-    _admRender();
+  function _doUpload(vidFile) {
+    function _resetShortForm() {
+      var ta = document.getElementById('adm-off-short-text');
+      if (ta) ta.value = '';
+      _admOffRemoveShort();
+      showToast('Short officiel publié ✓', 'ok');
+      _admRender();
+    }
+    _gwSaveVideoBlob(idbId, vidFile, function() {});
+    if (_gwFbStorage) {
+      var vExt = (vidFile.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
+      _showVideoProgress(0);
+      _uploadBlobToStorage('videos/' + shortId + vExt, vidFile,
+        function(url) {
+          _hideVideoProgress();
+          _offPublishPost(text, thumbData, nom, { idbId: idbId, url: url, videoType: 'short' }, shortId);
+          if (_gwFbReady && _gwFbDB) {
+            _gwFbDB.ref('gw/post_videos/' + shortId).set({ url: url, dur: 0 }).catch(function(){});
+          }
+          _resetShortForm();
+        },
+        function() {
+          _hideVideoProgress();
+          _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
+          _resetShortForm();
+        },
+        function(pct) { _showVideoProgress(pct); }
+      );
+    } else {
+      _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
+      _resetShortForm();
+    }
   }
 
-  /* Upload vidéo vers Storage */
-  _gwSaveVideoBlob(idbId, vidFile, function() {});
-  if (_gwFbStorage) {
-    var vExt = (vidFile.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
-    _showVideoProgress(0);
-    _uploadBlobToStorage('videos/' + shortId + vExt, vidFile,
-      function(url) {
-        _hideVideoProgress();
-        _offPublishPost(text, thumbData, nom, { idbId: idbId, url: url, videoType: 'short' }, shortId);
-        if (_gwFbReady && _gwFbDB) {
-          _gwFbDB.ref('gw/post_videos/' + shortId).set({ url: url, dur: 0 }).catch(function(){});
-        }
-        _resetShortForm();
-      },
-      function() {
-        _hideVideoProgress();
-        _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
-        _resetShortForm();
-      },
-      function(pct) { _showVideoProgress(pct); }
-    );
+  /* Compression automatique si > 20 Mo */
+  var origFile = _admOffShortVidFile;
+  if (origFile.size > 20 * 1024 * 1024) {
+    showToast('Compression vidéo en cours… (' + Math.round(origFile.size / 1024 / 1024) + ' Mo → ~10 Mo)', '');
+    _gwCompressShortVideo(origFile, null, function(compFile, wasCompressed) {
+      if (wasCompressed) {
+        showToast('Compressé : ' + Math.round(origFile.size/1024/1024) + ' Mo → ' + Math.round(compFile.size/1024/1024) + ' Mo ✓', 'ok');
+      }
+      _doUpload(compFile);
+    });
   } else {
-    _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
-    _resetShortForm();
+    _doUpload(origFile);
   }
 }
 
 /* ── Publie un post officiel (partagé entre admin panel + user composer) ── */
-function _offPublishPost(text, imgData, publisherNom, videoData, presetId) {
+function _offPublishPost(text, imgData, publisherNom, videoData, presetId, youtubeId) {
   var posts = _offGetPosts();
   var newPost = {
     id:             presetId || ('off_' + Date.now()),
@@ -31653,6 +34095,7 @@ function _offPublishPost(text, imgData, publisherNom, videoData, presetId) {
     text:           text,
     images:         imgData ? [imgData] : [],
     video:          videoData || null,
+    youtubeId:      youtubeId || null,
     publishedBy:    _adminUser ? _adminUser.email : (_currentUser ? _currentUser.email : 'admin'),
     publishedByNom: publisherNom || 'Geniwork',
     publishedAt:    new Date().toISOString(),
@@ -31912,8 +34355,21 @@ function _buildOfficialCard(p) {
 
   var timeStr   = _offTimeAgo(p.publishedAt);
   var mediaHtml = '';
-  if (p.video) {
-    /* Vidéo en priorité — p.video peut être une chaîne (ancien format) ou {idbId,url} */
+  if (p.youtubeId) {
+    /* Lien YouTube → vignette cliquable + player modal */
+    var ytThumb = 'https://img.youtube.com/vi/' + escHtml(p.youtubeId) + '/hqdefault.jpg';
+    mediaHtml =
+      '<div style="position:relative;border-radius:10px;overflow:hidden;aspect-ratio:16/9;background:#000;cursor:pointer;margin:8px 0" onclick="_openYoutubePlayer(\'' + escHtml(p.youtubeId) + '\')">' +
+        '<img src="' + ytThumb + '" alt="" style="width:100%;height:100%;object-fit:cover"/>' +
+        '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">' +
+          '<div style="width:64px;height:64px;background:rgba(255,0,0,.9);border-radius:50%;display:flex;align-items:center;justify-content:center">' +
+            '<i class="fab fa-youtube" style="color:#fff;font-size:30px"></i>' +
+          '</div>' +
+        '</div>' +
+        '<span style="position:absolute;top:8px;left:8px;background:rgba(0,0,0,.7);color:#fff;font-size:11px;padding:3px 8px;border-radius:20px;display:flex;align-items:center;gap:4px"><i class="fab fa-youtube" style="color:#FF0000"></i>YouTube</span>' +
+      '</div>';
+  } else if (p.video) {
+    /* Vidéo locale — p.video peut être une chaîne (ancien format) ou {idbId,url} */
     var vidSrc   = typeof p.video === 'string' ? p.video : (p.video.url || '');
     var vidIdbId = (p.video && typeof p.video === 'object') ? (p.video.idbId || null) : null;
 
@@ -31963,7 +34419,7 @@ function _buildOfficialCard(p) {
       })(p.id, vidIdbId);
     }
   } else if (p.images && p.images.length) {
-    mediaHtml = '<img src="' + escHtml(p.images[0]) + '" alt="" class="off-post-img"/>';
+    mediaHtml = '<img src="' + escHtml(p.images[0]) + '" alt="" class="off-post-img" style="cursor:pointer" onclick="openOfficialPhotoViewer(this.src)"/>';
   }
   var imgHtml = mediaHtml; /* compat avec le reste du code */
 
@@ -32612,6 +35068,8 @@ function _mkOpenCreate() {
   bg.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(15,23,42,.55);backdrop-filter:blur(3px)';
   bg.onclick = function(e){ if(e.target===bg){ bg.remove(); card.remove(); } };
 
+  var _mkCfg    = _admGetPlansConfig ? _admGetPlansConfig() : {};
+  var _mkEbookOn = _mkCfg.ebookEnabled !== false; /* false seulement si explicitement désactivé par l'admin */
   var svcOpts   = Object.keys(_MK_SVC_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_SVC_CATS[k]+'</option>'; }).join('');
   var prodOpts  = Object.keys(_MK_PROD_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_PROD_CATS[k]+'</option>'; }).join('');
   var ebookOpts = Object.keys(_MK_EBOOK_CATS).map(function(k){ return '<option value="'+k+'">'+_MK_EBOOK_CATS[k]+'</option>'; }).join('');
@@ -32639,7 +35097,7 @@ function _mkOpenCreate() {
       '<div style="display:flex;gap:8px;margin-top:6px">'+
         '<button id="mk-type-svc" onclick="_mkSetType(\'service\')" style="flex:1;padding:10px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">🛠️ Service</button>'+
         '<button id="mk-type-prod" onclick="_mkSetType(\'product\')" style="flex:1;padding:10px;background:#F1F5F9;color:#64748B;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">📦 Produit</button>'+
-        '<button id="mk-type-ebook" onclick="_mkSetType(\'ebook\')" style="flex:1;padding:10px;background:#F1F5F9;color:#64748B;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">📖 Ebook</button>'+
+        (_mkEbookOn ? '<button id="mk-type-ebook" onclick="_mkSetType(\'ebook\')" style="flex:1;padding:10px;background:#F1F5F9;color:#64748B;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer">📖 Ebook</button>' : '')+
       '</div>'+
     '</div>'+
 
@@ -32857,8 +35315,8 @@ function _mkSetEbookMode(mode) {
   var grad  = 'background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;flex:1;padding:10px 8px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer';
   var gradP = 'background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;flex:1;padding:10px 8px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer';
   var flat  = 'background:#F1F5F9;color:#64748B;border:none;flex:1;padding:10px 8px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer';
-  if (freeBtn) freeBtn.style.cssText = mode==='free' ? grad : flat;
-  if (paidBtn) paidBtn.style.cssText = mode==='paid' ? gradP : flat;
+  if (freeBtn) { freeBtn.style.cssText = mode==='free' ? grad : flat; freeBtn.dataset.mode = 'free'; }
+  if (paidBtn) { paidBtn.style.cssText = mode==='paid' ? gradP : flat; paidBtn.dataset.mode = mode==='paid' ? 'paid' : ''; }
   if (paidFields) paidFields.style.display = mode==='paid' ? 'block' : 'none';
   /* PayPal requis seulement en mode payant */
   _mkToggleEl('mk-paypal-wrap', mode==='paid' ? 'block' : 'none');
@@ -33077,7 +35535,7 @@ function _mkPublishListing() {
   if (card) card.remove();
 
   _mkPickedImages = [];
-  showToast('Annonce publiée ✓ Elle est visible dans le Marketplace', 'ok');
+  showToast('Annonce publiée ✓ Elle est visible dans Le Souk', 'ok');
   try { renderMarketplaceUserServices(); } catch(e) {}
   try { _mkRenderSystemListings();       } catch(e) {}
 }
@@ -33092,9 +35550,10 @@ function _mkPublishEbook() {
   var city    = _fldVal('mk-city-inp');
   var country = _fldVal('mk-country-inp');
 
-  /* Mode payant */
+  /* Mode payant — lire backgroundImage car les gradients ne remontent pas dans .background */
   var paidBtn = document.getElementById('mk-ebook-paid-btn');
-  var isPaid  = paidBtn && paidBtn.style.background.indexOf('6366') !== -1;
+  var _paidBg = paidBtn ? (paidBtn.style.backgroundImage || paidBtn.style.background || '') : '';
+  var isPaid  = _paidBg.indexOf('6366') !== -1 || (paidBtn && paidBtn.dataset.mode === 'paid');
   var price   = isPaid ? (_fldNum('mk-ebook-price-inp') || 0) : 0;
   var currency = _fldVal('mk-ebook-currency-sel') || 'EUR';
 
@@ -33166,7 +35625,7 @@ function _mkPublishEbook() {
     if (bg)   bg.remove();
     if (card) card.remove();
 
-    showToast('Ebook publié ✓ Visible dans le Marketplace !', 'ok');
+    showToast('Ebook publié ✓ Visible dans Le Souk !', 'ok');
     try { renderMarketplaceUserServices(); } catch(e) {}
     try { _mkRenderSystemListings(); } catch(e) {}
   }
@@ -33219,8 +35678,38 @@ function _mkOpenDetail(listingId) {
   if (!listing) return;
   _mkCurrentListing = listing;
 
-  listing.views = (listing.views || 0) + 1;
-  _mkSaveListings(listings);
+  /* Vue unique : 1 vue par utilisateur toutes les 2 heures maximum */
+  var _vKey = 'gw_mk_viewed_' + listing.id;
+  var _vLast = parseInt(localStorage.getItem(_vKey) || '0', 10);
+  var _vNow  = Date.now();
+  if (_vNow - _vLast > 2 * 3600 * 1000) {
+    localStorage.setItem(_vKey, _vNow);
+    if (_gwFbDB) {
+      _gwFbDB.ref('gw/mk_listing_stats/' + listing.id + '/views').transaction(function(cur) {
+        return (cur || 0) + 1;
+      }).then(function(res) {
+        var newViews = res.snapshot ? res.snapshot.val() : null;
+        if (newViews !== null) {
+          listing.views = newViews;
+          _mkSaveListings(listings);
+          /* Met à jour l'affichage si la fiche est ouverte */
+          var el = document.getElementById('mk-stat-views-' + listing.id);
+          if (el) el.textContent = newViews + ' vue(s)';
+        }
+      }).catch(function(){});
+    } else {
+      listing.views = (listing.views || 0) + 1;
+      _mkSaveListings(listings);
+    }
+  }
+  /* Charger les stats temps réel depuis Firebase avant d'afficher */
+  if (_gwFbDB) {
+    _gwFbDB.ref('gw/mk_listing_stats/' + listing.id).once('value').then(function(snap) {
+      var stats = snap.val() || {};
+      if (stats.views    != null) listing.views     = stats.views;
+      if (stats.downloads != null) listing.downloads = stats.downloads;
+    }).catch(function(){});
+  }
 
   var existing = document.getElementById('mk-detail-bg');
   if (existing) existing.remove();
@@ -33373,13 +35862,14 @@ function _mkOpenEbookDetail(listing) {
       '</div>'+
       '<div style="flex:1">'+
         '<div style="font-size:13px;font-weight:700;color:#0F172A">'+escHtml(listing.sellerNom)+'</div>'+
-        '<div style="font-size:11px;color:#64748B">'+escHtml(listing.sellerPlan||'free')+' · '+listing.views+' vue(s) · '+(listing.downloads||0)+' téléchargement(s)</div>'+
+        '<div style="font-size:11px;color:#64748B">'+escHtml(listing.sellerPlan||'free')+' · <span id="mk-stat-views-'+listing.id+'">'+listing.views+'</span> vue(s) · <span id="mk-stat-dl-'+listing.id+'">'+(listing.downloads||0)+'</span> téléchargement(s)</div>'+
       '</div>'+
     '</div>'+
 
     '<div id="mk-ebook-action-wrap"></div>'+
 
     (isMine ? '<div style="margin-top:8px;display:flex;flex-direction:column;gap:8px">'+
+      (!isFree ? '<button onclick="_mkGrantEbookAccess(\''+listing.id+'\')" style="padding:12px;background:#EEF2FF;color:#4F46E5;border:none;border-radius:14px;font-size:13px;font-weight:700;cursor:pointer"><i class="fas fa-key" style="margin-right:6px"></i>Autoriser un téléchargement</button>' : '')+
       '<button onclick="_mkDeleteListing(\''+listing.id+'\')" style="padding:12px;background:#FEF2F2;color:#EF4444;border:none;border-radius:14px;font-size:13px;font-weight:700;cursor:pointer"><i class="fas fa-trash" style="margin-right:6px"></i>Supprimer l\'ebook</button>'+
     '</div>' : '')+
     '</div>';
@@ -33404,24 +35894,250 @@ function _mkOpenEbookDetail(listing) {
         'style="display:block;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;margin-bottom:8px">'+
         '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger (déjà acheté)</a>';
     } else {
-      /* Bouton PayPal achat ebook */
-      actionWrap.innerHTML =
-        '<div id="mk-ebook-paypal-wrap" style="margin-bottom:8px"></div>'+
-        '<div style="font-size:10.5px;color:#94A3B8;text-align:center"><i class="fas fa-lock" style="margin-right:3px"></i>Paiement sécurisé PayPal · lien de téléchargement envoyé après achat</div>';
-      _mkLoadEbookPayPal(listing);
+      /* Ebook payant non acheté — afficher immédiatement l'UI selon paypalEnabled */
+      var _ebCfg = _admGetPlansConfig ? _admGetPlansConfig() : {};
+
+      /* Bouton téléchargement usage unique (accès manuel vendeur) */
+      function _ebBuildDlBtn(accessData) {
+        if (accessData && accessData.downloaded) {
+          return '<div style="background:#F0FDF4;border:1px solid #86EFAC;border-radius:14px;padding:14px;text-align:center">'+
+            '<div style="font-size:22px;margin-bottom:6px">✅</div>'+
+            '<div style="font-size:13px;font-weight:700;color:#16A34A;margin-bottom:4px">Ebook déjà téléchargé</div>'+
+            '<div style="font-size:11px;color:#4ADE80">Vous avez utilisé votre accès unique. Contactez le vendeur si besoin.</div>'+
+          '</div>';
+        }
+        return '<a href="'+escHtml(listing.ebookUrl)+'" download target="_blank" '+
+          'onclick="_mkEbookCountDownload(\''+listing.id+'\');_mkMarkEbookDownloaded(\''+listing.id+'\')" '+
+          'style="display:block;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;margin-bottom:8px">'+
+          '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger mon ebook</a>'+
+          '<div style="font-size:11px;color:#94A3B8;text-align:center"><i class="fas fa-info-circle" style="margin-right:3px"></i>Accès unique accordé par le vendeur</div>';
+      }
+
+      if (!_ebCfg.paypalEnabled) {
+        /* PayPal désactivé : bouton "Contacter le vendeur" immédiatement */
+        actionWrap.innerHTML =
+          '<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:14px;padding:14px;margin-bottom:10px">'+
+            '<div style="font-size:20px;font-weight:900;color:#6366F1;text-align:center;margin-bottom:6px">'+_gwFmtPrice(listing.price, listing.currency)+'</div>'+
+            '<div style="font-size:11px;color:#64748B;text-align:center;line-height:1.5;margin-bottom:12px">Le paiement en ligne n\'est pas disponible.<br>Contactez le vendeur pour finaliser votre achat.</div>'+
+            '<button onclick="_mkContactEbookSeller(\''+escHtml(listing.sellerEmail)+'\',\''+escHtml(listing.sellerNom)+'\',\''+escHtml(listing.title)+'\',\''+listing.id+'\')" '+
+            'style="display:block;width:100%;padding:13px;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:8px;box-sizing:border-box">'+
+            '<i class="fas fa-paper-plane" style="margin-right:6px"></i>Contacter le vendeur</button>'+
+            '<div style="font-size:11px;color:#94A3B8;text-align:center"><i class="fas fa-lock" style="margin-right:3px"></i>Téléchargement disponible après accord du vendeur</div>'+
+          '</div>';
+        /* Vérification Firebase en arrière-plan : si accès accordé → remplacer par bouton dl */
+        _mkCheckEbookAccess(listing.id, function(accessData) {
+          var aw = document.getElementById('mk-ebook-action-wrap');
+          if (aw && accessData) aw.innerHTML = _ebBuildDlBtn(accessData);
+        });
+      } else {
+        /* PayPal activé : vérifier accès manuel d'abord, sinon bouton PayPal */
+        _mkCheckEbookAccess(listing.id, function(accessData) {
+          var aw = document.getElementById('mk-ebook-action-wrap');
+          if (!aw) return;
+          if (accessData) {
+            aw.innerHTML = _ebBuildDlBtn(accessData);
+          } else {
+            aw.innerHTML =
+              '<div id="mk-ebook-paypal-wrap" style="margin-bottom:8px"></div>'+
+              '<div style="font-size:10.5px;color:#94A3B8;text-align:center"><i class="fas fa-lock" style="margin-right:3px"></i>Paiement sécurisé PayPal · téléchargement immédiat après achat</div>';
+            _mkLoadEbookPayPal(listing);
+          }
+        });
+      }
     }
   }
 }
 
+function _mkCheckEbookAccess(listingId, callback) {
+  /* callback(accessData) — null = pas d'accès, objet = accès (avec .downloaded pour usage unique) */
+  if (!_currentUser || !_gwFbDB) { callback(null); return; }
+  var key = _gwFbKey(_currentUser.email);
+  _gwFbDB.ref('gw/ebook_access/' + listingId + '/' + key).once('value').then(function(snap) {
+    callback(snap.val() || null);
+  }).catch(function() { callback(null); });
+}
+
+function _mkMarkEbookDownloaded(listingId) {
+  if (!_currentUser || !_gwFbDB) return;
+  var key = _gwFbKey(_currentUser.email);
+  _gwFbDB.ref('gw/ebook_access/' + listingId + '/' + key + '/downloaded').set(true).catch(function(){});
+}
+
+function _mkGrantEbookAccess(listingId) {
+  /* Afficher un formulaire inline sous le bouton "Autoriser" */
+  var existing = document.getElementById('mk-grant-form-'+listingId);
+  if (existing) { existing.remove(); return; } /* toggle */
+
+  var grantBtn = document.querySelector('[onclick="_mkGrantEbookAccess(\''+listingId+'\')"]');
+  if (!grantBtn) return;
+
+  var form = document.createElement('div');
+  form.id = 'mk-grant-form-'+listingId;
+  form.style.cssText = 'margin-top:10px;background:#EEF2FF;border:1px solid #C7D2FE;border-radius:12px;padding:12px';
+  form.innerHTML =
+    '<div style="font-size:12px;font-weight:700;color:#4F46E5;margin-bottom:8px"><i class="fas fa-key" style="margin-right:5px"></i>Autoriser un téléchargement</div>'+
+    '<input id="mk-grant-email-'+listingId+'" type="email" inputmode="email" placeholder="Email de l\'acheteur" autocomplete="email" '+
+    'style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #C7D2FE;border-radius:10px;font-size:13px;outline:none;margin-bottom:8px">'+
+    '<button onclick="_mkGrantEbookAccessConfirm(\''+listingId+'\')" '+
+    'style="width:100%;padding:10px;background:linear-gradient(135deg,#4F46E5,#7C3AED);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer">'+
+    '<i class="fas fa-check" style="margin-right:6px"></i>Confirmer l\'accès</button>';
+
+  grantBtn.parentNode.insertBefore(form, grantBtn.nextSibling);
+  document.getElementById('mk-grant-email-'+listingId).focus();
+}
+
+function _mkGrantEbookAccessConfirm(listingId) {
+  var input = document.getElementById('mk-grant-email-'+listingId);
+  if (!input) return;
+  var buyerEmail = (input.value || '').trim().toLowerCase();
+  if (!buyerEmail || buyerEmail.indexOf('@') < 0) { showToast('Entrez un email valide', 'err'); input.focus(); return; }
+  if (!_gwFbDB) { showToast('Connexion Firebase indisponible', 'err'); return; }
+
+  var btn = document.querySelector('[onclick="_mkGrantEbookAccessConfirm(\''+listingId+'\')"]');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Envoi…'; }
+
+  var key = _gwFbKey(buyerEmail);
+  _gwFbDB.ref('gw/ebook_access/' + listingId + '/' + key).set({
+    email: buyerEmail, grantedAt: new Date().toISOString(), downloaded: false
+  }).then(function() {
+    showToast('Accès accordé à ' + buyerEmail + ' ✓', 'ok');
+    var form = document.getElementById('mk-grant-form-'+listingId);
+    if (form) form.remove();
+    pushNotif(buyerEmail, {
+      id: genNotifId(), type: 'system',
+      title: '📖 Téléchargement autorisé !',
+      message: 'Le vendeur a autorisé votre téléchargement. Ouvrez la fiche ebook pour télécharger votre fichier (accès unique).',
+      date: new Date().toISOString(), read: false
+    });
+  }).catch(function() {
+    showToast('Erreur lors de l\'autorisation', 'err');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-check" style="margin-right:6px"></i>Confirmer l\'accès'; }
+  });
+}
+
+function _mkContactEbookSeller(sellerEmail, sellerNom, listingTitle, listingId) {
+  if (!_currentUser) { showToast('Connectez-vous pour envoyer un message', 'err'); return; }
+  if (sellerEmail === _currentUser.email) { showToast('Vous êtes le vendeur', ''); return; }
+
+  var existing = DEMO_CONVERSATIONS.find(function(c) { return !c.isGroup && c.email === sellerEmail; });
+  var conv;
+  if (existing) {
+    conv = existing;
+  } else {
+    var profile  = loadUserProfile(sellerEmail);
+    var hasBadge = profile && (profile.badgeType === 'verified' || profile.badgeType === 'premium');
+    conv = {
+      id: _newConvId(), name: sellerNom, email: sellerEmail,
+      role: 'Vendeur Geniwork', verified: hasBadge, online: false,
+      avatar: { type: 'color', color: '#6366F1', initials: getInitials(sellerNom) },
+      at: Date.now(), time: 'À l\'instant',
+      lastMsg: 'Démarrez la conversation', unread: 0, archived: false, messages: []
+    };
+    DEMO_CONVERSATIONS.unshift(conv);
+    _saveDMConvList();
+  }
+
+  /* Message auto : carte ebook + texte d'introduction */
+  var listing = listingId ? _mkGetListings().find(function(l) { return l.id === listingId; }) : null;
+  var _ts = Date.now();
+  var alreadySent = conv.messages.some(function(m) { return m.ebookId === listingId && m.from === _currentUser.email; });
+
+  if (!alreadySent) {
+    /* Carte ebook (image couverture + détails) */
+    var cardMsg = {
+      id: _ts, from: _currentUser.email, type: 'listing_card',
+      ebookId: listingId,
+      listingId: listingId,
+      listingTitle: listingTitle,
+      listingPrice:    listing ? listing.price : 0,
+      listingCurrency: listing ? (listing.currency || 'EUR') : 'EUR',
+      listingImg:      listing ? (listing.coverImage || (listing.images && listing.images[0]) || null) : null,
+      listingCat:      listing ? listing.category : '',
+      listingType:     'ebook',
+      text: '📖 ' + listingTitle + (listing ? ' — ' + _gwFmtPrice(listing.price, listing.currency) : ''),
+      time: _nowTime(), at: _ts
+    };
+    /* Message texte pré-rempli de l'acheteur */
+    var autoMsg = {
+      id: _ts + 1, from: _currentUser.email, type: 'text',
+      text: 'Bonjour, je suis intéressé(e) par votre ebook « ' + listingTitle + ' »' +
+            (listing ? ' vendu à ' + _gwFmtPrice(listing.price, listing.currency) : '') +
+            '. Comment procéder pour finaliser l\'achat ?',
+      time: _nowTime(), at: _ts + 1
+    };
+    conv.messages.push(cardMsg);
+    conv.messages.push(autoMsg);
+    conv.lastMsg = autoMsg.text;
+    conv.lastAt  = _ts + 1;
+    /* Écriture Firebase → carte + message visibles côté vendeur */
+    _dmWriteMsg(conv, cardMsg);
+    _dmWriteMsg(conv, autoMsg);
+    _writeDMInbox(sellerEmail, _currentUser.email, _currentUser.nom || _currentUser.email,
+                  _currentUser.role || 'Membre Geniwork', autoMsg.text);
+    /* Notif push au vendeur */
+    pushNotif(sellerEmail, {
+      id: genNotifId(), type: 'system',
+      title: '📖 Demande d\'achat ebook',
+      message: (_currentUser.nom || _currentUser.email) + ' est intéressé(e) par « ' + listingTitle + ' ».',
+      date: new Date().toISOString(), read: false
+    });
+  }
+
+  /* Fermer la fiche ebook */
+  var bg = document.getElementById('mk-detail-bg');
+  var card2 = document.getElementById('mk-detail-card');
+  if (bg) bg.remove();
+  if (card2) card2.remove();
+
+  /* Naviguer vers le chat */
+  var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+  if (msgsBtn) navTo(msgsBtn, 'p-messages');
+  renderConversations();
+  setTimeout(function() { openChat(conv.id); }, 220);
+}
+
 function _mkEbookCountDownload(listingId) {
-  var listings = _mkGetListings();
-  var l = listings.find(function(x){ return x.id === listingId; });
-  if (l) { l.downloads = (l.downloads || 0) + 1; _mkSaveListings(listings); }
+  /* Transaction atomique Firebase — 1 seul incrément même si appelé plusieurs fois */
+  var _dKey = 'gw_mk_dl_' + listingId + '_' + (_currentUser ? _currentUser.email : 'anon');
+  if (sessionStorage.getItem(_dKey)) return; /* déjà compté cette session */
+  sessionStorage.setItem(_dKey, '1');
+
+  if (_gwFbDB) {
+    _gwFbDB.ref('gw/mk_listing_stats/' + listingId + '/downloads').transaction(function(cur) {
+      return (cur || 0) + 1;
+    }).then(function(res) {
+      var newDl = res.snapshot ? res.snapshot.val() : null;
+      if (newDl !== null) {
+        var listings = _mkGetListings();
+        var l = listings.find(function(x){ return x.id === listingId; });
+        if (l) { l.downloads = newDl; _mkSaveListings(listings); }
+        var el = document.getElementById('mk-stat-dl-' + listingId);
+        if (el) el.textContent = newDl + ' téléchargement(s)';
+      }
+    }).catch(function(){});
+  } else {
+    var listings = _mkGetListings();
+    var l = listings.find(function(x){ return x.id === listingId; });
+    if (l) { l.downloads = (l.downloads || 0) + 1; _mkSaveListings(listings); }
+  }
 }
 
 function _mkLoadEbookPayPal(listing) {
   var wrap = document.getElementById('mk-ebook-paypal-wrap');
   if (!wrap) return;
+
+  /* Même interrupteur admin que le panier et l'achat direct — sinon l'achat
+     d'ebook restait possible même quand l'admin désactive PayPal */
+  if (!_admGetPlansConfig().paypalEnabled) {
+    wrap.innerHTML =
+      '<div style="background:linear-gradient(135deg,#FEF3C720,#FDE68A20);border:1px solid #FCD34D;border-radius:14px;padding:16px;text-align:center">' +
+        '<div style="font-size:22px;margin-bottom:8px">🔒</div>' +
+        '<div style="font-size:13px;font-weight:700;color:#92400E;margin-bottom:4px">Paiements temporairement désactivés</div>' +
+        '<div style="font-size:11px;color:#B45309;line-height:1.5">Les paiements en ligne sont momentanément indisponibles sur GeniWork.</div>' +
+      '</div>';
+    return;
+  }
+
   var existing = document.getElementById('paypal-sdk');
   if (!existing) {
     var script = document.createElement('script');
@@ -33491,6 +36207,19 @@ function _mkRenderEbookPayPalBtn(listing) {
 function _mkLoadPayPal(listing) {
   var wrap = document.getElementById('mk-paypal-btn-wrap');
   if (!wrap) return;
+
+  /* Respecte l'interrupteur admin "Paiements PayPal" — sinon le panier était
+     bien bloqué mais l'achat direct depuis une fiche produit/service restait
+     ouvert, rendant le blocage admin incomplet */
+  if (!_admGetPlansConfig().paypalEnabled) {
+    wrap.innerHTML =
+      '<div style="background:linear-gradient(135deg,#FEF3C720,#FDE68A20);border:1px solid #FCD34D;border-radius:14px;padding:16px;text-align:center">' +
+        '<div style="font-size:22px;margin-bottom:8px">🔒</div>' +
+        '<div style="font-size:13px;font-weight:700;color:#92400E;margin-bottom:4px">Paiements temporairement désactivés</div>' +
+        '<div style="font-size:11px;color:#B45309;line-height:1.5">Les paiements en ligne sont momentanément indisponibles sur GeniWork.<br>Contactez directement le vendeur pour finaliser votre achat.</div>' +
+      '</div>';
+    return;
+  }
 
   var existing = document.getElementById('paypal-sdk');
   if (!existing) {
@@ -33637,10 +36366,11 @@ function _mkContactSeller(email, listingId) {
       type:      'listing_card',
       listingId: listing.id,
       listingTitle: listing.title,
-      listingPrice: listing.price,
-      listingImg:   listing.images && listing.images.length ? listing.images[0] : null,
-      listingCat:   listing.category,
-      listingType:  listing.type,
+      listingPrice:    listing.price,
+      listingCurrency: listing.currency || 'EUR',
+      listingImg:      listing.images && listing.images.length ? listing.images[0] : null,
+      listingCat:      listing.category,
+      listingType:     listing.type,
       text:         '📦 ' + listing.title + ' — ' + _gwFmtPrice(listing.price, listing.currency)
     };
     conv.messages.push(cardMsg);
@@ -33953,7 +36683,7 @@ function _admBuildMkCommissions() {
   var total = txns.reduce(function(s,t){ return s + (t.commission||0); }, 0);
   var count = txns.length;
 
-  var html = '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-store" style="color:#6366F1;margin-right:6px"></i>Commissions Marketplace (1%)</div>';
+  var html = '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-store" style="color:#6366F1;margin-right:6px"></i>Commissions Le Souk (1%)</div>';
 
   html += '<div class="adm-pay-overview">'+
     '<div class="adm-pay-card total">'+
@@ -34324,7 +37054,7 @@ function _jobFeatureEnabled() {
 }
 function _admSetJobsFeature(enabled) {
   localStorage.setItem('gw_jobs_feature_enabled', enabled ? '1' : '0');
-  _gwFbSet('settings_jobs_enabled', enabled ? 1 : 0);
+  _admApi('moderate', { token: _admSessionToken, action: 'setJobsEnabled', enabled: !!enabled });
   _jobApplyFeatureVisibility();
   showToast(enabled ? 'Module Offres d\'emploi activé' : 'Module Offres d\'emploi désactivé', 'ok');
   try { _admRender(); } catch(e){}
@@ -36017,7 +38747,7 @@ function _mkRefreshTxBtn(btn) {
         btn.disabled = false;
       }, 1500);
     }
-    showToast('Marketplace actualisé', 'ok');
+    showToast('Le Souk actualisé', 'ok');
   }
 
   if (_gwFbReady && _gwFbDB) {
@@ -36142,7 +38872,7 @@ function _mkRefreshAllListings() {
     screen.innerHTML =
       /* Header */
       '<div style="position:sticky;top:0;background:#fff;z-index:10;border-bottom:1px solid #E2E8F0;box-shadow:0 1px 4px rgba(0,0,0,.05)">' +
-        '<div style="padding:14px 16px;display:flex;align-items:center;gap:10px">' +
+        '<div style="padding:calc(14px + var(--gw-sat, env(safe-area-inset-top, 0px))) 16px 14px;display:flex;align-items:center;gap:10px">' +
           '<button onclick="_mkCloseScreen(\'mk-all-screen\')" style="width:36px;height:36px;border:none;background:#F1F5F9;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;color:#374151;cursor:pointer;flex-shrink:0"><i class="fas fa-arrow-left"></i></button>' +
           '<div style="flex:1;font-size:17px;font-weight:800;color:#0F172A">Toutes les annonces</div>' +
           '<span style="font-size:12px;color:#94A3B8">'+filtered.length+' résultat(s)</span>' +
@@ -36580,10 +39310,10 @@ function _admBuildBackup() {
     ]) +
 
   /* Marketplace & Artistes */
-  _card('fa-store', '#059669', 'Marketplace & Artistes',
-    'Annonces marketplace, chansons, statistiques artistes',
+  _card('fa-store', '#059669', 'Le Souk & Artistes',
+    'Annonces Le Souk, chansons, statistiques artistes',
     [
-      { key:'marketplace', label:'Marketplace' },
+      { key:'marketplace', label:'Le Souk' },
       { key:'artiste',     label:'Artistes & Chansons' },
       { key:'services',    label:'Services freelance' }
     ]) +
@@ -37261,3 +39991,4 @@ function _secClearOldEvents() {
 /* ══════════════════════════════════════════
    FIN MODULE SÉCURITÉ
 ══════════════════════════════════════════ */
+

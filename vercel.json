@@ -8,6 +8,7 @@
     { "source": "/delete-account",           "destination": "/pages/delete-account.html" },
     { "source": "/child-safety",             "destination": "/pages/child-safety.html" },
     { "source": "/firebase-messaging-sw.js", "destination": "/firebase-messaging-sw.js" },
+    { "source": "/.well-known/:path*",       "destination": "/.well-known/:path*" },
     { "source": "/(.*)",                     "destination": "/index.html" }
   ],
   "headers": [
