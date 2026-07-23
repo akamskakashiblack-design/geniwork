@@ -554,6 +554,31 @@ function _gwFbKey(email) {
     .replace(/[#$\[\]\/]/g, '_');
 }
 
+/* ── Étape 1 migration auth : échange email+mot de passe contre une
+   vraie session Firebase (auth.uid = _gwFbKey(email)) via /api/auth/token.
+   Best-effort — n'importe quel échec (réseau, serveur) est avalé
+   silencieusement, la session anonyme existante continue de fonctionner
+   comme avant. N'affecte aucune autre fonctionnalité de l'app. ── */
+function _gwSignInRealIdentity(email, password) {
+  try {
+    fetch('/api/auth/token', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ email: email, password: password })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data && data.ok && data.token && typeof firebase !== 'undefined' && firebase.auth) {
+        return firebase.auth().signInWithCustomToken(data.token);
+      }
+    })
+    .then(function(cred) {
+      if (cred && cred.user) console.log('[GW Firebase] 🔐 Session réelle établie —', cred.user.uid);
+    })
+    .catch(function(e) { console.warn('[GW Firebase] _gwSignInRealIdentity ignoré :', e.message); });
+  } catch (e) { /* jamais bloquant */ }
+}
+
 /* ── Écriture vers Firebase ── */
 function _gwFbSet(path, data) {
   if (!_gwFbReady || !_gwFbDB) {
@@ -3322,6 +3347,12 @@ function doLogin() {
     /* Crée une session sécurisée */
     var session = _gwCreateSession(user);
     _currentUser = { nom: user.nom, email: user.email, loginMethod: user.loginMethod || 'email' };
+
+    /* Étape 1 migration auth : obtient une vraie session Firebase liée à
+       l'identité réelle (auth.uid), en plus de la session anonyme actuelle.
+       Best-effort : si ça échoue, la connexion continue normalement
+       (comme avant), rien n'est bloquant. */
+    _gwSignInRealIdentity(email, pwd);
 
     showToast('Connexion réussie ✓', 'ok');
     setTimeout(function() {
