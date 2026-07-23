@@ -579,6 +579,35 @@ function _gwSignInRealIdentity(email, password) {
   } catch (e) { /* jamais bloquant */ }
 }
 
+/* ── Étape 3 migration auth : même principe, mais pour la connexion Google.
+   Le serveur revérifie le jeton Google (credential JWT ou access token)
+   lui-même — jamais l'email fourni par le navigateur — avant de délivrer
+   la session Firebase réelle. Best-effort, non bloquant. ── */
+function _gwSignInRealIdentityGoogle(gUser) {
+  try {
+    var body = gUser.credential ? { credential: gUser.credential }
+             : gUser.accessToken ? { accessToken: gUser.accessToken }
+             : null;
+    if (!body) return;
+
+    fetch('/api/auth/google-token', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data && data.ok && data.token && typeof firebase !== 'undefined' && firebase.auth) {
+        return firebase.auth().signInWithCustomToken(data.token);
+      }
+    })
+    .then(function(cred) {
+      if (cred && cred.user) console.log('[GW Firebase] 🔐 Session réelle établie (Google) —', cred.user.uid);
+    })
+    .catch(function(e) { console.warn('[GW Firebase] _gwSignInRealIdentityGoogle ignoré :', e.message); });
+  } catch (e) { /* jamais bloquant */ }
+}
+
 /* ── Écriture vers Firebase ── */
 function _gwFbSet(path, data) {
   if (!_gwFbReady || !_gwFbDB) {
@@ -1791,12 +1820,14 @@ function startGoogleSignIn() {
         return;
       }
       _showGoogleLoading('Connexion en cours…');
+      var _gCred = result.credential && result.credential.idToken;
       _googleLogin({
-        googleId : user.uid,
-        email    : user.email,
-        nom      : user.displayName || user.email,
-        photo    : user.photoURL    || null,
-        verified : user.emailVerified
+        googleId  : user.uid,
+        email     : user.email,
+        nom       : user.displayName || user.email,
+        photo     : user.photoURL    || null,
+        verified  : user.emailVerified,
+        credential: _gCred || undefined
       });
     })
     .catch(function(error) {
@@ -1838,11 +1869,12 @@ function _startGoogleSignInNative() {
       }
       _showGoogleLoading('Connexion en cours…');
       _googleLogin({
-        googleId : claims.sub,
-        email    : claims.email,
-        nom      : claims.name    || claims.email,
-        photo    : claims.picture || null,
-        verified : claims.email_verified
+        googleId  : claims.sub,
+        email     : claims.email,
+        nom       : claims.name    || claims.email,
+        photo     : claims.picture || null,
+        verified  : claims.email_verified,
+        credential: idToken
       });
     })
     .catch(function(error) {
@@ -1867,11 +1899,12 @@ function _fetchGoogleUserProfile(accessToken) {
       return;
     }
     _googleLogin({
-      googleId : info.sub,
-      email    : info.email,
-      nom      : info.name    || info.email,
-      photo    : info.picture || null,
-      verified : info.email_verified
+      googleId    : info.sub,
+      email       : info.email,
+      nom         : info.name    || info.email,
+      photo       : info.picture || null,
+      verified    : info.email_verified,
+      accessToken : accessToken
     });
   })
   .catch(function() {
@@ -1896,11 +1929,12 @@ function _handleGoogleCredential(response) {
     return;
   }
   _googleLogin({
-    googleId: payload.sub,
-    email:    payload.email,
-    nom:      payload.name,
-    photo:    payload.picture,
-    verified: payload.email_verified
+    googleId:   payload.sub,
+    email:      payload.email,
+    nom:        payload.name,
+    photo:      payload.picture,
+    verified:   payload.email_verified,
+    credential: response.credential
   });
 }
 
@@ -1963,6 +1997,9 @@ function _googleLogin(gUser) {
       if (!_gwCheckBanOnLogin(existing.email)) return;
       _currentUser = { nom: existing.nom, email: existing.email, loginMethod: 'google' };
       _gwCreateSession(_currentUser);
+      /* Étape 3 migration auth : même principe que doLogin(), mais verifie le
+         jeton Google côté serveur (jamais l'email fourni par le navigateur) */
+      _gwSignInRealIdentityGoogle(gUser);
       _gwPreloadUserData(_currentUser, function() {
         goTo('screen-app');
         initApp(_currentUser);
