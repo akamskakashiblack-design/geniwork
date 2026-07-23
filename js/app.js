@@ -3110,6 +3110,14 @@ function _gwGetDeviceId() {
 function _gwCreateSession(user) {
   /* Efface le flag de déconnexion explicite → auto-login autorisé au prochain lancement */
   localStorage.removeItem('gw_explicit_logout');
+  /* Préserve le jeton de renouvellement (étape 4) déjà présent, pour ne pas
+     le perdre à chaque redémarrage avant que _gwRestoreRealIdentity() ait
+     eu le temps de le réécrire de façon asynchrone. */
+  var existingRefresh = null;
+  try {
+    var prev = JSON.parse(localStorage.getItem('gw_session') || 'null');
+    if (prev && prev.authRefresh) existingRefresh = prev.authRefresh;
+  } catch (e) {}
   var session = {
     token:       _gwToken(),
     email:       user.email,
@@ -3118,6 +3126,7 @@ function _gwCreateSession(user) {
     deviceId:    _gwGetDeviceId(),
     expires:     Date.now() + 365 * 24 * 3600 * 1000   /* 1 an */
   };
+  if (existingRefresh) session.authRefresh = existingRefresh;
   localStorage.setItem('gw_session', JSON.stringify(session));
   return session;
 }
@@ -3133,6 +3142,21 @@ function _gwLoadSession() {
     if (!s || !s.token || !s.email || !s.expires) { localStorage.removeItem('gw_session'); return null; }
     /* Session expirée */
     if (Date.now() > s.expires) { localStorage.removeItem('gw_session'); return null; }
+
+    /* Étape 5 migration auth : force une reconnexion UNIQUE (par appareil)
+       pour les sessions créées avant la mise en place des jetons de
+       renouvellement (étape 4), afin que tout le monde obtienne une vraie
+       identité Firebase avant qu'on verrouille les règles de sécurité. */
+    if (!s.authRefresh) {
+      if (localStorage.getItem('gw_auth_migration_v1') !== '1') {
+        localStorage.setItem('gw_auth_migration_v1', '1');
+        localStorage.removeItem('gw_session');
+        return null;
+      }
+    } else if (localStorage.getItem('gw_auth_migration_v1') !== '1') {
+      localStorage.setItem('gw_auth_migration_v1', '1');
+    }
+
     /* NOTE: la vérification deviceId est intentionnellement supprimée —
        elle causait des déconnexions sur mobile quand le storage était partiellement effacé */
     /* ── Renouvelle automatiquement la session à chaque ouverture ── */
