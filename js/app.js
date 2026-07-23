@@ -3114,6 +3114,7 @@ function _gwMailCode(email, code, type, onDone) {
 var _verifyCode = '';       // code inscription
 var _verifyEmail = '';      // email en attente de vérification
 var _verifyData  = null;    // données utilisateur temporaires
+var _verifyPlainPwd = '';   // mot de passe en clair, gardé le temps d'établir la session Firebase réelle après acceptCGU()
 
 var _resetCode  = '';       // code reset
 var _resetEmail = '';       // email en cours de reset
@@ -3232,6 +3233,7 @@ function doVerify() {
   /* ─ Code correct : hache le mot de passe et enregistre ─ */
   _verifyData.verified = true;
   var pwdToHash = _verifyData.password;
+  _verifyPlainPwd = pwdToHash; /* gardé temporairement pour _gwSignInRealIdentity() après acceptCGU() */
   var salt = _gwSalt();
   _gwHashPwd(pwdToHash, salt).then(function(hashed) {
     _verifyData.password = hashed;
@@ -3454,6 +3456,9 @@ function acceptCGU() {
       var sessionUser = { nom: newUser.nom, email: newUser.email, loginMethod: newUser.loginMethod || 'email' };
       _currentUser = sessionUser;
       _gwCreateSession(sessionUser);
+      /* Étape 2 migration auth : même principe que doLogin(), best-effort */
+      if (_verifyPlainPwd) _gwSignInRealIdentity(newUser.email, _verifyPlainPwd);
+      _verifyPlainPwd = '';
       initApp(sessionUser);
       scheduleNewPosts();
     }
