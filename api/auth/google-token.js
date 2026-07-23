@@ -16,6 +16,7 @@
 
 const crypto = require('crypto');
 const { emailKey } = require('../admin/_lib/fbrest');
+const { sign: signRefreshToken } = require('./_lib/refreshToken');
 
 function getServiceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -92,8 +93,9 @@ module.exports = async function handler(req, res) {
     const sa = getServiceAccount();
     const uid = emailKey(verified.email);
     const token = signCustomToken(uid, sa);
+    const refreshToken = signRefreshToken(verified.email);
 
-    res.status(200).json({ ok: true, token: token, uid: uid, email: verified.email });
+    res.status(200).json({ ok: true, token: token, uid: uid, email: verified.email, refreshToken: refreshToken });
   } catch (err) {
     console.error('[Geniwork Auth] erreur google-token:', err.message);
     res.status(500).json({ error: err.message });

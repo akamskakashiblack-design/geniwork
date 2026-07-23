@@ -568,6 +568,7 @@ function _gwSignInRealIdentity(email, password) {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (data && data.ok && data.refreshToken) _gwSaveAuthRefresh(data.refreshToken);
       if (data && data.ok && data.token && typeof firebase !== 'undefined' && firebase.auth) {
         return firebase.auth().signInWithCustomToken(data.token);
       }
@@ -597,6 +598,7 @@ function _gwSignInRealIdentityGoogle(gUser) {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (data && data.ok && data.refreshToken) _gwSaveAuthRefresh(data.refreshToken);
       if (data && data.ok && data.token && typeof firebase !== 'undefined' && firebase.auth) {
         return firebase.auth().signInWithCustomToken(data.token);
       }
@@ -605,6 +607,60 @@ function _gwSignInRealIdentityGoogle(gUser) {
       if (cred && cred.user) console.log('[GW Firebase] 🔐 Session réelle établie (Google) —', cred.user.uid);
     })
     .catch(function(e) { console.warn('[GW Firebase] _gwSignInRealIdentityGoogle ignoré :', e.message); });
+  } catch (e) { /* jamais bloquant */ }
+}
+
+/* ── Étape 4 migration auth : sauvegarde le jeton de renouvellement
+   (longue durée) reçu du serveur dans la session locale existante. ── */
+function _gwSaveAuthRefresh(token) {
+  try {
+    var raw = localStorage.getItem('gw_session');
+    var s = raw ? JSON.parse(raw) : {};
+    s.authRefresh = token;
+    localStorage.setItem('gw_session', JSON.stringify(s));
+  } catch (e) { /* jamais bloquant */ }
+}
+
+/* ── Étape 4 migration auth : au redémarrage de l'app (reconnexion
+   automatique), échange le jeton de renouvellement stocké contre une
+   session Firebase réelle fraîche — sans redemander le mot de passe.
+   Le jeton doit être passé explicitement (capturé AVANT que
+   _gwCreateSession() ne réécrive gw_session) plutôt que relu depuis
+   localStorage ici. Best-effort, non bloquant. ── */
+function _gwRestoreRealIdentity(refreshToken) {
+  try {
+    if (!refreshToken) return;
+
+    fetch('/api/auth/refresh', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ refreshToken: refreshToken })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data && data.ok && data.refreshToken) _gwSaveAuthRefresh(data.refreshToken);
+      if (data && data.ok && data.token && typeof firebase !== 'undefined' && firebase.auth) {
+        return firebase.auth().signInWithCustomToken(data.token);
+      }
+    })
+    .then(function(cred) {
+      if (cred && cred.user) console.log('[GW Firebase] 🔐 Session réelle restaurée —', cred.user.uid);
+    })
+    .catch(function(e) { console.warn('[GW Firebase] _gwRestoreRealIdentity ignoré :', e.message); });
+  } catch (e) { /* jamais bloquant */ }
+}
+
+/* ── Étape 4 migration auth : à la déconnexion (explicite, ban, suppression
+   de compte…), revient à une session Firebase anonyme et efface le jeton
+   de renouvellement pour qu'un autre utilisateur du même navigateur ne
+   restaure pas cette identité au prochain lancement. ── */
+function _gwClearRealIdentity() {
+  try {
+    if (typeof firebase !== 'undefined' && firebase.auth) {
+      firebase.auth().signOut()
+        .then(function() { return firebase.auth().signInAnonymously(); })
+        .catch(function(e) { console.warn('[GW Firebase] _gwClearRealIdentity ignoré :', e.message); });
+    }
   } catch (e) { /* jamais bloquant */ }
 }
 
@@ -2286,6 +2342,7 @@ function _gwStartApp() {
       _gwAppStarted = false;
       localStorage.removeItem('gw_session');
       _currentUser = null;
+      _gwClearRealIdentity();
       try { goTo('screen-login'); } catch(e) {}
       return;
     }
@@ -2308,6 +2365,7 @@ function _gwStartApp() {
       /* findUser() peut échouer si Firebase n'a pas encore syncé → fallback sur la session */
       var storedUser = findUser(session.email) || { nom: session.nom || session.email.split('@')[0], email: session.email, loginMethod: session.loginMethod || 'email' };
       _currentUser = { nom: storedUser.nom, email: storedUser.email, loginMethod: storedUser.loginMethod || 'email' };
+      _gwRestoreRealIdentity(session.authRefresh);
       _gwCreateSession(_currentUser);
       _gwPreloadUserData(_currentUser, function() {
         _gwAppStarted = true;
@@ -2339,6 +2397,7 @@ function _gwInstantAutoLogin() {
     var user = findUser(ses.email) || { nom: ses.nom || ses.email.split('@')[0], email: ses.email, loginMethod: ses.loginMethod || 'email' };
     _gwAppStarted = true;
     _currentUser = { nom: user.nom, email: user.email, loginMethod: user.loginMethod || 'email' };
+    _gwRestoreRealIdentity(ses.authRefresh);
     _gwCreateSession(_currentUser);
     initApp(_currentUser);
     scheduleNewPosts();
@@ -2863,6 +2922,7 @@ function goTo(screenId) {
       /* Invalide la session et redirige vers écran ban */
       localStorage.removeItem('gw_session');
       _currentUser = null;
+      _gwClearRealIdentity();
       document.querySelectorAll('.screen').forEach(function(s){ s.classList.remove('active'); });
       document.getElementById('screen-login').classList.add('active');
       setTimeout(function() { _gwShowLoginBanScreen(activeBan.email || '', activeBan); }, 200);
@@ -5216,6 +5276,7 @@ function _doDeleteAccount() {
   /* Déconnexion */
   _currentUser = null;
   localStorage.removeItem('gw_session');
+  _gwClearRealIdentity();
 
   _closeGenericSheet('delete-acct');
   showToast('Compte supprimé.', '');
@@ -5579,6 +5640,7 @@ function _doDeactivateAccount() {
 
   _currentUser = null;
   localStorage.removeItem('gw_session');
+  _gwClearRealIdentity();
 
   _closeGenericSheet('deactivate-acct');
   showToast('Compte désactivé. À bientôt !', '');
@@ -25765,6 +25827,7 @@ function doLogout() {
   DEMO_CONVERSATIONS.length = 0;
   _currentUser = null;
   localStorage.removeItem('gw_session');
+  _gwClearRealIdentity();
   /* Marque la déconnexion explicite → bloque l'auto-login au prochain lancement */
   localStorage.setItem('gw_explicit_logout', '1');
   _pickedImages = [];

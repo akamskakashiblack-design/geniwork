@@ -20,6 +20,7 @@
 const crypto = require('crypto');
 const { dbGet, emailKey } = require('../admin/_lib/fbrest');
 const { verifyPwd } = require('../admin/_lib/pwd');
+const { sign: signRefreshToken } = require('./_lib/refreshToken');
 
 function toArray(v) {
   if (Array.isArray(v)) return v;
@@ -82,8 +83,9 @@ module.exports = async function handler(req, res) {
     const sa = getServiceAccount();
     const uid = emailKey(email);
     const token = signCustomToken(uid, sa);
+    const refreshToken = signRefreshToken(email);
 
-    res.status(200).json({ ok: true, token: token, uid: uid });
+    res.status(200).json({ ok: true, token: token, uid: uid, refreshToken: refreshToken });
   } catch (err) {
     console.error('[Geniwork Auth] erreur token:', err.message);
     res.status(500).json({ error: err.message });
