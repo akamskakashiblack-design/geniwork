@@ -1434,6 +1434,12 @@ function _gwMergePost(snap) {
       if (lp && lp.id && !incomingIds[lp.id]) {
         /* Conserve les posts locaux avec idbId (vidéo locale) — Firebase ne les a pas encore */
         if (lp.video && lp.video.idbId) { localOnly.push(lp); incomingIds[lp.id] = true; }
+        /* Conserve aussi tout post récent (< 60s, id = Date.now() à la création) quel que
+           soit son type — l'écriture Firebase d'un post texte/image est différée (attente
+           auth + upload image + scan anti-nudité) et peut prendre plusieurs secondes ; un
+           merge Firebase qui arrive dans cette fenêtre ne doit pas être interprété comme
+           une suppression, sinon le post texte/image publié disparaît silencieusement. */
+        else if (typeof lp.id === 'number' && (Date.now() - lp.id) < 60000) { localOnly.push(lp); incomingIds[lp.id] = true; }
       }
     });
   } catch(e2) {}
@@ -1504,6 +1510,17 @@ function _gwMergePost(snap) {
         }
       });
       if (_vidChanged) changed = true;
+    }
+    /* ── Sync texte modifié chez les autres utilisateurs ── */
+    if (existing && p.edited && p.editedAt && p.text !== undefined && p.text !== existing.text) {
+      existing.text     = p.text;
+      existing.edited   = true;
+      existing.editedAt = p.editedAt;
+      var _ptEl = document.getElementById('ptxt-' + p.id);
+      if (_ptEl) _ptEl.innerHTML = _gwRenderTaggedText(p.text.length > 200 ? p.text.slice(0, 200) + '…' : p.text, p.tags);
+      var _eLbl = document.getElementById('pedit-' + p.id);
+      if (_eLbl) _eLbl.style.display = 'inline';
+      changed = true;
     }
   });
   if (changed) {
@@ -7273,7 +7290,9 @@ function buildPostCard(post) {
           '<div class="post-name">' + escHtml(getDisplayName(post.ownerEmail, post.author)) +
             getBadgeHtml(post.ownerEmail) +
           '</div>' +
-          '<div class="post-time">' + escHtml(getDisplayRole(post.ownerEmail, post.role)) + ' · ' + _timeAgo(post.at || post.id) + '</div>' +
+          '<div class="post-time">' + escHtml(getDisplayRole(post.ownerEmail, post.role)) + ' · ' + _timeAgo(post.at || post.id) +
+        (post.edited ? ' · <span id="pedit-' + post.id + '" style="color:#9CA3AF;font-size:10.5px">Modifié</span>' : '<span id="pedit-' + post.id + '" style="color:#9CA3AF;font-size:10.5px;display:none">Modifié</span>') +
+      '</div>' +
         '</div>' +
       '</div>' +
       followBtn +
@@ -7582,11 +7601,17 @@ function openPostMenu(postId) {
   if (isOwn) {
     var isPinned   = post.pinned   ? true : false;
     var isArchived = post.archived ? true : false;
+    var _canEdit   = (Date.now() - (post.at || 0)) < 10 * 60 * 1000;
     items =
-      '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');editPost(' + postId + ')">' +
-        '<span class="pmi-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-pen"></i></span>' +
-        '<span class="pmi-label">Modifier</span>' +
-      '</button>' +
+      (_canEdit
+        ? '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');editPost(' + postId + ')">' +
+            '<span class="pmi-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-pen"></i></span>' +
+            '<span class="pmi-label">Modifier</span>' +
+          '</button>'
+        : '<button class="post-menu-item" disabled style="opacity:.45;cursor:not-allowed">' +
+            '<span class="pmi-ico" style="background:#F3F4F6;color:#9CA3AF"><i class="fas fa-pen"></i></span>' +
+            '<span class="pmi-label" style="color:#9CA3AF">Modifier <span style="font-size:10px">(délai dépassé)</span></span>' +
+          '</button>') +
       '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');pinPost(' + postId + ')">' +
         '<span class="pmi-ico" style="background:#F5F3FF;color:#7C3AED"><i class="fas fa-thumbtack"></i></span>' +
         '<span class="pmi-label">' + (isPinned ? 'Désépingler' : 'Épingler') + '</span>' +
@@ -7636,6 +7661,15 @@ function editPost(postId) {
              PENDING_POSTS.find(function(p) { return p.id === postId; });
   if (!post) return;
 
+  /* Vérification délai 10 min */
+  var TEN_MIN = 10 * 60 * 1000;
+  var age = Date.now() - (post.at || 0);
+  if (age > TEN_MIN) {
+    showToast('Modification impossible après 10 minutes', 'err');
+    return;
+  }
+  var remaining = Math.ceil((TEN_MIN - age) / 60000);
+
   _closeGenericSheet('edit-post');
   var bg = document.createElement('div');
   bg.className = 'cam-sheet-bg change-pwd-modal'; bg.id = 'edit-post-bg';
@@ -7645,9 +7679,8 @@ function editPost(postId) {
   card.className = 'change-pwd-card'; card.id = 'edit-post-card';
   card.innerHTML =
     '<p class="change-pwd-title">Modifier la publication</p>' +
-    '<textarea id="edit-post-text" style="width:100%;padding:12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:14px;resize:vertical;min-height:100px;box-sizing:border-box;background:#F9FAFB;outline:none">' +
-      escHtml(post.text) +
-    '</textarea>' +
+    '<p style="font-size:11.5px;color:#6B7280;margin-bottom:10px;text-align:center">⏱ ' + remaining + ' min restante' + (remaining > 1 ? 's' : '') + '</p>' +
+    '<textarea id="edit-post-text" style="width:100%;padding:12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:14px;resize:vertical;min-height:100px;box-sizing:border-box;background:#F9FAFB;outline:none"></textarea>' +
     '<div class="change-pwd-btns">' +
       '<button class="change-pwd-cancel" onclick="_closeGenericSheet(\'edit-post\')">Annuler</button>' +
       '<button class="change-pwd-save" onclick="_saveEditPost(' + postId + ')">Enregistrer</button>' +
@@ -7658,7 +7691,11 @@ function editPost(postId) {
 
   setTimeout(function() {
     var ta = document.getElementById('edit-post-text');
-    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+    if (ta) {
+      ta.value = post.text || '';
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
   }, 100);
 }
 
@@ -7672,18 +7709,46 @@ function _saveEditPost(postId) {
              PENDING_POSTS.find(function(p) { return p.id === postId; });
   if (!post) return;
 
-  post.text = newText;
-  /* Persiste si c'est un post de l'utilisateur connecté */
+  /* Dernier contrôle délai 10 min */
+  if (Date.now() - (post.at || 0) > 10 * 60 * 1000) {
+    showToast('Modification impossible après 10 minutes', 'err');
+    _closeGenericSheet('edit-post');
+    return;
+  }
+
+  post.text     = newText;
+  post.edited   = true;
+  post.editedAt = Date.now();
+
+  /* Pousse vers Firebase — lit depuis localStorage (liste complète) pour éviter d'écraser des posts absents de DEMO_POSTS */
   if (_currentUser && post.ownerEmail === _currentUser.email) {
-    var stored = JSON.parse(localStorage.getItem(_userPostsKey(_currentUser.email)) || '[]');
-    var si = stored.findIndex(function(p) { return p.id === postId; });
-    if (si !== -1) { stored[si].text = newText; localStorage.setItem(_userPostsKey(_currentUser.email), JSON.stringify(stored)); }
+    try {
+      var _lsKey   = _userPostsKey(_currentUser.email);
+      var _lsPosts = JSON.parse(localStorage.getItem(_lsKey) || '[]');
+      var _lsIdx   = _lsPosts.findIndex(function(p) { return String(p.id) === String(postId); });
+      if (_lsIdx !== -1) {
+        _lsPosts[_lsIdx].text     = newText;
+        _lsPosts[_lsIdx].edited   = true;
+        _lsPosts[_lsIdx].editedAt = post.editedAt;
+      } else {
+        _lsPosts.unshift(post);
+      }
+      savePersistedUserPosts(_currentUser.email, _lsPosts);
+    } catch(e) {
+      /* fallback : utilise DEMO_POSTS */
+      savePersistedUserPosts(_currentUser.email,
+        DEMO_POSTS.filter(function(p) { return p.ownerEmail === _currentUser.email; }));
+    }
   }
 
   _closeGenericSheet('edit-post');
-  /* Rafraîchit la carte dans le DOM */
+
+  /* Mise à jour directe dans le DOM */
   var el = document.getElementById('ptxt-' + postId);
-  if (el) el.textContent = newText.length > 200 ? newText.slice(0, 200) + '…' : newText;
+  if (el) el.innerHTML = _gwRenderTaggedText(newText.length > 200 ? newText.slice(0, 200) + '…' : newText, post.tags);
+  var editLbl = document.getElementById('pedit-' + postId);
+  if (editLbl) editLbl.style.display = 'inline';
+
   showToast('Publication modifiée ✓', 'ok');
 }
 
@@ -9108,7 +9173,10 @@ function _gwOpenHashtagFeed(tag) {
 /* Rend un texte avec ses tags colorés/cliquables — échappe le texte en amont,
    donc toujours appeler avec le texte BRUT (jamais déjà échappé). */
 function _gwRenderTaggedText(text, tags) {
-  var escaped = escHtml(text || '');
+  /* Décode les entités HTML stockées accidentellement (&#39; → ') avant ré-encodage */
+  var _rawText = (text || '').replace(/&#(\d+);/g, function(m, c) { return String.fromCharCode(parseInt(c, 10)); })
+                              .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  var escaped = escHtml(_rawText);
   if (tags && tags.length) {
     tags.forEach(function(t) {
       if (!t || !t.nom) return;
@@ -12953,6 +13021,25 @@ function _vsActivate(idx) {
     if (i !== idx) { try { it.videoEl.pause(); } catch(e){} }
   });
 
+  /* Comme le lecteur vidéo classique qui ne garde jamais qu'UN SEUL <video>
+     avec des données chargées à la fois : on libère ici le buffer des Shorts
+     trop loin de la position courante. Sans ça, chaque Short visité pendant
+     le défilement gardait sa vidéo chargée en mémoire pour toujours — plus on
+     scrolle, plus il y a de vidéos "vivantes" en même temps dans la page,
+     ce qui ralentit progressivement la lecture (surtout sur les téléphones
+     moins puissants). La balise <video> reste en place, seul son buffer est
+     relâché — elle sera rechargée normalement si l'utilisateur y revient. */
+  _vsItems.forEach(function(it, i) {
+    if (i === idx || Math.abs(i - idx) <= 3) return;
+    if (!it.videoEl.src && !it.loaded) return;
+    try {
+      it.videoEl.pause();
+      it.videoEl.removeAttribute('src');
+      it.videoEl.load();
+    } catch(e){}
+    it.loaded = false;
+  });
+
   _vsClearEndTimer();
 
   var item = _vsItems[idx];
@@ -13011,12 +13098,15 @@ function _vsActivate(idx) {
 
     setTimeout(function() {
       if (_vsCurIdx !== idx) return;
-      /* Précharge 2 Shorts à l'avance (pas juste le suivant) pour que le
-         défilement reste fluide même en swipant vite plusieurs fois de suite */
+      /* File d'avance façon TikTok : 3 Shorts prêts en permanence pendant que
+         l'utilisateur regarde le courant, pas juste le suivant — délai court
+         (200ms au lieu de 600ms) pour démarrer le prefetch plus tôt tout en
+         laissant la vidéo courante démarrer sa propre lecture en premier */
       _vsPreload(idx + 1);
       _vsPreload(idx + 2);
+      _vsPreload(idx + 3);
       _vsUpdateDesktopPanel();
-    }, 600);
+    }, 200);
   }
 
   if (item.videoEl.src) {
@@ -13034,23 +13124,30 @@ function _vsActivate(idx) {
     });
   }
 
-  /* Précharge la vidéo suivante avec les URLs déjà connues */
-  var next = _vsItems[idx + 1];
-  if (next && !next.videoEl.src && !next.loaded) {
-    var nUrl = _gwVidUrlCache[next.postId];
-    if (!nUrl) {
-      var np = next.post;
-      nUrl = typeof np.video === 'string' ? np.video : (np.video && np.video.url ? np.video.url : '');
-      if (!nUrl) { try { var _nls = localStorage.getItem('gw_vurl_' + next.postId); if (_nls && !_nls.startsWith('blob:')) nUrl = _nls; } catch(e){} }
-      if (nUrl && nUrl.startsWith('blob:')) nUrl = '';
-      if (nUrl) _gwVidUrlCache[next.postId] = nUrl;
-    }
-    if (nUrl) {
-      next.videoEl.src = nUrl;
-      next.videoEl.preload = 'auto';
-      try { next.videoEl.load(); } catch(e){}
-      next.loaded = true;
-    }
+  /* Précharge immédiatement (sans attendre Firebase) les 2 Shorts suivants
+     avec les URLs déjà connues — comme TikTok qui garde toujours plusieurs
+     vidéos prêtes pendant que l'utilisateur regarde la vidéo courante */
+  _vsQuickAssignUrl(_vsItems[idx + 1]);
+  _vsQuickAssignUrl(_vsItems[idx + 2]);
+}
+
+/* Assigne immédiatement une URL déjà connue (cache mémoire/localStorage/post)
+   à un item du player, sans passer par la résolution Firebase (rapide, synchrone) */
+function _vsQuickAssignUrl(next) {
+  if (!next || next.videoEl.src || next.loaded) return;
+  var nUrl = _gwVidUrlCache[next.postId];
+  if (!nUrl) {
+    var np = next.post;
+    nUrl = typeof np.video === 'string' ? np.video : (np.video && np.video.url ? np.video.url : '');
+    if (!nUrl) { try { var _nls = localStorage.getItem('gw_vurl_' + next.postId); if (_nls && !_nls.startsWith('blob:')) nUrl = _nls; } catch(e){} }
+    if (nUrl && nUrl.startsWith('blob:')) nUrl = '';
+    if (nUrl) _gwVidUrlCache[next.postId] = nUrl;
+  }
+  if (nUrl) {
+    next.videoEl.src = nUrl;
+    next.videoEl.preload = 'auto';
+    try { next.videoEl.load(); } catch(e){}
+    next.loaded = true;
   }
 }
 
@@ -21558,7 +21655,7 @@ function _dmOpen(conv) {
     if (!msg || !msg.id || !msg.from) return;
 
     if (firstBatch) {
-      /* Accumule le premier lot → rendu groupé après 150 ms */
+      /* Accumule le premier lot → rendu groupé une fois le chargement initial confirmé */
       batchBuffer.push(msg);
     } else {
       /* Message temps réel → rendu immédiat */
@@ -21594,8 +21691,15 @@ function _dmOpen(conv) {
     }
   });
 
-  /* Rendu groupé du premier lot (messages historiques) */
-  setTimeout(function() {
+  /* Rendu groupé du premier lot (messages historiques) : on attend la confirmation
+     Firebase que le chargement initial est terminé (ref.once('value'), qui ne se
+     résout qu'après tous les child_added du lot initial) plutôt qu'un délai fixe —
+     sur réseau lent, un timer fixe coupait l'attente avant l'arrivée des données,
+     vidait le spinner trop tôt et faisait apparaître les messages un par un
+     ("synchronisation lente"). */
+  ref.once('value').then(_dmFlushFirstBatch).catch(_dmFlushFirstBatch);
+
+  function _dmFlushFirstBatch() {
     if (_dmRef !== ref || _dmRefKey !== fbKey) return;
     firstBatch = false;
 
@@ -21650,7 +21754,7 @@ function _dmOpen(conv) {
         String(Date.now())
       );
     } catch(e) {}
-  }, 200);
+  }
 }
 
 /* Debounce renderConversations pour ne pas re-rendre 30× lors du chargement de l'historique */
@@ -21719,26 +21823,37 @@ function _dmWriteMsg(conv, msg) {
       : msg.type === 'video' ? '🎥 Vidéo'
       : '📎 ' + (msg.fileName || 'Fichier'));
 
-  console.log('[DM] ✉️ Envoi → fbKey:', fbKey, '| msg.id:', msg.id, '| to:', conv.email);
+  /* Attend confirmation de l'auth Firebase avant d'écrire (règles auth != null) :
+     envoyer juste après l'ouverture de l'app / sur réseau lent, avant que
+     signInAnonymously() (ou la vraie session) ait résolu, faisait échouer le
+     write en silence côté règles → "Erreur d'envoi" alors que rien n'avait
+     vraiment été tenté. Même filet que _gwOnAuthReady utilisé pour les posts. */
+  return new Promise(function(resolve) {
+    _gwOnAuthReady(function() {
+      console.log('[DM] ✉️ Envoi → fbKey:', fbKey, '| msg.id:', msg.id, '| to:', conv.email);
 
-  return _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + msg.id).set(msg)
-    .then(function() {
-      console.log('[DM] ✅ dm_msgs écrit OK → mise à jour inbox de', conv.email);
-      return _gwFbDB.ref('gw/inboxes/' + toFbKey + '/' + myFbKey).set({
-        fromEmail: _currentUser.email,
-        fromName:  _currentUser.nom  || _currentUser.email,
-        fromRole:  _currentUser.role || 'Membre Geniwork',
-        lastMsg:   label,
-        at:        msg.at || Date.now()
-      });
-    })
-    .then(function() {
-      console.log('[DM] ✅ inbox écrit OK pour', conv.email);
-    })
-    .catch(function(err) {
-      console.error('[DM] ❌ Erreur envoi:', err && err.code, err && err.message, '| path: gw/dm_msgs/' + fbKey);
-      showToast('Erreur d\'envoi — vérifiez votre connexion', 'err');
+      _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + msg.id).set(msg)
+        .then(function() {
+          console.log('[DM] ✅ dm_msgs écrit OK → mise à jour inbox de', conv.email);
+          return _gwFbDB.ref('gw/inboxes/' + toFbKey + '/' + myFbKey).set({
+            fromEmail: _currentUser.email,
+            fromName:  _currentUser.nom  || _currentUser.email,
+            fromRole:  _currentUser.role || 'Membre Geniwork',
+            lastMsg:   label,
+            at:        msg.at || Date.now()
+          });
+        })
+        .then(function() {
+          console.log('[DM] ✅ inbox écrit OK pour', conv.email);
+          resolve();
+        })
+        .catch(function(err) {
+          console.error('[DM] ❌ Erreur envoi:', err && err.code, err && err.message, '| path: gw/dm_msgs/' + fbKey);
+          showToast('Erreur d\'envoi — vérifiez votre connexion', 'err');
+          resolve();
+        });
     });
+  });
 }
 
 /* _saveDMConv : remplacé par _dmWriteMsg. Stub pour compatibilité résiduelle. */
