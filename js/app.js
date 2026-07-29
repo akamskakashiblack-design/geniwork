@@ -21723,13 +21723,11 @@ function _dmOpen(conv) {
       'Chargement des messages…</div>';
   }
 
-  /* ── child_added : unique source de vérité ─────────────────────
-     Firebase rejoue TOUS les enfants existants au premier attach,
-     puis envoie les nouveaux en temps réel.
-     _appendBubble() (via data-msg-id) garantit l'idempotence.     */
-  var firstBatch = true;
-  var batchBuffer = [];
-
+  /* ── child_added : rendu immédiat (historique + temps réel) ────────
+     Suppression du buffer firstBatch/batchBuffer : chaque message est
+     rendu dès son arrivée via _dmRenderMsg (idempotent via data-msg-id).
+     Les messages historiques arrivent dans l'ordre chronologique (clé = id
+     = timestamp), donc aucun tri supplémentaire n'est nécessaire.          */
   ref.on('child_added', function(snap) {
     /* Stale-check : protège contre les callbacks d'une conv fermée */
     if (_dmRef !== ref || _dmRefKey !== fbKey) return;
@@ -21737,13 +21735,8 @@ function _dmOpen(conv) {
     var msg = snap.val();
     if (!msg || !msg.id || !msg.from) return;
 
-    if (firstBatch) {
-      /* Accumule le premier lot → rendu groupé une fois le chargement initial confirmé */
-      batchBuffer.push(msg);
-    } else {
-      /* Message temps réel → rendu immédiat */
-      _dmRenderMsg(msg, ref, fbKey);
-    }
+    /* Rendu immédiat — temps réel ET historique */
+    _dmRenderMsg(msg, ref, fbKey);
   }, function(err) {
     console.error('[DM] ❌ child_added erreur:', err && err.code, err && err.message);
     if (box) box.innerHTML = '<div style="text-align:center;padding:32px;color:#EF4444;font-size:13px">' +
@@ -21774,31 +21767,24 @@ function _dmOpen(conv) {
     }
   });
 
-  /* Rendu groupé du premier lot (messages historiques) : on attend la confirmation
-     Firebase que le chargement initial est terminé (ref.once('value'), qui ne se
-     résout qu'après tous les child_added du lot initial) plutôt qu'un délai fixe —
-     sur réseau lent, un timer fixe coupait l'attente avant l'arrivée des données,
-     vidait le spinner trop tôt et faisait apparaître les messages un par un
-     ("synchronisation lente"). */
-  ref.once('value').then(_dmFlushFirstBatch).catch(_dmFlushFirstBatch);
+  /* Une fois le chargement initial confirmé (once('value') se résout après
+     tous les child_added existants) : scroll en bas + marquer comme lus.
+     Les messages arrivent déjà tous en temps réel via child_added ci-dessus. */
+  ref.once('value').then(_dmOnLoaded).catch(_dmOnLoaded);
 
-  function _dmFlushFirstBatch() {
+  function _dmOnLoaded() {
     if (_dmRef !== ref || _dmRefKey !== fbKey) return;
-    firstBatch = false;
 
+    /* Vide le spinner de chargement si toujours là */
     var b = document.getElementById('chat-messages');
-    if (b) b.innerHTML = ''; /* vide le spinner */
-
-    /* Trie chronologiquement avant de rendre */
-    batchBuffer.sort(function(a, b2) { return (Number(a.id)||0) - (Number(b2.id)||0); });
-    batchBuffer.forEach(function(m) { _dmRenderMsg(m, ref, fbKey); });
-    batchBuffer = [];
+    if (b) {
+      var spinner = b.querySelector('[class*="spinner"], [class*="fa-spin"]');
+      if (spinner && !b.querySelector('.chat-msg-row')) b.innerHTML = '';
+    }
 
     setTimeout(_scrollChatToBottom, 60);
 
-    /* ── Marque comme lus tous les messages reçus (from ≠ moi) ──
-       Persisté dans Firebase → survit aux reconnexions */
-    batchBuffer.forEach(function() {}); /* reset (déjà vidé) */
+    /* ── Marque comme lus tous les messages reçus (from ≠ moi) ── */
     var msgsToMarkRead = [];
     var b2 = document.getElementById('chat-messages');
     if (b2) {
@@ -21806,7 +21792,6 @@ function _dmOpen(conv) {
         msgsToMarkRead.push(row2.getAttribute('data-msg-id'));
       });
     }
-    /* Lecture des messages reçus → mark read dans Firebase */
     if (msgsToMarkRead.length && _gwFbDB) {
       msgsToMarkRead.forEach(function(mid) {
         _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + mid + '/read').set(true).catch(function(){});
@@ -21818,8 +21803,7 @@ function _dmOpen(conv) {
     if (activeConv) { activeConv.unread = 0; }
     renderConversations();
 
-    /* ── Supprime l'entrée inbox Firebase + localStorage pour cet expéditeur ──
-       Sans ça, _checkDMInbox() re-crée le badge "non lu" à chaque poll/restart */
+    /* ── Supprime l'entrée inbox Firebase + localStorage pour cet expéditeur ── */
     try {
       if (_gwFbDB) {
         _gwFbDB.ref('gw/inboxes/' + _gwFbKey(_currentUser.email) + '/' + _gwFbKey(conv.email))
@@ -21829,9 +21813,6 @@ function _dmOpen(conv) {
       var _inbox    = JSON.parse(localStorage.getItem(_inboxKey) || '[]');
       _inbox        = _inbox.filter(function(e) { return e.fromEmail !== conv.email; });
       localStorage.setItem(_inboxKey, JSON.stringify(_inbox));
-      /* ── Sauvegarde un timestamp "lu" local par conversation ──
-         Fallback si Firebase delete ne se sync pas avant fermeture app :
-         _checkDMInbox ignorera toute entrée plus ancienne que ce timestamp */
       localStorage.setItem(
         'gw_dmread_' + _currentUser.email + '_' + _gwFbKey(conv.email),
         String(Date.now())
@@ -21915,19 +21896,19 @@ function _dmWriteMsg(conv, msg) {
     _gwOnAuthReady(function() {
       console.log('[DM] ✉️ Envoi → fbKey:', fbKey, '| msg.id:', msg.id, '| to:', conv.email);
 
-      _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + msg.id).set(msg)
-        .then(function() {
-          console.log('[DM] ✅ dm_msgs écrit OK → mise à jour inbox de', conv.email);
-          return _gwFbDB.ref('gw/inboxes/' + toFbKey + '/' + myFbKey).set({
-            fromEmail: _currentUser.email,
-            fromName:  _currentUser.nom  || _currentUser.email,
-            fromRole:  _currentUser.role || 'Membre Geniwork',
-            lastMsg:   label,
-            at:        msg.at || Date.now()
-          });
+      /* Écriture en parallèle : dm_msgs + inbox simultanément
+         → notification Y arrive en même temps que le message (pas après) */
+      Promise.all([
+        _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + msg.id).set(msg),
+        _gwFbDB.ref('gw/inboxes/' + toFbKey + '/' + myFbKey).set({
+          fromEmail: _currentUser.email,
+          fromName:  _currentUser.nom  || _currentUser.email,
+          fromRole:  _currentUser.role || 'Membre Geniwork',
+          lastMsg:   label,
+          at:        msg.at || Date.now()
         })
+      ])
         .then(function() {
-          console.log('[DM] ✅ inbox écrit OK pour', conv.email);
           resolve();
         })
         .catch(function(err) {
