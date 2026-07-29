@@ -1430,29 +1430,54 @@ function _gwMergePost(snap) {
   var localOnly = [];
   try {
     var lsLocal = JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
+    var _isOwnEmail = _currentUser && email === _currentUser.email;
     lsLocal.forEach(function(lp) {
       if (lp && lp.id && !incomingIds[lp.id]) {
         /* Conserve les posts locaux avec idbId (vidéo locale) — Firebase ne les a pas encore */
         if (lp.video && lp.video.idbId) { localOnly.push(lp); incomingIds[lp.id] = true; }
-        /* Conserve aussi tout post récent (< 60s, id = Date.now() à la création) quel que
-           soit son type — l'écriture Firebase d'un post texte/image est différée (attente
-           auth + upload image + scan anti-nudité) et peut prendre plusieurs secondes ; un
-           merge Firebase qui arrive dans cette fenêtre ne doit pas être interprété comme
-           une suppression, sinon le post texte/image publié disparaît silencieusement. */
+        /* Conserve aussi tout post récent (< 60s) quel que soit son type */
         else if (typeof lp.id === 'number' && (Date.now() - lp.id) < 60000) { localOnly.push(lp); incomingIds[lp.id] = true; }
+        /* Pour l'utilisateur courant : conserve TOUS les posts locaux absents de Firebase
+           (peuvent être exclus par _gwCapFirebasePosts si >50 posts) — localStorage est la source de vérité */
+        else if (_isOwnEmail) { localOnly.push(lp); incomingIds[lp.id] = true; }
       }
     });
   } catch(e2) {}
+
+  /* Posts "en vol" : dans DEMO_POSTS mais pas encore dans LS ni Firebase (upload en cours).
+     Si Firebase fire un child_changed pendant l'upload, ces posts seraient retirés de DEMO_POSTS.
+     On les réintègre dans localOnly pour les protéger ET les écrire dans localStorage. */
+  if (_isOwnEmail) {
+    var _nowMs = Date.now();
+    DEMO_POSTS.forEach(function(dp) {
+      if (dp && dp.ownerEmail === email && dp.id && !incomingIds[dp.id] &&
+          typeof dp.id === 'number' && (_nowMs - dp.id) < 300000) {
+        localOnly.push(dp);
+        incomingIds[dp.id] = true;
+      }
+    });
+  }
+
   if (localOnly.length) {
     posts = localOnly.concat(posts);
-    /* Retente l'écriture Firebase pour ces posts manquants */
+    /* Retente l'écriture Firebase — strip les base64 avant envoi pour ne pas saturer Firebase */
     if (_gwFbReady && _gwFbDB && email) {
-      try { _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts)).catch(function(){}); } catch(e3){}
+      var _fbSafe = _gwCapFirebasePosts(posts).map(function(p) {
+        var cp = Object.assign({}, p);
+        if (cp.images) cp.images = cp.images.map(function(img) {
+          return (!img || (typeof img === 'string' && img.startsWith('data:') && img.length > 200000)) ? '' : img;
+        }).filter(Boolean);
+        if (cp.video && typeof cp.video === 'object') {
+          cp.video = Object.assign({}, cp.video);
+          if (cp.video.poster && typeof cp.video.poster === 'string' && cp.video.poster.startsWith('data:') && cp.video.poster.length > 50000) delete cp.video.poster;
+        }
+        return cp;
+      });
+      try { _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_fbSafe).catch(function(){}); } catch(e3){}
     }
   }
 
-  /* Sauvegarde dans localStorage (inclut maintenant les posts locaux récupérés) */
-  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e){}
+  /* Sauvegarde localStorage — toujours (source de vérité locale complète) */
 
   /* ── Retire les posts supprimés de DEMO_POSTS pour cet utilisateur ── */
   var removedAny = false;
@@ -1523,6 +1548,9 @@ function _gwMergePost(snap) {
       changed = true;
     }
   });
+  /* Sauvegarde localStorage (toujours — source de vérité locale complète) */
+  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e){}
+
   if (changed) {
     DEMO_POSTS.sort(function(a, b){ return b.id - a.id; });
     try {
@@ -3869,6 +3897,20 @@ var _pickedImgData = null; /* image choisie pour publier */
 ══════════════════════════════════════════ */
 var DEMO_POSTS    = [];   /* Tous les posts réels — rempli au chargement */
 var PENDING_POSTS = [];   /* Posts Firebase reçus en temps réel — vidé à l'acceptation */
+
+/* ── Throttle renderFeed : évite N re-renders consécutifs lors du chargement initial ──
+   Au démarrage Firebase envoie child_added pour chaque utilisateur (~50+) → sans throttle
+   = 50 rebuilds DOM complets. Avec throttle = 1 render 150ms après le PREMIER event.
+   IMPORTANT : ne pas reset le timer si déjà programmé — sinon avec des events continus
+   (app active, plusieurs users) renderFeed ne se déclenche jamais. */
+var _gwFeedRenderTimer = null;
+function _gwScheduleRenderFeed() {
+  if (_gwFeedRenderTimer) return; /* déjà programmé → ne pas reset */
+  _gwFeedRenderTimer = setTimeout(function() {
+    _gwFeedRenderTimer = null;
+    try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e) {}
+  }, 150);
+}
 
 /* ══════════════════════════════════════════
    INITIALISATION DE L'APPLICATION
@@ -6247,17 +6289,13 @@ function switchFeedTab(btn, tab) {
 ══════════════════════════════════════════ */
 function _userPostsKey(email) { return 'gw_userposts_' + email; }
 
-/* Plafonne le payload Firebase à 50 éléments SANS jamais sacrifier de vidéo/Short —
-   avant, un simple posts.slice(0,50) faisait disparaître les anciennes vidéos dès
-   qu'un utilisateur dépassait 50 publications au total (photos + vidéos confondues). */
+/* Plafonne le payload Firebase à 500 éléments — garde les 500 plus récents.
+   Les posts plus anciens restent dans localStorage (source de vérité locale). */
 function _gwCapFirebasePosts(posts) {
-  var CAP = 50;
+  var CAP = 500;
   if (posts.length <= CAP) return posts;
-  var videos = posts.filter(function(p) { return p && p.video; });
-  var others = posts.filter(function(p) { return !(p && p.video); });
-  var kept = videos.concat(others.slice(0, Math.max(0, CAP - videos.length)));
-  kept.sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
-  return kept;
+  var sorted = posts.filter(Boolean).slice().sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
+  return sorted.slice(0, CAP);
 }
 
 function loadPersistedUserPosts(email) {
@@ -6300,9 +6338,13 @@ function savePersistedUserPosts(email, posts) {
 function persistNewPost(post) {
   if (!post.ownerEmail) return;
   var posts = loadPersistedUserPosts(post.ownerEmail);
-  /* Évite les doublons (double-publish) */
-  if (posts.find(function(p) { return p.id === post.id; })) return;
-  posts.unshift(post);
+  var idx = posts.findIndex(function(p) { return p.id === post.id; });
+  if (idx !== -1) {
+    /* Met à jour le post existant (ex : URL Storage après upload) */
+    posts[idx] = post;
+  } else {
+    posts.unshift(post);
+  }
   savePersistedUserPosts(post.ownerEmail, posts);
 }
 
@@ -7266,7 +7308,7 @@ function buildPostCard(post) {
           '<i class="fas fa-chevron-right" style="margin-left:auto;color:#CBD5E1;font-size:11px"></i>' +
         '</div>' +
         (ro.text ? '<p class="rp-orig-text" id="rp-orig-text-' + post.id + '" data-full="' + escHtml(ro.text) + '">' +
-          escHtml(ro.text.slice(0, 200)) +
+          _gwRenderTaggedText(ro.text.slice(0, 200), ro.tags || []) +
           (ro.text.length > 200
             ? '… <span class="rp-voir-plus" style="color:#2563EB;cursor:pointer;font-weight:600" onclick="event.stopPropagation();expandRepostOrig(' + post.id + ')">Voir plus</span>'
             : '') +
@@ -7407,7 +7449,7 @@ function expandRepostOrig(postId) {
   var el = document.getElementById('rp-orig-text-' + postId);
   if (!el) return;
   var full = el.getAttribute('data-full') || '';
-  el.textContent = full;
+  el.innerHTML = _gwRenderTaggedText(full, []);
   /* Lève le clamp CSS (-webkit-line-clamp:3) qui limitait l'affichage à 3 lignes */
   el.style.display = 'block';
   el.style.webkitLineClamp = 'unset';
@@ -15878,7 +15920,7 @@ function translatePost(postId) {
 
   /* Bascule : si déjà traduit, revient à l'original */
   if (btn.dataset.translated === '1') {
-    textEl.textContent = post.text;
+    textEl.innerHTML = _gwRenderTaggedText(post.text, post.tags);
     btn.innerHTML = '<i class="fas fa-language"></i> ' + t('post.translate');
     btn.dataset.translated = '0';
     btn.disabled = false;
@@ -19155,35 +19197,51 @@ function renderProfilPosts(email, nom, container) {
   }
 
   var posts = getPostsByAuthor(email, nom);
-
-  /* Si pas de posts locaux et que c'est un autre utilisateur → fetch Firebase */
   var isSelf = _currentUser && email && email === _currentUser.email;
-  if (!posts.length && !isSelf && email && _gwFbReady && _gwFbDB) {
+
+  /* Pour soi-même ou si Firebase non dispo → données locales directement */
+  if (isSelf || !email || !_gwFbReady || !_gwFbDB) {
+    _doRenderPosts(posts);
+    return;
+  }
+
+  /* Pour un autre utilisateur : affiche les données locales immédiatement (si dispo),
+     puis toujours rafraîchit depuis Firebase pour avoir les posts à jour */
+  if (posts.length) {
+    _doRenderPosts(posts);
+  } else {
     container.innerHTML =
-      '<div class="profil-posts-empty">' +
+      '<div class="profil-posts-empty" id="profil-fb-loading">' +
         '<i class="fas fa-spinner fa-spin" style="font-size:22px;color:#6366F1"></i>' +
         '<p style="margin-top:8px;color:#64748B">Chargement…</p>' +
       '</div>';
-    _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).once('value').then(function(snap) {
-      var fbPosts = snap.val();
-      if (fbPosts && Array.isArray(fbPosts) && fbPosts.length) {
-        fbPosts.forEach(function(p) {
-          if (!p || !p.id) return;
-          if (!p.images) p.images = [];
-          if (!DEMO_POSTS.find(function(d) { return d.id === p.id; })) {
-            p.likers = loadPostLikers(p.id);
-            DEMO_POSTS.push(p);
-          }
-        });
-        try { localStorage.setItem('gw_userposts_' + email, JSON.stringify(fbPosts)); } catch(e){}
-        _doRenderPosts(fbPosts);
-      } else {
-        _doRenderPosts([]);
-      }
-    }).catch(function() { _doRenderPosts([]); });
-  } else {
-    _doRenderPosts(posts);
   }
+
+  _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).once('value').then(function(snap) {
+    var fbPosts = snap.val();
+    /* Firebase peut retourner un objet {0:…,1:…} au lieu d'un array — normaliser */
+    if (fbPosts && typeof fbPosts === 'object' && !Array.isArray(fbPosts)) {
+      fbPosts = Object.keys(fbPosts).map(function(k) { return fbPosts[k]; });
+    }
+    if (Array.isArray(fbPosts) && fbPosts.length) {
+      fbPosts.forEach(function(p) {
+        if (!p || !p.id) return;
+        if (!p.images) p.images = [];
+        if (!DEMO_POSTS.find(function(d) { return d.id === p.id; })) {
+          p.likers = loadPostLikers(p.id);
+          DEMO_POSTS.push(p);
+        }
+      });
+      try { localStorage.setItem('gw_userposts_' + email, JSON.stringify(fbPosts)); } catch(e){}
+      _doRenderPosts(fbPosts);
+    } else if (!posts.length) {
+      /* Firebase vide ET pas de données locales → état vide */
+      _doRenderPosts([]);
+    }
+    /* Si Firebase vide mais données locales déjà affichées → les garder */
+  }).catch(function() {
+    if (!posts.length) _doRenderPosts([]);
+  });
 }
 
 /* ══════════════════════════════════════════
