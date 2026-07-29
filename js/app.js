@@ -16452,6 +16452,22 @@ function publierPost() {
   /* Affichage immédiat local avec les base64 */
   DEMO_POSTS.unshift(newPost);
 
+  /* Phase 1 — sauvegarde locale immédiate (sans blob URL) pour les vidéos :
+     _gwMergePost détecte le post via idbId dans lsLocal et ne le retire PAS
+     de DEMO_POSTS pendant l'upload, même si Firebase ne l'a pas encore.
+     persistNewPost (Phase 2) mettra à jour avec l'URL Storage après upload. */
+  if (videoBlob && videoIdbId && _currentUser) {
+    try {
+      var _ph1Key   = _userPostsKey(_currentUser.email);
+      var _ph1Posts = JSON.parse(localStorage.getItem(_ph1Key) || '[]');
+      if (!_ph1Posts.find(function(p) { return p.id === postId; })) {
+        var _ph1Copy = JSON.parse(JSON.stringify(newPost));
+        if (_ph1Copy.video) delete _ph1Copy.video.url; /* blob invalide hors session */
+        _ph1Posts.unshift(_ph1Copy);
+        localStorage.setItem(_ph1Key, JSON.stringify(_ph1Posts));
+      }
+    } catch(e){}
+  }
 
   /* Cache le blob URL du Short pour lecture immédiate dans le player (session courante) */
   if (_pickedVideo && _pickedVideo.url && _pickedVideo.videoType === 'short') {
