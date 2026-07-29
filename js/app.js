@@ -6404,7 +6404,7 @@ function getAllPosts() {
   });
 }
 
-/* Posts pour le FEED principal — exclut les Shorts (réservés à la section Short) */
+/* Posts pour le FEED principal */
 function _getFeedPosts() {
   var seen = {};
   return DEMO_POSTS.concat(PENDING_POSTS).filter(function(p) {
@@ -6414,7 +6414,6 @@ function _getFeedPosts() {
     seen[key] = true;
     /* Les offres d'emploi restent exclusivement dans la page Emploi, jamais dans le fil */
     if (p.type === 'job') return false;
-    if (p.video && p.video.videoType === 'short') return false;
     /* Respecte "Publications visibles" — l'auteur voit toujours ses propres posts */
     if (p.ownerEmail && !(_currentUser && p.ownerEmail === _currentUser.email) && _privLoadForEmail(p.ownerEmail).postsVisible === false) return false;
     return true;
@@ -6711,10 +6710,7 @@ function _renderFeedNow(posts) {
     return !_admIsBanned(p.ownerEmail);
   });
 
-  /* ── Les Shorts n'apparaissent PAS dans le feed principal ── */
-  posts = posts.filter(function(p) {
-    return !(p.video && p.video.videoType === 'short');
-  });
+  /* Les Shorts apparaissent dans le feed — clic ouvre le player Shorts */
 
   /* ── Réinitialise tout l'état ── */
   _feedGeneration++;               /* invalide tous les callbacks _feedAppendBatch en attente */
