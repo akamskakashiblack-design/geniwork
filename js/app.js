@@ -871,58 +871,63 @@ function _gwFbSyncStart() {
       if (!data || !data.url) return;
       /* Posts utilisateurs (IDs numériques) */
       var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(pid); });
-      if (post && post.video && (!post.video.url || post.video.url.startsWith('blob:'))) {
-        post.video.url = data.url;
-        /* Persiste l'URL dans localStorage pour éviter l'écran noir au prochain chargement */
-        if (post.ownerEmail) {
-          try {
-            var _pPosts = loadPersistedUserPosts(post.ownerEmail);
-            var _pIdx = _pPosts.findIndex(function(x){ return String(x.id) === String(pid); });
-            if (_pIdx !== -1 && _pPosts[_pIdx].video) {
-              _pPosts[_pIdx].video.url = data.url;
-              savePersistedUserPosts(post.ownerEmail, _pPosts);
+      if (post && post.video) {
+        /* Met à jour l'URL dans DEMO_POSTS si absente/blob */
+        if (!post.video.url || post.video.url.startsWith('blob:') || post.video.url === window.location.href) {
+          post.video.url = data.url;
+          /* Persiste l'URL dans localStorage pour éviter l'écran noir au prochain chargement */
+          if (post.ownerEmail) {
+            try {
+              var _pPosts = loadPersistedUserPosts(post.ownerEmail);
+              var _pIdx = _pPosts.findIndex(function(x){ return String(x.id) === String(pid); });
+              if (_pIdx !== -1 && _pPosts[_pIdx].video) {
+                _pPosts[_pIdx].video.url = data.url;
+                savePersistedUserPosts(post.ownerEmail, _pPosts);
+              }
+            } catch(e){}
+          }
+          var vEl = document.getElementById('fv-' + pid);
+          if (vEl && (!vEl.src || vEl.src.startsWith('blob:'))) {
+            vEl.src = data.url;
+            vEl.load();
+            vEl._gwThumbForced = false;
+            _gwForceVideoThumb(vEl);
+          }
+          var wrap = document.getElementById('pvw-' + pid);
+          if (wrap) {
+            (function(u, d) {
+              wrap.onclick = function() { _openVideoFromPost(String(pid), d); };
+            })(data.url, data.dur || 0);
+          }
+          /* Aussi mettre à jour les vidéos de repost qui citent ce post */
+          DEMO_POSTS.forEach(function(rp) {
+            if (rp.type === 'repost' && rp.repostOf && String(rp.repostOf.id) === String(pid)) {
+              if (rp.repostOf.video && (!rp.repostOf.video.url || rp.repostOf.video.url.startsWith('blob:'))) {
+                rp.repostOf.video.url = data.url;
+              }
+              var rpEl = document.getElementById('rp-fv-' + rp.id);
+              if (rpEl && (!rpEl.src || rpEl.src.startsWith('blob:'))) {
+                rpEl.src = data.url;
+                rpEl.load();
+                rpEl._gwThumbForced = false;
+                _gwForceVideoThumb(rpEl);
+              }
             }
-          } catch(e){}
+          });
         }
-        var vEl = document.getElementById('fv-' + pid);
-        if (vEl && (!vEl.src || vEl.src.startsWith('blob:'))) {
-          vEl.src = data.url;
-          vEl.load();
-          vEl._gwThumbForced = false;
-          _gwForceVideoThumb(vEl);
-        }
-        /* Si c'est un Short, mettre à jour le player Shorts si ouvert */
-        if (post.video && post.video.videoType === 'short') {
+        /* Player Shorts — toujours tenter la mise à jour du src, indépendamment de post.video.url
+           (race condition : _gwMergePost peut avoir déjà mis à jour post.video.url avant child_added) */
+        if (post.video.videoType === 'short') {
           try {
             var _vsIt = _vsItems.findIndex(function(x) { return x.postId === String(pid); });
-            if (_vsIt >= 0 && _vsItems[_vsIt].videoEl && !_vsItems[_vsIt].videoEl.src) {
+            if (_vsIt >= 0 && _vsItems[_vsIt].videoEl && !_vsItems[_vsIt].videoEl.getAttribute('src')) {
               _vsItems[_vsIt].videoEl.src = data.url;
               try { _vsItems[_vsIt].videoEl.load(); } catch(e2){}
-              _vsItems[_vsIt].loaded = true;
+              _vsItems[_vsIt].loaded = false;
+              if (_vsIt === _vsCurIdx) try { _vsActivate(_vsIt); } catch(e3){}
             }
           } catch(e2){}
         }
-        var wrap = document.getElementById('pvw-' + pid);
-        if (wrap) {
-          (function(u, d) {
-            wrap.onclick = function() { _openVideoFromPost(String(pid), d); };
-          })(data.url, data.dur || 0);
-        }
-        /* Aussi mettre à jour les vidéos de repost qui citent ce post */
-        DEMO_POSTS.forEach(function(rp) {
-          if (rp.type === 'repost' && rp.repostOf && String(rp.repostOf.id) === String(pid)) {
-            if (rp.repostOf.video && (!rp.repostOf.video.url || rp.repostOf.video.url.startsWith('blob:'))) {
-              rp.repostOf.video.url = data.url;
-            }
-            var rpEl = document.getElementById('rp-fv-' + rp.id);
-            if (rpEl && (!rpEl.src || rpEl.src.startsWith('blob:'))) {
-              rpEl.src = data.url;
-              rpEl.load();
-              rpEl._gwThumbForced = false;
-              _gwForceVideoThumb(rpEl);
-            }
-          }
-        });
       }
       /* Posts officiels (IDs commençant par 'off_') */
       if (String(pid).indexOf('off_') === 0) {
@@ -1523,6 +1528,16 @@ function _gwMergePost(snap) {
            l'URL Firebase Storage, l'injecter dans le lecteur Shorts */
         if (existing.video.videoType === 'short') {
           _newShorts.push(existing);
+          /* Mise à jour directe du player si le Short est déjà dans _vsItems sans src */
+          try {
+            var _vsUpIdx = _vsItems.findIndex(function(x) { return x.postId === String(p.id); });
+            if (_vsUpIdx >= 0 && _vsItems[_vsUpIdx].videoEl && !_vsItems[_vsUpIdx].videoEl.getAttribute('src')) {
+              _vsItems[_vsUpIdx].videoEl.src = p.video.url;
+              _vsItems[_vsUpIdx].loaded = false;
+              try { _vsItems[_vsUpIdx].videoEl.load(); } catch(e3){}
+              if (_vsUpIdx === _vsCurIdx) try { _vsActivate(_vsUpIdx); } catch(e3){}
+            }
+          } catch(e2){}
         }
       }
       /* Métadonnées d'édition — trim, recadrage, son, texte, effets, type */
@@ -12923,7 +12938,21 @@ function _vsInjectNewShorts(newPosts) {
     newPosts.forEach(function(post) {
       if (!post || !post.video || post.video.videoType !== 'short') return;
       if (!(post.video.url || post.video.idbId)) return;
-      if (existingIds[String(post.id)]) return;
+      var pidStr = String(post.id);
+      if (existingIds[pidStr]) {
+        /* Short déjà dans le player — mettre à jour le src si URL disponible maintenant */
+        if (post.video.url) {
+          var eItem = _vsItems.find(function(x) { return x.postId === pidStr; });
+          if (eItem && eItem.videoEl && !eItem.videoEl.getAttribute('src')) {
+            eItem.videoEl.src = post.video.url;
+            eItem.loaded = false;
+            try { eItem.videoEl.load(); } catch(e2){}
+            var eIdx = _vsItems.indexOf(eItem);
+            if (eIdx === _vsCurIdx) try { _vsActivate(eIdx); } catch(e2){}
+          }
+        }
+        return;
+      }
       var newIdx = _vsItems.length;
       var item = _vsCreateItem(post, newIdx);
       feedEl.appendChild(item.el);
