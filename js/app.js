@@ -871,63 +871,58 @@ function _gwFbSyncStart() {
       if (!data || !data.url) return;
       /* Posts utilisateurs (IDs numériques) */
       var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(pid); });
-      if (post && post.video) {
-        /* Met à jour l'URL dans DEMO_POSTS si absente/blob */
-        if (!post.video.url || post.video.url.startsWith('blob:') || post.video.url === window.location.href) {
-          post.video.url = data.url;
-          /* Persiste l'URL dans localStorage pour éviter l'écran noir au prochain chargement */
-          if (post.ownerEmail) {
-            try {
-              var _pPosts = loadPersistedUserPosts(post.ownerEmail);
-              var _pIdx = _pPosts.findIndex(function(x){ return String(x.id) === String(pid); });
-              if (_pIdx !== -1 && _pPosts[_pIdx].video) {
-                _pPosts[_pIdx].video.url = data.url;
-                savePersistedUserPosts(post.ownerEmail, _pPosts);
-              }
-            } catch(e){}
-          }
-          var vEl = document.getElementById('fv-' + pid);
-          if (vEl && (!vEl.src || vEl.src.startsWith('blob:'))) {
-            vEl.src = data.url;
-            vEl.load();
-            vEl._gwThumbForced = false;
-            _gwForceVideoThumb(vEl);
-          }
-          var wrap = document.getElementById('pvw-' + pid);
-          if (wrap) {
-            (function(u, d) {
-              wrap.onclick = function() { _openVideoFromPost(String(pid), d); };
-            })(data.url, data.dur || 0);
-          }
-          /* Aussi mettre à jour les vidéos de repost qui citent ce post */
-          DEMO_POSTS.forEach(function(rp) {
-            if (rp.type === 'repost' && rp.repostOf && String(rp.repostOf.id) === String(pid)) {
-              if (rp.repostOf.video && (!rp.repostOf.video.url || rp.repostOf.video.url.startsWith('blob:'))) {
-                rp.repostOf.video.url = data.url;
-              }
-              var rpEl = document.getElementById('rp-fv-' + rp.id);
-              if (rpEl && (!rpEl.src || rpEl.src.startsWith('blob:'))) {
-                rpEl.src = data.url;
-                rpEl.load();
-                rpEl._gwThumbForced = false;
-                _gwForceVideoThumb(rpEl);
-              }
+      if (post && post.video && (!post.video.url || post.video.url.startsWith('blob:'))) {
+        post.video.url = data.url;
+        /* Persiste l'URL dans localStorage pour éviter l'écran noir au prochain chargement */
+        if (post.ownerEmail) {
+          try {
+            var _pPosts = loadPersistedUserPosts(post.ownerEmail);
+            var _pIdx = _pPosts.findIndex(function(x){ return String(x.id) === String(pid); });
+            if (_pIdx !== -1 && _pPosts[_pIdx].video) {
+              _pPosts[_pIdx].video.url = data.url;
+              savePersistedUserPosts(post.ownerEmail, _pPosts);
             }
-          });
+          } catch(e){}
         }
-        /* Player Shorts — toujours tenter la mise à jour du src, indépendamment de post.video.url
-           (race condition : _gwMergePost peut avoir déjà mis à jour post.video.url avant child_added) */
-        if (post.video.videoType === 'short') {
+        var vEl = document.getElementById('fv-' + pid);
+        if (vEl && (!vEl.src || vEl.src.startsWith('blob:'))) {
+          vEl.src = data.url;
+          vEl.load();
+          vEl._gwThumbForced = false;
+          _gwForceVideoThumb(vEl);
+        }
+        /* Si c'est un Short, mettre à jour le player Shorts si ouvert */
+        if (post.video && post.video.videoType === 'short') {
           try {
             var _vsIt = _vsItems.findIndex(function(x) { return x.postId === String(pid); });
-            if (_vsIt >= 0 && _vsItems[_vsIt].videoEl && !_vsItems[_vsIt].videoEl.getAttribute('src')) {
+            if (_vsIt >= 0 && _vsItems[_vsIt].videoEl && !_vsItems[_vsIt].videoEl.src) {
               _vsItems[_vsIt].videoEl.src = data.url;
               try { _vsItems[_vsIt].videoEl.load(); } catch(e2){}
-              _vsItems[_vsIt].loaded = false;
-              if (_vsIt === _vsCurIdx) try { _vsActivate(_vsIt); } catch(e3){}
+              _vsItems[_vsIt].loaded = true;
             }
           } catch(e2){}
         }
+        var wrap = document.getElementById('pvw-' + pid);
+        if (wrap) {
+          (function(u, d) {
+            wrap.onclick = function() { _openVideoFromPost(String(pid), d); };
+          })(data.url, data.dur || 0);
+        }
+        /* Aussi mettre à jour les vidéos de repost qui citent ce post */
+        DEMO_POSTS.forEach(function(rp) {
+          if (rp.type === 'repost' && rp.repostOf && String(rp.repostOf.id) === String(pid)) {
+            if (rp.repostOf.video && (!rp.repostOf.video.url || rp.repostOf.video.url.startsWith('blob:'))) {
+              rp.repostOf.video.url = data.url;
+            }
+            var rpEl = document.getElementById('rp-fv-' + rp.id);
+            if (rpEl && (!rpEl.src || rpEl.src.startsWith('blob:'))) {
+              rpEl.src = data.url;
+              rpEl.load();
+              rpEl._gwThumbForced = false;
+              _gwForceVideoThumb(rpEl);
+            }
+          }
+        });
       }
       /* Posts officiels (IDs commençant par 'off_') */
       if (String(pid).indexOf('off_') === 0) {
@@ -1435,54 +1430,23 @@ function _gwMergePost(snap) {
   var localOnly = [];
   try {
     var lsLocal = JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
-    var _isOwnEmail = _currentUser && email === _currentUser.email;
     lsLocal.forEach(function(lp) {
       if (lp && lp.id && !incomingIds[lp.id]) {
         /* Conserve les posts locaux avec idbId (vidéo locale) — Firebase ne les a pas encore */
         if (lp.video && lp.video.idbId) { localOnly.push(lp); incomingIds[lp.id] = true; }
-        /* Conserve aussi tout post récent (< 60s) quel que soit son type */
-        else if (typeof lp.id === 'number' && (Date.now() - lp.id) < 60000) { localOnly.push(lp); incomingIds[lp.id] = true; }
-        /* Pour l'utilisateur courant : conserve TOUS les posts locaux absents de Firebase
-           (peuvent être exclus par _gwCapFirebasePosts si >50 posts) — localStorage est la source de vérité */
-        else if (_isOwnEmail) { localOnly.push(lp); incomingIds[lp.id] = true; }
       }
     });
   } catch(e2) {}
-
-  /* Posts "en vol" : dans DEMO_POSTS mais pas encore dans LS ni Firebase (upload en cours).
-     Si Firebase fire un child_changed pendant l'upload, ces posts seraient retirés de DEMO_POSTS.
-     On les réintègre dans localOnly pour les protéger ET les écrire dans localStorage. */
-  if (_isOwnEmail) {
-    var _nowMs = Date.now();
-    DEMO_POSTS.forEach(function(dp) {
-      if (dp && dp.ownerEmail === email && dp.id && !incomingIds[dp.id] &&
-          typeof dp.id === 'number' && (_nowMs - dp.id) < 300000) {
-        localOnly.push(dp);
-        incomingIds[dp.id] = true;
-      }
-    });
-  }
-
   if (localOnly.length) {
     posts = localOnly.concat(posts);
-    /* Retente l'écriture Firebase — strip les base64 avant envoi pour ne pas saturer Firebase */
+    /* Retente l'écriture Firebase pour ces posts manquants */
     if (_gwFbReady && _gwFbDB && email) {
-      var _fbSafe = _gwCapFirebasePosts(posts).map(function(p) {
-        var cp = Object.assign({}, p);
-        if (cp.images) cp.images = cp.images.map(function(img) {
-          return (!img || (typeof img === 'string' && img.startsWith('data:') && img.length > 200000)) ? '' : img;
-        }).filter(Boolean);
-        if (cp.video && typeof cp.video === 'object') {
-          cp.video = Object.assign({}, cp.video);
-          if (cp.video.poster && typeof cp.video.poster === 'string' && cp.video.poster.startsWith('data:') && cp.video.poster.length > 50000) delete cp.video.poster;
-        }
-        return cp;
-      });
-      try { _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_fbSafe).catch(function(){}); } catch(e3){}
+      try { _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts)).catch(function(){}); } catch(e3){}
     }
   }
 
-  /* Sauvegarde localStorage — toujours (source de vérité locale complète) */
+  /* Sauvegarde dans localStorage (inclut maintenant les posts locaux récupérés) */
+  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e){}
 
   /* ── Retire les posts supprimés de DEMO_POSTS pour cet utilisateur ── */
   var removedAny = false;
@@ -1528,16 +1492,6 @@ function _gwMergePost(snap) {
            l'URL Firebase Storage, l'injecter dans le lecteur Shorts */
         if (existing.video.videoType === 'short') {
           _newShorts.push(existing);
-          /* Mise à jour directe du player si le Short est déjà dans _vsItems sans src */
-          try {
-            var _vsUpIdx = _vsItems.findIndex(function(x) { return x.postId === String(p.id); });
-            if (_vsUpIdx >= 0 && _vsItems[_vsUpIdx].videoEl && !_vsItems[_vsUpIdx].videoEl.getAttribute('src')) {
-              _vsItems[_vsUpIdx].videoEl.src = p.video.url;
-              _vsItems[_vsUpIdx].loaded = false;
-              try { _vsItems[_vsUpIdx].videoEl.load(); } catch(e3){}
-              if (_vsUpIdx === _vsCurIdx) try { _vsActivate(_vsUpIdx); } catch(e3){}
-            }
-          } catch(e2){}
         }
       }
       /* Métadonnées d'édition — trim, recadrage, son, texte, effets, type */
@@ -1551,21 +1505,7 @@ function _gwMergePost(snap) {
       });
       if (_vidChanged) changed = true;
     }
-    /* ── Sync texte modifié chez les autres utilisateurs ── */
-    if (existing && p.edited && p.editedAt && p.text !== undefined && p.text !== existing.text) {
-      existing.text     = p.text;
-      existing.edited   = true;
-      existing.editedAt = p.editedAt;
-      var _ptEl = document.getElementById('ptxt-' + p.id);
-      if (_ptEl) _ptEl.innerHTML = _gwRenderTaggedText(p.text.length > 200 ? p.text.slice(0, 200) + '…' : p.text, p.tags);
-      var _eLbl = document.getElementById('pedit-' + p.id);
-      if (_eLbl) _eLbl.style.display = 'inline';
-      changed = true;
-    }
   });
-  /* Sauvegarde localStorage (toujours — source de vérité locale complète) */
-  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e){}
-
   if (changed) {
     DEMO_POSTS.sort(function(a, b){ return b.id - a.id; });
     try {
@@ -3912,20 +3852,6 @@ var _pickedImgData = null; /* image choisie pour publier */
 ══════════════════════════════════════════ */
 var DEMO_POSTS    = [];   /* Tous les posts réels — rempli au chargement */
 var PENDING_POSTS = [];   /* Posts Firebase reçus en temps réel — vidé à l'acceptation */
-
-/* ── Throttle renderFeed : évite N re-renders consécutifs lors du chargement initial ──
-   Au démarrage Firebase envoie child_added pour chaque utilisateur (~50+) → sans throttle
-   = 50 rebuilds DOM complets. Avec throttle = 1 render 150ms après le PREMIER event.
-   IMPORTANT : ne pas reset le timer si déjà programmé — sinon avec des events continus
-   (app active, plusieurs users) renderFeed ne se déclenche jamais. */
-var _gwFeedRenderTimer = null;
-function _gwScheduleRenderFeed() {
-  if (_gwFeedRenderTimer) return; /* déjà programmé → ne pas reset */
-  _gwFeedRenderTimer = setTimeout(function() {
-    _gwFeedRenderTimer = null;
-    try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e) {}
-  }, 150);
-}
 
 /* ══════════════════════════════════════════
    INITIALISATION DE L'APPLICATION
@@ -6304,13 +6230,17 @@ function switchFeedTab(btn, tab) {
 ══════════════════════════════════════════ */
 function _userPostsKey(email) { return 'gw_userposts_' + email; }
 
-/* Plafonne le payload Firebase à 500 éléments — garde les 500 plus récents.
-   Les posts plus anciens restent dans localStorage (source de vérité locale). */
+/* Plafonne le payload Firebase à 50 éléments SANS jamais sacrifier de vidéo/Short —
+   avant, un simple posts.slice(0,50) faisait disparaître les anciennes vidéos dès
+   qu'un utilisateur dépassait 50 publications au total (photos + vidéos confondues). */
 function _gwCapFirebasePosts(posts) {
-  var CAP = 500;
+  var CAP = 50;
   if (posts.length <= CAP) return posts;
-  var sorted = posts.filter(Boolean).slice().sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
-  return sorted.slice(0, CAP);
+  var videos = posts.filter(function(p) { return p && p.video; });
+  var others = posts.filter(function(p) { return !(p && p.video); });
+  var kept = videos.concat(others.slice(0, Math.max(0, CAP - videos.length)));
+  kept.sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
+  return kept;
 }
 
 function loadPersistedUserPosts(email) {
@@ -6353,13 +6283,9 @@ function savePersistedUserPosts(email, posts) {
 function persistNewPost(post) {
   if (!post.ownerEmail) return;
   var posts = loadPersistedUserPosts(post.ownerEmail);
-  var idx = posts.findIndex(function(p) { return p.id === post.id; });
-  if (idx !== -1) {
-    /* Met à jour le post existant (ex : URL Storage après upload) */
-    posts[idx] = post;
-  } else {
-    posts.unshift(post);
-  }
+  /* Évite les doublons (double-publish) */
+  if (posts.find(function(p) { return p.id === post.id; })) return;
+  posts.unshift(post);
   savePersistedUserPosts(post.ownerEmail, posts);
 }
 
@@ -6404,7 +6330,7 @@ function getAllPosts() {
   });
 }
 
-/* Posts pour le FEED principal */
+/* Posts pour le FEED principal — exclut les Shorts (réservés à la section Short) */
 function _getFeedPosts() {
   var seen = {};
   return DEMO_POSTS.concat(PENDING_POSTS).filter(function(p) {
@@ -6414,6 +6340,7 @@ function _getFeedPosts() {
     seen[key] = true;
     /* Les offres d'emploi restent exclusivement dans la page Emploi, jamais dans le fil */
     if (p.type === 'job') return false;
+    if (p.video && p.video.videoType === 'short') return false;
     /* Respecte "Publications visibles" — l'auteur voit toujours ses propres posts */
     if (p.ownerEmail && !(_currentUser && p.ownerEmail === _currentUser.email) && _privLoadForEmail(p.ownerEmail).postsVisible === false) return false;
     return true;
@@ -6710,7 +6637,10 @@ function _renderFeedNow(posts) {
     return !_admIsBanned(p.ownerEmail);
   });
 
-  /* Les Shorts apparaissent dans le feed — clic ouvre le player Shorts */
+  /* ── Les Shorts n'apparaissent PAS dans le feed principal ── */
+  posts = posts.filter(function(p) {
+    return !(p.video && p.video.videoType === 'short');
+  });
 
   /* ── Réinitialise tout l'état ── */
   _feedGeneration++;               /* invalide tous les callbacks _feedAppendBatch en attente */
@@ -7319,7 +7249,7 @@ function buildPostCard(post) {
           '<i class="fas fa-chevron-right" style="margin-left:auto;color:#CBD5E1;font-size:11px"></i>' +
         '</div>' +
         (ro.text ? '<p class="rp-orig-text" id="rp-orig-text-' + post.id + '" data-full="' + escHtml(ro.text) + '">' +
-          _gwRenderTaggedText(ro.text.slice(0, 200), ro.tags || []) +
+          escHtml(ro.text.slice(0, 200)) +
           (ro.text.length > 200
             ? '… <span class="rp-voir-plus" style="color:#2563EB;cursor:pointer;font-weight:600" onclick="event.stopPropagation();expandRepostOrig(' + post.id + ')">Voir plus</span>'
             : '') +
@@ -7343,9 +7273,7 @@ function buildPostCard(post) {
           '<div class="post-name">' + escHtml(getDisplayName(post.ownerEmail, post.author)) +
             getBadgeHtml(post.ownerEmail) +
           '</div>' +
-          '<div class="post-time">' + escHtml(getDisplayRole(post.ownerEmail, post.role)) + ' · ' + _timeAgo(post.at || post.id) +
-        (post.edited ? ' · <span id="pedit-' + post.id + '" style="color:#9CA3AF;font-size:10.5px">Modifié</span>' : '<span id="pedit-' + post.id + '" style="color:#9CA3AF;font-size:10.5px;display:none">Modifié</span>') +
-      '</div>' +
+          '<div class="post-time">' + escHtml(getDisplayRole(post.ownerEmail, post.role)) + ' · ' + _timeAgo(post.at || post.id) + '</div>' +
         '</div>' +
       '</div>' +
       followBtn +
@@ -7460,7 +7388,7 @@ function expandRepostOrig(postId) {
   var el = document.getElementById('rp-orig-text-' + postId);
   if (!el) return;
   var full = el.getAttribute('data-full') || '';
-  el.innerHTML = _gwRenderTaggedText(full, []);
+  el.textContent = full;
   /* Lève le clamp CSS (-webkit-line-clamp:3) qui limitait l'affichage à 3 lignes */
   el.style.display = 'block';
   el.style.webkitLineClamp = 'unset';
@@ -7654,17 +7582,11 @@ function openPostMenu(postId) {
   if (isOwn) {
     var isPinned   = post.pinned   ? true : false;
     var isArchived = post.archived ? true : false;
-    var _canEdit   = (Date.now() - (post.at || 0)) < 10 * 60 * 1000;
     items =
-      (_canEdit
-        ? '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');editPost(' + postId + ')">' +
-            '<span class="pmi-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-pen"></i></span>' +
-            '<span class="pmi-label">Modifier</span>' +
-          '</button>'
-        : '<button class="post-menu-item" disabled style="opacity:.45;cursor:not-allowed">' +
-            '<span class="pmi-ico" style="background:#F3F4F6;color:#9CA3AF"><i class="fas fa-pen"></i></span>' +
-            '<span class="pmi-label" style="color:#9CA3AF">Modifier <span style="font-size:10px">(délai dépassé)</span></span>' +
-          '</button>') +
+      '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');editPost(' + postId + ')">' +
+        '<span class="pmi-ico" style="background:#EFF6FF;color:#2563EB"><i class="fas fa-pen"></i></span>' +
+        '<span class="pmi-label">Modifier</span>' +
+      '</button>' +
       '<button class="post-menu-item" onclick="_closeGenericSheet(\'post-menu\');pinPost(' + postId + ')">' +
         '<span class="pmi-ico" style="background:#F5F3FF;color:#7C3AED"><i class="fas fa-thumbtack"></i></span>' +
         '<span class="pmi-label">' + (isPinned ? 'Désépingler' : 'Épingler') + '</span>' +
@@ -7714,15 +7636,6 @@ function editPost(postId) {
              PENDING_POSTS.find(function(p) { return p.id === postId; });
   if (!post) return;
 
-  /* Vérification délai 10 min */
-  var TEN_MIN = 10 * 60 * 1000;
-  var age = Date.now() - (post.at || 0);
-  if (age > TEN_MIN) {
-    showToast('Modification impossible après 10 minutes', 'err');
-    return;
-  }
-  var remaining = Math.ceil((TEN_MIN - age) / 60000);
-
   _closeGenericSheet('edit-post');
   var bg = document.createElement('div');
   bg.className = 'cam-sheet-bg change-pwd-modal'; bg.id = 'edit-post-bg';
@@ -7732,8 +7645,9 @@ function editPost(postId) {
   card.className = 'change-pwd-card'; card.id = 'edit-post-card';
   card.innerHTML =
     '<p class="change-pwd-title">Modifier la publication</p>' +
-    '<p style="font-size:11.5px;color:#6B7280;margin-bottom:10px;text-align:center">⏱ ' + remaining + ' min restante' + (remaining > 1 ? 's' : '') + '</p>' +
-    '<textarea id="edit-post-text" style="width:100%;padding:12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:14px;resize:vertical;min-height:100px;box-sizing:border-box;background:#F9FAFB;outline:none"></textarea>' +
+    '<textarea id="edit-post-text" style="width:100%;padding:12px;border:1.5px solid #E5E7EB;border-radius:10px;font-size:14px;resize:vertical;min-height:100px;box-sizing:border-box;background:#F9FAFB;outline:none">' +
+      escHtml(post.text) +
+    '</textarea>' +
     '<div class="change-pwd-btns">' +
       '<button class="change-pwd-cancel" onclick="_closeGenericSheet(\'edit-post\')">Annuler</button>' +
       '<button class="change-pwd-save" onclick="_saveEditPost(' + postId + ')">Enregistrer</button>' +
@@ -7744,11 +7658,7 @@ function editPost(postId) {
 
   setTimeout(function() {
     var ta = document.getElementById('edit-post-text');
-    if (ta) {
-      ta.value = post.text || '';
-      ta.focus();
-      ta.setSelectionRange(ta.value.length, ta.value.length);
-    }
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
   }, 100);
 }
 
@@ -7762,46 +7672,18 @@ function _saveEditPost(postId) {
              PENDING_POSTS.find(function(p) { return p.id === postId; });
   if (!post) return;
 
-  /* Dernier contrôle délai 10 min */
-  if (Date.now() - (post.at || 0) > 10 * 60 * 1000) {
-    showToast('Modification impossible après 10 minutes', 'err');
-    _closeGenericSheet('edit-post');
-    return;
-  }
-
-  post.text     = newText;
-  post.edited   = true;
-  post.editedAt = Date.now();
-
-  /* Pousse vers Firebase — lit depuis localStorage (liste complète) pour éviter d'écraser des posts absents de DEMO_POSTS */
+  post.text = newText;
+  /* Persiste si c'est un post de l'utilisateur connecté */
   if (_currentUser && post.ownerEmail === _currentUser.email) {
-    try {
-      var _lsKey   = _userPostsKey(_currentUser.email);
-      var _lsPosts = JSON.parse(localStorage.getItem(_lsKey) || '[]');
-      var _lsIdx   = _lsPosts.findIndex(function(p) { return String(p.id) === String(postId); });
-      if (_lsIdx !== -1) {
-        _lsPosts[_lsIdx].text     = newText;
-        _lsPosts[_lsIdx].edited   = true;
-        _lsPosts[_lsIdx].editedAt = post.editedAt;
-      } else {
-        _lsPosts.unshift(post);
-      }
-      savePersistedUserPosts(_currentUser.email, _lsPosts);
-    } catch(e) {
-      /* fallback : utilise DEMO_POSTS */
-      savePersistedUserPosts(_currentUser.email,
-        DEMO_POSTS.filter(function(p) { return p.ownerEmail === _currentUser.email; }));
-    }
+    var stored = JSON.parse(localStorage.getItem(_userPostsKey(_currentUser.email)) || '[]');
+    var si = stored.findIndex(function(p) { return p.id === postId; });
+    if (si !== -1) { stored[si].text = newText; localStorage.setItem(_userPostsKey(_currentUser.email), JSON.stringify(stored)); }
   }
 
   _closeGenericSheet('edit-post');
-
-  /* Mise à jour directe dans le DOM */
+  /* Rafraîchit la carte dans le DOM */
   var el = document.getElementById('ptxt-' + postId);
-  if (el) el.innerHTML = _gwRenderTaggedText(newText.length > 200 ? newText.slice(0, 200) + '…' : newText, post.tags);
-  var editLbl = document.getElementById('pedit-' + postId);
-  if (editLbl) editLbl.style.display = 'inline';
-
+  if (el) el.textContent = newText.length > 200 ? newText.slice(0, 200) + '…' : newText;
   showToast('Publication modifiée ✓', 'ok');
 }
 
@@ -9226,10 +9108,7 @@ function _gwOpenHashtagFeed(tag) {
 /* Rend un texte avec ses tags colorés/cliquables — échappe le texte en amont,
    donc toujours appeler avec le texte BRUT (jamais déjà échappé). */
 function _gwRenderTaggedText(text, tags) {
-  /* Décode les entités HTML stockées accidentellement (&#39; → ') avant ré-encodage */
-  var _rawText = (text || '').replace(/&#(\d+);/g, function(m, c) { return String.fromCharCode(parseInt(c, 10)); })
-                              .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
-  var escaped = escHtml(_rawText);
+  var escaped = escHtml(text || '');
   if (tags && tags.length) {
     tags.forEach(function(t) {
       if (!t || !t.nom) return;
@@ -12934,21 +12813,7 @@ function _vsInjectNewShorts(newPosts) {
     newPosts.forEach(function(post) {
       if (!post || !post.video || post.video.videoType !== 'short') return;
       if (!(post.video.url || post.video.idbId)) return;
-      var pidStr = String(post.id);
-      if (existingIds[pidStr]) {
-        /* Short déjà dans le player — mettre à jour le src si URL disponible maintenant */
-        if (post.video.url) {
-          var eItem = _vsItems.find(function(x) { return x.postId === pidStr; });
-          if (eItem && eItem.videoEl && !eItem.videoEl.getAttribute('src')) {
-            eItem.videoEl.src = post.video.url;
-            eItem.loaded = false;
-            try { eItem.videoEl.load(); } catch(e2){}
-            var eIdx = _vsItems.indexOf(eItem);
-            if (eIdx === _vsCurIdx) try { _vsActivate(eIdx); } catch(e2){}
-          }
-        }
-        return;
-      }
+      if (existingIds[String(post.id)]) return;
       var newIdx = _vsItems.length;
       var item = _vsCreateItem(post, newIdx);
       feedEl.appendChild(item.el);
@@ -13088,25 +12953,6 @@ function _vsActivate(idx) {
     if (i !== idx) { try { it.videoEl.pause(); } catch(e){} }
   });
 
-  /* Comme le lecteur vidéo classique qui ne garde jamais qu'UN SEUL <video>
-     avec des données chargées à la fois : on libère ici le buffer des Shorts
-     trop loin de la position courante. Sans ça, chaque Short visité pendant
-     le défilement gardait sa vidéo chargée en mémoire pour toujours — plus on
-     scrolle, plus il y a de vidéos "vivantes" en même temps dans la page,
-     ce qui ralentit progressivement la lecture (surtout sur les téléphones
-     moins puissants). La balise <video> reste en place, seul son buffer est
-     relâché — elle sera rechargée normalement si l'utilisateur y revient. */
-  _vsItems.forEach(function(it, i) {
-    if (i === idx || Math.abs(i - idx) <= 3) return;
-    if (!it.videoEl.src && !it.loaded) return;
-    try {
-      it.videoEl.pause();
-      it.videoEl.removeAttribute('src');
-      it.videoEl.load();
-    } catch(e){}
-    it.loaded = false;
-  });
-
   _vsClearEndTimer();
 
   var item = _vsItems[idx];
@@ -13165,15 +13011,12 @@ function _vsActivate(idx) {
 
     setTimeout(function() {
       if (_vsCurIdx !== idx) return;
-      /* File d'avance façon TikTok : 3 Shorts prêts en permanence pendant que
-         l'utilisateur regarde le courant, pas juste le suivant — délai court
-         (200ms au lieu de 600ms) pour démarrer le prefetch plus tôt tout en
-         laissant la vidéo courante démarrer sa propre lecture en premier */
+      /* Précharge 2 Shorts à l'avance (pas juste le suivant) pour que le
+         défilement reste fluide même en swipant vite plusieurs fois de suite */
       _vsPreload(idx + 1);
       _vsPreload(idx + 2);
-      _vsPreload(idx + 3);
       _vsUpdateDesktopPanel();
-    }, 200);
+    }, 600);
   }
 
   if (item.videoEl.src) {
@@ -13191,30 +13034,23 @@ function _vsActivate(idx) {
     });
   }
 
-  /* Précharge immédiatement (sans attendre Firebase) les 2 Shorts suivants
-     avec les URLs déjà connues — comme TikTok qui garde toujours plusieurs
-     vidéos prêtes pendant que l'utilisateur regarde la vidéo courante */
-  _vsQuickAssignUrl(_vsItems[idx + 1]);
-  _vsQuickAssignUrl(_vsItems[idx + 2]);
-}
-
-/* Assigne immédiatement une URL déjà connue (cache mémoire/localStorage/post)
-   à un item du player, sans passer par la résolution Firebase (rapide, synchrone) */
-function _vsQuickAssignUrl(next) {
-  if (!next || next.videoEl.src || next.loaded) return;
-  var nUrl = _gwVidUrlCache[next.postId];
-  if (!nUrl) {
-    var np = next.post;
-    nUrl = typeof np.video === 'string' ? np.video : (np.video && np.video.url ? np.video.url : '');
-    if (!nUrl) { try { var _nls = localStorage.getItem('gw_vurl_' + next.postId); if (_nls && !_nls.startsWith('blob:')) nUrl = _nls; } catch(e){} }
-    if (nUrl && nUrl.startsWith('blob:')) nUrl = '';
-    if (nUrl) _gwVidUrlCache[next.postId] = nUrl;
-  }
-  if (nUrl) {
-    next.videoEl.src = nUrl;
-    next.videoEl.preload = 'auto';
-    try { next.videoEl.load(); } catch(e){}
-    next.loaded = true;
+  /* Précharge la vidéo suivante avec les URLs déjà connues */
+  var next = _vsItems[idx + 1];
+  if (next && !next.videoEl.src && !next.loaded) {
+    var nUrl = _gwVidUrlCache[next.postId];
+    if (!nUrl) {
+      var np = next.post;
+      nUrl = typeof np.video === 'string' ? np.video : (np.video && np.video.url ? np.video.url : '');
+      if (!nUrl) { try { var _nls = localStorage.getItem('gw_vurl_' + next.postId); if (_nls && !_nls.startsWith('blob:')) nUrl = _nls; } catch(e){} }
+      if (nUrl && nUrl.startsWith('blob:')) nUrl = '';
+      if (nUrl) _gwVidUrlCache[next.postId] = nUrl;
+    }
+    if (nUrl) {
+      next.videoEl.src = nUrl;
+      next.videoEl.preload = 'auto';
+      try { next.videoEl.load(); } catch(e){}
+      next.loaded = true;
+    }
   }
 }
 
@@ -15945,7 +15781,7 @@ function translatePost(postId) {
 
   /* Bascule : si déjà traduit, revient à l'original */
   if (btn.dataset.translated === '1') {
-    textEl.innerHTML = _gwRenderTaggedText(post.text, post.tags);
+    textEl.textContent = post.text;
     btn.innerHTML = '<i class="fas fa-language"></i> ' + t('post.translate');
     btn.dataset.translated = '0';
     btn.disabled = false;
@@ -16452,22 +16288,6 @@ function publierPost() {
   /* Affichage immédiat local avec les base64 */
   DEMO_POSTS.unshift(newPost);
 
-  /* Phase 1 — sauvegarde locale immédiate (sans blob URL) pour les vidéos :
-     _gwMergePost détecte le post via idbId dans lsLocal et ne le retire PAS
-     de DEMO_POSTS pendant l'upload, même si Firebase ne l'a pas encore.
-     persistNewPost (Phase 2) mettra à jour avec l'URL Storage après upload. */
-  if (videoBlob && videoIdbId && _currentUser) {
-    try {
-      var _ph1Key   = _userPostsKey(_currentUser.email);
-      var _ph1Posts = JSON.parse(localStorage.getItem(_ph1Key) || '[]');
-      if (!_ph1Posts.find(function(p) { return p.id === postId; })) {
-        var _ph1Copy = JSON.parse(JSON.stringify(newPost));
-        if (_ph1Copy.video) delete _ph1Copy.video.url; /* blob invalide hors session */
-        _ph1Posts.unshift(_ph1Copy);
-        localStorage.setItem(_ph1Key, JSON.stringify(_ph1Posts));
-      }
-    } catch(e){}
-  }
 
   /* Cache le blob URL du Short pour lecture immédiate dans le player (session courante) */
   if (_pickedVideo && _pickedVideo.url && _pickedVideo.videoType === 'short') {
@@ -19238,51 +19058,35 @@ function renderProfilPosts(email, nom, container) {
   }
 
   var posts = getPostsByAuthor(email, nom);
+
+  /* Si pas de posts locaux et que c'est un autre utilisateur → fetch Firebase */
   var isSelf = _currentUser && email && email === _currentUser.email;
-
-  /* Pour soi-même ou si Firebase non dispo → données locales directement */
-  if (isSelf || !email || !_gwFbReady || !_gwFbDB) {
-    _doRenderPosts(posts);
-    return;
-  }
-
-  /* Pour un autre utilisateur : affiche les données locales immédiatement (si dispo),
-     puis toujours rafraîchit depuis Firebase pour avoir les posts à jour */
-  if (posts.length) {
-    _doRenderPosts(posts);
-  } else {
+  if (!posts.length && !isSelf && email && _gwFbReady && _gwFbDB) {
     container.innerHTML =
-      '<div class="profil-posts-empty" id="profil-fb-loading">' +
+      '<div class="profil-posts-empty">' +
         '<i class="fas fa-spinner fa-spin" style="font-size:22px;color:#6366F1"></i>' +
         '<p style="margin-top:8px;color:#64748B">Chargement…</p>' +
       '</div>';
+    _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).once('value').then(function(snap) {
+      var fbPosts = snap.val();
+      if (fbPosts && Array.isArray(fbPosts) && fbPosts.length) {
+        fbPosts.forEach(function(p) {
+          if (!p || !p.id) return;
+          if (!p.images) p.images = [];
+          if (!DEMO_POSTS.find(function(d) { return d.id === p.id; })) {
+            p.likers = loadPostLikers(p.id);
+            DEMO_POSTS.push(p);
+          }
+        });
+        try { localStorage.setItem('gw_userposts_' + email, JSON.stringify(fbPosts)); } catch(e){}
+        _doRenderPosts(fbPosts);
+      } else {
+        _doRenderPosts([]);
+      }
+    }).catch(function() { _doRenderPosts([]); });
+  } else {
+    _doRenderPosts(posts);
   }
-
-  _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).once('value').then(function(snap) {
-    var fbPosts = snap.val();
-    /* Firebase peut retourner un objet {0:…,1:…} au lieu d'un array — normaliser */
-    if (fbPosts && typeof fbPosts === 'object' && !Array.isArray(fbPosts)) {
-      fbPosts = Object.keys(fbPosts).map(function(k) { return fbPosts[k]; });
-    }
-    if (Array.isArray(fbPosts) && fbPosts.length) {
-      fbPosts.forEach(function(p) {
-        if (!p || !p.id) return;
-        if (!p.images) p.images = [];
-        if (!DEMO_POSTS.find(function(d) { return d.id === p.id; })) {
-          p.likers = loadPostLikers(p.id);
-          DEMO_POSTS.push(p);
-        }
-      });
-      try { localStorage.setItem('gw_userposts_' + email, JSON.stringify(fbPosts)); } catch(e){}
-      _doRenderPosts(fbPosts);
-    } else if (!posts.length) {
-      /* Firebase vide ET pas de données locales → état vide */
-      _doRenderPosts([]);
-    }
-    /* Si Firebase vide mais données locales déjà affichées → les garder */
-  }).catch(function() {
-    if (!posts.length) _doRenderPosts([]);
-  });
 }
 
 /* ══════════════════════════════════════════
@@ -21739,11 +21543,13 @@ function _dmOpen(conv) {
       'Chargement des messages…</div>';
   }
 
-  /* ── child_added : rendu immédiat (historique + temps réel) ────────
-     Suppression du buffer firstBatch/batchBuffer : chaque message est
-     rendu dès son arrivée via _dmRenderMsg (idempotent via data-msg-id).
-     Les messages historiques arrivent dans l'ordre chronologique (clé = id
-     = timestamp), donc aucun tri supplémentaire n'est nécessaire.          */
+  /* ── child_added : unique source de vérité ─────────────────────
+     Firebase rejoue TOUS les enfants existants au premier attach,
+     puis envoie les nouveaux en temps réel.
+     _appendBubble() (via data-msg-id) garantit l'idempotence.     */
+  var firstBatch = true;
+  var batchBuffer = [];
+
   ref.on('child_added', function(snap) {
     /* Stale-check : protège contre les callbacks d'une conv fermée */
     if (_dmRef !== ref || _dmRefKey !== fbKey) return;
@@ -21751,8 +21557,13 @@ function _dmOpen(conv) {
     var msg = snap.val();
     if (!msg || !msg.id || !msg.from) return;
 
-    /* Rendu immédiat — temps réel ET historique */
-    _dmRenderMsg(msg, ref, fbKey);
+    if (firstBatch) {
+      /* Accumule le premier lot → rendu groupé après 150 ms */
+      batchBuffer.push(msg);
+    } else {
+      /* Message temps réel → rendu immédiat */
+      _dmRenderMsg(msg, ref, fbKey);
+    }
   }, function(err) {
     console.error('[DM] ❌ child_added erreur:', err && err.code, err && err.message);
     if (box) box.innerHTML = '<div style="text-align:center;padding:32px;color:#EF4444;font-size:13px">' +
@@ -21783,24 +21594,24 @@ function _dmOpen(conv) {
     }
   });
 
-  /* Une fois le chargement initial confirmé (once('value') se résout après
-     tous les child_added existants) : scroll en bas + marquer comme lus.
-     Les messages arrivent déjà tous en temps réel via child_added ci-dessus. */
-  ref.once('value').then(_dmOnLoaded).catch(_dmOnLoaded);
-
-  function _dmOnLoaded() {
+  /* Rendu groupé du premier lot (messages historiques) */
+  setTimeout(function() {
     if (_dmRef !== ref || _dmRefKey !== fbKey) return;
+    firstBatch = false;
 
-    /* Vide le spinner de chargement si toujours là */
     var b = document.getElementById('chat-messages');
-    if (b) {
-      var spinner = b.querySelector('[class*="spinner"], [class*="fa-spin"]');
-      if (spinner && !b.querySelector('.chat-msg-row')) b.innerHTML = '';
-    }
+    if (b) b.innerHTML = ''; /* vide le spinner */
+
+    /* Trie chronologiquement avant de rendre */
+    batchBuffer.sort(function(a, b2) { return (Number(a.id)||0) - (Number(b2.id)||0); });
+    batchBuffer.forEach(function(m) { _dmRenderMsg(m, ref, fbKey); });
+    batchBuffer = [];
 
     setTimeout(_scrollChatToBottom, 60);
 
-    /* ── Marque comme lus tous les messages reçus (from ≠ moi) ── */
+    /* ── Marque comme lus tous les messages reçus (from ≠ moi) ──
+       Persisté dans Firebase → survit aux reconnexions */
+    batchBuffer.forEach(function() {}); /* reset (déjà vidé) */
     var msgsToMarkRead = [];
     var b2 = document.getElementById('chat-messages');
     if (b2) {
@@ -21808,6 +21619,7 @@ function _dmOpen(conv) {
         msgsToMarkRead.push(row2.getAttribute('data-msg-id'));
       });
     }
+    /* Lecture des messages reçus → mark read dans Firebase */
     if (msgsToMarkRead.length && _gwFbDB) {
       msgsToMarkRead.forEach(function(mid) {
         _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + mid + '/read').set(true).catch(function(){});
@@ -21819,7 +21631,8 @@ function _dmOpen(conv) {
     if (activeConv) { activeConv.unread = 0; }
     renderConversations();
 
-    /* ── Supprime l'entrée inbox Firebase + localStorage pour cet expéditeur ── */
+    /* ── Supprime l'entrée inbox Firebase + localStorage pour cet expéditeur ──
+       Sans ça, _checkDMInbox() re-crée le badge "non lu" à chaque poll/restart */
     try {
       if (_gwFbDB) {
         _gwFbDB.ref('gw/inboxes/' + _gwFbKey(_currentUser.email) + '/' + _gwFbKey(conv.email))
@@ -21829,12 +21642,15 @@ function _dmOpen(conv) {
       var _inbox    = JSON.parse(localStorage.getItem(_inboxKey) || '[]');
       _inbox        = _inbox.filter(function(e) { return e.fromEmail !== conv.email; });
       localStorage.setItem(_inboxKey, JSON.stringify(_inbox));
+      /* ── Sauvegarde un timestamp "lu" local par conversation ──
+         Fallback si Firebase delete ne se sync pas avant fermeture app :
+         _checkDMInbox ignorera toute entrée plus ancienne que ce timestamp */
       localStorage.setItem(
         'gw_dmread_' + _currentUser.email + '_' + _gwFbKey(conv.email),
         String(Date.now())
       );
     } catch(e) {}
-  }
+  }, 200);
 }
 
 /* Debounce renderConversations pour ne pas re-rendre 30× lors du chargement de l'historique */
@@ -21903,37 +21719,26 @@ function _dmWriteMsg(conv, msg) {
       : msg.type === 'video' ? '🎥 Vidéo'
       : '📎 ' + (msg.fileName || 'Fichier'));
 
-  /* Attend confirmation de l'auth Firebase avant d'écrire (règles auth != null) :
-     envoyer juste après l'ouverture de l'app / sur réseau lent, avant que
-     signInAnonymously() (ou la vraie session) ait résolu, faisait échouer le
-     write en silence côté règles → "Erreur d'envoi" alors que rien n'avait
-     vraiment été tenté. Même filet que _gwOnAuthReady utilisé pour les posts. */
-  return new Promise(function(resolve) {
-    _gwOnAuthReady(function() {
-      console.log('[DM] ✉️ Envoi → fbKey:', fbKey, '| msg.id:', msg.id, '| to:', conv.email);
+  console.log('[DM] ✉️ Envoi → fbKey:', fbKey, '| msg.id:', msg.id, '| to:', conv.email);
 
-      /* Écriture en parallèle : dm_msgs + inbox simultanément
-         → notification Y arrive en même temps que le message (pas après) */
-      Promise.all([
-        _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + msg.id).set(msg),
-        _gwFbDB.ref('gw/inboxes/' + toFbKey + '/' + myFbKey).set({
-          fromEmail: _currentUser.email,
-          fromName:  _currentUser.nom  || _currentUser.email,
-          fromRole:  _currentUser.role || 'Membre Geniwork',
-          lastMsg:   label,
-          at:        msg.at || Date.now()
-        })
-      ])
-        .then(function() {
-          resolve();
-        })
-        .catch(function(err) {
-          console.error('[DM] ❌ Erreur envoi:', err && err.code, err && err.message, '| path: gw/dm_msgs/' + fbKey);
-          showToast('Erreur d\'envoi — vérifiez votre connexion', 'err');
-          resolve();
-        });
+  return _gwFbDB.ref('gw/dm_msgs/' + fbKey + '/' + msg.id).set(msg)
+    .then(function() {
+      console.log('[DM] ✅ dm_msgs écrit OK → mise à jour inbox de', conv.email);
+      return _gwFbDB.ref('gw/inboxes/' + toFbKey + '/' + myFbKey).set({
+        fromEmail: _currentUser.email,
+        fromName:  _currentUser.nom  || _currentUser.email,
+        fromRole:  _currentUser.role || 'Membre Geniwork',
+        lastMsg:   label,
+        at:        msg.at || Date.now()
+      });
+    })
+    .then(function() {
+      console.log('[DM] ✅ inbox écrit OK pour', conv.email);
+    })
+    .catch(function(err) {
+      console.error('[DM] ❌ Erreur envoi:', err && err.code, err && err.message, '| path: gw/dm_msgs/' + fbKey);
+      showToast('Erreur d\'envoi — vérifiez votre connexion', 'err');
     });
-  });
 }
 
 /* _saveDMConv : remplacé par _dmWriteMsg. Stub pour compatibilité résiduelle. */
