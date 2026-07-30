@@ -3445,11 +3445,6 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   /* GPU compositing — évite image figée/son sans image sur Chrome desktop */
   transform: translateZ(0);
   -webkit-transform: translateZ(0);
-  backface-visibility: hidden;
-  -webkit-backface-visibility: hidden;
-  will-change: transform;
-  /* Fluidité 60fps — désactive le rendu CPU sur Android WebView */
-  -webkit-backface-visibility: hidden;
 }
 .vs-tap-zone {
   position: absolute;
