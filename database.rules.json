@@ -14,7 +14,7 @@
       "dms": {
         "$userFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": false
         }
       },
       "dm_msgs": {
@@ -27,14 +27,16 @@
       "dm_meta": {
         "$dmFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": false
         }
       },
       "inboxes": {
         "$toFbKey": {
-          ".read":  "auth != null",
-          ".write": "auth != null",
-          ".indexOn": ["fromEmail", "at"]
+          ".read":  "auth != null && auth.uid === $toFbKey",
+          ".indexOn": ["fromEmail", "at"],
+          "$fromFbKey": {
+            ".write": "auth != null && (auth.uid === $fromFbKey || auth.uid === $toFbKey)"
+          }
         }
       },
       "group_msgs": {
@@ -53,7 +55,7 @@
       "posts": {
         ".read":  true,
         "$userFbKey": {
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "post_imgs": {
@@ -75,7 +77,9 @@
       "likes": {
         ".read":  true,
         "$postId": {
-          ".write": "auth != null"
+          "$userFbKey": {
+            ".write": "auth != null && auth.uid === $userFbKey"
+          }
         }
       },
       "dislikes": {
@@ -111,13 +115,13 @@
       "viewed_vids": {
         "$userFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "following": {
         ".read":  true,
         "$userFbKey": {
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "follow_counts": {
@@ -129,7 +133,9 @@
       "followers": {
         "$profileFbKey": {
           ".read":  true,
-          ".write": "auth != null"
+          "$followerFbKey": {
+            ".write": "auth != null && auth.uid === $followerFbKey"
+          }
         }
       },
       "notifs": {
@@ -141,7 +147,7 @@
       "fcm_tokens": {
         "$userFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "mk_listings": {
@@ -171,7 +177,7 @@
       "services": {
         ".read":  true,
         "$userFbKey": {
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "projects": {
@@ -199,13 +205,13 @@
       "blocked": {
         "$userFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "privacy": {
         "$userFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "admin_tasks": {
@@ -231,7 +237,7 @@
       "online": {
         ".read":  "auth != null",
         "$userFbKey": {
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "payments": {
@@ -317,7 +323,7 @@
         "$postId": {
           ".read":  "auth != null",
           "$userKey": {
-            ".write": "auth != null"
+            ".write": "auth != null && auth.uid === $userKey"
           }
         }
       },
@@ -326,7 +332,7 @@
         "$postId": {
           ".read":  "auth != null",
           "$userKey": {
-            ".write": "auth != null"
+            ".write": "auth != null && auth.uid === $userKey"
           }
         }
       },
@@ -334,7 +340,7 @@
         "$postId": {
           "$userKey": {
             ".read":  "auth != null",
-            ".write": "auth != null"
+            ".write": "auth != null && auth.uid === $userKey"
           }
         }
       },
@@ -371,13 +377,13 @@
       "job_saved": {
         "$userFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "job_hist_hidden": {
         "$userFbKey": {
           ".read":  "auth != null",
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "recruiter_logos": {
