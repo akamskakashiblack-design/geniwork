@@ -6230,11 +6230,11 @@ function switchFeedTab(btn, tab) {
 ══════════════════════════════════════════ */
 function _userPostsKey(email) { return 'gw_userposts_' + email; }
 
-/* Plafonne le payload Firebase à 500 éléments SANS jamais sacrifier de vidéo/Short —
+/* Plafonne le payload Firebase à 50 éléments SANS jamais sacrifier de vidéo/Short —
    avant, un simple posts.slice(0,50) faisait disparaître les anciennes vidéos dès
    qu'un utilisateur dépassait 50 publications au total (photos + vidéos confondues). */
 function _gwCapFirebasePosts(posts) {
-  var CAP = 500;
+  var CAP = 50;
   if (posts.length <= CAP) return posts;
   var videos = posts.filter(function(p) { return p && p.video; });
   var others = posts.filter(function(p) { return !(p && p.video); });
