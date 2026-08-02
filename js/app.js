@@ -1450,13 +1450,9 @@ function _gwMergePost(snap) {
 
   /* ── Retire les posts supprimés de DEMO_POSTS pour cet utilisateur ── */
   var removedAny = false;
-  var _nowMs = Date.now();
   DEMO_POSTS = DEMO_POSTS.filter(function(p) {
     if (p.ownerEmail !== email) return true; /* pas de cet user → conserver */
     if (incomingIds[p.id]) return true;       /* encore dans Firebase ou local → conserver */
-    /* Filet de sécurité : vidéo publiée depuis moins de 5 min avec idbId = upload en cours,
-       ne pas la retirer même si Firebase ne l'a pas encore (Phase 1 → Phase 2) */
-    if (p.video && p.video.idbId && (_nowMs - Number(p.id)) < 300000) return true;
     /* Post supprimé → fermer les players si nécessaire */
     try {
       if (_vpCurrentPost && String(_vpCurrentPost.id) === String(p.id)) closeVideoPlayer();
@@ -12876,7 +12872,7 @@ function _vsCreateItem(post, idx) {
   el.setAttribute('data-post-id', pidStr);
 
   el.innerHTML =
-    '<video class="vs-video"' + _vsPosterAttr + ' playsinline webkit-playsinline x-webkit-airplay="allow" preload="none"></video>' +
+    '<video class="vs-video"' + _vsPosterAttr + ' playsinline webkit-playsinline x-webkit-airplay="allow" preload="metadata"></video>' +
     _gwRenderTextLayersHtml(post.video && post.video.textLayers) +
     _gwRenderVideoOverlaysHtml(post.video && post.video.effects) +
     '<div class="vs-tap-zone" onclick="vsHandleTap(' + idx + ', event)"></div>' +
@@ -12932,36 +12928,20 @@ function _vsDoPlayMuted(v) {
   v.play().catch(function(){});
 }
 
-/* ── Récupération automatique d'un freeze (stall) ──
-   Avant : au bout de 2s de blocage, v.load() jetait tout le buffer déjà
-   téléchargé et relançait la requête réseau depuis le début. Sur connexion
-   lente, ce buffer contenait justement les données en train d'arriver — le
-   jeter provoquait un nouveau blocage 2s plus tard, qui relançait un nouveau
-   load(), etc. : une boucle qui ne laissait jamais la vidéo finir de charger
-   et donnait l'impression d'une lecture "très lente et qui cale" en continu.
-   Maintenant : on attend plus longtemps, on essaie d'abord une simple relance
-   de lecture (sans toucher au buffer), et le reload destructif n'intervient
-   qu'en dernier recours si la position n'a vraiment pas avancé. ── */
+/* ── Récupération automatique d'un freeze (stall) ── */
 function _vsStallRecovery(item, idx, v) {
   clearTimeout(item._stallTimer);
-  var ct0 = v.currentTime;
   item._stallTimer = setTimeout(function() {
     if (_vsCurIdx !== idx || v.paused) return;
-    if (v.currentTime > ct0 + 0.05) return; /* ça a déjà repris tout seul */
-    try { v.play().catch(function(){}); } catch(e){}
-    item._stallTimer = setTimeout(function() {
-      if (_vsCurIdx !== idx || v.paused) return;
-      if (v.currentTime > ct0 + 0.05) return; /* repris entre-temps */
-      var ct = v.currentTime;
-      v.load();
-      v.addEventListener('canplay', function _sr() {
-        v.removeEventListener('canplay', _sr);
-        if (_vsCurIdx !== idx) return;
-        try { v.currentTime = ct > 0 ? ct : (v._gwTrimStart || 0); } catch(e){}
-        _vsGlobalMuted ? _vsDoPlayMuted(v) : _vsDoPlay(v);
-      }, { once: true });
-    }, 3000);
-  }, 3000);
+    var ct = v.currentTime;
+    v.load();
+    v.addEventListener('canplay', function _sr() {
+      v.removeEventListener('canplay', _sr);
+      if (_vsCurIdx !== idx) return;
+      try { v.currentTime = ct > 0 ? ct : (v._gwTrimStart || 0); } catch(e){}
+      _vsGlobalMuted ? _vsDoPlayMuted(v) : _vsDoPlay(v);
+    }, { once: true });
+  }, 2000);
 }
 
 function _vsActivate(idx) {
@@ -13189,20 +13169,6 @@ function openVideoScroll(startPostId) {
       }).catch(function(){});
     }
   });
-
-  /* Démarre le buffer de la première vidéo immédiatement si l'URL est déjà connue —
-     évite d'attendre le premier tick asynchrone de _gwResolveVideoUrl */
-  var _vsFirstItem = _vsItems[startIdx];
-  if (_vsFirstItem && !_vsFirstItem.videoEl.src) {
-    var _vsFirstPid = _vsFirstItem.postId;
-    var _vsFirstUrl = _gwVidBlobCache[_vsFirstPid] || _gwVidUrlCache[_vsFirstPid] || '';
-    if (_vsFirstUrl) {
-      _vsFirstItem.videoEl.src = _vsFirstUrl;
-      _vsFirstItem.videoEl.preload = 'auto';
-      try { _vsFirstItem.videoEl.load(); } catch(e){}
-      _vsFirstItem.loaded = true;
-    }
-  }
 
   _vsActivate(startIdx);
   _vsSetupObserver();
