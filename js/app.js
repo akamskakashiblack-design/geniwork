@@ -1557,6 +1557,25 @@ function _gwMergePost(snap) {
       }
     });
   } catch(e2) {}
+  /* Protection DEMO_POSTS : si un post est en mémoire (vient d'être publié) mais
+     n'est pas encore dans localStorage ni dans Firebase (upload en cours ou écriture
+     Firebase non encore confirmée), le protéger pour éviter qu'il disparaisse.
+     Les images base64 sont retirées du payload Firebase (trop lourdes) — elles
+     seront remplacées par les URLs Storage quand l'upload se terminera. */
+  try {
+    DEMO_POSTS.forEach(function(dp) {
+      if (dp && dp.ownerEmail === email && dp.id && !incomingIds[dp.id]) {
+        var dpCopy = Object.assign({}, dp);
+        if (dpCopy.images && Array.isArray(dpCopy.images)) {
+          dpCopy.images = dpCopy.images.filter(function(img) {
+            return img && typeof img === 'string' && !img.startsWith('data:');
+          });
+        }
+        localOnly.push(dpCopy);
+        incomingIds[dp.id] = true;
+      }
+    });
+  } catch(e3) {}
   if (localOnly.length) {
     posts = localOnly.concat(posts);
     /* Retente l'écriture Firebase pour ces posts manquants */
@@ -6409,9 +6428,12 @@ function savePersistedUserPosts(email, posts) {
 function persistNewPost(post) {
   if (!post.ownerEmail) return;
   var posts = loadPersistedUserPosts(post.ownerEmail);
-  /* Évite les doublons (double-publish) */
-  if (posts.find(function(p) { return p.id === post.id; })) return;
-  posts.unshift(post);
+  var idx = posts.findIndex(function(p) { return p.id === post.id; });
+  if (idx !== -1) {
+    posts[idx] = post; /* Met à jour (ex : images base64 → URLs Storage après upload) */
+  } else {
+    posts.unshift(post);
+  }
   savePersistedUserPosts(post.ownerEmail, posts);
 }
 
