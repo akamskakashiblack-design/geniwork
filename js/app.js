@@ -251,14 +251,17 @@ function _gwRetryPendingUpload(postId) {
       return;
     }
     _showVideoProgress(0);
-    var ext = (blob.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
-    _uploadBlobToStorage('videos/' + post.id + ext, blob,
-      function(url) {
+    _cfUploadVideo(blob, post.id,
+      function(pct) { _showVideoProgress(pct); },
+      function(url, cfMeta) {
+        _gwVidUrlCache[post.id] = url;
         _hideVideoProgress();
         showToast('Vidéo envoyée ✓', 'ok');
         if (_gwFbReady && _gwFbDB) {
           _gwFbDB.ref('gw/post_videos/' + post.id).set({
             url: url,
+            cfUid: (cfMeta && cfMeta.uid) || '',
+            thumbnail: (cfMeta && cfMeta.thumbnail) || '',
             dur: post.video.duration || 0
           }).catch(function(){});
         }
@@ -274,8 +277,7 @@ function _gwRetryPendingUpload(postId) {
       function() {
         _hideVideoProgress();
         showToast('Échec de l\'envoi — réessayez plus tard', 'err');
-      },
-      function(pct) { _showVideoProgress(pct); }
+      }
     );
   });
 }
@@ -398,6 +400,44 @@ function _uploadBlobToStorage(storagePath, blob, onOk, onFail, onProgress) {
   }
 }
 
+/* ── Upload vidéo vers Cloudflare Stream via Worker proxy ──────────────────────
+   Flow : 1) Worker → CF Stream direct_upload → uid + uploadURL
+          2) Client uploade le blob directement sur uploadURL
+          3) Retourne l'URL HLS de lecture permanente
+──────────────────────────────────────────────────────────────────────────── */
+var _CF_WORKER_URL = 'https://green-wildflower-cda5.akams-kakashi-black.workers.dev';
+
+/* onSuccess reçoit (url, cfMeta) où cfMeta = { uid, thumbnail } */
+function _cfUploadVideo(blob, postId, onProgress, onSuccess, onFail) {
+  fetch(_CF_WORKER_URL + '/upload-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ maxDurationSeconds: 600 })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (!data.uploadURL) { onFail(new Error('No uploadURL from Worker')); return; }
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', data.uploadURL);
+    xhr.upload.onprogress = function(e) {
+      if (e.lengthComputable && onProgress) onProgress(Math.round(e.loaded / e.total * 100));
+    };
+    xhr.onload = function() {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { localStorage.setItem('gw_vurl_' + postId, data.playbackUrl); } catch(e){}
+        onSuccess(data.playbackUrl, { uid: data.uid, thumbnail: data.thumbnail });
+      } else {
+        onFail(new Error('CF upload HTTP ' + xhr.status));
+      }
+    };
+    xhr.onerror = function() { onFail(new Error('CF upload network error')); };
+    var fd = new FormData();
+    fd.append('file', blob, 'video.mp4');
+    xhr.send(fd);
+  })
+  .catch(function(e) { onFail(e); });
+}
+
 /* ── Ré-upload rétroactif des vidéos sans URL Storage ──────────────────────────
    Appelé après login : scanne les posts de l'utilisateur courant qui ont un
    blob vidéo en IndexedDB mais pas encore d'URL Firebase Storage.
@@ -419,14 +459,17 @@ function _gwUploadPendingVideos() {
     (function(p) {
       _gwLoadVideoBlob(p.video.idbId, function(blob) {
         if (!blob) return;  /* pas en IDB sur cet appareil */
-        var ext = (blob.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
-        _uploadBlobToStorage('videos/' + p.id + ext, blob,
-          function(url) {
-            console.log('[GW Storage] ✅ Vidéo ré-uploadée :', p.id, url);
+        _cfUploadVideo(blob, p.id,
+          null,
+          function(url, cfMeta) {
+            console.log('[GW CF] ✅ Vidéo ré-uploadée CF Stream :', p.id, url);
             p.video.url = url;
+            _gwVidUrlCache[p.id] = url;
             /* 1. Nœud dédié pour livraison immédiate aux autres appareils */
             _gwFbDB.ref('gw/post_videos/' + p.id).set({
               url: url,
+              cfUid: (cfMeta && cfMeta.uid) || '',
+              thumbnail: (cfMeta && cfMeta.thumbnail) || '',
               dur: p.video.duration || 0
             }).catch(function(){});
             /* 2. Met à jour le tableau de posts dans Firebase */
@@ -464,12 +507,13 @@ function _gwUploadPendingOfficialVideos() {
     (function(p) {
       _gwLoadVideoBlob(p.video.idbId, function(blob) {
         if (!blob) return;  /* blob absent sur cet appareil — ignoré */
-        var ext = (blob.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
-        _uploadBlobToStorage('videos/' + p.id + ext, blob,
-          function(url) {
-            console.log('[GW Storage] ✅ Vidéo officielle ré-uploadée :', p.id, url);
+        _cfUploadVideo(blob, p.id,
+          null,
+          function(url, cfMeta) {
+            console.log('[GW CF] ✅ Vidéo officielle ré-uploadée CF Stream :', p.id, url);
             p.video.url = url;
-            _gwFbDB.ref('gw/post_videos/' + p.id).set({ url: url, dur: p.video.duration || 0 }).catch(function(){});
+            _gwVidUrlCache[p.id] = url;
+            _gwFbDB.ref('gw/post_videos/' + p.id).set({ url: url, cfUid: (cfMeta && cfMeta.uid) || '', thumbnail: (cfMeta && cfMeta.thumbnail) || '', dur: p.video.duration || 0 }).catch(function(){});
             /* Met à jour localStorage */
             var all = _offGetPosts();
             var idx = all.findIndex(function(x) { return String(x.id) === String(p.id); });
@@ -12687,7 +12731,7 @@ var _vsObserver      = null;
 var _vsRafId         = null;
 var _vsEndTimer      = null;
 var _vsCountN        = 10;
-var _vsGlobalMuted   = true;  /* true = muet au démarrage ; false = son actif */
+var _vsGlobalMuted   = false;  /* false = son actif par défaut */
 var _vsLikesRef      = null;
 var _vsSharesRef     = null;
 var _vsViewsRef      = null;
@@ -12959,7 +13003,7 @@ function _vsActivate(idx) {
   var vd   = (item.post.video && typeof item.post.video === 'object') ? item.post.video : {};
 
   /* Applique le réglage son du créateur (comme openVideoPlayer) */
-  _vsGlobalMuted = (vd.muted !== false); /* false uniquement si le créateur a activé le son */
+  _vsGlobalMuted = !!vd.muted; /* mute uniquement si le créateur a désactivé le son */
   _vsUpdateSoundBtn();
 
   function _start() {
@@ -13129,8 +13173,8 @@ function openVideoScroll(startPostId) {
   var startIdx = posts.findIndex(function(p) { return String(p.id) === String(startPostId); });
   if (startIdx < 0) startIdx = 0;
 
-  /* Reset état son : commence muet, bouton haut-droite pour activer */
-  _vsGlobalMuted = true;
+  /* Son actif par défaut à l'ouverture du player */
+  _vsGlobalMuted = false;
   _vsUpdateSoundBtn();
 
   var feedEl = document.getElementById('vs-feed');
@@ -16361,8 +16405,9 @@ function publierPost() {
   _gwOnAuthReady(function() { _nsfwGate.then(function(_nsfwSafe) {
     if (!_nsfwSafe) return; /* bloqué par le scan — déjà géré par _gwHandleNsfwDetection */
 
-  if (_gwFbStorage && (_imagesSnapshot.length > 0 || videoBlob || docBlob)) {
-    var _pendingUploads   = (_imagesSnapshot.length > 0 ? 1 : 0) + (videoBlob ? 1 : 0) + (docBlob ? 1 : 0);
+  var _hasImgOrDoc = (_imagesSnapshot.length > 0 || docBlob) && _gwFbStorage;
+  if (videoBlob || _hasImgOrDoc) {
+    var _pendingUploads   = (videoBlob ? 1 : 0) + (_imagesSnapshot.length > 0 && _gwFbStorage ? 1 : 0) + (docBlob && _gwFbStorage ? 1 : 0);
     var _uploadedImages   = _imagesSnapshot;
     var _uploadedVideoUrl = null;
     var _uploadedDocUrl   = null;
@@ -16373,7 +16418,7 @@ function publierPost() {
       }
     }
 
-    if (_imagesSnapshot.length > 0) {
+    if (_imagesSnapshot.length > 0 && _gwFbStorage) {
       _uploadImages('post_imgs/' + postId, _imagesSnapshot, function(urls) {
         _uploadedImages = urls;
         _onUploadDone();
@@ -16381,16 +16426,19 @@ function publierPost() {
     }
     if (videoBlob) {
       function _doVidUpload(blobToUp) {
-        var _vExt = (blobToUp.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
         _showVideoProgress(0, 'Envoi de la vidéo…');
-        _uploadBlobToStorage('videos/' + postId + _vExt, blobToUp,
-          function(url) {
+        _cfUploadVideo(blobToUp, postId,
+          function(pct) { _showVideoProgress(pct, 'Envoi de la vidéo…'); },
+          function(url, cfMeta) {
             _uploadedVideoUrl = url;
+            _gwVidUrlCache[postId] = url;
             _showVideoProgress(100, 'Vidéo envoyée ✓');
             setTimeout(function() { _hideVideoProgress(); }, 800);
             if (_gwFbReady && _gwFbDB) {
               _gwFbDB.ref('gw/post_videos/' + postId).set({
                 url: url,
+                cfUid: (cfMeta && cfMeta.uid) || '',
+                thumbnail: (cfMeta && cfMeta.thumbnail) || '',
                 dur: newPost.video ? (newPost.video.duration || 0) : 0
               }).catch(function(){});
             }
@@ -16398,21 +16446,17 @@ function publierPost() {
           },
           function(e) {
             var _errCode = e && (e.code || e.message || String(e));
-            console.error('[GW Storage] ❌ Échec upload vidéo :', _errCode);
+            console.error('[GW CF] ❌ Échec upload vidéo CF Stream :', _errCode);
             showToast('⚠️ Vidéo non uploadée (' + (_errCode || 'inconnu') + ')', 'err');
             _hideVideoProgress();
             _onUploadDone();
-          },
-          function(pct) {
-            /* Upload réel : barre de 0 → 100 % */
-            _showVideoProgress(pct, 'Envoi de la vidéo…');
           }
         );
       }
       /* La découpe a déjà été traitée dans l'éditeur — upload direct 0→100% */
       _doVidUpload(videoBlob);
     }
-    if (docBlob) {
+    if (docBlob && _gwFbStorage) {
       var _dExt = _docExtSnapshot ? ('.' + _docExtSnapshot) : '.bin';
       _uploadBlobToStorage('post_docs/' + postId + _dExt, docBlob,
         function(url) {
@@ -33556,19 +33600,17 @@ function _admRecompressAllShorts() {
 
           var compMB = Math.round(compBlob.size / 1024 / 1024);
 
-          if (!_gwFbStorage) {
-            errors++;
-            _processNext(idx + 1);
-            return;
-          }
-
-          /* Ré-uploade vers Firebase Storage (même chemin, extension .webm) */
-          var newPath = 'videos/' + postId + '.webm';
-          _uploadBlobToStorage(newPath, compBlob,
-            function(newUrl) {
+          /* Ré-uploade vers Cloudflare Stream */
+          _cfUploadVideo(compBlob, postId,
+            null,
+            function(newUrl, cfMeta) {
               /* Met à jour l'URL dans Firebase RTDB */
               if (_gwFbReady && _gwFbDB) {
-                _gwFbDB.ref('gw/post_videos/' + postId).update({ url: newUrl }).catch(function(){});
+                _gwFbDB.ref('gw/post_videos/' + postId).update({
+                  url: newUrl,
+                  cfUid: (cfMeta && cfMeta.uid) || '',
+                  thumbnail: (cfMeta && cfMeta.thumbnail) || ''
+                }).catch(function(){});
               }
               /* Met à jour en mémoire */
               if (post.video) post.video.url = newUrl;
@@ -33586,8 +33628,7 @@ function _admRecompressAllShorts() {
             function() {
               errors++;
               _processNext(idx + 1);
-            },
-            null /* pas de barre de progression ici */
+            }
           );
         });
       })
@@ -33659,35 +33700,27 @@ function _admPublishOfficial() {
     var _offNom     = _adminUser ? _adminUser.nom : 'Geniwork';
     /* Sauvegarde le Blob dans IndexedDB (fallback appareil d'origine) */
     _gwSaveVideoBlob(videoIdbId, _offVidFile, function() {});
-    if (_gwFbStorage) {
-      /* Upload vers Storage avec barre de progression */
-      var _vExt = (_offVidFile.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
-      _showVideoProgress(0);
-      _uploadBlobToStorage('videos/' + _offPostId + _vExt, _offVidFile,
-        function(url) {
-          _hideVideoProgress();
-          /* Publie avec l'URL Storage permanente */
-          _offPublishPost(_offText, _offImg, _offNom,
-            { idbId: videoIdbId, url: url }, _offPostId);
-          /* Nœud dédié pour livraison immédiate aux autres appareils */
-          if (_gwFbReady && _gwFbDB) {
-            _gwFbDB.ref('gw/post_videos/' + _offPostId).set({ url: url, dur: 0 }).catch(function(){});
-          }
-          _resetAdmForm();
-        },
-        function() {
-          /* Échec upload Storage → publie quand même (lecture IDB sur cet appareil) */
-          _hideVideoProgress();
-          _offPublishPost(_offText, _offImg, _offNom,
-            { idbId: videoIdbId }, _offPostId);
-          _resetAdmForm();
-        },
-        function(pct) { _showVideoProgress(pct); }
-      );
-      return; /* attend la fin de l'upload */
-    }
-    /* Pas de Storage disponible → publie avec IDB uniquement */
-    _offPublishPost(text, imgData, _offNom, { idbId: videoIdbId }, _offPostId);
+    _showVideoProgress(0);
+    _cfUploadVideo(_offVidFile, _offPostId,
+      function(pct) { _showVideoProgress(pct); },
+      function(url, cfMeta) {
+        _gwVidUrlCache[_offPostId] = url;
+        _hideVideoProgress();
+        _offPublishPost(_offText, _offImg, _offNom,
+          { idbId: videoIdbId, url: url }, _offPostId);
+        if (_gwFbReady && _gwFbDB) {
+          _gwFbDB.ref('gw/post_videos/' + _offPostId).set({ url: url, cfUid: (cfMeta && cfMeta.uid) || '', thumbnail: (cfMeta && cfMeta.thumbnail) || '', dur: 0 }).catch(function(){});
+        }
+        _resetAdmForm();
+      },
+      function() {
+        _hideVideoProgress();
+        _offPublishPost(_offText, _offImg, _offNom,
+          { idbId: videoIdbId }, _offPostId);
+        _resetAdmForm();
+      }
+    );
+    return; /* attend la fin de l'upload */
   } else {
     _offPublishPost(text, imgData, _adminUser ? _adminUser.nom : 'Geniwork', null);
   }
@@ -34206,29 +34239,24 @@ function _admPublishOfficialShort() {
       _admRender();
     }
     _gwSaveVideoBlob(idbId, vidFile, function() {});
-    if (_gwFbStorage) {
-      var vExt = (vidFile.type || '').indexOf('mp4') !== -1 ? '.mp4' : '.webm';
-      _showVideoProgress(0);
-      _uploadBlobToStorage('videos/' + shortId + vExt, vidFile,
-        function(url) {
-          _hideVideoProgress();
-          _offPublishPost(text, thumbData, nom, { idbId: idbId, url: url, videoType: 'short' }, shortId);
-          if (_gwFbReady && _gwFbDB) {
-            _gwFbDB.ref('gw/post_videos/' + shortId).set({ url: url, dur: 0 }).catch(function(){});
-          }
-          _resetShortForm();
-        },
-        function() {
-          _hideVideoProgress();
-          _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
-          _resetShortForm();
-        },
-        function(pct) { _showVideoProgress(pct); }
-      );
-    } else {
-      _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
-      _resetShortForm();
-    }
+    _showVideoProgress(0);
+    _cfUploadVideo(vidFile, shortId,
+      function(pct) { _showVideoProgress(pct); },
+      function(url, cfMeta) {
+        _gwVidUrlCache[shortId] = url;
+        _hideVideoProgress();
+        _offPublishPost(text, thumbData, nom, { idbId: idbId, url: url, videoType: 'short' }, shortId);
+        if (_gwFbReady && _gwFbDB) {
+          _gwFbDB.ref('gw/post_videos/' + shortId).set({ url: url, cfUid: (cfMeta && cfMeta.uid) || '', thumbnail: (cfMeta && cfMeta.thumbnail) || '', dur: 0 }).catch(function(){});
+        }
+        _resetShortForm();
+      },
+      function() {
+        _hideVideoProgress();
+        _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
+        _resetShortForm();
+      }
+    );
   }
 
   /* Compression automatique si > 20 Mo */
