@@ -16425,17 +16425,26 @@ function publierPost() {
   /* Affichage immédiat local avec les base64 */
   DEMO_POSTS.unshift(newPost);
 
+  /* Succès confirmé dès que le post est en mémoire locale — avant tout appel
+     qui pourrait jeter (renderFeed, notifyTags…) afin d'éviter le faux positif
+     "Erreur lors de la publication" dans le catch extérieur. */
+  showToast('Publication partagée ✓', 'ok');
+  _unlockPubBtn();
 
-  /* Cache le blob URL du Short pour lecture immédiate dans le player (session courante) */
-  if (_pickedVideo && _pickedVideo.url && _pickedVideo.videoType === 'short') {
-    _gwVidBlobCache[String(postId)] = _pickedVideo.url;
+  try {
+    /* Cache le blob URL du Short pour lecture immédiate dans le player (session courante) */
+    if (_pickedVideo && _pickedVideo.url && _pickedVideo.videoType === 'short') {
+      _gwVidBlobCache[String(postId)] = _pickedVideo.url;
+    }
+    if (_currentUser) _incDailyCount('posts', _currentUser.email);
+    renderFeed(_getFeedPosts());
+    if (_currentUser) _gwNotifyTags(newPost.tags, newPost.id, _currentUser);
+    _gwSaveHashtags(text);
+    var _pubTextEl = document.getElementById('pub-text');
+    if (_pubTextEl) _pubTextEl._gwPendingTags = [];
+  } catch(_renderErr) {
+    console.warn('[GW] Rendu feed post-publish (non-critique) :', _renderErr && _renderErr.message);
   }
-  if (_currentUser) _incDailyCount('posts', _currentUser.email);
-  renderFeed(_getFeedPosts());
-  if (_currentUser) _gwNotifyTags(newPost.tags, newPost.id, _currentUser);
-  _gwSaveHashtags(text);
-  var _pubTextEl = document.getElementById('pub-text');
-  if (_pubTextEl) _pubTextEl._gwPendingTags = [];
 
   /* ── Upload médias vers Firebase Storage puis sauvegarde définitive ── */
   function _finalizePost(finalImages, finalVideoUrl, finalDocUrl) {
@@ -16572,10 +16581,6 @@ function publierPost() {
   }
 
   }); });
-
-  /* Publication soumise — succès confirmé avant le reset UI */
-  showToast('Publication partagée ✓', 'ok');
-  _unlockPubBtn();
 
   /* Réinitialise l'UI — erreurs ici non-critiques (post déjà soumis) */
   try {
