@@ -325,12 +325,9 @@ function _gwInitFirebase() {
     _gwFbAuth.onAuthStateChanged(function(user) {
       if (user && !user.isAnonymous && _currentUser && _currentUser.email) {
         try {
-          var _syncPosts = loadPersistedUserPosts(_currentUser.email);
+          var _syncPosts = _gwPostRead(_currentUser.email);
           if (_syncPosts && _syncPosts.length > 0) {
-            var _fbKey = _gwFbKey(_currentUser.email);
-            _gwFbDB.ref('gw/posts/' + _fbKey).set(_gwCapFirebasePosts(_syncPosts))
-              .then(function() { console.log('[GW Firebase] Sync auto posts OK (auth réelle)'); })
-              .catch(function(e) { console.warn('[GW Firebase] Sync auto posts échoué :', e.message); });
+            _gwPostPushFirebase(_currentUser.email, _syncPosts);
           }
         } catch(e) {}
       }
@@ -1515,148 +1512,36 @@ function _gwFbSyncStart() {
 /* ── Merge les posts d'un utilisateur reçus depuis Firebase ── */
 function _gwMergePost(snap) {
   if (!snap) return;
-  var fbKey = snap.key;
-  var posts = snap.val();
-  var email = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
-
-  /* Firebase RTDB peut stocker un tableau "troué" comme objet ({0:..,2:..})
-     plutôt que comme array — le convertir au lieu de le traiter comme
-     "tous les posts supprimés", sinon les Shorts de cet utilisateur
-     disparaissent chez tout le monde alors qu'ils existent toujours. */
-  if (posts && typeof posts === 'object' && !Array.isArray(posts)) {
-    posts = Object.keys(posts).map(function(k) { return posts[k]; });
-  }
-
-  /* Array vide ou null = tous les posts de cet utilisateur ont été supprimés */
-  if (!Array.isArray(posts) || !posts.length) {
-    var had = DEMO_POSTS.some(function(p) { return p.ownerEmail === email; });
-    if (had) {
-      DEMO_POSTS = DEMO_POSTS.filter(function(p) { return p.ownerEmail !== email; });
-      try { localStorage.removeItem(_userPostsKey(email)); } catch(e2){}
-      try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e2){}
+  /* Capture les Shorts existants avant merge pour détecter les nouvelles URLs */
+  var _preShorts = {};
+  DEMO_POSTS.forEach(function(p) {
+    if (p && p.video && p.video.videoType === 'short') {
+      _preShorts[String(p.id)] = p.video.url || '';
     }
-    return;
-  }
-
-  /* ── Fusionne les posts locaux non encore synchés (ex : écriture Firebase échouée) ── */
-  var incomingIds = {};
-  posts.forEach(function(p) { if (p && p.id) incomingIds[p.id] = true; });
-
-  /* Posts locaux absents de Firebase → les réintégrer dans le tableau avant sauvegarde */
-  var localOnly = [];
-  try {
-    var lsLocal = JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
-    var _now2h = Date.now() - (2 * 60 * 60 * 1000); /* 2 heures de grâce */
-    lsLocal.forEach(function(lp) {
-      if (lp && lp.id && !incomingIds[lp.id]) {
-        /* Conserve les posts locaux absents de Firebase si :
-           - vidéo encore en upload (idbId présent) OU
-           - post créé il y a moins de 2h (l'écriture Firebase a peut-être échoué transitoirement) */
-        var protect = (lp.video && lp.video.idbId) || (lp.at && lp.at > _now2h);
-        if (protect) { localOnly.push(lp); incomingIds[lp.id] = true; }
-      }
-    });
-  } catch(e2) {}
-  /* Protection DEMO_POSTS : si un post est en mémoire (vient d'être publié) mais
-     n'est pas encore dans localStorage ni dans Firebase (upload en cours ou écriture
-     Firebase non encore confirmée), le protéger pour éviter qu'il disparaisse.
-     Les images base64 sont retirées du payload Firebase (trop lourdes) — elles
-     seront remplacées par les URLs Storage quand l'upload se terminera. */
-  try {
-    DEMO_POSTS.forEach(function(dp) {
-      if (dp && dp.ownerEmail === email && dp.id && !incomingIds[dp.id]) {
-        var dpCopy = Object.assign({}, dp);
-        if (dpCopy.images && Array.isArray(dpCopy.images)) {
-          dpCopy.images = dpCopy.images.filter(function(img) {
-            return img && typeof img === 'string' && !img.startsWith('data:');
-          });
-        }
-        localOnly.push(dpCopy);
-        incomingIds[dp.id] = true;
-      }
-    });
-  } catch(e3) {}
-  if (localOnly.length) {
-    posts = localOnly.concat(posts);
-    /* Retente l'écriture Firebase pour ces posts manquants */
-    if (_gwFbReady && _gwFbDB && email) {
-      try { _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts)).catch(function(){}); } catch(e3){}
-    }
-  }
-
-  /* Sauvegarde dans localStorage (inclut maintenant les posts locaux récupérés) */
-  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e){}
-
-  /* ── Retire les posts supprimés de DEMO_POSTS pour cet utilisateur ── */
-  var removedAny = false;
-  DEMO_POSTS = DEMO_POSTS.filter(function(p) {
-    if (p.ownerEmail !== email) return true; /* pas de cet user → conserver */
-    if (incomingIds[p.id]) return true;       /* encore dans Firebase ou local → conserver */
-    /* Post supprimé → fermer les players si nécessaire */
-    try {
-      if (_vpCurrentPost && String(_vpCurrentPost.id) === String(p.id)) closeVideoPlayer();
-    } catch(e2){}
-    removedAny = true;
-    return false;
   });
-
-  /* ── Ajoute/met à jour les posts ── */
-  var changed = removedAny;
-  var _newShorts = [];
-  posts.forEach(function(p) {
-    if (!p || !p.id) return;
-    if (!p.images) p.images = [];
-    var existing = DEMO_POSTS.find(function(d){ return d.id === p.id; });
-    if (!existing) {
-      p.likers = loadPostLikers(p.id);
-      DEMO_POSTS.push(p);
-      changed = true;
-      if (p.video && typeof p.video === 'object' && p.video.videoType === 'short' && (p.video.url || p.video.idbId)) {
+  try { _gwPostsMerge(snap.key, snap.val()); } catch(e) {}
+  /* Injecte les Shorts qui ont reçu une URL Firebase après le merge */
+  try {
+    var _newShorts = [];
+    DEMO_POSTS.forEach(function(p) {
+      if (!p || !p.video || p.video.videoType !== 'short') return;
+      var _preUrl = _preShorts[String(p.id)];
+      if (p.video.url && _preUrl !== undefined && !_preUrl && p.video.url) {
         _newShorts.push(p);
+        /* Corrige le src="" dans le DOM si nécessaire */
+        try {
+          var _vEl = document.getElementById('fv-' + p.id);
+          if (_vEl && (!_vEl.getAttribute('src') || _vEl.src.startsWith('blob:'))) {
+            _vEl.src = p.video.url; _vEl.load();
+          }
+        } catch(e2) {}
       }
-    } else if (p.video && typeof p.video === 'object' && existing.video && typeof existing.video === 'object') {
-      /* Synchronise les métadonnées vidéo depuis Firebase (source de vérité) */
-      var _vidChanged = false;
-      /* URL : prend Firebase sauf si on a déjà une URL valide (non-blob) */
-      if (p.video.url && (!existing.video.url || existing.video.url.startsWith('blob:') || existing.video.url === '' || existing.video.url === window.location.href)) {
-        existing.video.url = p.video.url;
-        var _vEl = document.getElementById('fv-' + p.id);
-        /* Corrige aussi le src="" (que le navigateur résout en URL de la page) */
-        if (_vEl && (!_vEl.getAttribute('src') || _vEl.getAttribute('src') === '' || _vEl.src.startsWith('blob:'))) {
-          _vEl.src = p.video.url;
-          _vEl.load();
-        }
-        _vidChanged = true;
-        /* Si c'est un Short qui avait été pré-sauvegardé sans URL, maintenant qu'on a
-           l'URL Firebase Storage, l'injecter dans le lecteur Shorts */
-        if (existing.video.videoType === 'short') {
-          _newShorts.push(existing);
-        }
-      }
-      /* Métadonnées d'édition — trim, recadrage, son, texte, effets, type */
-      var _vmKeys = ['videoType','trimStart','trimEnd','cropPos','cropZoom','muted','poster','textLayers','effects','filter','zoom','zoomDur','intro','outro'];
-      _vmKeys.forEach(function(k) {
-        if (p.video[k] !== undefined && p.video[k] !== null &&
-            JSON.stringify(existing.video[k]) !== JSON.stringify(p.video[k])) {
-          existing.video[k] = p.video[k];
-          _vidChanged = true;
-        }
-      });
-      if (_vidChanged) changed = true;
-    }
-  });
-  if (changed) {
-    DEMO_POSTS.sort(function(a, b){ return b.id - a.id; });
-    try {
-      if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
-    } catch(e){}
-    /* Pré-résout les URLs des Shorts nouvellement reçus */
-    try { setTimeout(function() { _gwPreloadShortUrls(); }, 500); } catch(e){}
-    /* Injecte les nouveaux Shorts dans le player si ouvert */
+    });
     if (_newShorts.length) {
-      try { setTimeout(function() { _vsInjectNewShorts(_newShorts); }, 700); } catch(e){}
+      setTimeout(function() { try { _gwPreloadShortUrls(); } catch(e) {} }, 500);
+      setTimeout(function() { try { _vsInjectNewShorts(_newShorts); } catch(e) {} }, 700);
     }
-  }
+  } catch(e) {}
 }
 
 
@@ -2854,7 +2739,7 @@ function _gwFbPreloadAndStart() {
         else return;
       }
       var pe = pk.replace(/__d__/g, '.').replace(/__a__/g, '@');
-      try { localStorage.setItem('gw_userposts_' + pe, JSON.stringify(pv)); } catch(e){}
+      try { _gwPostsMerge(pk, pv); } catch(e){}
     });
 
     /* ── Bans ── */
@@ -4207,39 +4092,8 @@ function initApp(user) {
     _gwFbDB.ref('gw/posts').once('value').then(function(snap) {
       var allPosts = snap.val() || {};
       Object.keys(allPosts).forEach(function(fk) {
-        var fps = allPosts[fk];
-        if (!Array.isArray(fps)) return;
-        var em = fk.replace(/__d__/g,'.').replace(/__a__/g,'@');
-
-        /* FUSION — ne jamais écraser localStorage sans vérifier les posts locaux.
-           Avant : localStorage.setItem(key, JSON.stringify(fps)) effaçait tout post
-           publié localement mais pas encore confirmé dans Firebase (auth anonyme,
-           upload en cours, réseau coupé). Le post disparaissait au prochain démarrage.
-           Maintenant : on conserve les posts locaux absents de Firebase. */
-        try {
-          var _fbIds = {};
-          fps.forEach(function(p) { if (p && p.id) _fbIds[p.id] = true; });
-          var _lsExisting = loadPersistedUserPosts(em);
-          var _lsOnly = _lsExisting.filter(function(p) {
-            return p && p.id && !_fbIds[p.id];
-          });
-          var _merged = _lsOnly.concat(fps);
-          localStorage.setItem(_userPostsKey(em), JSON.stringify(_merged));
-          fps = _merged; /* les posts locaux sont aussi injectés dans DEMO_POSTS */
-        } catch(e) {
-          try { localStorage.setItem(_userPostsKey(em), JSON.stringify(fps)); } catch(e2) {}
-        }
-
-        fps.forEach(function(p) {
-          if (!p || !p.id) return;
-          if (!p.images) p.images = [];
-          if (!DEMO_POSTS.find(function(d){ return d.id === p.id; })) {
-            p.likers = loadPostLikers(p.id);
-            DEMO_POSTS.push(p);
-          }
-        });
+        try { _gwPostsMerge(fk, allPosts[fk]); } catch(e) {}
       });
-      DEMO_POSTS.sort(function(a,b){ return b.id - a.id; });
       _persistedPostsLoaded = true;
       try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e){}
     }).catch(function(){});
@@ -6383,104 +6237,211 @@ function switchFeedTab(btn, tab) {
   }
 }
 
-/* ══════════════════════════════════════════
-   PERSISTANCE DES POSTS UTILISATEURS
-══════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════
+   PERSISTANCE DES POSTS v2 — règles claires
+   ─────────────────────────────────────────
+   RÈGLE 1 : localStorage = source de vérité sur l'appareil.
+   RÈGLE 2 : Firebase = sync secondaire, jamais destructif.
+   RÈGLE 3 : Un seul chemin d'écriture : _gwPostWrite(email, posts).
+   RÈGLE 4 : Un seul chemin de lecture  : _gwPostRead(email).
+   RÈGLE 5 : Firebase ne remplace JAMAIS localStorage ; il se fusionne.
+══════════════════════════════════════════════════════════════════ */
+
 function _userPostsKey(email) { return 'gw_userposts_' + email; }
 
-/* Plafonne le payload Firebase à 50 éléments SANS jamais sacrifier de vidéo/Short —
-   avant, un simple posts.slice(0,50) faisait disparaître les anciennes vidéos dès
-   qu'un utilisateur dépassait 50 publications au total (photos + vidéos confondues). */
+/* ── Lecture ── */
+function _gwPostRead(email) {
+  try { return JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]'); }
+  catch(e) { return []; }
+}
+/* Alias de compatibilité */
+function loadPersistedUserPosts(email) { return _gwPostRead(email); }
+
+/* ── Écriture locale UNIQUEMENT (pas Firebase) ── */
+function _gwPostWriteLocal(email, posts) {
+  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); }
+  catch(e) { console.warn('[GW Posts] localStorage plein :', e.message); }
+}
+
+/* ── Prépare le payload Firebase (retire base64 lourdes, plafonne à 50) ── */
 function _gwCapFirebasePosts(posts) {
   var CAP = 50;
-  if (posts.length <= CAP) return posts;
-  var videos = posts.filter(function(p) { return p && p.video; });
-  var others = posts.filter(function(p) { return !(p && p.video); });
-  var kept = videos.concat(others.slice(0, Math.max(0, CAP - videos.length)));
-  kept.sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
-  return kept;
-}
-
-function loadPersistedUserPosts(email) {
-  return JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
-}
-
-function savePersistedUserPosts(email, posts) {
-  /* try-catch obligatoire : QuotaExceededError ici bloquait la suite et empêchait
-     l'écriture Firebase — le Short disparaissait pour tout le monde après rechargement */
-  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); } catch(e) {}
-  if (_gwFbReady && _gwFbDB && email) {
-    /* Images sont maintenant des URLs Storage (ou base64 <200KB) → écriture directe */
-    var fbPosts = _gwCapFirebasePosts(posts).map(function(p) {
-      var copy = Object.assign({}, p);
-      /* Sécurité : si une image base64 est encore trop lourde, la retirer du payload Firebase */
-      if (copy.images) {
-        copy.images = copy.images.map(function(img) {
-          return (!img || (img.startsWith('data:') && img.length > 200000)) ? '' : img;
-        }).filter(function(img) { return img !== ''; });
+  var capped = posts;
+  if (capped.length > CAP) {
+    var videos = capped.filter(function(p) { return p && p.video; });
+    var others = capped.filter(function(p) { return !(p && p.video); });
+    capped = videos.concat(others.slice(0, Math.max(0, CAP - videos.length)));
+    capped.sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
+  }
+  return capped.map(function(p) {
+    var c = Object.assign({}, p);
+    if (c.images && Array.isArray(c.images)) {
+      c.images = c.images.filter(function(img) {
+        return img && typeof img === 'string' && !img.startsWith('data:') && img.length < 200000;
+      });
+    }
+    if (c.video && typeof c.video === 'object') {
+      c.video = Object.assign({}, c.video);
+      if (c.video.poster && typeof c.video.poster === 'string' &&
+          c.video.poster.startsWith('data:') && c.video.poster.length > 50000) {
+        delete c.video.poster;
       }
-      /* Retirer les champs locaux-seulement du payload Firebase */
-      if (copy.video && typeof copy.video === 'object') {
-        copy.video = Object.assign({}, copy.video);
-        /* poster = miniature base64 locale, inutile (et lourde) pour les autres utilisateurs */
-        if (copy.video.poster && typeof copy.video.poster === 'string' &&
-            copy.video.poster.startsWith('data:') && copy.video.poster.length > 50000) {
-          delete copy.video.poster;
+    }
+    return c;
+  });
+}
+
+/* ── Push Firebase (best-effort, silencieux) ── */
+function _gwPostPushFirebase(email, posts) {
+  if (!_gwFbReady || !_gwFbDB || !email) return;
+  try {
+    _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts))
+      .catch(function(e) {
+        if (e.code === 'PERMISSION_DENIED' && _currentUser) {
+          showToast('Synchronisation en cours…', 'info');
         }
-        /* idbId conservé dans Firebase : permet à _gwUploadPendingVideos de retrouver
-           et ré-uploader la vidéo automatiquement si l'upload a échoué ou l'app s'est fermée */
-      }
-      return copy;
-    });
-    _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(fbPosts).catch(function(e) {
-      console.error('[GW Firebase] ❌ Posts →', e.message);
-      /* PERMISSION_DENIED = l'auth anonyme est encore active — le token réel n'a pas
-         encore été restauré. onAuthStateChanged va retenter automatiquement.
-         On avertit uniquement si l'utilisateur est bien connecté (évite le bruit au boot). */
-      if (e.code === 'PERMISSION_DENIED' && _currentUser) {
-        showToast('Synchronisation en cours…', 'info');
-      }
-    });
-  }
+      });
+  } catch(e) {}
 }
 
-function persistNewPost(post) {
-  if (!post.ownerEmail) return;
-  var posts = loadPersistedUserPosts(post.ownerEmail);
-  var idx = posts.findIndex(function(p) { return p.id === post.id; });
-  if (idx !== -1) {
-    posts[idx] = post; /* Met à jour (ex : images base64 → URLs Storage après upload) */
-  } else {
-    posts.unshift(post);
-  }
-  savePersistedUserPosts(post.ownerEmail, posts);
-}
-
-function deletePersistedPost(postId, email) {
+/* ── Écriture locale + Firebase ── */
+function _gwPostWrite(email, posts) {
   if (!email) return;
-  var posts = loadPersistedUserPosts(email);
-  savePersistedUserPosts(email, posts.filter(function(p) { return p.id !== postId; }));
+  _gwPostWriteLocal(email, posts);
+  _gwPostPushFirebase(email, posts);
+}
+/* Alias de compatibilité */
+function savePersistedUserPosts(email, posts) { _gwPostWrite(email, posts); }
+
+/* ── Upsert un post (insert ou update) → local + Firebase ── */
+function _gwPostUpsert(post) {
+  if (!post || !post.id || !post.ownerEmail) return;
+  var posts = _gwPostRead(post.ownerEmail);
+  var idx = -1;
+  for (var i = 0; i < posts.length; i++) {
+    if (posts[i] && String(posts[i].id) === String(post.id)) { idx = i; break; }
+  }
+  if (idx !== -1) { posts[idx] = post; }
+  else             { posts.unshift(post); }
+  _gwPostWrite(post.ownerEmail, posts);
+}
+/* Alias de compatibilité */
+function persistNewPost(post) { _gwPostUpsert(post); }
+
+/* ── Supprimer un post → local + Firebase ── */
+function _gwPostRemove(postId, email) {
+  if (!email) return;
+  var posts = _gwPostRead(email).filter(function(p) {
+    return p && String(p.id) !== String(postId);
+  });
+  _gwPostWrite(email, posts);
+}
+/* Alias de compatibilité */
+function deletePersistedPost(postId, email) { _gwPostRemove(postId, email); }
+
+/* ── Fusion Firebase → local (non-destructive) ──
+   RÈGLE : on ne supprime jamais un post présent en local mais absent
+   de Firebase — ce post n'a peut-être pas encore été synchronisé
+   (auth anonyme, upload en cours, coupure réseau).
+   Firebase peut AJOUTER et METTRE À JOUR, jamais SUPPRIMER. ── */
+function _gwPostsMerge(fbKey, fbData) {
+  var email = (fbKey || '').replace(/__d__/g, '.').replace(/__a__/g, '@');
+  if (!email) return;
+
+  /* Normaliser fbData en tableau */
+  var fbArr = [];
+  if (Array.isArray(fbData)) {
+    fbArr = fbData.filter(Boolean);
+  } else if (fbData && typeof fbData === 'object') {
+    fbArr = Object.keys(fbData).map(function(k) { return fbData[k]; }).filter(Boolean);
+  }
+  /* Firebase vide = ne rien toucher (ne pas effacer les posts locaux) */
+  if (!fbArr.length) return;
+
+  /* Construire un index par ID des données Firebase */
+  var fbById = {};
+  fbArr.forEach(function(p) { if (p && p.id) fbById[String(p.id)] = p; });
+
+  /* Lire les posts locaux actuels */
+  var local = _gwPostRead(email);
+  var localById = {};
+  local.forEach(function(p) { if (p && p.id) localById[String(p.id)] = p; });
+
+  /* Construire le tableau fusionné :
+     - Posts locaux absents de Firebase → conservés tels quels
+     - Posts Firebase → intégrés en préservant les URLs locales si Firebase n'en a pas */
+  var merged = Object.assign({}, localById);
+  fbArr.forEach(function(fp) {
+    if (!fp || !fp.id) return;
+    var key = String(fp.id);
+    var local = merged[key];
+    if (local) {
+      /* Firebase met à jour les champs sauf les images/URLs locales non nulles */
+      var updated = Object.assign({}, local, fp);
+      /* Si Firebase n'a pas d'images mais local en a (upload en cours) → garder les locales */
+      if ((!fp.images || !fp.images.length) && local.images && local.images.length) {
+        updated.images = local.images;
+      }
+      merged[key] = updated;
+    } else {
+      merged[key] = fp;
+    }
+  });
+
+  var result = Object.keys(merged).map(function(k) { return merged[k]; })
+    .sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
+
+  /* Sauvegarder en local */
+  _gwPostWriteLocal(email, result);
+
+  /* Mettre à jour DEMO_POSTS : ajouter les nouveaux, mettre à jour les URLs vidéo */
+  result.forEach(function(p) {
+    if (!p || !p.id) return;
+    if (!p.images) p.images = [];
+    var existing = null;
+    for (var i = 0; i < DEMO_POSTS.length; i++) {
+      if (String(DEMO_POSTS[i].id) === String(p.id)) { existing = DEMO_POSTS[i]; break; }
+    }
+    if (!existing) {
+      p.likers = loadPostLikers(p.id);
+      DEMO_POSTS.push(p);
+    } else if (p.video && existing.video && p.video.url && !existing.video.url) {
+      existing.video.url = p.video.url;
+    }
+  });
+
+  /* Purger de DEMO_POSTS uniquement les posts de cet utilisateur qui ont été
+     explicitement supprimés (absents à la fois de Firebase ET du local fusionné) */
+  var mergedIds = {};
+  result.forEach(function(p) { if (p && p.id) mergedIds[String(p.id)] = true; });
+  DEMO_POSTS = DEMO_POSTS.filter(function(p) {
+    if (!p || p.ownerEmail !== email) return true;
+    return !!mergedIds[String(p.id)];
+  });
+
+  DEMO_POSTS.sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
+  try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e) {}
 }
 
-/* Charge tous les posts persistés des utilisateurs inscrits dans DEMO_POSTS
-   (appelé une seule fois au démarrage) */
+/* ── Chargement au démarrage : localStorage → DEMO_POSTS ──
+   Synchrone, immédiat. Doit être appelé AVANT l'enregistrement
+   des listeners Firebase pour que DEMO_POSTS soit peuplé
+   quand _gwMergePost se déclenche. ── */
 var _persistedPostsLoaded = false;
 function _loadAllPersistedPosts() {
   if (_persistedPostsLoaded) return;
   _persistedPostsLoaded = true;
   getUsers().forEach(function(u) {
-    var stored = loadPersistedUserPosts(u.email);
+    var stored = _gwPostRead(u.email);
     stored.forEach(function(p) {
-      /* Ne pas insérer si déjà présent */
-      if (!DEMO_POSTS.find(function(d) { return d.id === p.id; })) {
-        /* Restaure les likers depuis localStorage */
-        p.likers = loadPostLikers(p.id);
-        DEMO_POSTS.push(p);
-      }
+      if (!p || !p.id) return;
+      if (DEMO_POSTS.some(function(d) { return String(d.id) === String(p.id); })) return;
+      if (!p.images) p.images = [];
+      p.likers = loadPostLikers(p.id);
+      DEMO_POSTS.push(p);
     });
   });
-  /* Tri par id décroissant (plus récent en premier) */
-  DEMO_POSTS.sort(function(a, b) { return b.id - a.id; });
+  DEMO_POSTS.sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
 }
 
 /* ══════════════════════════════════════════
@@ -16467,25 +16428,13 @@ function publierPost() {
   DEMO_POSTS.unshift(newPost);
 
   /* ── Sauvegarde immédiate en localStorage (AVANT tout async) ──
-     Garantit que le post survit à une fermeture d'app pendant l'upload
-     ou si Firebase n'est pas encore prêt. Pour les posts avec images, on
-     sauvegarde d'abord sans base64 (skeleton), puis _finalizePost met à
-     jour avec les vraies URLs Storage via persistNewPost (UPDATE). */
-  if (newPost.ownerEmail) {
-    try {
-      var _skelPost = JSON.parse(JSON.stringify(newPost));
-      /* Strip base64 pour éviter QuotaExceededError — sera mis à jour après upload */
-      if (_skelPost.images && _skelPost.images.length > 0) {
-        _skelPost.images = [];
-      }
-      var _skelKey = _userPostsKey(newPost.ownerEmail);
-      var _skelArr = [];
-      try { _skelArr = JSON.parse(localStorage.getItem(_skelKey) || '[]'); } catch(e) { _skelArr = []; }
-      var _skelIdx = _skelArr.findIndex(function(p) { return p && p.id === _skelPost.id; });
-      if (_skelIdx !== -1) { _skelArr[_skelIdx] = _skelPost; } else { _skelArr.unshift(_skelPost); }
-      localStorage.setItem(_skelKey, JSON.stringify(_skelArr));
-    } catch(e) {}
-  }
+     Skeleton sans base64 pour éviter QuotaExceededError.
+     _finalizePost mettra à jour avec les vraies URLs via _gwPostUpsert. */
+  try {
+    var _skelPost = JSON.parse(JSON.stringify(newPost));
+    if (_skelPost.images && _skelPost.images.length > 0) { _skelPost.images = []; }
+    _gwPostUpsert(_skelPost);
+  } catch(e) {}
 
   /* Succès confirmé dès que le post est en mémoire locale — avant tout appel
      qui pourrait jeter (renderFeed, notifyTags…) afin d'éviter le faux positif
@@ -19277,21 +19226,11 @@ function renderProfilPosts(email, nom, container) {
         '<p style="margin-top:8px;color:#64748B">Chargement…</p>' +
       '</div>';
     _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).once('value').then(function(snap) {
-      var fbPosts = snap.val();
-      if (fbPosts && Array.isArray(fbPosts) && fbPosts.length) {
-        fbPosts.forEach(function(p) {
-          if (!p || !p.id) return;
-          if (!p.images) p.images = [];
-          if (!DEMO_POSTS.find(function(d) { return d.id === p.id; })) {
-            p.likers = loadPostLikers(p.id);
-            DEMO_POSTS.push(p);
-          }
-        });
-        try { localStorage.setItem('gw_userposts_' + email, JSON.stringify(fbPosts)); } catch(e){}
-        _doRenderPosts(fbPosts);
-      } else {
-        _doRenderPosts([]);
+      if (snap.val()) {
+        try { _gwPostsMerge(_gwFbKey(email), snap.val()); } catch(e) {}
       }
+      var merged = _gwPostRead(email);
+      _doRenderPosts(merged.length ? merged : []);
     }).catch(function() { _doRenderPosts([]); });
   } else {
     _doRenderPosts(posts);
@@ -27901,19 +27840,8 @@ function _gwHandleNsfwDetection(result, postId) {
     renderFeed(_getFeedPosts());
   } catch(e){}
 
-  /* 2. Retire du localStorage */
-  try {
-    var lsP=JSON.parse(localStorage.getItem('gw_posts')||'[]');
-    lsP=lsP.filter(function(p){return String(p.id)!==String(postId);});
-    localStorage.setItem('gw_posts',JSON.stringify(lsP));
-  } catch(e){}
-
-  /* 3. Retire des posts persistés */
-  try {
-    var pers=loadPersistedUserPosts(_currentUser.email)||[];
-    pers=pers.filter(function(p){return String(p.id)!==String(postId);});
-    savePersistedUserPosts(_currentUser.email,pers);
-  } catch(e){}
+  /* 2. Retire des posts persistés */
+  try { _gwPostRemove(postId, _currentUser.email); } catch(e){}
 
   /* 4. Supprime de Firebase */
   _gwRemoveNsfwPostFromFirebase(postId);
