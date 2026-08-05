@@ -319,6 +319,23 @@ function _gwInitFirebase() {
     });
     /* Auth anonyme : DOIT être confirmée avant tout write Firebase
        (règles auth != null).  On lance sync + preload dans le then().  */
+    /* Quand l'auth passe d'anonyme → réelle (token custom restauré au démarrage),
+       re-syncer les posts Firebase pour les rendre visibles aux autres utilisateurs.
+       Évite la fenêtre où un post est publié pendant que l'auth est encore anonyme. */
+    _gwFbAuth.onAuthStateChanged(function(user) {
+      if (user && !user.isAnonymous && _currentUser && _currentUser.email) {
+        try {
+          var _syncPosts = loadPersistedUserPosts(_currentUser.email);
+          if (_syncPosts && _syncPosts.length > 0) {
+            var _fbKey = _gwFbKey(_currentUser.email);
+            _gwFbDB.ref('gw/posts/' + _fbKey).set(_gwCapFirebasePosts(_syncPosts))
+              .then(function() { console.log('[GW Firebase] Sync auto posts OK (auth réelle)'); })
+              .catch(function(e) { console.warn('[GW Firebase] Sync auto posts échoué :', e.message); });
+          }
+        } catch(e) {}
+      }
+    });
+
     _gwFbAuth.signInAnonymously()
       .then(function(cred) {
         console.log('[GW Firebase] 🔒 Auth anonyme OK —', cred.user.uid);
@@ -436,6 +453,46 @@ function _cfUploadVideo(blob, postId, onProgress, onSuccess, onFail) {
     xhr.send(fd);
   })
   .catch(function(e) { onFail(e); });
+}
+
+/* ── Lecture HLS (Cloudflare Stream) dans tous les navigateurs ────────────────
+   Android Chrome / WebView ne lit pas les URLs .m3u8 nativement.
+   Cette fonction crée une instance hls.js quand nécessaire, ou utilise la
+   lecture native (Safari/iOS). L'ancienne instance hls.js est détruite avant
+   d'en attacher une nouvelle pour éviter les fuites mémoire.
+──────────────────────────────────────────────────────────────────────────── */
+function _gwPlayHLS(videoEl, src) {
+  /* Détruit l'instance hls.js existante sur cet élément */
+  if (videoEl._gwHls) {
+    try { videoEl._gwHls.destroy(); } catch(e) {}
+    videoEl._gwHls = null;
+  }
+  if (!src) { videoEl.src = ''; return; }
+
+  var isHLS = src.indexOf('.m3u8') !== -1;
+  if (!isHLS) {
+    /* MP4, blob, etc. → lecture directe */
+    videoEl.src = src;
+    return;
+  }
+
+  /* HLS natif (Safari iOS/macOS) */
+  if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+    videoEl.src = src;
+    return;
+  }
+
+  /* hls.js disponible (Chrome / Android WebView) */
+  if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+    var hls = new Hls({ enableWorker: false, maxBufferLength: 30 });
+    hls.loadSource(src);
+    hls.attachMedia(videoEl);
+    videoEl._gwHls = hls;
+    return;
+  }
+
+  /* Dernier recours : tente la lecture directe */
+  videoEl.src = src;
 }
 
 /* ── Ré-upload rétroactif des vidéos sans URL Storage ──────────────────────────
@@ -930,7 +987,7 @@ function _gwFbSyncStart() {
         }
         var vEl = document.getElementById('fv-' + pid);
         if (vEl && (!vEl.src || vEl.src.startsWith('blob:'))) {
-          vEl.src = data.url;
+          _gwPlayHLS(vEl, data.url);
           vEl.load();
           vEl._gwThumbForced = false;
           _gwForceVideoThumb(vEl);
@@ -1474,10 +1531,14 @@ function _gwMergePost(snap) {
   var localOnly = [];
   try {
     var lsLocal = JSON.parse(localStorage.getItem(_userPostsKey(email)) || '[]');
+    var _now2h = Date.now() - (2 * 60 * 60 * 1000); /* 2 heures de grâce */
     lsLocal.forEach(function(lp) {
       if (lp && lp.id && !incomingIds[lp.id]) {
-        /* Conserve les posts locaux avec idbId (vidéo locale) — Firebase ne les a pas encore */
-        if (lp.video && lp.video.idbId) { localOnly.push(lp); incomingIds[lp.id] = true; }
+        /* Conserve les posts locaux absents de Firebase si :
+           - vidéo encore en upload (idbId présent) OU
+           - post créé il y a moins de 2h (l'écriture Firebase a peut-être échoué transitoirement) */
+        var protect = (lp.video && lp.video.idbId) || (lp.at && lp.at > _now2h);
+        if (protect) { localOnly.push(lp); incomingIds[lp.id] = true; }
       }
     });
   } catch(e2) {}
@@ -6320,6 +6381,12 @@ function savePersistedUserPosts(email, posts) {
     });
     _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(fbPosts).catch(function(e) {
       console.error('[GW Firebase] ❌ Posts →', e.message);
+      /* PERMISSION_DENIED = l'auth anonyme est encore active — le token réel n'a pas
+         encore été restauré. onAuthStateChanged va retenter automatiquement.
+         On avertit uniquement si l'utilisateur est bien connecté (évite le bruit au boot). */
+      if (e.code === 'PERMISSION_DENIED' && _currentUser) {
+        showToast('Synchronisation en cours…', 'info');
+      }
     });
   }
 }
@@ -13070,7 +13137,7 @@ function _vsActivate(idx) {
       if (!url) return;
       _gwVidUrlCache[item.postId] = url;
       if (typeof item.post.video === 'object') item.post.video.url = url;
-      item.videoEl.src = url;
+      _gwPlayHLS(item.videoEl, url);
       item.videoEl.preload = 'auto';
       try { item.videoEl.load(); } catch(e){}
       item.loaded = true;
@@ -13090,7 +13157,7 @@ function _vsActivate(idx) {
       if (nUrl) _gwVidUrlCache[next.postId] = nUrl;
     }
     if (nUrl) {
-      next.videoEl.src = nUrl;
+      _gwPlayHLS(next.videoEl, nUrl);
       next.videoEl.preload = 'auto';
       try { next.videoEl.load(); } catch(e){}
       next.loaded = true;
@@ -13109,7 +13176,7 @@ function _vsPreload(idx) {
     if (!url || item.videoEl.src) return;
     _gwVidUrlCache[item.postId] = url;
     if (typeof item.post.video === 'object') item.post.video.url = url;
-    item.videoEl.src = url;
+    _gwPlayHLS(item.videoEl, url);
     item.videoEl.preload = 'auto';
     try {
       var vd = (item.post.video && typeof item.post.video === 'object') ? item.post.video : {};
@@ -15575,7 +15642,7 @@ function openVideoPlayer(src, duration, cropPos, cropZoom, trimStart, trimEnd, m
      sur certains Android bas/moyenne gamme. scale() seul suffit pour le zoom. */
   video.style.transform  = _vpZoom > 1 ? ('scale(' + _vpZoom + ')') : '';
   video.style.transformOrigin = 'center center';
-  video.src = src;
+  _gwPlayHLS(video, src);
   video.load(); /* force le fetch immédiat — évite la saccade au premier play */
   video.currentTime = 0;
   video.playbackRate = 1;
