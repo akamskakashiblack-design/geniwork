@@ -966,13 +966,22 @@ function _gwFbSyncStart() {
   /* ── Posts utilisateurs (sync temps réel) ── */
   _gwFbDB.ref('gw/posts').on('child_added',   function(snap) { try { _gwMergePost(snap); } catch(e){} });
   _gwFbDB.ref('gw/posts').on('child_changed', function(snap) { try { _gwMergePost(snap); } catch(e){} });
-  /* Quand un nœud user est supprimé (tous ses posts effacés), retirer du feed */
+  /* child_removed = Firebase a supprimé le nœud user (réseau, règles…)
+     RÈGLE : ne JAMAIS toucher localStorage depuis Firebase → localStorage reste source de vérité */
   _gwFbDB.ref('gw/posts').on('child_removed', function(snap) {
     try {
       var email = snap.key.replace(/__d__/g, '.').replace(/__a__/g, '@');
-      DEMO_POSTS = DEMO_POSTS.filter(function(p) { return p.ownerEmail !== email; });
-      try { localStorage.removeItem(_userPostsKey(email)); } catch(e2){}
-      try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e2){}
+      /* Retire du feed SEULEMENT si localStorage est aussi vide (suppression réelle) */
+      var lsPosts = _gwPostRead(email);
+      if (!lsPosts.length) {
+        DEMO_POSTS = DEMO_POSTS.filter(function(p) { return p.ownerEmail !== email; });
+        try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e2){}
+      }
+      /* Sinon : réseau/règles Firebase ont supprimé le nœud mais localStorage a les posts
+         → repousser vers Firebase pour restaurer */
+      else if (_gwFbReady && _gwFbDB) {
+        _gwPostPushFirebase(email, lsPosts);
+      }
     } catch(e){}
   });
 
@@ -6294,6 +6303,9 @@ function _gwCapFirebasePosts(posts) {
 /* ── Push Firebase (best-effort, silencieux) ── */
 function _gwPostPushFirebase(email, posts) {
   if (!_gwFbReady || !_gwFbDB || !email) return;
+  /* Ne jamais pousser un tableau vide : Firebase RTDB traite .set([]) comme null
+     ce qui supprime le nœud et déclenche child_removed, effaçant tous les posts du feed */
+  if (!posts || !posts.length) return;
   try {
     _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts))
       .catch(function(e) {
