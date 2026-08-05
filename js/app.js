@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-3';
+  var CURRENT_VERSION = '6e5587c-4';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -1126,7 +1126,7 @@ function _gwFbSyncStart() {
       /* Mise à jour DOM ciblée — SANS re-render pour éviter le scroll jump */
       document.querySelectorAll('[id="dislike-btn-' + postId + '"]').forEach(function(btn) {
         btn.className = 'act-btn' + (disliked ? ' disliked' : '');
-        var ico = btn.querySelector('i'); if (ico) ico.className = disliked ? 'fas fa-heart-broken' : 'far fa-heart-broken';
+        var ico = btn.querySelector('i'); if (ico) ico.className = 'fas fa-heart-broken';
         var cnt = btn.querySelector('span'); if (cnt) { cnt.textContent = list.length > 0 ? list.length : ''; cnt.style.display = list.length > 0 ? '' : 'none'; }
       });
     } catch(e){}
@@ -7483,7 +7483,7 @@ function buildPostCard(post) {
           ' <span id="like-count-' + post.id + '">' + likeCount + '</span>' +
         '</button>' +
         '<button class="act-btn' + (disliked ? ' disliked' : '') + '" id="dislike-btn-' + post.id + '" onclick="dislikePost(' + post.id + ')">' +
-          '<i class="' + (disliked ? 'fas' : 'far') + ' fa-heart-broken"></i>' +
+          '<i class="fas fa-heart-broken"></i>' +
           (dcount > 0 ? ' <span id="dislike-count-' + post.id + '">' + dcount + '</span>' : '<span id="dislike-count-' + post.id + '" style="display:none">' + dcount + '</span>') +
         '</button>' +
         '<button class="act-btn" onclick="openComments(' + post.id + ')">' +
@@ -7612,7 +7612,7 @@ function likePost(postId) {
       savePostDislikers(postId, dList);
       document.querySelectorAll('[id="dislike-btn-' + postId + '"]').forEach(function(b) {
         b.className = 'act-btn';
-        var i = b.querySelector('i'); if (i) i.className = 'far fa-heart-broken';
+        var i = b.querySelector('i'); if (i) i.className = 'fas fa-heart-broken';
         var c = b.querySelector('span'); if (c) { c.textContent = dList.length; c.style.display = dList.length > 0 ? '' : 'none'; }
       });
     }
@@ -7709,7 +7709,7 @@ function dislikePost(postId) {
 
   document.querySelectorAll('[id="dislike-btn-' + postId + '"]').forEach(function(btn) {
     btn.className = 'act-btn' + (disliked ? ' disliked' : '');
-    var i = btn.querySelector('i'); if (i) i.className = (disliked ? 'fas' : 'far') + ' fa-heart-broken';
+    var i = btn.querySelector('i'); if (i) i.className = 'fas fa-heart-broken';
     var c = btn.querySelector('span');
     if (c) { c.textContent = dcount; c.style.display = dcount > 0 ? '' : 'none'; }
   });
