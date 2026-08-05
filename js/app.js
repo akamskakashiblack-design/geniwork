@@ -16476,34 +16476,35 @@ function publierPost() {
 
   }); });
 
-  /* Réinitialise */
-  document.getElementById('pub-text').value = '';
-  _clearQuoteRef();
-  _pickedImages = [];
-  renderImgPreviews();
-  _pickedVideo = null;
-  renderVideoPreview();
-  _pickedDoc = null;
-  renderDocPreview();
-  document.getElementById('img-picker').value      = '';
-  document.getElementById('cam-back-photo').value  = '';
-  document.getElementById('cam-front-photo').value = '';
-  document.getElementById('video-picker').value    = '';
-  document.getElementById('cam-back-video').value  = '';
-  document.getElementById('cam-front-video').value = '';
-  var dp = document.getElementById('doc-picker');
-  if (dp) dp.value = '';
-
+  /* Publication soumise — succès confirmé avant le reset UI */
   showToast('Publication partagée ✓', 'ok');
-
-  /* ── Libère le bouton Publier ── */
   _unlockPubBtn();
 
-  var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
-  navTo(homeBtn, 'p-home');
-
-  var scroll = document.getElementById('feed-scroll');
-  if (scroll) scroll.scrollTop = 0;
+  /* Réinitialise l'UI — erreurs ici non-critiques (post déjà soumis) */
+  try {
+    document.getElementById('pub-text').value = '';
+    _clearQuoteRef();
+    _pickedImages = [];
+    renderImgPreviews();
+    _pickedVideo = null;
+    renderVideoPreview();
+    _pickedDoc = null;
+    renderDocPreview();
+    document.getElementById('img-picker').value      = '';
+    document.getElementById('cam-back-photo').value  = '';
+    document.getElementById('cam-front-photo').value = '';
+    document.getElementById('video-picker').value    = '';
+    document.getElementById('cam-back-video').value  = '';
+    document.getElementById('cam-front-video').value = '';
+    var dp = document.getElementById('doc-picker');
+    if (dp) dp.value = '';
+    var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
+    navTo(homeBtn, 'p-home');
+    var scroll = document.getElementById('feed-scroll');
+    if (scroll) scroll.scrollTop = 0;
+  } catch(_uiErr) {
+    console.warn('[GW] Reset UI post-publish (non-critique) :', _uiErr && _uiErr.message);
+  }
 
   } catch(err) {
     console.error('[GW] publierPost erreur :', err && (err.message || err));
