@@ -11275,7 +11275,7 @@ function _gwOpenVideoEditor() {
     '<div id="gw-ved-wrap" style="position:relative;' + (isShort ? 'flex:none' : 'flex:1') + ';background:#000">' +
       '<video id="gw-ved-vid" src="' + _pickedVideo.url + '" ' +
         'style="width:100%;height:100%;object-fit:cover;object-position:' + _ved.cropPos.x + '% ' + _ved.cropPos.y + '%;' +
-        'transform:scale(' + _ved.cropZoom + ');transform-origin:center center;display:block" playsinline loop muted></video>' +
+        'transform:scale(' + _ved.cropZoom + ');transform-origin:center center;display:block" autoplay playsinline webkit-playsinline loop muted></video>' +
       /* Icône de glissement (visible uniquement en mode Recadrer) */
       '<div id="gw-ved-crophint" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:none;pointer-events:none;width:50px;height:50px;border-radius:50%;background:rgba(0,0,0,.45);align-items:center;justify-content:center;color:#fff;font-size:18px">' +
         '<i class="fas fa-arrows-up-down-left-right"></i>' +
@@ -12416,7 +12416,7 @@ function renderVideoPreview() {
   var _pvPoster = _pickedVideo.poster ? ' poster="' + _pickedVideo.poster + '"' : '';
   preview.innerHTML =
     '<div style="' + _pvWrapStyle + '">' +
-      '<video src="' + _pickedVideo.url + '"' + _pvPoster + ' controls playsinline webkit-playsinline style="' + _pvVidStyle + '"></video>' +
+      '<video src="' + _pickedVideo.url + '"' + _pvPoster + ' autoplay muted controls playsinline webkit-playsinline style="' + _pvVidStyle + '"></video>' +
     '</div>' +
     '<button class="rm-video" onclick="removeVideo()"><i class="fas fa-times"></i></button>' +
     '<div class="pub-video-meta">' +
