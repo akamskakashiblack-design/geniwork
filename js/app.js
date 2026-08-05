@@ -16466,6 +16466,27 @@ function publierPost() {
   /* Affichage immédiat local avec les base64 */
   DEMO_POSTS.unshift(newPost);
 
+  /* ── Sauvegarde immédiate en localStorage (AVANT tout async) ──
+     Garantit que le post survit à une fermeture d'app pendant l'upload
+     ou si Firebase n'est pas encore prêt. Pour les posts avec images, on
+     sauvegarde d'abord sans base64 (skeleton), puis _finalizePost met à
+     jour avec les vraies URLs Storage via persistNewPost (UPDATE). */
+  if (newPost.ownerEmail) {
+    try {
+      var _skelPost = JSON.parse(JSON.stringify(newPost));
+      /* Strip base64 pour éviter QuotaExceededError — sera mis à jour après upload */
+      if (_skelPost.images && _skelPost.images.length > 0) {
+        _skelPost.images = [];
+      }
+      var _skelKey = _userPostsKey(newPost.ownerEmail);
+      var _skelArr = [];
+      try { _skelArr = JSON.parse(localStorage.getItem(_skelKey) || '[]'); } catch(e) { _skelArr = []; }
+      var _skelIdx = _skelArr.findIndex(function(p) { return p && p.id === _skelPost.id; });
+      if (_skelIdx !== -1) { _skelArr[_skelIdx] = _skelPost; } else { _skelArr.unshift(_skelPost); }
+      localStorage.setItem(_skelKey, JSON.stringify(_skelArr));
+    } catch(e) {}
+  }
+
   /* Succès confirmé dès que le post est en mémoire locale — avant tout appel
      qui pourrait jeter (renderFeed, notifyTags…) afin d'éviter le faux positif
      "Erreur lors de la publication" dans le catch extérieur. */
