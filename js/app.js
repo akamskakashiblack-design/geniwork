@@ -2,6 +2,24 @@
    GENIWORK — JavaScript complet
    ═══════════════════════════════════════════ */
 
+/* ── Auto-reload Android WebView : force le chargement du nouveau code ──
+   Le WebView Android peut ignorer les headers HTTP no-cache et servir
+   l'ancienne version depuis son cache disque. Ce mécanisme compare la
+   version courante avec celle en localStorage et force un rechargement
+   si elles diffèrent. */
+(function() {
+  var CURRENT_VERSION = '6e5587c-3';
+  try {
+    var stored = localStorage.getItem('_gw_js_version');
+    if (stored && stored !== CURRENT_VERSION) {
+      localStorage.setItem('_gw_js_version', CURRENT_VERSION);
+      window.location.reload(true);
+      return;
+    }
+    localStorage.setItem('_gw_js_version', CURRENT_VERSION);
+  } catch(e) {}
+})();
+
 /* ══════════════════════════════════════════════════════════════
    FIREBASE — SYNCHRONISATION TEMPS RÉEL MULTI-ADMIN
    ══════════════════════════════════════════════════════════════
@@ -6426,9 +6444,15 @@ function _gwPostsMerge(fbKey, fbData) {
      explicitement supprimés (absents à la fois de Firebase ET du local fusionné) */
   var mergedIds = {};
   result.forEach(function(p) { if (p && p.id) mergedIds[String(p.id)] = true; });
+  var _now = Date.now();
   DEMO_POSTS = DEMO_POSTS.filter(function(p) {
     if (!p || p.ownerEmail !== email) return true;
-    return !!mergedIds[String(p.id)];
+    if (mergedIds[String(p.id)]) return true;
+    /* Grâce 60s : un post récemment publié ne peut pas être supprimé par Firebase
+       (réseau lent, write pas encore confirmé, race condition Android) */
+    var _pub = _gwRecentlyPublished[String(p.id)];
+    if (_pub && (_now - _pub) < 60000) return true;
+    return false;
   });
 
   DEMO_POSTS.sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
@@ -6440,6 +6464,8 @@ function _gwPostsMerge(fbKey, fbData) {
    des listeners Firebase pour que DEMO_POSTS soit peuplé
    quand _gwMergePost se déclenche. ── */
 var _persistedPostsLoaded = false;
+/* Protection contre la suppression prématurée depuis Firebase : post id → timestamp de publication */
+var _gwRecentlyPublished = {};
 function _loadAllPersistedPosts() {
   if (_persistedPostsLoaded) return;
   _persistedPostsLoaded = true;
@@ -16438,6 +16464,8 @@ function publierPost() {
 
   /* Affichage immédiat local avec les base64 */
   DEMO_POSTS.unshift(newPost);
+  /* Protège ce post contre toute suppression Firebase pendant 60s */
+  _gwRecentlyPublished[String(newPost.id)] = Date.now();
 
   /* ── Sauvegarde immédiate en localStorage (AVANT tout async) ──
      Skeleton sans base64 pour éviter QuotaExceededError.

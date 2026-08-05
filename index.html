@@ -4,6 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
   <meta name="theme-color" content="#060D1F" />
+  <!-- Force Android WebView à ne pas mettre en cache les ressources -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>Geniwork</title>
   <!-- Preconnect pour réduire la latence DNS+TLS des ressources critiques -->
   <link rel="preconnect" href="https://www.gstatic.com" crossorigin />
@@ -3642,7 +3646,7 @@
 
   <!-- hls.js — lecture des vidéos Cloudflare Stream (.m3u8) sur Android/Chrome -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js" crossorigin="anonymous" defer></script>
-  <script src="js/app.js?v=1754443300000" defer></script>
+  <script src="js/app.js?v=1754443400000" defer></script>
   <script src="js/gw-messaging.js?v=1784154646117" defer></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
