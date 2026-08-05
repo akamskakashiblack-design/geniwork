@@ -4210,7 +4210,26 @@ function initApp(user) {
         var fps = allPosts[fk];
         if (!Array.isArray(fps)) return;
         var em = fk.replace(/__d__/g,'.').replace(/__a__/g,'@');
-        try { localStorage.setItem(_userPostsKey(em), JSON.stringify(fps)); } catch(e){}
+
+        /* FUSION — ne jamais écraser localStorage sans vérifier les posts locaux.
+           Avant : localStorage.setItem(key, JSON.stringify(fps)) effaçait tout post
+           publié localement mais pas encore confirmé dans Firebase (auth anonyme,
+           upload en cours, réseau coupé). Le post disparaissait au prochain démarrage.
+           Maintenant : on conserve les posts locaux absents de Firebase. */
+        try {
+          var _fbIds = {};
+          fps.forEach(function(p) { if (p && p.id) _fbIds[p.id] = true; });
+          var _lsExisting = loadPersistedUserPosts(em);
+          var _lsOnly = _lsExisting.filter(function(p) {
+            return p && p.id && !_fbIds[p.id];
+          });
+          var _merged = _lsOnly.concat(fps);
+          localStorage.setItem(_userPostsKey(em), JSON.stringify(_merged));
+          fps = _merged; /* les posts locaux sont aussi injectés dans DEMO_POSTS */
+        } catch(e) {
+          try { localStorage.setItem(_userPostsKey(em), JSON.stringify(fps)); } catch(e2) {}
+        }
+
         fps.forEach(function(p) {
           if (!p || !p.id) return;
           if (!p.images) p.images = [];
