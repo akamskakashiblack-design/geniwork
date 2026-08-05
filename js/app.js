@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-4';
+  var CURRENT_VERSION = '6e5587c-5';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -1004,23 +1004,25 @@ function _gwFbSyncStart() {
   });
 
   /* ── URLs vidéos des posts (canal séparé pour livraison fiable) ── */
-  _gwFbDB.ref('gw/post_videos').on('child_added', function(snap) {
+  function _onPostVideoArrived(snap) {
     try {
       var pid  = snap.key;
       var data = snap.val();
       if (!data || !data.url) return;
+      _gwVidUrlCache[pid] = data.url;
+      try { localStorage.setItem('gw_vurl_' + pid, data.url); } catch(e){}
       /* Posts utilisateurs (IDs numériques) */
       var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(pid); });
-      if (post && post.video && (!post.video.url || post.video.url.startsWith('blob:'))) {
+      if (post && post.video) {
         post.video.url = data.url;
-        /* Persiste l'URL dans localStorage pour éviter l'écran noir au prochain chargement */
+        /* Persiste l'URL dans localStorage via v2 */
         if (post.ownerEmail) {
           try {
-            var _pPosts = loadPersistedUserPosts(post.ownerEmail);
+            var _pPosts = _gwPostRead(post.ownerEmail);
             var _pIdx = _pPosts.findIndex(function(x){ return String(x.id) === String(pid); });
             if (_pIdx !== -1 && _pPosts[_pIdx].video) {
               _pPosts[_pIdx].video.url = data.url;
-              savePersistedUserPosts(post.ownerEmail, _pPosts);
+              _gwPostWrite(post.ownerEmail, _pPosts);
             }
           } catch(e){}
         }
@@ -1031,14 +1033,18 @@ function _gwFbSyncStart() {
           vEl._gwThumbForced = false;
           _gwForceVideoThumb(vEl);
         }
-        /* Si c'est un Short, mettre à jour le player Shorts si ouvert */
-        if (post.video && post.video.videoType === 'short') {
+        /* Short → mettre à jour le player Shorts si ouvert (blob: inclus) */
+        if (post.video.videoType === 'short') {
           try {
             var _vsIt = _vsItems.findIndex(function(x) { return x.postId === String(pid); });
-            if (_vsIt >= 0 && _vsItems[_vsIt].videoEl && !_vsItems[_vsIt].videoEl.src) {
-              _vsItems[_vsIt].videoEl.src = data.url;
+            if (_vsIt >= 0 && _vsItems[_vsIt].videoEl &&
+                (!_vsItems[_vsIt].videoEl.src || _vsItems[_vsIt].videoEl.src.startsWith('blob:'))) {
+              _gwPlayHLS(_vsItems[_vsIt].videoEl, data.url);
               try { _vsItems[_vsIt].videoEl.load(); } catch(e2){}
               _vsItems[_vsIt].loaded = true;
+            } else if (_vsIt < 0) {
+              /* Short pas encore dans le player → injecter */
+              try { _vsInjectNewShorts([post]); } catch(e2){}
             }
           } catch(e2){}
         }
@@ -1048,12 +1054,10 @@ function _gwFbSyncStart() {
             wrap.onclick = function() { _openVideoFromPost(String(pid), d); };
           })(data.url, data.dur || 0);
         }
-        /* Aussi mettre à jour les vidéos de repost qui citent ce post */
+        /* Vidéos de repost citant ce post */
         DEMO_POSTS.forEach(function(rp) {
           if (rp.type === 'repost' && rp.repostOf && String(rp.repostOf.id) === String(pid)) {
-            if (rp.repostOf.video && (!rp.repostOf.video.url || rp.repostOf.video.url.startsWith('blob:'))) {
-              rp.repostOf.video.url = data.url;
-            }
+            if (rp.repostOf.video) rp.repostOf.video.url = data.url;
             var rpEl = document.getElementById('rp-fv-' + rp.id);
             if (rpEl && (!rpEl.src || rpEl.src.startsWith('blob:'))) {
               rpEl.src = data.url;
@@ -1068,7 +1072,7 @@ function _gwFbSyncStart() {
       if (String(pid).indexOf('off_') === 0) {
         var offList = _offGetPosts();
         var offPost = offList.find(function(x) { return String(x.id) === String(pid); });
-        if (offPost && offPost.video && typeof offPost.video === 'object' && (!offPost.video.url || offPost.video.url.startsWith('blob:'))) {
+        if (offPost && offPost.video && typeof offPost.video === 'object') {
           offPost.video.url = data.url;
           try { localStorage.setItem('gw_official_posts', JSON.stringify(offList)); } catch(e2){}
           var offVEl = document.getElementById('off-fv-' + pid);
@@ -1081,7 +1085,9 @@ function _gwFbSyncStart() {
         }
       }
     } catch(e){}
-  });
+  }
+  _gwFbDB.ref('gw/post_videos').on('child_added',   _onPostVideoArrived);
+  _gwFbDB.ref('gw/post_videos').on('child_changed', _onPostVideoArrived);
 
   /* ── Likes (temps réel entre appareils) — child_added = 1er like, child_changed = likes suivants ── */
   function _gwMergeLikes(snap) {
@@ -1109,6 +1115,11 @@ function _gwFbSyncStart() {
       document.querySelectorAll('[id="like-count-' + postId + '"],[id="lcount-' + postId + '"]').forEach(function(el) {
         el.textContent = total > 0 ? String(total) : '';
       });
+      /* Player Shorts — IDs différents du feed (vs-like-btn / vs-likes) */
+      var _vsLikeEl  = document.getElementById('vs-likes-'    + postId);
+      var _vsLikeBtn = document.getElementById('vs-like-btn-' + postId);
+      if (_vsLikeEl)  _vsLikeEl.textContent = total > 0 ? _fmtViews(total) : '0';
+      if (_vsLikeBtn) _vsLikeBtn.classList.toggle('vs-liked', liked);
     } catch(e){}
   }
   _gwFbDB.ref('gw/likes').on('child_added',   function(snap) { _gwMergeLikes(snap); });
@@ -1558,14 +1569,16 @@ function _gwMergePost(snap) {
     var _newShorts = [];
     DEMO_POSTS.forEach(function(p) {
       if (!p || !p.video || p.video.videoType !== 'short') return;
+      if (!p.video.url || p.video.url.startsWith('blob:')) return;
       var _preUrl = _preShorts[String(p.id)];
-      if (p.video.url && _preUrl !== undefined && !_preUrl && p.video.url) {
+      var _isNew  = (_preUrl === undefined);          /* Short jamais vu avant le merge */
+      var _isUpd  = (_preUrl !== undefined && !_preUrl); /* Short connu sans URL, maintenant avec */
+      if (_isNew || _isUpd) {
         _newShorts.push(p);
-        /* Corrige le src="" dans le DOM si nécessaire */
         try {
           var _vEl = document.getElementById('fv-' + p.id);
           if (_vEl && (!_vEl.getAttribute('src') || _vEl.src.startsWith('blob:'))) {
-            _vEl.src = p.video.url; _vEl.load();
+            _gwPlayHLS(_vEl, p.video.url); _vEl.load();
           }
         } catch(e2) {}
       }
@@ -6319,6 +6332,12 @@ function _gwCapFirebasePosts(posts) {
           c.video.poster.startsWith('data:') && c.video.poster.length > 50000) {
         delete c.video.poster;
       }
+      /* Vidéos : blob URLs et idbId sont locaux — inutilisables cross-device.
+         L'URL finale (Cloudflare Stream) sera poussée par _finalizePost. */
+      if (c.video.url && typeof c.video.url === 'string' && c.video.url.startsWith('blob:')) {
+        delete c.video.url;
+      }
+      delete c.video.idbId;
     }
     /* Documents : retirer les blob URLs (locales) et idbId avant envoi Firebase —
        les autres utilisateurs ne peuvent pas accéder aux blobs locaux.
@@ -12959,7 +12978,9 @@ function _vsBuildList() {
     if (!p) return;
     if (p.type === 'repost' && p.repostOf) {
       var rv = p.repostOf.video;
-      if (!rv || typeof rv !== 'object' || !(rv.url || rv.idbId) || rv.videoType !== 'short') return;
+      var rvOk = rv && typeof rv === 'object' && rv.videoType === 'short' &&
+                 ((rv.url && !rv.url.startsWith('blob:')) || rv.idbId);
+      if (!rvOk) return;
       if (!seenIds[String(p.id)]) {
         seenIds[String(p.id)] = true;
         result.push({ id: p.id, author: p.author, role: p.role, at: p.at, time: p.time,
@@ -12970,8 +12991,9 @@ function _vsBuildList() {
       return;
     }
     if (!p.video) return;
-    var hasMedia = (typeof p.video === 'string' && p.video) ||
-                   (typeof p.video === 'object' && (p.video.url || p.video.idbId));
+    var hasMedia = (typeof p.video === 'string' && p.video && !p.video.startsWith('blob:')) ||
+                   (typeof p.video === 'object' && (
+                     (p.video.url && !p.video.url.startsWith('blob:')) || p.video.idbId));
     if (hasMedia && p.video.videoType === 'short' && !seenIds[String(p.id)]) {
       seenIds[String(p.id)] = true; result.push(p);
     }
