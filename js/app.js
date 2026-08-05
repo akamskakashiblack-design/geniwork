@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-5';
+  var CURRENT_VERSION = '6e5587c-6';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -501,7 +501,9 @@ function _gwPlayHLS(videoEl, src) {
   if (typeof Hls !== 'undefined' && Hls.isSupported()) {
     var hls = new Hls({
       enableWorker: false,
-      maxBufferLength: 30,
+      /* Buffer large : pré-télécharge jusqu'à 60s pour une lecture sans accroc */
+      maxBufferLength: 60,
+      maxMaxBufferLength: 120,
       /* Cloudflare Stream prend 10-60s pour transcoder après l'upload.
          Ces retries permettent à hls.js d'attendre que le manifest soit prêt
          sans afficher une erreur immédiate. */
@@ -511,9 +513,13 @@ function _gwPlayHLS(videoEl, src) {
       levelLoadingRetryDelay: 2000,
       fragLoadingMaxRetry: 6,
       fragLoadingRetryDelay: 2000,
-      /* Commence en basse qualité pour une lecture immédiate, monte ensuite */
+      /* Démarre à 720p (2.5 Mbps) puis monte à 1080p si la connexion le permet.
+         abrEwmaDefaultEstimate = estimation bande passante initiale → détermine
+         le niveau de qualité du 1er segment chargé. */
       startLevel: -1,
-      abrEwmaDefaultEstimate: 500000
+      abrEwmaDefaultEstimate: 2500000,
+      abrBandWidthFactor: 0.85,
+      abrBandWidthUpFactor: 0.6
     });
     hls.loadSource(src);
     hls.attachMedia(videoEl);
@@ -11121,17 +11127,17 @@ function _gwCamConstraints() {
   var isVid   = (_camMode === 'video' && _pubVideoType === 'video');
   var base    = { facingMode: { ideal: _camFacing } };
   if (isShort) {
-    /* Portrait 9:16 — Short TikTok */
-    base.width  = { ideal: 1080 };
-    base.height = { ideal: 1920 };
+    /* Portrait 9:16 — Short TikTok : min 720p, ideal 1080p */
+    base.width  = { min: 720,  ideal: 1080 };
+    base.height = { min: 1280, ideal: 1920 };
   } else if (isVid) {
-    /* Paysage 16:9 — Vidéo YouTube */
-    base.width  = { ideal: 1920 };
-    base.height = { ideal: 1080 };
+    /* Paysage 16:9 — Vidéo : min 720p, ideal 1080p */
+    base.width  = { min: 1280, ideal: 1920 };
+    base.height = { min: 720,  ideal: 1080 };
   } else {
     /* Photo */
-    base.width  = { ideal: 1280 };
-    base.height = { ideal: 720 };
+    base.width  = { min: 720,  ideal: 1280 };
+    base.height = { min: 480,  ideal: 720  };
   }
   return { video: base, audio: _camMode === 'video' };
 }
@@ -11283,8 +11289,13 @@ function _gwStartRecord() {
     if (MediaRecorder.isTypeSupported(types[i])) { mimeType = types[i]; break; }
   }
 
+  /* 6 Mbps pour garantir 720p–1080p net sans compression visible.
+     La compression post-record réduit si nécessaire avant upload. */
+  var _camBps = 6000000;
   try {
-    _camRecorder = new MediaRecorder(_camStream, mimeType ? { mimeType: mimeType } : undefined);
+    _camRecorder = new MediaRecorder(_camStream, mimeType
+      ? { mimeType: mimeType, videoBitsPerSecond: _camBps }
+      : { videoBitsPerSecond: _camBps });
   } catch(e) {
     _camRecorder = new MediaRecorder(_camStream);
   }
@@ -13225,12 +13236,14 @@ function _vsActivate(idx) {
 
     setTimeout(function() {
       if (_vsCurIdx !== idx) return;
-      /* Précharge 2 Shorts à l'avance (pas juste le suivant) pour que le
-         défilement reste fluide même en swipant vite plusieurs fois de suite */
+      /* Précharge 3 Shorts en avance + 1 derrière pour un défilement fluide
+         dans les deux sens sans attente réseau */
       _vsPreload(idx + 1);
       _vsPreload(idx + 2);
+      _vsPreload(idx + 3);
+      _vsPreload(idx - 1);
       _vsUpdateDesktopPanel();
-    }, 600);
+    }, 400);
   }
 
   if (item.videoEl.src) {
@@ -13375,8 +13388,9 @@ function openVideoScroll(startPostId) {
         try { localStorage.setItem('gw_vurl_' + pid, d.url); } catch(e){}
         if (typeof post.video === 'object') post.video.url = d.url;
         var fi = _vsItems.findIndex(function(x){ return x.postId === pid; });
-        if (fi >= 0 && !_vsItems[fi].videoEl.src && Math.abs(fi - _vsCurIdx) <= 2) {
-          _vsItems[fi].videoEl.src = d.url; _vsItems[fi].videoEl.preload = 'auto';
+        if (fi >= 0 && !_vsItems[fi].videoEl.src && Math.abs(fi - _vsCurIdx) <= 4) {
+          _gwPlayHLS(_vsItems[fi].videoEl, d.url);
+          _vsItems[fi].videoEl.preload = 'auto';
           try { _vsItems[fi].videoEl.load(); } catch(e){}
           _vsItems[fi].loaded = true;
         }
@@ -13396,8 +13410,14 @@ function openVideoScroll(startPostId) {
   feedEl.addEventListener('touchend',   function()  { setTimeout(function(){ _vsUserScrolling = false; }, 600); }, { passive: true });
   feedEl.addEventListener('touchmove',  function(e) {
     var dy = _touchY - e.touches[0].clientY;
-    if (dy > 40)       { _vsPreload(_vsCurIdx + 1); }
-    else if (dy < -40) { _vsPreload(_vsCurIdx - 1); }
+    if (dy > 20) {
+      /* Scroll vers le bas → précharge en avance */
+      _vsPreload(_vsCurIdx + 1);
+      _vsPreload(_vsCurIdx + 2);
+    } else if (dy < -20) {
+      /* Scroll vers le haut → précharge derrière */
+      _vsPreload(_vsCurIdx - 1);
+    }
   }, { passive: true });
 
   if (_gwFbReady && _gwFbDB) {
@@ -34299,10 +34319,11 @@ function _gwCompressShortVideo(file, onProgress, callback, trimStart, trimEnd) {
     var scale = Math.min(1, MAX_W / origW);
     var w = Math.round(origW * scale / 2) * 2;
     var h = Math.round(origH * scale / 2) * 2;
-    var BASE_BPS = 1200000;
+    /* 2.5 Mbps pour 720p, scale proportionnel → ~5 Mbps pour 1080p */
+    var BASE_BPS = 2500000;
     var BASE_PIX = 720 * 1280;
     var videoBps = Math.round(BASE_BPS * (w * h) / BASE_PIX);
-    videoBps = Math.max(600000, Math.min(2500000, videoBps));
+    videoBps = Math.max(1200000, Math.min(5000000, videoBps));
 
     var canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
