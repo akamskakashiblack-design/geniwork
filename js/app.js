@@ -484,7 +484,22 @@ function _gwPlayHLS(videoEl, src) {
 
   /* hls.js disponible (Chrome / Android WebView) */
   if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-    var hls = new Hls({ enableWorker: false, maxBufferLength: 30 });
+    var hls = new Hls({
+      enableWorker: false,
+      maxBufferLength: 30,
+      /* Cloudflare Stream prend 10-60s pour transcoder après l'upload.
+         Ces retries permettent à hls.js d'attendre que le manifest soit prêt
+         sans afficher une erreur immédiate. */
+      manifestLoadingMaxRetry: 8,
+      manifestLoadingRetryDelay: 3000,
+      levelLoadingMaxRetry: 6,
+      levelLoadingRetryDelay: 2000,
+      fragLoadingMaxRetry: 6,
+      fragLoadingRetryDelay: 2000,
+      /* Commence en basse qualité pour une lecture immédiate, monte ensuite */
+      startLevel: -1,
+      abrEwmaDefaultEstimate: 500000
+    });
     hls.loadSource(src);
     hls.attachMedia(videoEl);
     videoEl._gwHls = hls;
@@ -11813,7 +11828,17 @@ function _gwVedShowPanel(mode) {
 function _gwVedToggleSound() {
   _ved.muted = !_ved.muted;
   var v = document.getElementById('gw-ved-vid');
-  if (v) v.muted = _ved.muted;
+  if (v) {
+    var wasPaused = v.paused;
+    var ct = v.currentTime;
+    v.muted = _ved.muted;
+    /* Android WebView cale quand muted passe true→false sur une vidéo en lecture.
+       Forcer un play() depuis la position sauvegardée résout le freeze. */
+    if (!_ved.muted && !wasPaused) {
+      v.currentTime = ct;
+      try { v.play(); } catch(e) {}
+    }
+  }
   _gwVedShowPanel('trim');
 }
 
@@ -16384,7 +16409,8 @@ function publierPost() {
     var _nsfw_pid   = postId;
     var _nsfw_imgs  = _imagesSnapshot.slice();
     var _nsfw_vid   = (_pickedVideo && _pickedVideo.url) ? _pickedVideo.url : '';
-    showToast('🔍 Analyse du contenu en cours…', 'info');
+    if (videoBlob) _showVideoProgress(0, 'Analyse du contenu…');
+    else showToast('🔍 Analyse du contenu en cours…', 'info');
     _nsfwGate = _gwScanPostMedia(_nsfw_imgs, _nsfw_vid).then(function(result) {
       if (result && result.flagged) {
         _gwHandleNsfwDetection(result, String(_nsfw_pid));
@@ -16469,8 +16495,12 @@ function publierPost() {
      writes Firebase en silence (règles auth != null) — le post restait
      visible seulement en local pour l'auteur. _gwOnAuthReady a un filet de
      8s pour ne jamais bloquer indéfiniment si l'auth échoue durablement. ── */
+  /* Barre de progression vidéo visible immédiatement (avant le scan NSFW et l'upload)
+     pour que l'utilisateur sache que l'envoi est en cours dès le clic Publier */
+  if (videoBlob) _showVideoProgress(0, 'Préparation de la vidéo…');
+
   _gwOnAuthReady(function() { _nsfwGate.then(function(_nsfwSafe) {
-    if (!_nsfwSafe) return; /* bloqué par le scan — déjà géré par _gwHandleNsfwDetection */
+    if (!_nsfwSafe) { _hideVideoProgress(); return; } /* bloqué par le scan */
 
   var _hasImgOrDoc = (_imagesSnapshot.length > 0 || docBlob) && _gwFbStorage;
   if (videoBlob || _hasImgOrDoc) {
