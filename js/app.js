@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-7';
+  var CURRENT_VERSION = '6e5587c-8';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -6338,12 +6338,10 @@ function _gwCapFirebasePosts(posts) {
           c.video.poster.startsWith('data:') && c.video.poster.length > 50000) {
         delete c.video.poster;
       }
-      /* Vidéos : blob URLs et idbId sont locaux — inutilisables cross-device.
-         L'URL finale (Cloudflare Stream) sera poussée par _finalizePost. */
-      if (c.video.url && typeof c.video.url === 'string' && c.video.url.startsWith('blob:')) {
-        delete c.video.url;
-      }
-      delete c.video.idbId;
+      /* On garde video.url (blob: ou CF) et video.idbId dans Firebase :
+         _gwResolveVideoUrl filtre déjà les blob: URLs et tombe sur gw/post_videos
+         pour récupérer l'URL Cloudflare Stream réelle. Supprimer idbId cassait
+         les Shorts (cf. régression) — comportement v1.1.8 restauré. */
     }
     /* Documents : retirer les blob URLs (locales) et idbId avant envoi Firebase —
        les autres utilisateurs ne peuvent pas accéder aux blobs locaux.
