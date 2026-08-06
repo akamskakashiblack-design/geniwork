@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-6';
+  var CURRENT_VERSION = '6e5587c-7';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -6447,11 +6447,28 @@ function _gwPostsMerge(fbKey, fbData) {
     var key = String(fp.id);
     var local = merged[key];
     if (local) {
-      /* Firebase met à jour les champs sauf les images/URLs locales non nulles */
+      /* Merge shallow d'abord */
       var updated = Object.assign({}, local, fp);
-      /* Si Firebase n'a pas d'images mais local en a (upload en cours) → garder les locales */
+      /* Images : garder les locales si Firebase n'en a pas (upload en cours) */
       if ((!fp.images || !fp.images.length) && local.images && local.images.length) {
         updated.images = local.images;
+      }
+      /* VIDEO — merge profond obligatoire : _gwCapFirebasePosts supprime idbId et
+         les blob: URLs avant le push Firebase. Sans merge profond, Object.assign
+         remplacerait local.video entier par { videoType:'short' }, effaçant l'idbId
+         et l'URL locale → le Short disparaît de _vsBuildList. */
+      if (fp.video && typeof fp.video === 'object' && local.video && typeof local.video === 'object') {
+        updated.video = Object.assign({}, local.video, fp.video);
+        /* Si Firebase a une vraie URL CF, elle écrase le blob local (voulue).
+           Si Firebase n'a pas d'URL (blob supprimé), garder l'URL locale. */
+        if (!updated.video.url && local.video.url)   updated.video.url   = local.video.url;
+        if (!updated.video.idbId && local.video.idbId) updated.video.idbId = local.video.idbId;
+      }
+      /* DOC — même logique (blob URLs et idbId supprimés avant Firebase push) */
+      if (fp.doc && typeof fp.doc === 'object' && local.doc && typeof local.doc === 'object') {
+        updated.doc = Object.assign({}, local.doc, fp.doc);
+        if (!updated.doc.url && local.doc.url)     updated.doc.url   = local.doc.url;
+        if (!updated.doc.idbId && local.doc.idbId) updated.doc.idbId = local.doc.idbId;
       }
       merged[key] = updated;
     } else {
