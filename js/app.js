@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-8';
+  var CURRENT_VERSION = '6e5587c-9';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -1019,16 +1019,24 @@ function _gwFbSyncStart() {
       try { localStorage.setItem('gw_vurl_' + pid, data.url); } catch(e){}
       /* Posts utilisateurs (IDs numériques) */
       var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(pid); });
-      if (post && post.video) {
+      if (post && post.video && (!post.video.url || post.video.url.startsWith('blob:'))) {
         post.video.url = data.url;
-        /* Persiste l'URL dans localStorage via v2 */
+        /* Persiste l'URL dans localStorage + Firebase SEULEMENT pour le propriétaire courant.
+           Pour les posts des AUTRES utilisateurs : localStorage uniquement
+           (leur Firebase node est protégé par auth.uid === $userFbKey — écrire depuis
+           un autre compte génère des PERMISSION_DENIED en masse au démarrage). */
         if (post.ownerEmail) {
           try {
             var _pPosts = _gwPostRead(post.ownerEmail);
             var _pIdx = _pPosts.findIndex(function(x){ return String(x.id) === String(pid); });
             if (_pIdx !== -1 && _pPosts[_pIdx].video) {
               _pPosts[_pIdx].video.url = data.url;
-              _gwPostWrite(post.ownerEmail, _pPosts);
+              var _isOwner = _currentUser && _currentUser.email === post.ownerEmail;
+              if (_isOwner) {
+                _gwPostWrite(post.ownerEmail, _pPosts);   /* localStorage + Firebase */
+              } else {
+                _gwPostWriteLocal(post.ownerEmail, _pPosts); /* localStorage seulement */
+              }
             }
           } catch(e){}
         }
@@ -6366,8 +6374,15 @@ function _gwPostPushFirebase(email, posts) {
   try {
     _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts))
       .catch(function(e) {
-        if (e.code === 'PERMISSION_DENIED' && _currentUser) {
-          showToast('Synchronisation en cours…', 'info');
+        if (e.code === 'PERMISSION_DENIED') {
+          console.warn('[GW Firebase] Posts PERMISSION_DENIED — session Firebase à renouveler');
+          /* Tenter de rafraîchir la session Firebase depuis le refresh token stocké */
+          try {
+            var _sess = JSON.parse(localStorage.getItem('gw_session') || '{}');
+            if (_sess.authRefresh) {
+              _gwRestoreRealIdentity(_sess.authRefresh);
+            }
+          } catch(e2){}
         }
       });
   } catch(e) {}
