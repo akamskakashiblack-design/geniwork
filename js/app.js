@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-10';
+  var CURRENT_VERSION = '6e5587c-11';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -226,7 +226,25 @@ function _gwGetPendingPosts(email) {
   try { return JSON.parse(localStorage.getItem('gw_pending_posts_' + email) || '[]'); } catch(e) { return []; }
 }
 function _gwSavePendingPosts(email, list) {
-  try { localStorage.setItem('gw_pending_posts_' + email, JSON.stringify(list)); } catch(e) {}
+  try {
+    localStorage.setItem('gw_pending_posts_' + email, JSON.stringify(list));
+  } catch(e) {
+    if (_gwIsQuotaError(e)) {
+      _gwLog('LS_QUOTA_EXCEEDED', { email: email, status: 'PENDING_POSTS_EVICTING', error: e.name });
+      _gwEvictLsCache();
+      try {
+        localStorage.setItem('gw_pending_posts_' + email, JSON.stringify(list));
+        _gwLog('LS_QUOTA_RECOVERED', { email: email, status: 'PENDING_POSTS_OK_AFTER_EVICTION' });
+      } catch(e2) {
+        /* Même après nettoyage le quota est dépassé.
+           Les pending posts restent en mémoire jusqu'à la fin de l'upload —
+           la reprise automatique au prochain démarrage sera impossible,
+           mais la vidéo reste dans IndexedDB (_gwSaveVideoBlob). */
+        _gwLog('LS_QUOTA_EXCEEDED', { email: email, status: 'PENDING_POSTS_LOST_IN_LS', error: e2.name });
+      }
+    }
+    /* Silencieux pour les autres erreurs — pending posts sont non-critiques au runtime */
+  }
 }
 function _gwAddPendingPost(email, post) {
   var list = _gwGetPendingPosts(email);
@@ -6352,6 +6370,66 @@ function switchFeedTab(btn, tab) {
    RÈGLE 5 : Firebase ne remplace JAMAIS localStorage ; il se fusionne.
 ══════════════════════════════════════════════════════════════════ */
 
+/* ── Clés localStorage non-critiques : cache pur, reconstruisible depuis Firebase ──
+   Ces clés PEUVENT être supprimées automatiquement lors d'un QuotaExceededError
+   pour libérer de l'espace et permettre de sauvegarder les données critiques.
+   Ne jamais inclure : gw_userposts_*, gw_pending_posts_*, gw_session, gw_users,
+   gw_profile_*, gw_photo_*, gw_auth_migration_* ── */
+var _GW_LS_EVICTABLE_PREFIXES = [
+  'gw_likers_',     /* likes par post → reconstruisible depuis gw/likes */
+  'gw_dislikers_',  /* dislikes par post → reconstruisible depuis gw/dislikes */
+  'gw_comments_',   /* commentaires → reconstruisibles depuis gw/comments */
+  'gw_rcount_',     /* compteurs reposts → reconstruisibles depuis gw/rcounts */
+  'gw_fav_count_',  /* compteurs favoris → reconstruisibles depuis gw/favcounts */
+  'gw_vid_views_',  /* vues vidéo → reconstruisibles depuis gw/vid_views */
+  'gw_creact_',     /* réactions créatives → reconstruisibles depuis gw/creact */
+  'gw_vurl_',       /* URLs vidéo CF → reconstruisibles depuis gw/post_videos */
+  'gw_fc_',         /* follow counts → reconstruisibles depuis gw/follow_counts */
+  'gw_mile_',       /* milestones → reconstruisibles depuis gw/milestones */
+  'gw_reports_',    /* signalements → reconstruisibles depuis gw/reports */
+  'gw_notifs_',     /* notifications → reconstruisibles depuis gw/notifs */
+  'gw_followers_',  /* followers → reconstruisibles depuis gw/followers */
+];
+var _GW_LS_EVICTABLE_EXACT = [
+  'gw_online_count',    /* compteur en ligne — éphémère */
+  'gw_official_posts',  /* posts officiels — rechargés depuis gw/official_posts */
+  'gw_hashtag_cache',   /* cache hashtags — recalculable */
+];
+
+/* ── Détecte un QuotaExceededError de façon cross-browser ── */
+function _gwIsQuotaError(e) {
+  if (!e) return false;
+  if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') return true;
+  if (e instanceof DOMException && (e.code === 22 || e.code === 1014)) return true;
+  return false;
+}
+
+/* ── Éviction du cache localStorage (uniquement données non-critiques) ──
+   Libère de l'espace en supprimant les caches reconstruisibles depuis Firebase.
+   NE TOUCHE PAS aux posts, pending posts, session, profils, ni données en attente de sync.
+   Retourne le nombre de clés supprimées. ── */
+function _gwEvictLsCache() {
+  var freedKeys = 0;
+  try {
+    var keys = Object.keys(localStorage);
+    keys.forEach(function(k) {
+      var isEvictable =
+        _GW_LS_EVICTABLE_EXACT.indexOf(k) !== -1 ||
+        _GW_LS_EVICTABLE_PREFIXES.some(function(pfx) { return k.startsWith(pfx); });
+      if (isEvictable) {
+        try { localStorage.removeItem(k); freedKeys++; } catch(e2) {}
+      }
+    });
+    _gwLog('LS_CACHE_EVICTED', { status: 'OK', extra: 'keys_removed=' + freedKeys });
+  } catch(e) {
+    _gwLog('LS_CACHE_EVICTED', { status: 'ERROR', error: e.message });
+  }
+  return freedKeys;
+}
+
+/* Anti-spam : n'afficher le toast de quota qu'une fois par session */
+var _gwLsQuotaToastShown = false;
+
 function _userPostsKey(email) { return 'gw_userposts_' + email; }
 
 /* ── Lecture ── */
@@ -6362,10 +6440,40 @@ function _gwPostRead(email) {
 /* Alias de compatibilité */
 function loadPersistedUserPosts(email) { return _gwPostRead(email); }
 
-/* ── Écriture locale UNIQUEMENT (pas Firebase) ── */
+/* ── Écriture locale UNIQUEMENT (pas Firebase) ──
+   Sur QuotaExceededError :
+     1. Éviction du cache non-critique
+     2. Retry de l'écriture
+     3. Si toujours plein : log + toast unique + s'appuyer sur Firebase
+   La publication est toujours poussée vers Firebase par _gwPostWrite(),
+   indépendamment du succès ou de l'échec de cette fonction. ── */
 function _gwPostWriteLocal(email, posts) {
-  try { localStorage.setItem(_userPostsKey(email), JSON.stringify(posts)); }
-  catch(e) { console.warn('[GW Posts] localStorage plein :', e.message); }
+  try {
+    localStorage.setItem(_userPostsKey(email), JSON.stringify(posts));
+  } catch(e) {
+    if (_gwIsQuotaError(e)) {
+      _gwLog('LS_QUOTA_EXCEEDED', { email: email, status: 'EVICTING_CACHE', error: e.name });
+      _gwEvictLsCache();
+      try {
+        localStorage.setItem(_userPostsKey(email), JSON.stringify(posts));
+        _gwLog('LS_QUOTA_RECOVERED', { email: email, status: 'WRITE_OK_AFTER_EVICTION' });
+        return; /* Récupération réussie */
+      } catch(e2) {
+        /* localStorage vraiment plein même après nettoyage */
+        _gwLog('LS_QUOTA_EXCEEDED', { email: email, status: 'WRITE_FAILED_FIREBASE_IS_BACKUP', error: e2.name });
+        if (!_gwLsQuotaToastShown) {
+          _gwLsQuotaToastShown = true;
+          try { showToast('Espace local insuffisant — publication sauvegardée sur le serveur', 'warn'); } catch(e3) {}
+        }
+        /* La publication reste en mémoire (DEMO_POSTS) et sera poussée vers
+           Firebase par _gwPostPushFirebase() — appelé juste après dans _gwPostWrite().
+           Au prochain démarrage, Firebase la restituera via child_added/_gwPostsMerge. */
+      }
+    } else {
+      _gwLog('LS_WRITE_ERROR', { email: email, error: e.message });
+      console.warn('[GW Posts] localStorage erreur inattendue :', e.message);
+    }
+  }
 }
 
 /* ── Prépare le payload Firebase (retire base64 lourdes, plafonne à 50) ── */

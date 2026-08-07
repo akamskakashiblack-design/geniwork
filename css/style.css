@@ -701,8 +701,9 @@ body {
   transition: opacity 0.25s, transform 0.25s;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-.toast.ok  { background: #16A34A; }
-.toast.err { background: #DC2626; }
+.toast.ok   { background: #16A34A; }
+.toast.err  { background: #DC2626; }
+.toast.warn { background: #D97706; }
 
 /* ═══════════════════════════════════════════
    ÉCRAN CGU
