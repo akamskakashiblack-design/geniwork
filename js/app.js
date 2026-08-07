@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-11';
+  var CURRENT_VERSION = '6e5587c-12';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -6476,17 +6476,11 @@ function _gwPostWriteLocal(email, posts) {
   }
 }
 
-/* ── Prépare le payload Firebase (retire base64 lourdes, plafonne à 50) ── */
+/* ── Sanitise les posts avant envoi Firebase (retire les données locales volumineuses) ──
+   Plus de limite de nombre : chaque post est écrit individuellement via ref.update()
+   plutôt que ref.set(array) — aucune publication ne peut être perdue par un cap. ── */
 function _gwCapFirebasePosts(posts) {
-  var CAP = 50;
-  var capped = posts;
-  if (capped.length > CAP) {
-    var videos = capped.filter(function(p) { return p && p.video; });
-    var others = capped.filter(function(p) { return !(p && p.video); });
-    capped = videos.concat(others.slice(0, Math.max(0, CAP - videos.length)));
-    capped.sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
-  }
-  return capped.map(function(p) {
+  return posts.filter(Boolean).map(function(p) {
     var c = Object.assign({}, p);
     if (c.images && Array.isArray(c.images)) {
       c.images = c.images.filter(function(img) {
@@ -6551,12 +6545,21 @@ function _gwPostPushFirebaseWithRetry(email, posts, attempt) {
     return;
   }
 
-  _gwLog('FIREBASE_WRITE_ATTEMPT', { email: email, attempt: attempt, extra: 'posts=' + posts.length });
+  /* Construire l'objet keyed-by-postId pour un update additif (non-destructif).
+     update() écrit uniquement les posts fournis sans écraser ceux déjà dans Firebase.
+     La suppression d'un post nécessite ref.child(postId).remove() — voir _gwPostRemove. */
+  var _sanitized = _gwCapFirebasePosts(posts);
+  var _postsObj  = {};
+  _sanitized.forEach(function(p) { if (p && p.id) _postsObj[String(p.id)] = p; });
+  var _postCount = Object.keys(_postsObj).length;
+  if (!_postCount) return;
+
+  _gwLog('FIREBASE_WRITE_ATTEMPT', { email: email, attempt: attempt, extra: 'posts=' + _postCount });
 
   try {
-    _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts))
+    _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).update(_postsObj)
       .then(function() {
-        _gwLog('FIREBASE_WRITE_SUCCESS', { email: email, attempt: attempt, status: 'OK' });
+        _gwLog('FIREBASE_WRITE_SUCCESS', { email: email, attempt: attempt, status: 'OK', extra: 'posts=' + _postCount });
       })
       .catch(function(e) {
         var errCode = e.code || e.message || String(e);
@@ -6647,13 +6650,25 @@ function _gwPostUpsert(post) {
 /* Alias de compatibilité */
 function persistNewPost(post) { _gwPostUpsert(post); }
 
-/* ── Supprimer un post → local + Firebase ── */
+/* ── Supprimer un post → local + Firebase ──
+   update() est additif : il ne supprime pas un nœud existant.
+   La suppression Firebase doit utiliser ref.child(postId).remove() explicitement. ── */
 function _gwPostRemove(postId, email) {
   if (!email) return;
   var posts = _gwPostRead(email).filter(function(p) {
     return p && String(p.id) !== String(postId);
   });
-  _gwPostWrite(email, posts);
+  /* Écriture locale : source de vérité sur l'appareil */
+  _gwPostWriteLocal(email, posts);
+  /* Firebase : suppression chirurgicale du nœud individuel du post
+     (ne supprime pas les autres posts du même utilisateur) */
+  if (_gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/posts/' + _gwFbKey(email) + '/' + String(postId))
+      .remove()
+      .catch(function(e) {
+        _gwLog('FIREBASE_WRITE_FAILED', { email: email, postId: postId, status: 'POST_REMOVE_FAILED', error: e.code || e.message });
+      });
+  }
 }
 /* Alias de compatibilité */
 function deletePersistedPost(postId, email) { _gwPostRemove(postId, email); }
@@ -8213,10 +8228,20 @@ function deletePost(postId) {
   if (_currentUser) {
     var email = _currentUser.email;
     var stored = loadPersistedUserPosts(email).filter(function(p) { return String(p.id) !== String(postId); });
-    savePersistedUserPosts(email, stored);   /* écrit localStorage ET Firebase gw/posts/{key} */
+    /* _gwPostWriteLocal : mise à jour locale de la liste filtrée */
+    _gwPostWriteLocal(email, stored);
 
-    /* Supprime aussi les métadonnées vidéo et images sur Firebase */
+    /* Firebase : suppression explicite du nœud individuel du post.
+       savePersistedUserPosts fait désormais un update() additif — il ne supprime pas
+       le nœud du post supprimé. La suppression doit être déclarée explicitement. */
     if (_gwFbReady && _gwFbDB) {
+      _gwFbDB.ref('gw/posts/' + _gwFbKey(email) + '/' + String(postId))
+        .remove()
+        .catch(function(e) {
+          _gwLog('FIREBASE_WRITE_FAILED', { email: email, postId: postId, status: 'DELETE_POST_NODE_FAILED', error: e.code || e.message });
+        });
+
+      /* Supprime aussi les métadonnées vidéo et images sur Firebase */
       if (post && post.video) {
         _gwFbDB.ref('gw/post_videos/' + postId).remove().catch(function(){});
       }
