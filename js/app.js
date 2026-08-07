@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-9';
+  var CURRENT_VERSION = '6e5587c-10';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -93,6 +93,39 @@ function _gwOnAuthReady(fn) {
   var run = function() { if (fired) return; fired = true; fn(); };
   _gwAuthWaiters.push(run);
   setTimeout(run, 8000);
+}
+
+/* ── Auth RÉELLE : distinct de l'auth anonyme.
+   Les writes vers gw/posts/{userKey} exigent auth.uid === $userFbKey
+   → nécessite un custom token Firebase (pas un uid anonyme aléatoire).
+   _gwRealAuthReady passe à true seulement quand onAuthStateChanged
+   confirme une identité non-anonyme. ── */
+var _gwRealAuthReady  = false;   /* true quand l'identité Firebase réelle est confirmée */
+var _gwRealAuthWaiters = [];     /* callbacks en attente d'identité réelle */
+var _gwFbSyncQueue    = {};      /* { email: posts } — writes différés, idempotent par email */
+var _GW_FB_MAX_RETRIES = 3;
+var _GW_FB_RETRY_DELAYS = [2000, 5000, 10000]; /* backoff : 2s, 5s, 10s */
+
+/* ── Logger structuré pour le suivi du cycle de vie des publications ── */
+function _gwLog(event, ctx) {
+  try {
+    ctx = ctx || {};
+    var uid = '';
+    try {
+      var cu = firebase.auth && firebase.auth().currentUser;
+      uid = cu ? (cu.isAnonymous ? 'anon:' + cu.uid.slice(0,8) : cu.uid) : 'no-auth';
+    } catch(e2) {}
+    var parts = ['[GW|' + event + ']',
+      new Date().toISOString(),
+      'uid=' + uid];
+    if (ctx.postId   !== undefined) parts.push('postId='   + ctx.postId);
+    if (ctx.email    !== undefined) parts.push('user='     + ctx.email);
+    if (ctx.attempt  !== undefined) parts.push('attempt='  + ctx.attempt);
+    if (ctx.status   !== undefined) parts.push('status='   + ctx.status);
+    if (ctx.error    !== undefined) parts.push('err='      + ctx.error);
+    if (ctx.extra    !== undefined) parts.push(ctx.extra);
+    console.log(parts.join(' | '));
+  } catch(e) {}
 }
 
 /* ══════════════════════════════════════════
@@ -342,10 +375,22 @@ function _gwInitFirebase() {
        Évite la fenêtre où un post est publié pendant que l'auth est encore anonyme. */
     _gwFbAuth.onAuthStateChanged(function(user) {
       if (user && !user.isAnonymous && _currentUser && _currentUser.email) {
+        /* ─ Identité réelle confirmée ─ */
+        if (!_gwRealAuthReady) {
+          _gwRealAuthReady = true;
+          _gwLog('AUTH_READY', { email: _currentUser.email, status: 'REAL_IDENTITY_CONFIRMED' });
+          /* Débloquer les callbacks en attente */
+          _gwRealAuthWaiters.forEach(function(fn) { try { fn(); } catch(e){} });
+          _gwRealAuthWaiters = [];
+        }
+        /* Flush la queue de sync différée (posts publiés pendant la fenêtre anonyme) */
+        _gwFlushSyncQueue();
+        /* Re-push complet des posts locaux pour garantir la visibilité */
         try {
           var _syncPosts = _gwPostRead(_currentUser.email);
           if (_syncPosts && _syncPosts.length > 0) {
-            _gwPostPushFirebase(_currentUser.email, _syncPosts);
+            _gwLog('FIREBASE_WRITE_ATTEMPT', { email: _currentUser.email, attempt: 0, status: 'AUTH_STATE_REPUSH', extra: 'posts=' + _syncPosts.length });
+            _gwPostPushFirebaseWithRetry(_currentUser.email, _syncPosts, 0);
           }
         } catch(e) {}
       }
@@ -6365,27 +6410,109 @@ function _gwCapFirebasePosts(posts) {
   });
 }
 
-/* ── Push Firebase (best-effort, silencieux) ── */
+/* ── Flush la queue de synchronisation Firebase différée ──
+   Appelée dès que l'identité réelle est confirmée (onAuthStateChanged).
+   Idempotent : chaque email n'a qu'un seul état en queue (le plus récent). ── */
+function _gwFlushSyncQueue() {
+  var emails = Object.keys(_gwFbSyncQueue);
+  if (!emails.length) return;
+  _gwLog('QUEUED_FOR_SYNC', { status: 'FLUSHING', extra: 'queue=' + emails.length + ' email(s)' });
+  emails.forEach(function(email) {
+    /* Toujours lire depuis localStorage — version la plus fraîche */
+    var freshPosts = _gwPostRead(email);
+    delete _gwFbSyncQueue[email];
+    if (freshPosts && freshPosts.length) {
+      _gwPostPushFirebaseWithRetry(email, freshPosts, 0);
+    }
+  });
+}
+
+/* ── Push Firebase avec retry automatique et backoff exponentiel ──
+   Gère PERMISSION_DENIED (auth à renouveler) et erreurs réseau séparément.
+   Idempotent : un retry lit toujours la version fraîche depuis localStorage.
+   IMPORTANT : ne tente jamais de pousser les posts d'un autre utilisateur
+   (règle Firebase auth.uid === $userFbKey) — uniquement pour le user courant. ── */
+function _gwPostPushFirebaseWithRetry(email, posts, attempt) {
+  if (!_gwFbReady || !_gwFbDB || !email) return;
+  if (!posts || !posts.length) return;
+
+  /* Guard : on ne peut écrire que dans son propre nœud Firebase */
+  var isOwnEmail = _currentUser && _currentUser.email === email;
+  if (!isOwnEmail) {
+    _gwLog('FIREBASE_WRITE_FAILED', { email: email, attempt: attempt, status: 'NOT_OWNER_SKIP' });
+    return;
+  }
+
+  _gwLog('FIREBASE_WRITE_ATTEMPT', { email: email, attempt: attempt, extra: 'posts=' + posts.length });
+
+  try {
+    _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts))
+      .then(function() {
+        _gwLog('FIREBASE_WRITE_SUCCESS', { email: email, attempt: attempt, status: 'OK' });
+      })
+      .catch(function(e) {
+        var errCode = e.code || e.message || String(e);
+
+        if (e.code === 'PERMISSION_DENIED') {
+          /* Auth incorrecte (fenêtre anon ou session expirée) */
+          _gwLog('FIREBASE_WRITE_RETRY', { email: email, attempt: attempt, status: 'PERMISSION_DENIED', error: errCode });
+          /* Mettre en queue → sera flushé au prochain onAuthStateChanged */
+          var freshForQueue = _gwPostRead(email);
+          _gwFbSyncQueue[email] = freshForQueue.length ? freshForQueue : posts;
+          _gwLog('QUEUED_FOR_SYNC', { email: email, attempt: attempt, status: 'AWAITING_REAL_AUTH' });
+
+          /* Forcer le refresh d'identité */
+          if (_gwRealAuthReady) {
+            /* L'auth était réelle mais a été révoquée / expirée → invalider et renouveler */
+            _gwRealAuthReady = false;
+          }
+          try {
+            var _sess = JSON.parse(localStorage.getItem('gw_session') || '{}');
+            if (_sess.authRefresh) { _gwRestoreRealIdentity(_sess.authRefresh); }
+          } catch(e2) {}
+          return; /* Ne pas retry ici — onAuthStateChanged le fera via _gwFlushSyncQueue */
+        }
+
+        /* Erreur réseau ou autre → retry avec backoff */
+        if (attempt < _GW_FB_MAX_RETRIES) {
+          var delay = _GW_FB_RETRY_DELAYS[attempt] || 10000;
+          _gwLog('FIREBASE_WRITE_RETRY', { email: email, attempt: attempt, error: errCode, extra: 'next_in=' + delay + 'ms' });
+          setTimeout(function() {
+            /* Relire depuis localStorage pour garantir l'idempotence (pas de doublon) */
+            var retryPosts = _gwPostRead(email);
+            _gwPostPushFirebaseWithRetry(email, retryPosts.length ? retryPosts : posts, attempt + 1);
+          }, delay);
+        } else {
+          _gwLog('FIREBASE_WRITE_FAILED', { email: email, attempt: attempt, error: errCode, status: 'MAX_RETRIES_REACHED' });
+          /* Dernière chance : mettre en queue pour le prochain auth refresh */
+          var freshFallback = _gwPostRead(email);
+          _gwFbSyncQueue[email] = freshFallback.length ? freshFallback : posts;
+          _gwLog('QUEUED_FOR_SYNC', { email: email, status: 'FALLBACK_QUEUE' });
+        }
+      });
+  } catch(e) {
+    _gwLog('FIREBASE_WRITE_FAILED', { email: email, attempt: attempt, error: e.message, status: 'EXCEPTION' });
+  }
+}
+
+/* ── Push Firebase (best-effort) ──
+   Si l'identité réelle n'est pas encore confirmée, met en queue et attend
+   onAuthStateChanged pour garantir que les posts seront bien visibles
+   par les autres utilisateurs (règle Firebase : auth.uid === $userFbKey). ── */
 function _gwPostPushFirebase(email, posts) {
   if (!_gwFbReady || !_gwFbDB || !email) return;
   /* Ne jamais pousser un tableau vide : Firebase RTDB traite .set([]) comme null
      ce qui supprime le nœud et déclenche child_removed, effaçant tous les posts du feed */
   if (!posts || !posts.length) return;
-  try {
-    _gwFbDB.ref('gw/posts/' + _gwFbKey(email)).set(_gwCapFirebasePosts(posts))
-      .catch(function(e) {
-        if (e.code === 'PERMISSION_DENIED') {
-          console.warn('[GW Firebase] Posts PERMISSION_DENIED — session Firebase à renouveler');
-          /* Tenter de rafraîchir la session Firebase depuis le refresh token stocké */
-          try {
-            var _sess = JSON.parse(localStorage.getItem('gw_session') || '{}');
-            if (_sess.authRefresh) {
-              _gwRestoreRealIdentity(_sess.authRefresh);
-            }
-          } catch(e2){}
-        }
-      });
-  } catch(e) {}
+
+  if (!_gwRealAuthReady) {
+    /* Auth réelle pas encore confirmée → on met en queue, pas de perte possible */
+    _gwFbSyncQueue[email] = posts;
+    _gwLog('AUTH_WAITING', { email: email, status: 'QUEUED_UNTIL_REAL_AUTH', extra: 'posts=' + posts.length });
+    return;
+  }
+
+  _gwPostPushFirebaseWithRetry(email, posts, 0);
 }
 
 /* ── Écriture locale + Firebase ── */
