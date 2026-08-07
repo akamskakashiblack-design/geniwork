@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-12';
+  var CURRENT_VERSION = '6e5587c-13';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -640,6 +640,72 @@ function _gwUploadPendingVideos() {
             if (vEl && !vEl.src) vEl.src = url;
           },
           function() {}  /* échec silencieux — réessayera au prochain démarrage */
+        );
+      });
+    })(post);
+  });
+}
+
+/* ── Retry upload des documents dont le Storage a échoué lors de la publication ──
+   Détecte les posts de l'auteur courant avec doc.status === 'failed'|'uploading'
+   ET un idbId (blob toujours en IndexedDB) → relance l'upload vers Firebase Storage.
+   Idempotent : storagePath est fixe (post_docs/{postId}.ext) — pas de doublon. ── */
+function _gwUploadPendingDocs() {
+  if (!_gwFbStorage || !_gwFbReady || !_currentUser) return;
+  var myEmail = _currentUser.email;
+  var posts   = _gwPostRead(myEmail);
+  var toFix   = posts.filter(function(p) {
+    if (!p || !p.doc || typeof p.doc !== 'object') return false;
+    if (p.doc.status !== 'failed' && p.doc.status !== 'uploading') return false;
+    if (!p.doc.idbId || !p.doc.storagePath) return false;
+    /* Exclure uniquement si une URL Storage permanente (non-blob) est déjà présente.
+       Une blob: URL serialisée en localStorage est invalide après reload → traiter comme absente. */
+    var docUrl = p.doc.url;
+    var hasValidUrl = docUrl && typeof docUrl === 'string' && !docUrl.startsWith('blob:');
+    return !hasValidUrl;
+  });
+  if (!toFix.length) return;
+  _gwLog('DOC_UPLOAD_RETRY', { email: myEmail, extra: 'pending=' + toFix.length });
+
+  toFix.forEach(function(post) {
+    (function(p) {
+      _gwLoadDocBlob(p.doc.idbId, function(blob) {
+        if (!blob) {
+          /* Blob absent de l'IDB (autre appareil ou IDB effacé) — impossible de retry */
+          var allPosts = _gwPostRead(myEmail);
+          var idx = allPosts.findIndex(function(x) { return String(x.id) === String(p.id); });
+          if (idx !== -1 && allPosts[idx].doc) {
+            allPosts[idx].doc.status = 'legacy_missing_remote';
+            delete allPosts[idx].doc.idbId;
+            _gwPostWrite(myEmail, allPosts);
+            _gwLog('DOC_UPLOAD_RETRY', { postId: String(p.id), status: 'IDB_MISSING_MARKED_LEGACY' });
+          }
+          return;
+        }
+        _uploadBlobToStorage(
+          p.doc.storagePath, blob,
+          function(url) {
+            var allPosts = _gwPostRead(myEmail);
+            var idx = allPosts.findIndex(function(x) { return String(x.id) === String(p.id); });
+            if (idx !== -1 && allPosts[idx].doc) {
+              allPosts[idx].doc.url           = url;
+              allPosts[idx].doc.status        = 'ready';
+              allPosts[idx].doc.storageProvider = 'firebase';
+              delete allPosts[idx].doc.idbId;
+              _gwPostWrite(myEmail, allPosts);
+            }
+            var dp = DEMO_POSTS.find(function(x) { return String(x.id) === String(p.id); });
+            if (dp && dp.doc) { dp.doc.url = url; dp.doc.status = 'ready'; }
+            _gwLog('DOC_UPLOAD_RETRY_SUCCESS', { postId: String(p.id), status: 'OK', extra: 'path=' + p.doc.storagePath });
+            showToast('Document synchronisé ✓', 'ok');
+          },
+          function(e) {
+            _gwLog('DOC_UPLOAD_RETRY_FAILED', {
+              postId: String(p.id),
+              status: 'STORAGE_ERROR',
+              error: e && (e.code || e.message || String(e))
+            });
+          }
         );
       });
     })(post);
@@ -4305,10 +4371,11 @@ function initApp(user) {
     try { _globalMsgPoll(); } catch(e) {}
   }, 800);
 
-  /* Ré-upload rétroactif des vidéos sans URL Storage (posts anciens ou upload interrompu) */
+  /* Ré-upload rétroactif des médias sans URL Storage (posts anciens ou upload interrompu) */
   setTimeout(function() {
     try { _gwUploadPendingVideos(); } catch(e) {}
     try { _gwUploadPendingOfficialVideos(); } catch(e2) {}
+    try { _gwUploadPendingDocs(); } catch(e3) {}
   }, 6000);
 
   /* Initialise les notifications push (service worker + permission + token FCM).
@@ -6500,13 +6567,16 @@ function _gwCapFirebasePosts(posts) {
     }
     /* Documents : retirer les blob URLs (locales) et idbId avant envoi Firebase —
        les autres utilisateurs ne peuvent pas accéder aux blobs locaux.
-       La vraie URL Storage sera poussée par _finalizePost après upload. */
+       storagePath, storageProvider et status sont CONSERVÉS : ils permettent
+       aux autres appareils de connaître l'état de l'upload et au retry de
+       reconstruire le chemin sans réuploader vers un chemin différent.
+       La vraie URL Storage est poussée par _finalizePost après upload réussi. */
     if (c.doc && typeof c.doc === 'object') {
       c.doc = Object.assign({}, c.doc);
       if (c.doc.url && typeof c.doc.url === 'string' && c.doc.url.startsWith('blob:')) {
         delete c.doc.url;
       }
-      delete c.doc.idbId; /* idbId = référence IndexedDB locale uniquement */
+      delete c.doc.idbId; /* idbId = référence IndexedDB locale, jamais dans Firebase */
     }
     return c;
   });
@@ -6730,11 +6800,24 @@ function _gwPostsMerge(fbKey, fbData) {
       /* DOC — même logique (blob URLs et idbId supprimés avant Firebase push) */
       if (fp.doc && typeof fp.doc === 'object' && local.doc && typeof local.doc === 'object') {
         updated.doc = Object.assign({}, local.doc, fp.doc);
-        if (!updated.doc.url && local.doc.url)     updated.doc.url   = local.doc.url;
-        if (!updated.doc.idbId && local.doc.idbId) updated.doc.idbId = local.doc.idbId;
+        /* Restaurer depuis local si Firebase n'a pas ces champs (push partiel ou ancienne version) */
+        if (!updated.doc.url && local.doc.url)                   updated.doc.url         = local.doc.url;
+        if (!updated.doc.idbId && local.doc.idbId)               updated.doc.idbId       = local.doc.idbId;
+        if (!updated.doc.storagePath && local.doc.storagePath)   updated.doc.storagePath = local.doc.storagePath;
+        /* Rétrocompatibilité : si Firebase a une URL mais pas de status → marquer ready */
+        if (updated.doc.url && !updated.doc.url.startsWith('blob:') && !updated.doc.status) {
+          updated.doc.status = 'ready';
+        }
       }
       merged[key] = updated;
     } else {
+      /* Post venant uniquement de Firebase (user B ou nouvel appareil de A) */
+      var _fpDoc = fp.doc;
+      if (_fpDoc && typeof _fpDoc === 'object' && !_fpDoc.url && !_fpDoc.storagePath && !_fpDoc.status) {
+        /* Ancien post Firebase sans référence Storage → marquer legacy, ne pas supprimer */
+        fp = Object.assign({}, fp);
+        fp.doc = Object.assign({}, _fpDoc, { status: 'legacy_missing_remote' });
+      }
       merged[key] = fp;
     }
   });
@@ -7597,13 +7680,22 @@ function buildPostCard(post) {
 
   /* Document HTML */
   var docHtml = '';
-  if (post.doc && (post.doc.idbId || post.doc.url)) {
+  if (post.doc && post.doc.name) {
     var d     = post.doc;
     var dExt  = d.ext || (d.name ? d.name.split('.').pop().toLowerCase() : 'file');
     var di    = _docIcon(d.name || 'document');
     var dShort= (d.name || 'Document').length > 32 ? (d.name).slice(0, 30) + '…' : (d.name || 'Document');
     var dMb   = d.size ? (d.size / (1024*1024)).toFixed(2) + ' Mo' : '';
     var safeId= String(post.id).replace(/'/g,"\\'");
+    /* Indicateur de statut quand le document n'est pas encore accessible */
+    var _dStatusLabel = '';
+    if (!d.url && !d.idbId) {
+      if (d.status === 'uploading' || d.status === 'failed') {
+        _dStatusLabel = '<div class="post-doc-status post-doc-status--pending">En cours de synchronisation…</div>';
+      } else if (d.status === 'legacy_missing_remote') {
+        _dStatusLabel = '<div class="post-doc-status post-doc-status--unavailable">Non disponible</div>';
+      }
+    }
 
     docHtml =
       '<div class="post-doc-card" onclick="_openPostDoc(\'' + safeId + '\')">' +
@@ -7611,11 +7703,12 @@ function buildPostCard(post) {
         '<div class="post-doc-info">' +
           '<div class="post-doc-name">' + escHtml(dShort) + '</div>' +
           '<div class="post-doc-meta">' + escHtml(dExt.toUpperCase()) + (dMb ? ' · ' + dMb : '') + '</div>' +
+          _dStatusLabel +
         '</div>' +
         '<div class="post-doc-open"><i class="fas fa-chevron-right"></i></div>' +
       '</div>';
 
-    /* Si pas d'URL valide → charge depuis IndexedDB dès le rendu */
+    /* Si pas d'URL valide mais idbId disponible → pré-charge depuis IndexedDB */
     if (!d.url && d.idbId) {
       (function(pid) {
         _gwLoadDocBlob(d.idbId, function(blob) {
@@ -13161,23 +13254,53 @@ function _downloadDocViewer() {
   document.body.appendChild(a); a.click(); a.remove();
 }
 
-/* Ouvre le doc d'un post (charge depuis IndexedDB si besoin) */
+/* Ouvre le doc d'un post — sources par priorité :
+   1. URL Storage permanente (tous appareils)
+   2. IndexedDB (auteur, cet appareil)
+   3. Blob URL de session (juste publié, avant reload)
+   4. Message adapté selon status si aucune source disponible */
 function _openPostDoc(postId) {
   var post = DEMO_POSTS.find(function(p) { return String(p.id) === String(postId); });
   if (!post || !post.doc) return;
 
-  var d = post.doc;
-  if (d.url) {
-    _openDocViewer(d.url, d.name, d.ext || (d.name.split('.').pop().toLowerCase()));
+  var d    = post.doc;
+  var _ext = d.ext || (d.name ? d.name.split('.').pop().toLowerCase() : 'file');
+
+  /* 1. URL Storage permanente → ouverture directe */
+  if (d.url && !d.url.startsWith('blob:')) {
+    _openDocViewer(d.url, d.name, _ext);
     return;
   }
+  /* 2. IndexedDB disponible (auteur sur cet appareil) */
   if (d.idbId) {
     _gwLoadDocBlob(d.idbId, function(blob) {
-      if (!blob) { showToast('Document introuvable', 'err'); return; }
+      if (!blob) {
+        showToast(
+          (d.status === 'failed' || d.status === 'uploading')
+            ? 'Document en attente de synchronisation — reconnectez-vous pour réessayer'
+            : 'Document introuvable localement',
+          'warn'
+        );
+        return;
+      }
       var bUrl = URL.createObjectURL(blob);
-      d.url = bUrl; /* cache en mémoire */
-      _openDocViewer(bUrl, d.name, d.ext || (d.name.split('.').pop().toLowerCase()));
+      d.url = bUrl; /* cache en mémoire pour la session courante */
+      _openDocViewer(bUrl, d.name, _ext);
     });
+    return;
+  }
+  /* 3. Blob URL de session (toujours valide avant reload) */
+  if (d.url && d.url.startsWith('blob:')) {
+    _openDocViewer(d.url, d.name, _ext);
+    return;
+  }
+  /* 4. Aucune source disponible */
+  if (d.status === 'legacy_missing_remote') {
+    showToast('Document non disponible (publication ancienne sans synchronisation Cloud)', 'err');
+  } else if (d.status === 'failed' || d.status === 'uploading') {
+    showToast('Document en cours de synchronisation — disponible bientôt', 'warn');
+  } else {
+    showToast('Document non disponible sur cet appareil', 'err');
   }
 }
 
@@ -16695,7 +16818,11 @@ function publierPost() {
   /* Capturé maintenant : l'upload réel est désormais différé après le scan
      NSFW / la confirmation d'auth, et _pickedDoc sera remis à null avant
      que ce code ne s'exécute (reset du formulaire, plus bas). */
-  var _docExtSnapshot = _pickedDoc && _pickedDoc.type;
+  var _docExtSnapshot        = _pickedDoc && _pickedDoc.type;
+  var _docMimeSnapshot       = _pickedDoc && _pickedDoc.file && _pickedDoc.file.type || '';
+  var _docStoragePathSnapshot = _pickedDoc
+    ? ('post_docs/' + postId + (_pickedDoc.type ? '.' + _pickedDoc.type : '.bin'))
+    : null;
 
   /* Pour les vidéos régulières : type et catégorie obligatoires */
   if (_pickedVideo && (_pickedVideo.videoType || 'video') === 'video' && !_pubVidMeta) {
@@ -16728,9 +16855,17 @@ function publierPost() {
         poster:    _pickedVideo.poster   || '' }
     : null;
 
-  /* Document : idbId + url courante + métadonnées */
+  /* Document : idbId + url courante + métadonnées + storagePath pour retry */
   var docData = _pickedDoc
-    ? { idbId: docIdbId, url: _pickedDoc.url, name: _pickedDoc.name, size: _pickedDoc.size, ext: _pickedDoc.type }
+    ? { idbId:           docIdbId,
+        url:             _pickedDoc.url,
+        name:            _pickedDoc.name,
+        size:            _pickedDoc.size,
+        ext:             _pickedDoc.type,
+        mimeType:        _docMimeSnapshot,
+        storagePath:     _docStoragePathSnapshot,
+        storageProvider: 'firebase',
+        status:          'uploading' }
     : null;
 
   /* ── Si un post est cité (doQuotePost) → type quote ── */
@@ -16869,12 +17004,16 @@ function publierPost() {
     }
     if (postToStore.doc) {
       if (finalDocUrl) {
-        /* URL Storage permanente — accessible par tous les utilisateurs */
-        postToStore.doc.url = finalDocUrl;
-        if (newPost.doc) newPost.doc.url = finalDocUrl;
-        delete postToStore.doc.idbId; /* idbId inutile si Storage URL disponible */
+        /* Upload réussi : URL Storage permanente accessible par tous les utilisateurs */
+        postToStore.doc.url    = finalDocUrl;
+        postToStore.doc.status = 'ready';
+        if (newPost.doc) { newPost.doc.url = finalDocUrl; newPost.doc.status = 'ready'; }
+        delete postToStore.doc.idbId; /* idbId inutile quand l'URL Storage est disponible */
       } else {
-        delete postToStore.doc.url; /* blob URL non sérialisable */
+        /* Upload échoué : supprimer la blob URL (non sérialisable), garder l'idbId
+           et storagePath pour que _gwUploadPendingDocs() puisse retenter au prochain démarrage */
+        delete postToStore.doc.url;
+        postToStore.doc.status = 'failed';
       }
     }
     persistNewPost(postToStore);
@@ -16962,15 +17101,23 @@ function publierPost() {
       _doVidUpload(videoBlob);
     }
     if (docBlob && _gwFbStorage) {
-      var _dExt = _docExtSnapshot ? ('.' + _docExtSnapshot) : '.bin';
-      _uploadBlobToStorage('post_docs/' + postId + _dExt, docBlob,
+      /* _docStoragePathSnapshot garantit que le retry utilisera exactement le même chemin */
+      _uploadBlobToStorage(_docStoragePathSnapshot, docBlob,
         function(url) {
           _uploadedDocUrl = url;
           showToast('Document synchronisé ✓', 'ok');
           _onUploadDone();
         },
-        function() {
-          /* Échec upload — le doc reste accessible localement via IndexedDB */
+        function(e) {
+          /* Échec upload — blob conservé en IndexedDB, status 'failed' posé par _finalizePost.
+             _gwUploadPendingDocs() retentera au prochain démarrage avec le même storagePath. */
+          _gwLog('DOC_UPLOAD_FAILED', {
+            postId: String(postId),
+            status: 'STORAGE_ERROR',
+            error: e && (e.code || e.message || String(e)),
+            extra: 'path=' + _docStoragePathSnapshot
+          });
+          showToast('⚠️ Document non synchronisé — sera renvoyé automatiquement', 'warn');
           _onUploadDone();
         }
       );
