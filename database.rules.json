@@ -67,12 +67,12 @@
       "post_videos": {
         ".read":  true,
         "$postId": {
-          ".write": "auth != null"
+          ".write": "auth != null && (auth.token.gw_admin === true || !$postId.matches(/^off_/))"
         }
       },
       "official_posts": {
         ".read":  true,
-        ".write": "auth != null"
+        ".write": "auth != null && auth.token.gw_admin === true"
       },
       "likes": {
         ".read":  true,

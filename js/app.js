@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-18';
+  var CURRENT_VERSION = '6e5587c-19';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -29569,7 +29569,20 @@ function _admSetup() {
     _admSessionToken = res.data.token;
     _adminUser = res.data.user;
     showToast('Compte admin créé ✓', 'ok');
-    setTimeout(function() { _admOpenPanel(); }, 800);
+    /* PERM-1 : attendre la confirmation Firebase avant d'ouvrir le panel
+       pour éviter un PERMISSION_DENIED immédiat sur les écritures officielles */
+    if (res.data.adminFirebaseToken && typeof firebase !== 'undefined' && firebase.auth) {
+      firebase.auth().signInWithCustomToken(res.data.adminFirebaseToken)
+        .then(function(cred) {
+          if (cred && cred.user) _gwLog('ADMIN_FB_SIGNIN_OK', { uid: cred.user.uid });
+        })
+        .catch(function(e) {
+          _gwLog('ADMIN_FB_SIGNIN_FAILED', { error: e && (e.code || e.message || String(e)) });
+        })
+        .then(function() { _admOpenPanel(); });
+    } else {
+      setTimeout(function() { _admOpenPanel(); }, 800);
+    }
   }).catch(function() {
     if (btn) { btn.disabled = false; btn.textContent = 'Créer le compte admin'; }
     showToast('Erreur lors de la création', 'err');
@@ -29702,7 +29715,20 @@ function _admLogin() {
     _adminUser = targetUser;
     _admLog('LOGIN', 'Admin panel · rôle : ' + targetUser.role);
     showToast('Bienvenue, ' + targetUser.nom + ' !', 'ok');
-    setTimeout(function() { _admOpenPanel(); }, 600);
+    /* PERM-1 : attendre la confirmation Firebase avant d'ouvrir le panel
+       pour éviter un PERMISSION_DENIED immédiat sur les écritures officielles */
+    if (res.data.adminFirebaseToken && typeof firebase !== 'undefined' && firebase.auth) {
+      firebase.auth().signInWithCustomToken(res.data.adminFirebaseToken)
+        .then(function(cred) {
+          if (cred && cred.user) _gwLog('ADMIN_FB_SIGNIN_OK', { uid: cred.user.uid });
+        })
+        .catch(function(e) {
+          _gwLog('ADMIN_FB_SIGNIN_FAILED', { error: e && (e.code || e.message || String(e)) });
+        })
+        .then(function() { _admOpenPanel(); });
+    } else {
+      setTimeout(function() { _admOpenPanel(); }, 600);
+    }
   }).catch(function() {
     if (btn) { btn.disabled = false; btn.textContent = 'Se connecter'; }
     _loginErr('Erreur réseau, réessayez.');
@@ -29715,6 +29741,12 @@ function _admLogout() {
     _admLog('LOGOUT', 'Admin panel');
     _adminUser = null;
     _admSessionToken = null;
+    /* PERM-1 : révoquer la session Firebase admin (gw_admin claim) et revenir anonyme */
+    if (typeof firebase !== 'undefined' && firebase.auth) {
+      firebase.auth().signOut()
+        .then(function() { return firebase.auth().signInAnonymously(); })
+        .catch(function(e) { _gwLog('ADMIN_FB_SIGNOUT_FAILED', { error: e && e.message }); });
+    }
     goTo('screen-login');
   }
 }

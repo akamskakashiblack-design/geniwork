@@ -7,9 +7,10 @@
    Body: { nom, email, password }
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbGet, dbSet } = require('./_lib/fbrest');
+const { dbGet, dbSet, emailKey } = require('./_lib/fbrest');
 const { hashPwd } = require('./_lib/pwd');
 const { sign } = require('./_lib/session');
+const { signAdminFirebaseToken } = require('./_lib/customToken');
 
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -44,7 +45,15 @@ module.exports = async function handler(req, res) {
     const user = { email, nom, role: 'Super Admin' };
     const token = sign(user);
 
-    res.status(200).json({ ok: true, token, user });
+    /* PERM-1 : émettre un Firebase Custom Token avec claim gw_admin. */
+    let adminFirebaseToken = null;
+    try {
+      adminFirebaseToken = signAdminFirebaseToken(emailKey(email));
+    } catch (e) {
+      console.warn('[Geniwork Admin] adminFirebaseToken non émis (setup):', e.message);
+    }
+
+    res.status(200).json({ ok: true, token, adminFirebaseToken, user });
   } catch (err) {
     console.error('[Geniwork Admin] erreur setup:', err.message);
     res.status(500).json({ error: err.message });

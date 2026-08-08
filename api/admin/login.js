@@ -10,6 +10,7 @@
 const { dbGet, dbSet, dbUpdate, emailKey } = require('./_lib/fbrest');
 const { verifyPwd } = require('./_lib/pwd');
 const { sign } = require('./_lib/session');
+const { signAdminFirebaseToken } = require('./_lib/customToken');
 
 const MAX_ATTEMPTS = 5;
 const LOCK_MS = 60 * 1000;
@@ -117,7 +118,17 @@ module.exports = async function handler(req, res) {
     }
 
     const token = sign(target);
-    res.status(200).json({ ok: true, token, user: target });
+
+    /* PERM-1 : émettre un Firebase Custom Token avec claim gw_admin pour que
+       les règles RTDB puissent vérifier auth.token.gw_admin === true. */
+    let adminFirebaseToken = null;
+    try {
+      adminFirebaseToken = signAdminFirebaseToken(emailKey(email));
+    } catch (e) {
+      console.warn('[Geniwork Admin] adminFirebaseToken non émis:', e.message);
+    }
+
+    res.status(200).json({ ok: true, token, adminFirebaseToken, user: target });
   } catch (err) {
     console.error('[Geniwork Admin] erreur login:', err.message);
     res.status(500).json({ error: err.message });
