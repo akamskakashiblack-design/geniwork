@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-15';
+  var CURRENT_VERSION = '6e5587c-16';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -1030,6 +1030,7 @@ function _gwUploadPendingOfficialVideos() {
               allB[idxB].video.cloudflareVideoId = cfId;
               allB[idxB].video.videoStatus       = 'ready';
               _offSavePosts(allB);
+              _gwDeleteVideoBlob(p.video.idbId); /* RR-03 : blob IDB orphelin supprimé après recovery URL — miroir CAS C L.1124 */
             }
             var vElB = document.getElementById('off-fv-' + p.id);
             if (vElB && !vElB.src) vElB.src = cachedUrl;
@@ -35450,6 +35451,7 @@ function _admPublishOfficialShort() {
         }
         /* Phase 2 : compléter le short en place avec URL + cfId (OV-01) */
         _gwVidUrlCache[shortId] = url;
+        try { localStorage.setItem('gw_vurl_' + shortId, url); } catch(e2) {} /* RR-01 : SHB-04 actif même si crash avant _offSavePosts */
         var _allSP = _offGetPosts();
         var _idxSP = _allSP.findIndex(function(x) { return String(x.id) === String(shortId); });
         if (_idxSP !== -1) {
