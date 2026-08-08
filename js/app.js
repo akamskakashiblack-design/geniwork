@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-17';
+  var CURRENT_VERSION = '6e5587c-18';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -827,6 +827,11 @@ function _gwUploadPendingVideos() {
    Backoff : immédiat → 2 s → 5 s → 10 s (abandon + log après 3 échecs).
    Idempotent : .set() sur le même path produit toujours le même résultat. ── */
 function _gwPostVideoFbWriteWithRetry(postId, data, attempt) {
+  /* SEC-01 : si le post officiel a été supprimé dans un autre onglet (SHB-02),
+     abandonner silencieusement pour ne pas recréer gw/post_videos/<id> après OV-08 .remove() */
+  if (String(postId).indexOf('off_') === 0) {
+    try { if (localStorage.getItem('gw_off_del_' + postId)) return; } catch(e) {}
+  }
   var _delays = [0, 2000, 5000, 10000];
   if (!_gwFbReady || !_gwFbDB) {
     if (attempt < 3) {
@@ -34822,6 +34827,7 @@ function _admPublishOfficial() {
       function(url, cfMeta) {
         /* Phase 2 : compléter le post en place avec URL + cfId (OV-01) */
         _gwVidUrlCache[_offPostId] = url;
+        try { localStorage.setItem('gw_vurl_' + _offPostId, url); } catch(e2) {} /* SEC-03 : SHB-04 actif pour post vidéo non-Short — symétrique de RR-01 L.35455 */
         _hideVideoProgress();
         var _allP = _offGetPosts();
         var _idxP = _allP.findIndex(function(x) { return String(x.id) === String(_offPostId); });
