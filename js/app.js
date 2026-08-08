@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-16';
+  var CURRENT_VERSION = '6e5587c-17';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -34340,7 +34340,8 @@ function _offSavePosts(list) {
   if (!_gwFbSkip && _gwFbDB && _gwFbReady) {
     /* Strip les images base64 trop lourdes avant d'écrire dans Firebase
        (évite le dépassement de la limite 4 Mo qui ferait échouer le write) */
-    var fbList = list.slice(0, 30).map(function(p) {
+    if (list.length > 100) _gwLog('OFFICIAL_POSTS_FB_TRUNCATED', { total: list.length, cap: 100 }); /* OV-07 */
+    var fbList = list.slice(0, 100).map(function(p) {                                               /* OV-07 : cap porté de 30 à 100 */
       var copy = Object.assign({}, p);
       if (copy.images) {
         copy.images = copy.images.map(function(img) {
@@ -34351,7 +34352,7 @@ function _offSavePosts(list) {
       return copy;
     });
     _gwFbDB.ref('gw/official_posts').set(fbList).catch(function(e) {
-      console.error('[GW Firebase] ❌ official_posts →', e.message || e);
+      _gwLog('OFFICIAL_POSTS_FB_WRITE_FAILED', { error: e && (e.message || String(e)) }); /* OV-06 */
     });
   }
 }
@@ -35637,6 +35638,12 @@ function _admDeleteOfficialPost(id) {
   /* SHB-08 : supprimer la clé gw_vurl_<id> orpheline en localStorage */
   try { localStorage.removeItem('gw_vurl_' + id); } catch(e) {}
   _offSavePosts(allOff.filter(function(p){ return p.id !== id; }));
+  /* OV-08 : nettoyer gw/post_videos/<id> dans Firebase (miroir du delete utilisateur L.8773) */
+  if (_gwFbDB && !_gwFbSkip) {
+    _gwFbDB.ref('gw/post_videos/' + id).remove().catch(function(e) {
+      _gwLog('OFFICIAL_POST_VIDEO_FB_DELETE_FAILED', { postId: String(id), error: e && e.message });
+    });
+  }
   _admLog('DELETE_OFFICIAL_POST', id);
   showToast('Post supprimé', 'ok');
   /* Rebuild le feed pour retirer le post du pool */
