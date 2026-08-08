@@ -7278,8 +7278,29 @@ function _gwPostsMerge(fbKey, fbData) {
     if (!existing) {
       p.likers = loadPostLikers(p.id);
       DEMO_POSTS.push(p);
-    } else if (p.video && existing.video && p.video.url && !existing.video.url) {
-      existing.video.url = p.video.url;
+    } else {
+      /* Vidéo : URL Firebase définitive → DEMO_POSTS */
+      if (p.video && existing.video && p.video.url && !existing.video.url) {
+        existing.video.url = p.video.url;
+      }
+      /* IMG-SYNC : images[] Firebase arrive avec URLs Storage définitives alors que
+         DEMO_POSTS n'a encore que des données vides (skeleton push) ou base64 locales.
+         Ne remplace jamais des URLs Storage existantes par du vide ou du base64. */
+      if (p.images && p.images.length > 0) {
+        var _hasStorageUrls = p.images.some(function(u) {
+          return u && typeof u === 'string' && !u.startsWith('data:');
+        });
+        var _existingEmpty = !existing.images || !existing.images.length;
+        var _existingOnlyB64 =
+          existing.images &&
+          existing.images.length > 0 &&
+          existing.images.every(function(u) {
+            return u && typeof u === 'string' && u.startsWith('data:');
+          });
+        if (_hasStorageUrls && (_existingEmpty || _existingOnlyB64)) {
+          existing.images = p.images;
+        }
+      }
     }
   });
 
