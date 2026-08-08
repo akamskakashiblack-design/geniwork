@@ -8,7 +8,7 @@
    version courante avec celle en localStorage et force un rechargement
    si elles diffèrent. */
 (function() {
-  var CURRENT_VERSION = '6e5587c-13';
+  var CURRENT_VERSION = '6e5587c-15';
   try {
     var stored = localStorage.getItem('_gw_js_version');
     if (stored && stored !== CURRENT_VERSION) {
@@ -79,6 +79,14 @@ var _gwFbStorage = null;   /* Instance Firebase Storage (photos/vidéos) */
 var _gwFbReady   = false;  /* true quand Firebase est connecté */
 var _gwFbSkip    = false;  /* Pause les listeners pour éviter les boucles */
 var _gwAppStarted = false; /* true si l'app a déjà été lancée (fast-path ou normal) */
+
+/* ── Verrous upload vidéo (M3.2) ── */
+var _gwPendingVideosUploadRunning = false; /* mutex global : bloque RC-2 (double initApp → double _gwUploadPendingVideos) */
+var _gwPendingVideoLocks = {};             /* verrou par postId : { [postId]: true } — évite MUTEX-1 et MUTEX-2 */
+var _gwOfficialUploadRunning = false;      /* mutex global vidéos officielles : bloque OV-03 (double upload concurrent) */
+var _gwCancelledOfficialShorts = {};       /* SR-04 : shortIds annulés pendant l'upload { [shortId]: true } */
+var _gwShortPublishing = false;            /* SHB-03 : mutex anti-double-clic bouton Publier Short */
+var _GW_UPLOAD_LOCK_TTL = 5 * 60 * 1000; /* SHB-01 : TTL verrou inter-onglets CAS C en ms (5 min) */
 
 /* ── Auth anonyme : les writes Firebase (règles auth != null) échouent
    silencieusement si on écrit avant que signInAnonymously() ait résolu.
@@ -313,8 +321,50 @@ function _gwRetryPendingUpload(postId) {
 
   if (!post.video || !post.video.idbId) { _gwRemovePendingPost(_currentUser.email, postId); return; }
 
+  /* ── Idempotence : si cloudflareVideoId est connu, CF a déjà la vidéo.
+     Ne PAS re-uploader — juste récupérer l'URL et ré-écrire RTDB. ── */
+  var cfId = post.video.cloudflareVideoId;
+  if (cfId) {
+    var cachedUrl = _gwVidUrlCache[post.id] ||
+      (function() { try { return localStorage.getItem('gw_vurl_' + post.id); } catch(e) { return null; } })();
+    if (cachedUrl && !cachedUrl.startsWith('blob:')) {
+      showToast('Vidéo déjà envoyée — synchronisation en cours…', 'ok');
+      _gwPostVideoFbWriteWithRetry(post.id, {
+        url: cachedUrl, cfUid: cfId,
+        thumbnail: post.video.thumbnail || '', dur: post.video.duration || 0
+      }, 1);
+      var _fp = JSON.parse(JSON.stringify(post));
+      _fp.video.url               = cachedUrl;
+      _fp.video.cloudflareVideoId = cfId;
+      _fp.video.videoStatus       = 'ready';
+      persistNewPost(_fp);
+      var _dp = DEMO_POSTS.find(function(p) { return String(p.id) === String(post.id); });
+      if (_dp && _dp.video) { _dp.video.url = cachedUrl; _dp.video.videoStatus = 'ready'; }
+      _gwVidUrlCache[post.id] = cachedUrl;
+      try { renderFeed(_getFeedPosts()); } catch(e){}
+      _gwRemovePendingPost(_currentUser.email, postId);
+      return;
+    }
+    /* cfId connu mais URL introuvable — orphelin CF, pas de re-upload automatique */
+    _gwLog('VIDEO_ORPHAN_DETECTED', {
+      postId: String(postId), cloudflareVideoId: cfId, userId: _currentUser.email,
+      timestamp: new Date().toISOString(), operation: 'RETRY_PENDING_UPLOAD_NO_URL'
+    });
+    showToast('Vidéo en attente de synchronisation — réessayez plus tard', 'warn');
+    return;
+  }
+
+  /* ── Re-upload CF complet (cloudflareVideoId inconnu → CF n'a pas encore la vidéo) ── */
+  /* M3.2 — Mutex par postId : bloque MUTEX-1 (double-clic) + MUTEX-2 croisé */
+  var _retryKey = String(postId);
+  if (_gwPendingVideoLocks[_retryKey]) {
+    _gwLog('VIDEO_MANUAL_RETRY_SKIPPED', { postId: _retryKey, operation: 'ALREADY_RUNNING' });
+    return;
+  }
+  _gwPendingVideoLocks[_retryKey] = true;
   _gwLoadVideoBlob(post.video.idbId, function(blob) {
     if (!blob) {
+      delete _gwPendingVideoLocks[_retryKey];
       showToast('Vidéo introuvable localement — republiez-la', 'err');
       _gwRemovePendingPost(_currentUser.email, postId);
       return;
@@ -323,28 +373,40 @@ function _gwRetryPendingUpload(postId) {
     _cfUploadVideo(blob, post.id,
       function(pct) { _showVideoProgress(pct); },
       function(url, cfMeta) {
-        _gwVidUrlCache[post.id] = url;
-        _hideVideoProgress();
-        showToast('Vidéo envoyée ✓', 'ok');
-        if (_gwFbReady && _gwFbDB) {
-          _gwFbDB.ref('gw/post_videos/' + post.id).set({
-            url: url,
-            cfUid: (cfMeta && cfMeta.uid) || '',
+        try {
+          var _cfIdNew = (cfMeta && cfMeta.uid) || '';
+          _gwVidUrlCache[post.id] = url;
+          try { localStorage.setItem('gw_vurl_' + post.id, url); } catch(e2){}
+          _hideVideoProgress();
+          showToast('Vidéo envoyée ✓', 'ok');
+          _gwPostVideoFbWriteWithRetry(post.id, {
+            url: url, cfUid: _cfIdNew,
             thumbnail: (cfMeta && cfMeta.thumbnail) || '',
             dur: post.video.duration || 0
-          }).catch(function(){});
+          }, 1);
+          var finalPost = JSON.parse(JSON.stringify(post));
+          finalPost.video.url               = url;
+          finalPost.video.cloudflareVideoId = _cfIdNew;
+          finalPost.video.videoStatus       = 'ready';
+          finalPost.video.storageProvider   = 'cloudflare';
+          persistNewPost(finalPost);
+          var dp = DEMO_POSTS.find(function(p) { return String(p.id) === String(post.id); });
+          if (dp && dp.video) {
+            dp.video.url               = url;
+            dp.video.cloudflareVideoId = _cfIdNew;
+            dp.video.videoStatus       = 'ready';
+          } else if (!dp) {
+            DEMO_POSTS.unshift(finalPost);
+          }
+          try { renderFeed(_getFeedPosts()); } catch(e){}
+          _gwRemovePendingPost(_currentUser.email, postId);
+        } finally {
+          delete _gwPendingVideoLocks[_retryKey];
         }
-        var finalPost = JSON.parse(JSON.stringify(post));
-        finalPost.video.url = url;
-        persistNewPost(finalPost);
-        var dp = DEMO_POSTS.find(function(p) { return p.id === finalPost.id; });
-        if (dp) { dp.video = dp.video || {}; dp.video.url = url; }
-        else DEMO_POSTS.unshift(finalPost);
-        try { renderFeed(_getFeedPosts()); } catch(e){}
-        _gwRemovePendingPost(_currentUser.email, postId);
       },
       function() {
         _hideVideoProgress();
+        delete _gwPendingVideoLocks[_retryKey];
         showToast('Échec de l\'envoi — réessayez plus tard', 'err');
       }
     );
@@ -601,49 +663,194 @@ function _gwPlayHLS(videoEl, src) {
    échec réseau lors de la publication.
 ──────────────────────────────────────────────────────────────────────────── */
 function _gwUploadPendingVideos() {
-  if (!_gwFbStorage || !_gwFbDB || !_gwFbReady || !_currentUser) return;
+  /* ── M3.2 — Mutex global : bloque RC-2 (double initApp → double exécution) ── */
+  if (_gwPendingVideosUploadRunning) {
+    _gwLog('VIDEO_PENDING_RETRY_SKIPPED', { operation: 'ALREADY_RUNNING' });
+    return;
+  }
+  if (!_gwFbDB || !_gwFbReady || !_currentUser) return;
   var myEmail = _currentUser.email;
   var postsToFix = DEMO_POSTS.filter(function(p) {
     if (!p || p.ownerEmail !== myEmail) return false;
     if (!p.video || typeof p.video !== 'object' || !p.video.idbId) return false;
-    /* Après reload : les posts avec upload échoué n'ont pas d'URL (blob URLs non persistées en localStorage) */
-    return !p.video.url;
+    /* Exclure uniquement si une URL CF permanente (non-blob) est déjà présente */
+    var vidUrl = p.video.url;
+    var hasValidUrl = vidUrl && typeof vidUrl === 'string' && !vidUrl.startsWith('blob:');
+    return !hasValidUrl;
   });
   if (!postsToFix.length) return;
-  console.log('[GW Storage] 🔄 Ré-upload de', postsToFix.length, 'vidéo(s) en attente…');
+  _gwLog('VIDEO_UPLOAD_RETRY', { email: myEmail, extra: 'pending=' + postsToFix.length });
+
+  _gwPendingVideosUploadRunning = true;
+  var _pendingCount = postsToFix.length;
+  function _donePending() {
+    if (--_pendingCount <= 0) { _gwPendingVideosUploadRunning = false; }
+  }
+
   postsToFix.forEach(function(post) {
-    (function(p) {
-      _gwLoadVideoBlob(p.video.idbId, function(blob) {
-        if (!blob) return;  /* pas en IDB sur cet appareil */
-        _cfUploadVideo(blob, p.id,
-          null,
-          function(url, cfMeta) {
-            console.log('[GW CF] ✅ Vidéo ré-uploadée CF Stream :', p.id, url);
-            p.video.url = url;
-            _gwVidUrlCache[p.id] = url;
-            /* 1. Nœud dédié pour livraison immédiate aux autres appareils */
-            _gwFbDB.ref('gw/post_videos/' + p.id).set({
-              url: url,
-              cfUid: (cfMeta && cfMeta.uid) || '',
-              thumbnail: (cfMeta && cfMeta.thumbnail) || '',
-              dur: p.video.duration || 0
-            }).catch(function(){});
-            /* 2. Met à jour le tableau de posts dans Firebase */
-            var savedPosts = loadPersistedUserPosts(myEmail);
-            var idx = savedPosts.findIndex(function(sp) { return String(sp.id) === String(p.id); });
-            if (idx !== -1) {
-              savedPosts[idx].video.url = url;
-              savePersistedUserPosts(myEmail, savedPosts);
+    /* ── M3.2.3 — Isolation par post : _doneOnce() garantit exactement un appel
+       à _donePending() par post même si une exception synchrone se propage.
+       Le flag _postPendingDone empêche le double appel quand le finally du CAS 1a
+       a déjà décrémenté le compteur avant que le catch externe ne s'exécute. ── */
+    var _postPendingDone = false;
+    function _doneOnce() {
+      if (!_postPendingDone) { _postPendingDone = true; _donePending(); }
+    }
+    try {
+      (function(p) {
+        var cfId = p.video.cloudflareVideoId;
+
+        /* ── Cas 1 : cloudflareVideoId connu → CF possède déjà la vidéo ─────────
+           Ne PAS re-uploader. Récupérer l'URL depuis gw/post_videos ou localStorage,
+           puis ré-écrire le nœud RTDB si manquant. ── */
+        if (cfId) {
+          /* L'URL peut encore être en localStorage (gw_vurl_postId) même si le post
+             local a une blob URL ou rien — elle est écrite dès onSuccess dans _cfUploadVideo */
+          var cachedUrl = _gwVidUrlCache[p.id] ||
+            (function() { try { return localStorage.getItem('gw_vurl_' + p.id); } catch(e) { return null; } })();
+
+          if (cachedUrl && !cachedUrl.startsWith('blob:')) {
+            /* URL récupérable — ré-écrire gw/post_videos et mettre à jour le post */
+            try {
+              _gwLog('VIDEO_RTDB_REWRITE', { postId: String(p.id), cfId: cfId, status: 'URL_FROM_CACHE' });
+              _gwPostVideoFbWriteWithRetry(p.id, {
+                url:       cachedUrl,
+                cfUid:     cfId,
+                thumbnail: p.video.thumbnail || '',
+                dur:       p.video.duration  || 0
+              }, 1);
+              p.video.url        = cachedUrl;
+              p.video.videoStatus = 'ready';
+              _gwVidUrlCache[p.id] = cachedUrl;
+              var _allA = _gwPostRead(myEmail);
+              var _idxA = _allA.findIndex(function(x) { return String(x.id) === String(p.id); });
+              if (_idxA !== -1 && _allA[_idxA].video) {
+                _allA[_idxA].video.url         = cachedUrl;
+                _allA[_idxA].video.videoStatus = 'ready';
+                _gwPostWrite(myEmail, _allA);
+              }
+              var vElA = document.getElementById('fv-' + p.id);
+              if (vElA && (!vElA.src || vElA.src.startsWith('blob:'))) _gwPlayHLS(vElA, cachedUrl);
+              showToast('Vidéo synchronisée ✓', 'ok');
+            } finally {
+              _doneOnce();
             }
-            /* 3. Met à jour le <video> déjà rendu dans le feed */
-            var vEl = document.getElementById('fv-' + p.id);
-            if (vEl && !vEl.src) vEl.src = url;
-          },
-          function() {}  /* échec silencieux — réessayera au prochain démarrage */
-        );
+            return;
+          }
+
+          /* URL introuvable même en localStorage → vidéo orpheline dans CF */
+          _gwLog('VIDEO_ORPHAN_DETECTED', {
+            postId:            String(p.id),
+            cloudflareVideoId: cfId,
+            userId:            myEmail,
+            timestamp:         new Date().toISOString(),
+            operation:         'PENDING_RETRY_NO_URL'
+          });
+          /* Ne pas re-uploader automatiquement — l'URL est peut-être dans gw/post_videos
+             et sera reçue via _onPostVideoArrived. Abandonner ce cycle. */
+          _doneOnce();
+          return;
+        }
+
+        /* ── Cas 2 : pas de cloudflareVideoId → re-upload CF complet ────────── */
+        /* M3.2 — Mutex par postId : bloque MUTEX-2 (double forEach) + MUTEX-1 croisé */
+        var _postKey = String(p.id);
+        if (_gwPendingVideoLocks[_postKey]) {
+          _gwLog('VIDEO_PENDING_POST_SKIPPED', { postId: _postKey, operation: 'ALREADY_RUNNING' });
+          _doneOnce();
+          return;
+        }
+        _gwPendingVideoLocks[_postKey] = true;
+        _gwLoadVideoBlob(p.video.idbId, function(blob) {
+          if (!blob) {
+            delete _gwPendingVideoLocks[_postKey];
+            _doneOnce();
+            return;
+          }
+          _cfUploadVideo(blob, p.id,
+            null,
+            function(url, cfMeta) {
+              try {
+                var _cfIdNew = (cfMeta && cfMeta.uid) || '';
+                _gwLog('VIDEO_UPLOAD_RETRY_SUCCESS', { postId: String(p.id), cfId: _cfIdNew });
+                p.video.url               = url;
+                p.video.cloudflareVideoId = _cfIdNew;
+                p.video.storageProvider   = 'cloudflare';
+                p.video.videoStatus       = 'ready';
+                _gwVidUrlCache[p.id] = url;
+                try { localStorage.setItem('gw_vurl_' + p.id, url); } catch(e2){}
+                _gwPostVideoFbWriteWithRetry(p.id, {
+                  url: url, cfUid: _cfIdNew,
+                  thumbnail: (cfMeta && cfMeta.thumbnail) || '',
+                  dur: p.video.duration || 0
+                }, 1);
+                var savedPosts = _gwPostRead(myEmail);
+                var idx = savedPosts.findIndex(function(sp) { return String(sp.id) === String(p.id); });
+                if (idx !== -1 && savedPosts[idx].video) {
+                  savedPosts[idx].video.url               = url;
+                  savedPosts[idx].video.cloudflareVideoId = _cfIdNew;
+                  savedPosts[idx].video.videoStatus       = 'ready';
+                  _gwPostWrite(myEmail, savedPosts);
+                }
+                var vEl = document.getElementById('fv-' + p.id);
+                if (vEl && (!vEl.src || vEl.src.startsWith('blob:'))) _gwPlayHLS(vEl, url);
+                showToast('Vidéo synchronisée ✓', 'ok');
+              } finally {
+                delete _gwPendingVideoLocks[_postKey];
+                _doneOnce();
+              }
+            },
+            function(e) {
+              _gwLog('VIDEO_UPLOAD_RETRY_FAILED', {
+                postId: String(p.id), status: 'CF_ERROR',
+                error: e && (e.code || e.message || String(e))
+              });
+              delete _gwPendingVideoLocks[_postKey];
+              _doneOnce();
+            }
+          );
+        });
+      })(post);
+    } catch(e) {
+      _gwLog('VIDEO_PENDING_SYNC_ERROR', {
+        postId: String(post && post.id),
+        error: e && (e.code || e.message || String(e))
       });
-    })(post);
+      delete _gwPendingVideoLocks[String(post && post.id)];
+      _doneOnce();
+    }
   });
+}
+
+/* ── Écriture Firebase gw/post_videos avec retry (M3) ─────────────────────────
+   Remplace le pattern .catch(function(){}) pour l'écriture du nœud vidéo.
+   Backoff : immédiat → 2 s → 5 s → 10 s (abandon + log après 3 échecs).
+   Idempotent : .set() sur le même path produit toujours le même résultat. ── */
+function _gwPostVideoFbWriteWithRetry(postId, data, attempt) {
+  var _delays = [0, 2000, 5000, 10000];
+  if (!_gwFbReady || !_gwFbDB) {
+    if (attempt < 3) {
+      setTimeout(function() { _gwPostVideoFbWriteWithRetry(postId, data, attempt + 1); },
+                 _delays[attempt + 1] || 10000);
+    } else {
+      _gwLog('VIDEO_RTDB_WRITE_FAILED', { postId: String(postId), attempt: attempt, status: 'FB_NOT_READY_GIVE_UP' });
+    }
+    return;
+  }
+  _gwFbDB.ref('gw/post_videos/' + String(postId)).set(data)
+    .then(function() {
+      _gwLog('VIDEO_RTDB_WRITE_OK', { postId: String(postId), attempt: attempt });
+    })
+    .catch(function(e) {
+      _gwLog('VIDEO_RTDB_WRITE_FAILED', {
+        postId: String(postId), attempt: attempt,
+        error: e && (e.code || e.message || String(e))
+      });
+      if (attempt < 3) {
+        setTimeout(function() { _gwPostVideoFbWriteWithRetry(postId, data, attempt + 1); },
+                   _delays[attempt + 1] || 10000);
+      }
+    });
 }
 
 /* ── Retry upload des documents dont le Storage a échoué lors de la publication ──
@@ -712,42 +919,242 @@ function _gwUploadPendingDocs() {
   });
 }
 
-/* ── Ré-upload rétroactif des vidéos officielles sans URL Storage ────────────
-   Appelé après login : scanne les posts officiels dont le blob est en IDB
-   mais qui n'ont pas encore d'URL Firebase Storage (publiés avant la MAJ).
+/* ── Verrou inter-onglets pour CAS C (SHB-01) ─────────────────────────────
+   Empêche deux onglets d'uploader le même Short pending simultanément.
+   Le verrou est stocké en localStorage (partagé entre onglets) avec expiration
+   automatique après _GW_UPLOAD_LOCK_TTL ms pour éviter un verrou permanent
+   si un onglet crashe pendant l'upload.
+────────────────────────────────────────────────────────────────────────────── */
+function _gwOfficialAcquireLock(postId) {
+  try {
+    var key = 'gw_off_uplock_' + postId;
+    var raw = localStorage.getItem(key);
+    if (raw) {
+      var lk = JSON.parse(raw);
+      if (lk && lk.ts && (Date.now() - lk.ts) < _GW_UPLOAD_LOCK_TTL) return false; /* verrou actif */
+    }
+    localStorage.setItem(key, JSON.stringify({ ts: Date.now() }));
+    return true;
+  } catch(e) {
+    return true; /* erreur localStorage → laisser passer pour ne pas bloquer la récupération */
+  }
+}
+function _gwOfficialReleaseLock(postId) {
+  try { localStorage.removeItem('gw_off_uplock_' + postId); } catch(e) {}
+}
+
+/* ── Ré-upload rétroactif des vidéos officielles sans URL CF ─────────────────
+   Appelé après login. Idempotent : vérifie cloudflareVideoId avant tout upload.
+   Cas A : cfId + URL valide     → RTDB-only (check défensif, aucun upload CF).
+   Cas B : cfId + URL absente    → cherche cache/localStorage → RTDB-only
+                                   ou VIDEO_ORPHAN_DETECTED si aucune URL.
+   Cas C : pas de cfId           → blob IndexedDB requis → upload CF autorisé.
 ────────────────────────────────────────────────────────────────────────────── */
 function _gwUploadPendingOfficialVideos() {
-  if (!_gwFbStorage || !_gwFbDB || !_gwFbReady) return;
-  /* Seul l'admin / éditeur officiel qui a le blob en IDB peut ré-uploader */
-  var offList  = _offGetPosts();
-  var toFix    = offList.filter(function(p) {
-    return p.video && typeof p.video === 'object' && p.video.idbId && !p.video.url;
+  /* OV-03 : mutex global — bloque les double-appels concurrents */
+  if (_gwOfficialUploadRunning) {
+    _gwLog('VIDEO_OFFICIAL_RETRY_SKIPPED', { operation: 'ALREADY_RUNNING' });
+    return;
+  }
+  if (!_gwFbDB || !_gwFbReady) return;
+  var offList = _offGetPosts();
+  var toFix = offList.filter(function(p) {
+    if (!p || !p.video || typeof p.video !== 'object' || !p.video.idbId) return false;
+    if (p.video.videoStatus === 'orphan') return false;       /* OV-04 : exclu définitivement */
+    if (p.video.videoStatus === 'blob_missing') return false; /* SR-03 : blob IDB absent — non récupérable */
+    if (p.video.videoStatus === 'failed' && (p.video.retryCount || 0) >= 5) return false; /* SHB-10 : borne 5 retries */
+    var vidUrl = p.video.url;
+    var hasValidUrl = vidUrl && typeof vidUrl === 'string' && !vidUrl.startsWith('blob:');
+    return !hasValidUrl;
   });
   if (!toFix.length) return;
-  console.log('[GW Storage] 🔄 Ré-upload de', toFix.length, 'vidéo(s) officielle(s) en attente…');
+  _gwLog('VIDEO_OFFICIAL_UPLOAD_RETRY', { count: toFix.length });
+
+  _gwOfficialUploadRunning = true;
+  var _officialPending = toFix.length;
+  function _doneOfficial() {
+    if (--_officialPending <= 0) { _gwOfficialUploadRunning = false; }
+  }
+
   toFix.forEach(function(post) {
-    (function(p) {
-      _gwLoadVideoBlob(p.video.idbId, function(blob) {
-        if (!blob) return;  /* blob absent sur cet appareil — ignoré */
-        _cfUploadVideo(blob, p.id,
-          null,
-          function(url, cfMeta) {
-            console.log('[GW CF] ✅ Vidéo officielle ré-uploadée CF Stream :', p.id, url);
-            p.video.url = url;
-            _gwVidUrlCache[p.id] = url;
-            _gwFbDB.ref('gw/post_videos/' + p.id).set({ url: url, cfUid: (cfMeta && cfMeta.uid) || '', thumbnail: (cfMeta && cfMeta.thumbnail) || '', dur: p.video.duration || 0 }).catch(function(){});
-            /* Met à jour localStorage */
-            var all = _offGetPosts();
-            var idx = all.findIndex(function(x) { return String(x.id) === String(p.id); });
-            if (idx !== -1) { all[idx].video.url = url; _offSavePosts(all); }
-            /* Met à jour le <video> si déjà rendu */
-            var vEl = document.getElementById('off-fv-' + p.id);
-            if (vEl && !vEl.src) vEl.src = url;
-          },
-          function() {}
-        );
+    var _officialIterDone = false;
+    function _doneOfficialOnce() {
+      if (!_officialIterDone) { _officialIterDone = true; _doneOfficial(); }
+    }
+    try {
+      (function(p) {
+        var vidUrl      = p.video && p.video.url;
+        var hasValidUrl = vidUrl && typeof vidUrl === 'string' && !vidUrl.startsWith('blob:');
+        var cfId        = p.video && p.video.cloudflareVideoId;
+
+        /* ── CAS A : cfId connu + URL valide → RTDB-only (check défensif) ─────── */
+        if (cfId && hasValidUrl) {
+          _gwLog('VIDEO_RTDB_REWRITE', { postId: String(p.id), cfId: cfId, status: 'OFFICIAL_URL_OK' });
+          _gwPostVideoFbWriteWithRetry(p.id, {
+            url:       vidUrl,
+            cfUid:     cfId,
+            thumbnail: p.video.thumbnail || '',
+            dur:       0
+          }, 1);
+          p.video.videoStatus = 'ready';
+          var allA = _offGetPosts();
+          var idxA = allA.findIndex(function(x) { return String(x.id) === String(p.id); });
+          if (idxA !== -1 && allA[idxA].video) {
+            allA[idxA].video.videoStatus = 'ready';
+            _offSavePosts(allA);
+          }
+          _doneOfficialOnce();
+          return;
+        }
+
+        /* ── CAS B : cfId connu + URL absente → chercher dans cache ────────────── */
+        if (cfId && !hasValidUrl) {
+          var cachedUrl = _gwVidUrlCache[String(p.id)] ||
+            (function() { try { return localStorage.getItem('gw_vurl_' + p.id); } catch(e) { return null; } })();
+          if (cachedUrl && !cachedUrl.startsWith('blob:')) {
+            _gwLog('VIDEO_RTDB_REWRITE', { postId: String(p.id), cfId: cfId, status: 'OFFICIAL_URL_FROM_CACHE' });
+            _gwPostVideoFbWriteWithRetry(p.id, {
+              url:       cachedUrl,
+              cfUid:     cfId,
+              thumbnail: p.video.thumbnail || '',
+              dur:       0
+            }, 1);
+            p.video.url               = cachedUrl;
+            p.video.cloudflareVideoId = cfId;
+            p.video.videoStatus       = 'ready';
+            _gwVidUrlCache[String(p.id)] = cachedUrl;
+            var allB = _offGetPosts();
+            var idxB = allB.findIndex(function(x) { return String(x.id) === String(p.id); });
+            if (idxB !== -1 && allB[idxB].video) {
+              allB[idxB].video.url               = cachedUrl;
+              allB[idxB].video.cloudflareVideoId = cfId;
+              allB[idxB].video.videoStatus       = 'ready';
+              _offSavePosts(allB);
+            }
+            var vElB = document.getElementById('off-fv-' + p.id);
+            if (vElB && !vElB.src) vElB.src = cachedUrl;
+            _doneOfficialOnce();
+            return;
+          }
+          /* cfId connu mais aucune URL trouvable → marquer orphelin (OV-04) */
+          _gwLog('VIDEO_ORPHAN_DETECTED', {
+            postId:            String(p.id),
+            cloudflareVideoId: cfId,
+            operation:         'OFFICIAL_PENDING_NO_URL'
+          });
+          var allOrph = _offGetPosts();
+          var idxOrph = allOrph.findIndex(function(x) { return String(x.id) === String(p.id); });
+          if (idxOrph !== -1 && allOrph[idxOrph].video) {
+            allOrph[idxOrph].video.videoStatus = 'orphan';
+            _offSavePosts(allOrph);
+            _gwLog('VIDEO_ORPHAN_MARKED', { postId: String(p.id), cloudflareVideoId: cfId });
+          }
+          _doneOfficialOnce();
+          return;
+        }
+
+        /* ── CAS C : pas de cfId → blob IndexedDB requis → upload CF autorisé ─── */
+        /* SHB-01 : verrou inter-onglets — évite deux onglets uploadant le même Short */
+        if (!_gwOfficialAcquireLock(String(p.id))) {
+          _gwLog('VIDEO_OFFICIAL_LOCK_SKIPPED', { postId: String(p.id) });
+          _doneOfficialOnce();
+          return;
+        }
+        /* SHB-04 : URL CF déjà en localStorage (crash après succès CF avant onSuccess) → pas de re-upload */
+        var _recUrl = null;
+        try { _recUrl = localStorage.getItem('gw_vurl_' + p.id); } catch(e) {}
+        if (_recUrl && !_recUrl.startsWith('blob:')) {
+          _gwLog('VIDEO_OFFICIAL_URL_RECOVERED', { postId: String(p.id), source: 'gw_vurl_' });
+          _gwVidUrlCache[String(p.id)] = _recUrl;
+          _gwPostVideoFbWriteWithRetry(p.id, {
+            url: _recUrl, cfUid: p.video.cloudflareVideoId || '',
+            thumbnail: p.video.thumbnail || '', dur: 0
+          }, 1);
+          var allRec = _offGetPosts();
+          var idxRec = allRec.findIndex(function(x) { return String(x.id) === String(p.id); });
+          if (idxRec !== -1 && allRec[idxRec].video) {
+            allRec[idxRec].video.url         = _recUrl;
+            allRec[idxRec].video.videoStatus = 'ready';
+            delete allRec[idxRec].video.retryCount;
+            _offSavePosts(allRec);
+            _gwDeleteVideoBlob(p.video.idbId);
+          }
+          _gwOfficialReleaseLock(String(p.id));
+          _doneOfficialOnce();
+          return;
+        }
+        _gwLoadVideoBlob(p.video.idbId, function(blob) {
+          if (!blob) {
+            /* SR-03 : blob IDB absent → marquer blob_missing pour ne plus retenter */
+            _gwLog('VIDEO_OFFICIAL_BLOB_MISSING', { postId: String(p.id), idbId: p.video.idbId });
+            var allBM = _offGetPosts();
+            var idxBM = allBM.findIndex(function(x) { return String(x.id) === String(p.id); });
+            if (idxBM !== -1 && allBM[idxBM].video) {
+              allBM[idxBM].video.videoStatus = 'blob_missing';
+              _offSavePosts(allBM);
+              _gwLog('VIDEO_OFFICIAL_BLOB_MISSING_MARKED', { postId: String(p.id), idbId: p.video.idbId });
+            }
+            _gwOfficialReleaseLock(String(p.id)); /* SHB-01 */
+            _doneOfficialOnce();
+            return;
+          }
+          _cfUploadVideo(blob, p.id, null,
+            function(url, cfMeta) {
+              var newCfId = (cfMeta && cfMeta.uid) || '';
+              _gwLog('VIDEO_OFFICIAL_UPLOAD_SUCCESS', { postId: String(p.id), cfId: newCfId });
+              p.video.url               = url;
+              p.video.cloudflareVideoId = newCfId;
+              p.video.videoStatus       = 'ready';
+              _gwVidUrlCache[String(p.id)] = url;
+              try { localStorage.setItem('gw_vurl_' + p.id, url); } catch(e2) {}
+              _gwPostVideoFbWriteWithRetry(p.id, {
+                url:       url,
+                cfUid:     newCfId,
+                thumbnail: (cfMeta && cfMeta.thumbnail) || p.video.thumbnail || '',
+                dur:       0
+              }, 1);
+              var allC = _offGetPosts();
+              var idxC = allC.findIndex(function(x) { return String(x.id) === String(p.id); });
+              if (idxC !== -1 && allC[idxC].video) {
+                allC[idxC].video.url               = url;
+                allC[idxC].video.cloudflareVideoId = newCfId;
+                allC[idxC].video.videoStatus       = 'ready';
+                delete allC[idxC].video.retryCount; /* SHB-10 : succès → réinitialiser */
+                _offSavePosts(allC);
+                _gwDeleteVideoBlob(p.video.idbId);  /* SR-02 */
+              }
+              var vElC = document.getElementById('off-fv-' + p.id);
+              if (vElC && !vElC.src) vElC.src = url;
+              _gwOfficialReleaseLock(String(p.id)); /* SHB-01 */
+              _doneOfficialOnce();
+            },
+            function(e) {
+              _gwLog('VIDEO_OFFICIAL_UPLOAD_FAILED', {
+                postId: String(p.id),
+                error:  e && (e.code || e.message || String(e))
+              });
+              p.video.videoStatus = 'failed';
+              var allF = _offGetPosts();
+              var idxF = allF.findIndex(function(x) { return String(x.id) === String(p.id); });
+              if (idxF !== -1 && allF[idxF].video) {
+                allF[idxF].video.videoStatus = 'failed';
+                allF[idxF].video.retryCount  = (allF[idxF].video.retryCount || 0) + 1; /* SHB-10 */
+                _offSavePosts(allF);
+              }
+              _gwOfficialReleaseLock(String(p.id)); /* SHB-01 */
+              _doneOfficialOnce();
+            }
+          );
+        });
+      })(post);
+    } catch(e) {
+      _gwLog('VIDEO_OFFICIAL_SYNC_ERROR', {
+        postId: String(post && post.id),
+        error:  e && (e.message || String(e))
       });
-    })(post);
+      _gwOfficialReleaseLock(String(post && post.id)); /* SHB-01 : libérer même en cas d'exception */
+      _doneOfficialOnce();
+    }
   });
 }
 
@@ -1214,10 +1621,18 @@ function _gwFbSyncStart() {
       /* Posts officiels (IDs commençant par 'off_') */
       if (String(pid).indexOf('off_') === 0) {
         var offList = _offGetPosts();
-        var offPost = offList.find(function(x) { return String(x.id) === String(pid); });
-        if (offPost && offPost.video && typeof offPost.video === 'object') {
-          offPost.video.url = data.url;
-          try { localStorage.setItem('gw_official_posts', JSON.stringify(offList)); } catch(e2){}
+        var offIdx = offList.findIndex(function(x) { return String(x.id) === String(pid); });
+        if (offIdx !== -1 && offList[offIdx].video && typeof offList[offIdx].video === 'object') {
+          var _offVidRef = offList[offIdx].video;
+          _offVidRef.url = data.url;
+          /* SHB-06 : mettre à jour videoStatus → ready quand une URL valide est reçue */
+          if (_offVidRef.videoStatus === 'uploading' || _offVidRef.videoStatus === 'failed') {
+            _offVidRef.videoStatus = 'ready';
+          }
+          /* SHB-06 : utiliser _offSavePosts (quota + Firebase) au lieu d'écriture directe localStorage */
+          _offSavePosts(offList);
+          /* SHB-06 : nettoyer le blob IDB maintenant que l'URL est disponible */
+          if (_offVidRef.idbId) _gwDeleteVideoBlob(_offVidRef.idbId);
           var offVEl = document.getElementById('off-fv-' + pid);
           if (offVEl && (!offVEl.src || offVEl.src.startsWith('blob:'))) {
             offVEl.src = data.url;
@@ -2937,7 +3352,25 @@ function _gwFbPreloadAndStart() {
 
     /* ── Publications officielles ── */
     var offPosts = snaps[3].val();
-    if (offPosts) try { localStorage.setItem('gw_official_posts', JSON.stringify(offPosts)); } catch(e){}
+    if (offPosts) {
+      /* SHB-05 : normaliser Firebase en tableau + préserver les posts pending locaux absents de Firebase.
+         Si _offSavePosts (Phase 1) a réussi en localStorage mais échoué vers Firebase,
+         la prochaine connexion ne doit pas écraser et perdre le Short pending local. */
+      var _fbOffArr = Array.isArray(offPosts) ? offPosts :
+        (typeof offPosts === 'object' ? Object.values(offPosts).filter(Boolean) : []);
+      var _localOffRaw = null;
+      try { _localOffRaw = JSON.parse(localStorage.getItem('gw_official_posts')); } catch(e2) {}
+      var _localOffArr = Array.isArray(_localOffRaw) ? _localOffRaw : [];
+      var _fbOffIds = {};
+      _fbOffArr.forEach(function(p) { if (p && p.id) _fbOffIds[String(p.id)] = true; });
+      /* Conserver uniquement les posts uploading présents localement mais absents de Firebase */
+      var _localPending = _localOffArr.filter(function(p) {
+        return p && p.id && !_fbOffIds[String(p.id)] &&
+               p.video && p.video.videoStatus === 'uploading';
+      });
+      var _mergedOff = _localPending.concat(_fbOffArr);
+      try { localStorage.setItem('gw_official_posts', JSON.stringify(_mergedOff)); } catch(e) {}
+    }
 
     /* ── Marketplace ── */
     var mk = snaps[4].val();
@@ -13424,7 +13857,11 @@ function _vsBuildList() {
   });
   _offGetPosts().forEach(function(p) {
     if (!p || !p.video || typeof p.video !== 'object') return;
-    if (p.video.videoType !== 'short' || !(p.video.url || p.video.idbId) || seenIds[String(p.id)]) return;
+    if (p.video.videoType !== 'short') return;
+    /* SHB-07 : exclure les états définitivement inutilisables du player */
+    var _pvs = p.video.videoStatus;
+    if (_pvs === 'orphan' || _pvs === 'blob_missing') return;
+    if (!(p.video.url || p.video.idbId) || seenIds[String(p.id)]) return;
     seenIds[String(p.id)] = true;
     result.push({ id: p.id, author: 'Geniwork', role: 'Officiel',
                   at: p.publishedAt ? new Date(p.publishedAt).getTime() : 0,
@@ -17001,6 +17438,20 @@ function publierPost() {
       } else {
         delete postToStore.video.url;
       }
+      /* Propager cloudflareVideoId, storageProvider et videoStatus depuis newPost →
+         postToStore. Ces champs sont posés dans onSuccess/onFail de _cfUploadVideo
+         et doivent être persistés dans localStorage + Firebase via persistNewPost. */
+      if (newPost.video) {
+        if (newPost.video.cloudflareVideoId) {
+          postToStore.video.cloudflareVideoId = newPost.video.cloudflareVideoId;
+          postToStore.video.storageProvider   = 'cloudflare';
+        }
+        if (newPost.video.videoStatus) {
+          postToStore.video.videoStatus = newPost.video.videoStatus;
+        } else if (!finalVideoUrl) {
+          postToStore.video.videoStatus = 'failed';
+        }
+      }
     }
     if (postToStore.doc) {
       if (finalDocUrl) {
@@ -17076,23 +17527,32 @@ function publierPost() {
           function(url, cfMeta) {
             _uploadedVideoUrl = url;
             _gwVidUrlCache[postId] = url;
+            try { localStorage.setItem('gw_vurl_' + postId, url); } catch(e2){}
             _showVideoProgress(100, 'Vidéo envoyée ✓');
             setTimeout(function() { _hideVideoProgress(); }, 800);
-            if (_gwFbReady && _gwFbDB) {
-              _gwFbDB.ref('gw/post_videos/' + postId).set({
-                url: url,
-                cfUid: (cfMeta && cfMeta.uid) || '',
-                thumbnail: (cfMeta && cfMeta.thumbnail) || '',
-                dur: newPost.video ? (newPost.video.duration || 0) : 0
-              }).catch(function(){});
+            /* Stocker cloudflareVideoId dans newPost.video AVANT _finalizePost —
+               permet le retry idempotent si RTDB ou le post-write échoue ensuite */
+            if (newPost.video && cfMeta && cfMeta.uid) {
+              newPost.video.cloudflareVideoId = cfMeta.uid;
+              newPost.video.storageProvider   = 'cloudflare';
+              newPost.video.videoStatus       = 'ready';
             }
+            /* Écriture gw/post_videos avec retry backoff (2s → 5s → 10s) */
+            _gwPostVideoFbWriteWithRetry(postId, {
+              url:       url,
+              cfUid:     (cfMeta && cfMeta.uid)       || '',
+              thumbnail: (cfMeta && cfMeta.thumbnail) || '',
+              dur:       newPost.video ? (newPost.video.duration || 0) : 0
+            }, 1);
             _onUploadDone();
           },
           function(e) {
             var _errCode = e && (e.code || e.message || String(e));
-            console.error('[GW CF] ❌ Échec upload vidéo CF Stream :', _errCode);
+            _gwLog('VIDEO_UPLOAD_FAILED', { postId: String(postId), status: 'CF_ERROR', error: _errCode });
             showToast('⚠️ Vidéo non uploadée (' + (_errCode || 'inconnu') + ')', 'err');
             _hideVideoProgress();
+            /* Marquer videoStatus 'failed' — inclus dans _finalizePost → persistNewPost */
+            if (newPost.video) { newPost.video.videoStatus = 'failed'; }
             _onUploadDone();
           }
         );
@@ -33868,7 +34328,14 @@ function _admResolveAppeal(id, action) {
 /* ── Helpers ── */
 function _offGetPosts()        { try { return JSON.parse(localStorage.getItem('gw_official_posts') || '[]'); } catch(e){ return []; } }
 function _offSavePosts(list) {
-  localStorage.setItem('gw_official_posts', JSON.stringify(list));
+  try {
+    localStorage.setItem('gw_official_posts', JSON.stringify(list));
+  } catch(e) {
+    _gwLog('OFFICIAL_POSTS_LOCAL_SAVE_FAILED', {
+      error: e && (e.name || e.message || String(e)),
+      count: list ? list.length : 0
+    });
+  }
   if (!_gwFbSkip && _gwFbDB && _gwFbReady) {
     /* Strip les images base64 trop lourdes avant d'écrire dans Firebase
        (évite le dépassement de la limite 4 Mo qui ferait échouer le write) */
@@ -34326,25 +34793,86 @@ function _admPublishOfficial() {
     var _offText    = text;
     var _offImg     = imgData;
     var _offNom     = _adminUser ? _adminUser.nom : 'Geniwork';
+    /* Phase 1 : persister le post pending avant l'upload (OV-01)
+       Garantit la récupérabilité si l'app crashe après le succès CF mais avant _offPublishPost */
+    var _offPendingPost = {
+      id:             _offPostId,
+      isOfficial:     true,
+      text:           _offText,
+      images:         _offImg ? [_offImg] : [],
+      video:          { idbId: videoIdbId, videoStatus: 'uploading' },
+      youtubeId:      null,
+      publishedBy:    _adminUser ? _adminUser.email : (_currentUser ? _currentUser.email : 'admin'),
+      publishedByNom: _offNom,
+      publishedAt:    new Date().toISOString(),
+      baseLikes:      0,
+      likers:         [],
+      comments:       []
+    };
+    var _offPreList = _offGetPosts();
+    _offPreList.unshift(_offPendingPost);
+    _offSavePosts(_offPreList);
     /* Sauvegarde le Blob dans IndexedDB (fallback appareil d'origine) */
     _gwSaveVideoBlob(videoIdbId, _offVidFile, function() {});
     _showVideoProgress(0);
     _cfUploadVideo(_offVidFile, _offPostId,
       function(pct) { _showVideoProgress(pct); },
       function(url, cfMeta) {
+        /* Phase 2 : compléter le post en place avec URL + cfId (OV-01) */
         _gwVidUrlCache[_offPostId] = url;
         _hideVideoProgress();
-        _offPublishPost(_offText, _offImg, _offNom,
-          { idbId: videoIdbId, url: url }, _offPostId);
-        if (_gwFbReady && _gwFbDB) {
-          _gwFbDB.ref('gw/post_videos/' + _offPostId).set({ url: url, cfUid: (cfMeta && cfMeta.uid) || '', thumbnail: (cfMeta && cfMeta.thumbnail) || '', dur: 0 }).catch(function(){});
+        var _allP = _offGetPosts();
+        var _idxP = _allP.findIndex(function(x) { return String(x.id) === String(_offPostId); });
+        if (_idxP !== -1) {
+          _allP[_idxP].video = { idbId: videoIdbId, url: url,
+            cloudflareVideoId: (cfMeta && cfMeta.uid) || '', videoStatus: 'ready' };
+          _offSavePosts(_allP);
+          _gwDeleteVideoBlob(videoIdbId); /* SHB-11 : blob IDB nettoyé après persistance réussie */
+          _admLog('OFFICIAL_POST', _offText.slice(0, 60));
+          var _notifMsgOff = '📣 Geniwork : ' + (_offText ? _offText.slice(0, 120) : 'Nouvelle publication officielle');
+          try {
+            getUsers().forEach(function(u) {
+              var notifs = getNotifs(u.email);
+              notifs.unshift({ id: genNotifId(), type: 'official', msg: _notifMsgOff,
+                at: Date.now(), time: "À l'instant", unread: true, fromUser: null });
+              saveNotifs(u.email, notifs);
+            });
+          } catch(e2) {}
+          if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
+          if (_currentUser) {
+            try { renderNotifs(); } catch(e2) {}
+            try { updateNotifBadge(); } catch(e2) {}
+            _showOfficialBanner(_offNom, _offText);
+          }
+        } else {
+          /* Fallback : Phase 1 non persistée → vérifier si non supprimé entre-temps (SHB-02) */
+          var _offWasDel = false;
+          try { _offWasDel = !!localStorage.getItem('gw_off_del_' + _offPostId); } catch(e) {}
+          if (!_offWasDel) {
+            _offPublishPost(_offText, _offImg, _offNom,
+              { idbId: videoIdbId, url: url,
+                cloudflareVideoId: (cfMeta && cfMeta.uid) || '',
+                videoStatus: 'ready' }, _offPostId);
+          }
+          _gwDeleteVideoBlob(videoIdbId); /* SHB-11 : blob IDB nettoyé après fallback */
         }
+        _gwPostVideoFbWriteWithRetry(_offPostId, {
+          url:       url,
+          cfUid:     (cfMeta && cfMeta.uid)       || '',
+          thumbnail: (cfMeta && cfMeta.thumbnail) || '',
+          dur:       0
+        }, 1);
         _resetAdmForm();
       },
       function() {
+        /* Phase 2 onFail : marquer failed en place (OV-01) */
         _hideVideoProgress();
-        _offPublishPost(_offText, _offImg, _offNom,
-          { idbId: videoIdbId }, _offPostId);
+        var _allF = _offGetPosts();
+        var _idxF = _allF.findIndex(function(x) { return String(x.id) === String(_offPostId); });
+        if (_idxF !== -1 && _allF[_idxF].video) {
+          _allF[_idxF].video.videoStatus = 'failed';
+          _offSavePosts(_allF);
+        }
         _resetAdmForm();
       }
     );
@@ -34851,6 +35379,9 @@ function _gwCompressShortVideo(file, onProgress, callback, trimStart, trimEnd) {
 function _admPublishOfficialShort() {
   if (!_adminUser || !_admHasAction('publish')) { showToast('Accès non autorisé', 'err'); return; }
   if (!_admOffShortVidFile) { showToast('Sélectionnez une vidéo pour le short', 'err'); return; }
+  /* SHB-03 : mutex anti-double-clic — un seul Short à la fois */
+  if (_gwShortPublishing) { showToast('Publication en cours…', ''); return; }
+  _gwShortPublishing = true;
 
   var text      = _gwSanitize((document.getElementById('adm-off-short-text') || {}).value || '', 500).trim();
   var thumbEl   = document.getElementById('adm-off-short-thumb-preview');
@@ -34859,42 +35390,142 @@ function _admPublishOfficialShort() {
   var idbId     = 'vid_off_short_' + Date.now();
   var nom       = _adminUser ? _adminUser.nom : 'Geniwork';
 
+  /* SR-05 : séparation toast succès / échec */
+  function _resetShortFormOk() {
+    _gwShortPublishing = false; /* SHB-03 : libère le mutex avant le re-render */
+    var ta = document.getElementById('adm-off-short-text');
+    if (ta) ta.value = '';
+    _admOffRemoveShort();
+    showToast('Short officiel publié ✓', 'ok');
+    _admRender();
+  }
+  function _resetShortFormFail() {
+    _gwShortPublishing = false; /* SHB-03 : libère le mutex avant le re-render */
+    var ta = document.getElementById('adm-off-short-text');
+    if (ta) ta.value = '';
+    _admOffRemoveShort();
+    showToast('Échec de l\'upload — le Short sera réessayé au prochain démarrage.', 'err');
+    _admRender();
+  }
+
+  /* SR-01 : Phase 1 persistée AVANT toute compression */
+  var _shortPendingPost = {
+    id:             shortId,
+    isOfficial:     true,
+    text:           text,
+    images:         thumbData ? [thumbData] : [],
+    video:          { idbId: idbId, videoType: 'short', videoStatus: 'uploading' },
+    youtubeId:      null,
+    publishedBy:    _adminUser ? _adminUser.email : (_currentUser ? _currentUser.email : 'admin'),
+    publishedByNom: nom,
+    publishedAt:    new Date().toISOString(),
+    baseLikes:      0,
+    likers:         [],
+    comments:       []
+  };
+  var _shortPreList = _offGetPosts();
+  _shortPreList.unshift(_shortPendingPost);
+  _offSavePosts(_shortPreList);
+
+  var origFile = _admOffShortVidFile;
+  /* SR-01 : blob original dans IDB AVANT compression (récupérable si crash pendant la compression) */
+  _gwSaveVideoBlob(idbId, origFile, function() {});
+
   function _doUpload(vidFile) {
-    function _resetShortForm() {
-      var ta = document.getElementById('adm-off-short-text');
-      if (ta) ta.value = '';
-      _admOffRemoveShort();
-      showToast('Short officiel publié ✓', 'ok');
-      _admRender();
+    /* SR-01 : si compression a produit un fichier différent → remplacer le blob IDB */
+    if (vidFile !== origFile) {
+      _gwSaveVideoBlob(idbId, vidFile, function() {});
     }
-    _gwSaveVideoBlob(idbId, vidFile, function() {});
     _showVideoProgress(0);
     _cfUploadVideo(vidFile, shortId,
       function(pct) { _showVideoProgress(pct); },
       function(url, cfMeta) {
-        _gwVidUrlCache[shortId] = url;
+        /* SR-04 : vérifier annulation avant Phase 2 */
         _hideVideoProgress();
-        _offPublishPost(text, thumbData, nom, { idbId: idbId, url: url, videoType: 'short' }, shortId);
-        if (_gwFbReady && _gwFbDB) {
-          _gwFbDB.ref('gw/post_videos/' + shortId).set({ url: url, cfUid: (cfMeta && cfMeta.uid) || '', thumbnail: (cfMeta && cfMeta.thumbnail) || '', dur: 0 }).catch(function(){});
+        if (_gwCancelledOfficialShorts[shortId]) {
+          delete _gwCancelledOfficialShorts[shortId];
+          _gwShortPublishing = false; /* SHB-03 */
+          _gwDeleteVideoBlob(idbId);
+          return;
         }
-        _resetShortForm();
+        /* Phase 2 : compléter le short en place avec URL + cfId (OV-01) */
+        _gwVidUrlCache[shortId] = url;
+        var _allSP = _offGetPosts();
+        var _idxSP = _allSP.findIndex(function(x) { return String(x.id) === String(shortId); });
+        if (_idxSP !== -1) {
+          _allSP[_idxSP].video = { idbId: idbId, url: url, videoType: 'short',
+            cloudflareVideoId: (cfMeta && cfMeta.uid) || '', videoStatus: 'ready' };
+          _offSavePosts(_allSP);
+          /* SR-02 : blob IDB nettoyé après persistance réussie */
+          _gwDeleteVideoBlob(idbId);
+          _admLog('OFFICIAL_POST', text.slice(0, 60));
+          var _notifMsgSh = '📣 Geniwork : ' + (text ? text.slice(0, 120) : 'Nouvelle publication officielle');
+          try {
+            getUsers().forEach(function(u) {
+              var notifs = getNotifs(u.email);
+              notifs.unshift({ id: genNotifId(), type: 'official', msg: _notifMsgSh,
+                at: Date.now(), time: "À l'instant", unread: true, fromUser: null });
+              saveNotifs(u.email, notifs);
+            });
+          } catch(e2) {}
+          if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
+          if (_currentUser) {
+            try { renderNotifs(); } catch(e2) {}
+            try { updateNotifBadge(); } catch(e2) {}
+            _showOfficialBanner(nom, text);
+          }
+        } else {
+          /* Fallback : Phase 1 non persistée (quota) → vérifier d'abord si le Short n'a pas été
+             supprimé par un autre onglet (SHB-02 : marqueur gw_off_del_ partagé en localStorage) */
+          var _wasDeleted = false;
+          try { _wasDeleted = !!localStorage.getItem('gw_off_del_' + shortId); } catch(e) {}
+          if (!_wasDeleted) {
+            _offPublishPost(text, thumbData, nom,
+              { idbId: idbId, url: url, videoType: 'short',
+                cloudflareVideoId: (cfMeta && cfMeta.uid) || '',
+                videoStatus: 'ready' }, shortId);
+          }
+          /* SR-02 : nettoyage blob dans tous les cas */
+          _gwDeleteVideoBlob(idbId);
+        }
+        _gwPostVideoFbWriteWithRetry(shortId, {
+          url:       url,
+          cfUid:     (cfMeta && cfMeta.uid)       || '',
+          thumbnail: (cfMeta && cfMeta.thumbnail) || '',
+          dur:       0
+        }, 1);
+        delete _gwCancelledOfficialShorts[shortId];
+        _resetShortFormOk();  /* SR-05 */
       },
       function() {
+        /* Phase 2 onFail : marquer failed en place (OV-01) */
         _hideVideoProgress();
-        _offPublishPost(text, thumbData, nom, { idbId: idbId, videoType: 'short' }, shortId);
-        _resetShortForm();
+        var _allSF = _offGetPosts();
+        var _idxSF = _allSF.findIndex(function(x) { return String(x.id) === String(shortId); });
+        if (_idxSF !== -1 && _allSF[_idxSF].video) {
+          _allSF[_idxSF].video.videoStatus = 'failed';
+          _allSF[_idxSF].video.retryCount  = 1; /* SHB-10 : 1ère tentative échouée */
+          _offSavePosts(_allSF);
+        }
+        delete _gwCancelledOfficialShorts[shortId];
+        _resetShortFormFail();  /* SR-05 / SHB-03 libéré dans _resetShortFormFail */
       }
     );
   }
 
   /* Compression automatique si > 20 Mo */
-  var origFile = _admOffShortVidFile;
   if (origFile.size > 20 * 1024 * 1024) {
     showToast('Compression vidéo en cours… (' + Math.round(origFile.size / 1024 / 1024) + ' Mo → ~10 Mo)', '');
     _gwCompressShortVideo(origFile, null, function(compFile, wasCompressed) {
       if (wasCompressed) {
         showToast('Compressé : ' + Math.round(origFile.size/1024/1024) + ' Mo → ' + Math.round(compFile.size/1024/1024) + ' Mo ✓', 'ok');
+      }
+      /* SR-04 : si annulé pendant la compression → pas d'upload */
+      if (_gwCancelledOfficialShorts[shortId]) {
+        delete _gwCancelledOfficialShorts[shortId];
+        _gwShortPublishing = false; /* SHB-03 */
+        _gwDeleteVideoBlob(idbId);
+        return;
       }
       _doUpload(compFile);
     });
@@ -34991,12 +35622,18 @@ function _showOfficialBanner(nom, text) {
 /* ── Supprimer un post officiel ── */
 function _admDeleteOfficialPost(id) {
   if (!confirm('Supprimer ce post officiel ?')) return;
+  /* SR-04 : signaler l'annulation AVANT tout (bloque Phase 2 si upload en cours dans cet onglet) */
+  _gwCancelledOfficialShorts[String(id)] = true;
+  /* SHB-02 : marqueur de suppression partagé entre onglets via localStorage */
+  try { localStorage.setItem('gw_off_del_' + id, '1'); } catch(e) {}
   /* Nettoie le Blob vidéo dans IndexedDB si présent */
   var allOff = _offGetPosts();
   var target = allOff.find(function(p){ return p.id === id; });
   if (target && target.video && typeof target.video === 'object' && target.video.idbId) {
     _gwDeleteVideoBlob(target.video.idbId);
   }
+  /* SHB-08 : supprimer la clé gw_vurl_<id> orpheline en localStorage */
+  try { localStorage.removeItem('gw_vurl_' + id); } catch(e) {}
   _offSavePosts(allOff.filter(function(p){ return p.id !== id; }));
   _admLog('DELETE_OFFICIAL_POST', id);
   showToast('Post supprimé', 'ok');
