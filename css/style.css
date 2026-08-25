@@ -3658,6 +3658,50 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   animation: slideUp 0.25s ease;
 }
 
+/* GROUPS-FREE-05 : le panneau "Informations du groupe" (#grp-info-bg/-card)
+   réutilise par erreur les classes .cam-sheet-bg/.cam-sheet-card (z-index
+   160/161, conçues pour s'ouvrir depuis la LISTE des conversations) alors
+   qu'il s'ouvre en réalité PAR-DESSUS .chat-screen.open (z-index:170) —
+   le panneau se rendait donc visuellement DERRIÈRE la conversation (confirmé
+   par getComputedStyle : chat-screen gagnait l'empilement). Les feuilles qui
+   s'ouvrent légitimement par-dessus un chat actif (menu ⋮, .chat-sheet-bg/
+   -card) utilisent déjà z-index 400/401 dans ce fichier — on aligne le
+   panneau groupe sur cette même convention plutôt que sur .cam-sheet-*.
+   Ciblé par ID uniquement : ne touche pas .cam-sheet-bg/-card globalement,
+   toujours utilisée telle quelle par les autres feuilles (sélecteur caméra,
+   picker DM/création de groupe) qui ne s'ouvrent jamais par-dessus un chat. */
+#grp-info-bg   { z-index: 400; }
+#grp-info-card { z-index: 401; }
+
+/* GROUPS-FREE-07-BIS (P1) : même bug que #grp-info-bg/-card ci-dessus,
+   reproduit à l'identique pour les feuilles ajoutées en GROUPS-FREE-07
+   (Inviter des amis, Ajouter des membres, écran d'acceptation d'invitation)
+   — toutes les trois réutilisaient .cam-sheet-bg/.cam-sheet-card (160/161)
+   sans override dédié, donc s'ouvraient DERRIÈRE .chat-screen.open (170) :
+   c'est la feuille "Inviter des amis" qui s'ouvre DEPUIS #grp-info-card
+   (401) déjà ouvert, elle doit donc être strictement au-dessus de lui, pas
+   seulement au-dessus du chat. L'écran d'acceptation d'invitation peut
+   s'ouvrir seul (notification, lien profond) : même palier suffit. */
+#grp-invite-bg        { z-index: 402; }
+#grp-invite-card      { z-index: 403; }
+#grp-addmember-bg     { z-index: 402; }
+#grp-addmember-card   { z-index: 403; }
+#grp-invite-view-bg   { z-index: 404; }
+#grp-invite-view-card { z-index: 405; }
+
+/* GROUPS-FREE-07-BIS-LIVE (P4, second bug) : #grp-info-card est un flex
+   column à hauteur plafonnée (overflow:hidden) — quand son contenu total
+   dépasse cette hauteur, le moteur flex compresse les enfants sans
+   flex-shrink:0 pour tout faire tenir. #grp-info-cover (photo + boutons
+   Ajouter/Remplacer/Supprimer la couverture) n'avait aucune protection :
+   confirmé en LIVE via getBoundingClientRect() — le bouton existe bien
+   dans le DOM (innerHTML correct, testé automatiquement) mais sa hauteur
+   réelle était compressée à 54px sur un contenu qui en demande 116,
+   coupant le bouton hors de la zone visible par overflow:hidden. La zone
+   membres (.collab-search-results) a déjà son propre overflow-y:auto —
+   c'est elle qui doit absorber la compression, jamais la couverture. */
+#grp-info-cover { flex-shrink: 0; }
+
 .cam-sheet-handle {
   width: 40px;
   height: 4px;

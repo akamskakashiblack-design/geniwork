@@ -2,13 +2,37 @@
   "rules": {
     "gw": {
       "users": {
-        ".read":  true,
+        ".read":  false,
         ".write": "auth != null"
+      },
+      "users_public": {
+        ".read":  true,
+        ".write": false
       },
       "profiles": {
         ".read":  true,
         "$userFbKey": {
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey",
+          ".validate": "(!data.child('planType').exists() || newData.child('planType').exists()) && (!data.child('planBilling').exists() || newData.child('planBilling').exists()) && (!data.child('planSince').exists() || newData.child('planSince').exists()) && (!data.child('planCancelled').exists() || newData.child('planCancelled').exists()) && (!data.child('planCancelledAt').exists() || newData.child('planCancelledAt').exists()) && (!data.child('planRenewalDate').exists() || newData.child('planRenewalDate').exists()) && (!data.child('aiCredits').exists() || newData.child('aiCredits').exists()) && (!data.child('aiCycleMonth').exists() || newData.child('aiCycleMonth').exists()) && (!data.child('aiPlanGranted').exists() || newData.child('aiPlanGranted').exists()) && (!data.child('badgeType').exists() || newData.child('badgeType').exists()) && (!data.child('badgeStatus').exists() || newData.child('badgeStatus').exists()) && (!data.child('identityVerified').exists() || newData.child('identityVerified').exists()) && (!data.child('badgeApprovedAt').exists() || newData.child('badgeApprovedAt').exists()) && (!data.child('badgeCertifiedBy').exists() || newData.child('badgeCertifiedBy').exists()) && (!data.child('badgeCertifiedAt').exists() || newData.child('badgeCertifiedAt').exists()) && (!data.child('badgeRevokedBy').exists() || newData.child('badgeRevokedBy').exists()) && (!data.child('badgeRevokedAt').exists() || newData.child('badgeRevokedAt').exists()) && (!data.child('badgeRevokedMotif').exists() || newData.child('badgeRevokedMotif').exists()) && (!data.child('badgeSource').exists() || newData.child('badgeSource').exists())",
+          "planType":          { ".validate": "newData.val() === data.val()" },
+          "planBilling":       { ".validate": "newData.val() === data.val()" },
+          "planSince":         { ".validate": "newData.val() === data.val()" },
+          "planCancelled":     { ".validate": "newData.val() === data.val()" },
+          "planCancelledAt":   { ".validate": "newData.val() === data.val()" },
+          "planRenewalDate":   { ".validate": "newData.val() === data.val()" },
+          "aiCredits":         { ".validate": "newData.val() === data.val()" },
+          "aiCycleMonth":      { ".validate": "newData.val() === data.val()" },
+          "aiPlanGranted":     { ".validate": "newData.val() === data.val()" },
+          "badgeType":         { ".validate": "newData.val() === data.val()" },
+          "badgeStatus":       { ".validate": "newData.val() === data.val() || newData.val() === 'pending'" },
+          "identityVerified":  { ".validate": "newData.val() === data.val()" },
+          "badgeApprovedAt":   { ".validate": "newData.val() === data.val()" },
+          "badgeCertifiedBy":  { ".validate": "newData.val() === data.val()" },
+          "badgeCertifiedAt":  { ".validate": "newData.val() === data.val()" },
+          "badgeRevokedBy":    { ".validate": "newData.val() === data.val()" },
+          "badgeRevokedAt":    { ".validate": "newData.val() === data.val()" },
+          "badgeRevokedMotif": { ".validate": "newData.val() === data.val()" },
+          "badgeSource":       { ".validate": "newData.val() === data.val()" }
         }
       },
       "dms": {
@@ -19,37 +43,149 @@
       },
       "dm_msgs": {
         "$dmFbKey": {
-          ".read":  "auth != null",
-          ".write": "auth != null",
+          ".read":  false,
+          ".write": false,
           ".indexOn": ["id", "at", "from"]
         }
       },
       "dm_meta": {
         "$dmFbKey": {
-          ".read":  "auth != null",
+          ".read":  false,
           ".write": false
         }
       },
       "inboxes": {
         "$toFbKey": {
-          ".read":  "auth != null && auth.uid === $toFbKey",
+          ".read":  false,
           ".indexOn": ["fromEmail", "at"],
           "$fromFbKey": {
-            ".write": "auth != null && (auth.uid === $fromFbKey || auth.uid === $toFbKey)"
+            ".write": false
+          }
+        }
+      },
+      "dm_conversations": {
+        "$userFbKey": {
+          ".read": false,
+          "$dmFbKey": {
+            ".write": false
+          }
+        }
+      },
+      "dm_user_conversations": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          "$conversationId": {
+            ".write": "auth != null && (auth.uid === $uid || root.child('gw/dm_conversations_v2/'+$conversationId+'/participants/'+auth.uid).exists())"
+          }
+        }
+      },
+      "dm_conversations_v2": {
+        "$conversationId": {
+          ".read": "auth != null && data.child('participants').child(auth.uid).exists()",
+          "participants": {
+            "$uid": {
+              ".write": "auth != null && ((!data.parent().exists() && newData.val() === true && newData.parent().child(auth.uid).exists()) || (data.exists() && newData.val() === data.val()))"
+            }
+          },
+          "lastMessage": {
+            ".write": "auth != null && data.parent().child('participants').child(auth.uid).exists() && newData.isString()"
+          },
+          "lastMessageAt": {
+            ".write": "auth != null && data.parent().child('participants').child(auth.uid).exists() && newData.isNumber()"
+          },
+          "unread": {
+            "$uid": {
+              ".write": "auth != null && data.parent().parent().child('participants').child(auth.uid).exists() && data.parent().parent().child('participants').child($uid).exists() && newData.isNumber()"
+            }
+          }
+        }
+      },
+      "dm_messages": {
+        "$conversationId": {
+          ".read": "auth != null && root.child('gw/dm_conversations_v2/'+$conversationId+'/participants/'+auth.uid).exists()",
+          "$messageId": {
+            ".write": "auth != null && root.child('gw/dm_conversations_v2/'+$conversationId+'/participants/'+auth.uid).exists() && !data.exists() && newData.child('senderId').val() === auth.uid && newData.hasChildren(['senderId','senderEmail','text','createdAt'])"
           }
         }
       },
       "group_msgs": {
-        ".read":  "auth != null",
         "$grpFbKey": {
-          ".read":  "auth != null",
-          ".write": "auth != null"
+          ".read": "auth != null && data.child('meta/members').child(auth.uid).exists()",
+          ".write": "auth != null && !newData.exists() && data.child('meta/owner').val() === auth.uid",
+          "meta": {
+            ".write": "auth != null && !data.exists() && newData.child('owner').val() === auth.uid && newData.child('members').child(auth.uid).val() === true",
+            "groupId": {
+              ".write": "auth != null && !data.exists()"
+            },
+            "name": {
+              ".write": "auth != null && !data.exists()"
+            },
+            "createdAt": {
+              ".write": "auth != null && !data.exists()"
+            },
+            "isFreeGroup": {
+              ".write": "auth != null && !data.exists()"
+            },
+            "owner": {
+              ".write": "auth != null && (!data.exists() || newData.val() === data.val())"
+            },
+            "ownerEmail": {
+              ".write": "auth != null && (!data.exists() || newData.val() === data.val())"
+            },
+            "description": {
+              ".write": "auth != null && (!data.exists() || data.parent().child('owner').val() === auth.uid)"
+            },
+            "members": {
+              "$uid": {
+                ".write": "auth != null && ((!data.parent().exists() && newData.val() === true) || (!data.exists() && newData.val() === true && (data.parent().parent().child('owner').val() === auth.uid || data.parent().parent().child('admins').child(auth.uid).val() === true)) || (data.exists() && newData.val() === data.val()) || (data.exists() && !newData.exists() && $uid === auth.uid) || (data.exists() && !newData.exists() && data.parent().parent().child('owner').val() === auth.uid) || (data.exists() && !newData.exists() && data.parent().parent().child('admins').child(auth.uid).val() === true && $uid !== data.parent().parent().child('owner').val()))"
+              }
+            },
+            "memberEmails": {
+              "$uid": {
+                ".write": "auth != null && ((!data.parent().exists() && newData.exists()) || (!data.exists() && newData.exists() && (data.parent().parent().child('owner').val() === auth.uid || data.parent().parent().child('admins').child(auth.uid).val() === true)) || (data.exists() && newData.val() === data.val()) || (data.exists() && !newData.exists() && ($uid === auth.uid || data.parent().parent().child('owner').val() === auth.uid || (data.parent().parent().child('admins').child(auth.uid).val() === true && $uid !== data.parent().parent().child('owner').val()))))"
+              }
+            },
+            "admins": {
+              "$uid": {
+                ".write": "auth != null && data.parent().parent().child('owner').val() === auth.uid && data.parent().parent().child('members').child($uid).exists() && $uid !== auth.uid && (!newData.exists() || newData.val() === true)"
+              }
+            },
+            "lastMessage": {
+              ".write": "auth != null && root.child('gw/group_msgs/'+$grpFbKey+'/meta/members/'+auth.uid).exists()"
+            },
+            "lastMessageAt": {
+              ".write": "auth != null && root.child('gw/group_msgs/'+$grpFbKey+'/meta/members/'+auth.uid).exists()"
+            }
+          },
+          "lastMsg": {
+            ".write": "auth != null && root.child('gw/group_msgs/'+$grpFbKey+'/meta/members/'+auth.uid).exists()"
+          },
+          "lastAt": {
+            ".write": "auth != null && root.child('gw/group_msgs/'+$grpFbKey+'/meta/members/'+auth.uid).exists()"
+          },
+          "messages": {
+            "$messageId": {
+              ".write": "auth != null && root.child('gw/group_msgs/'+$grpFbKey+'/meta/members/'+auth.uid).exists() && !data.exists() && (($grpFbKey.matches(/^gw_grp_adhoc_/) && newData.child('senderId').val() === auth.uid && newData.hasChildren(['senderId','senderEmail','text','createdAt'])) || (!($grpFbKey.matches(/^gw_grp_adhoc_/)) && newData.hasChildren(['id','from','text','at']) && (newData.child('from').val() === 'system' || newData.child('from').val() === root.child('gw/group_msgs/'+$grpFbKey+'/meta/memberEmails/'+auth.uid).val())))"
+            }
+          }
         }
       },
       "group_inboxes": {
         "$userFbKey": {
-          ".read":  "auth != null",
-          ".write": "auth != null"
+          ".read": "auth != null && (!$userFbKey.matches(/^free_/) || $userFbKey === ('free_' + auth.uid))",
+          ".write": "auth != null && !$userFbKey.matches(/^free_/)",
+          "$groupId": {
+            ".write": "auth != null && (!$userFbKey.matches(/^free_/) || $userFbKey === ('free_' + auth.uid) || root.child('gw/group_msgs/'+$groupId+'/meta/members/'+auth.uid).exists())"
+          }
+        }
+      },
+      "group_invites": {
+        "$token": {
+          ".read": "auth != null",
+          ".write": "auth != null && !data.exists() && newData.child('inviterUid').val() === auth.uid && newData.child('status').val() === 'pending' && root.child('gw/group_msgs/'+newData.child('groupId').val()+'/meta/members/'+auth.uid).exists()",
+          "status": {
+            ".write": "auth != null && data.exists() && data.val() === 'pending' && ((newData.val() === 'declined') || (newData.val() === 'revoked' && (root.child('gw/group_msgs/'+data.parent().child('groupId').val()+'/meta/owner').val() === auth.uid || data.parent().child('inviterUid').val() === auth.uid)))"
+          }
         }
       },
       "posts": {
@@ -140,8 +276,8 @@
       },
       "notifs": {
         "$userFbKey": {
-          ".read":  "auth != null",
-          ".write": "auth != null"
+          ".read":  "auth != null && auth.uid === $userFbKey",
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "fcm_tokens": {
@@ -151,21 +287,50 @@
         }
       },
       "mk_listings": {
-        ".read":  true,
-        ".write": "auth != null"
+        ".read":  false,
+        ".write": false
+      },
+      "mk_listings_v2": {
+        ".read": true,
+        "$sellerUid": {
+          ".write": "auth != null && auth.uid === $sellerUid",
+          "$listingId": {
+            ".validate": "newData.hasChildren(['id','sellerEmail','title','price','type','status'])",
+            "id":            { ".validate": "newData.val() === $listingId" },
+            "sellerEmail":   { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "sellerPaypal":  { ".validate": "!data.exists() || (data.val() === '' && newData.isString()) || newData.val() === data.val()" },
+            "sellerPlan":    { ".validate": "newData.val() === ((root.child('gw/profiles/' + $sellerUid + '/planType').val() === 'premium' || root.child('gw/profiles/' + $sellerUid + '/planType').val() === 'business') ? root.child('gw/profiles/' + $sellerUid + '/planType').val() : 'free')" },
+            "isPriority":    { ".validate": "newData.val() === (root.child('gw/profiles/' + $sellerUid + '/planType').val() === 'business')" },
+            "canAd":         { ".validate": "newData.val() === (root.child('gw/profiles/' + $sellerUid + '/planType').val() === 'premium' || root.child('gw/profiles/' + $sellerUid + '/planType').val() === 'business')" },
+            "expiresAt":     { ".validate": "newData.isNumber() && (data.exists() ? newData.val() === data.val() : (newData.val() <= now + ((root.child('gw/profiles/' + $sellerUid + '/planType').val() === 'premium' || root.child('gw/profiles/' + $sellerUid + '/planType').val() === 'business') ? 5184000000 : 2592000000) + 60000 && newData.val() >= now + ((root.child('gw/profiles/' + $sellerUid + '/planType').val() === 'premium' || root.child('gw/profiles/' + $sellerUid + '/planType').val() === 'business') ? 5184000000 : 2592000000) - 60000))" },
+            "status":        { ".validate": "!data.exists() ? newData.val() === 'active' : (newData.val() === data.val() || newData.val() === 'sold' || (newData.val() === 'expired' && data.val() === 'active' && now >= newData.parent().child('expiresAt').val()))" }
+          }
+        }
       },
       "mk_txns": {
         ".read":  "auth != null",
         ".write": "auth != null"
       },
       "collab_requests": {
+        ".read":  false,
+        ".write": false
+      },
+      "collab_requests_v2": {
         ".read":  true,
-        ".write": "auth != null"
+        ".write": false
+      },
+      "collab_request_docs_v2": {
+        "$ownerUid": {
+          "$requestId": {
+            ".read":  "auth != null && (auth.uid === $ownerUid || root.child('gw/collab_requests_v2/'+$ownerUid+'/'+$requestId+'/applicants').child(auth.uid).exists())",
+            ".write": false
+          }
+        }
       },
       "collab_invites": {
         "$userFbKey": {
-          ".read":  "auth != null",
-          ".write": "auth != null"
+          ".read":  "auth != null && auth.uid === $userFbKey",
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "milestones": {
@@ -183,7 +348,7 @@
       "projects": {
         ".read":  true,
         "$userFbKey": {
-          ".write": "auth != null"
+          ".write": "auth != null && auth.uid === $userFbKey"
         }
       },
       "reviews": {
@@ -363,16 +528,71 @@
         }
       },
       "jobs": {
-        ".read":  true,
-        ".write": "auth != null"
+        ".read":  false,
+        ".write": false
+      },
+      "jobs_v2": {
+        ".read": true,
+        "$recruiterUid": {
+          ".write": "auth != null && auth.uid === $recruiterUid",
+          "$jobId": {
+            ".validate": "newData.hasChildren(['id','title','description','postedBy','status'])",
+            "id":         { ".validate": "newData.val() === $jobId" },
+            "postedBy":   { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "status":     { ".validate": "!data.exists() ? newData.val() === 'active' : (newData.val() === data.val() || newData.val() === 'closed')" },
+            "applicants": { ".validate": false }
+          }
+        }
       },
       "recruiter_verifs": {
-        ".read":  "auth != null",
-        ".write": "auth != null"
+        ".read":  false,
+        ".write": false
+      },
+      "recruiter_verifs_v2": {
+        "$applicantUid": {
+          ".read":  "auth != null && auth.uid === $applicantUid",
+          ".write": "auth != null && auth.uid === $applicantUid",
+          "$verifId": {
+            ".validate": "newData.hasChildren(['id','email','company','regnum','status','submittedAt'])",
+            "id":            { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "email":         { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "status":        { ".validate": "!data.exists() ? newData.val() === 'pending' : newData.val() === data.val()" },
+            "reviewedAt":    { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "reviewedBy":    { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "rejectReason":  { ".validate": "!data.exists() || newData.val() === data.val()" }
+          }
+        }
       },
       "job_applications": {
-        ".read":  "auth != null",
-        ".write": "auth != null"
+        ".read":  false,
+        ".write": false
+      },
+      "job_applications_v2": {
+        "$jobOwnerUid": {
+          ".read":  "auth != null && auth.uid === $jobOwnerUid",
+          ".write": "auth != null && auth.uid === $jobOwnerUid",
+          "$applicationId": {
+            ".validate": "newData.hasChildren(['id','jobId','candidateUid','applicantEmail','appliedAt','archived','mode']) && (newData.child('mode').val() !== 'simplified' || newData.hasChildren(['cv','phone']))",
+            "id":            { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "jobId":         { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "candidateUid":  { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "applicantEmail":{ ".validate": "!data.exists() || newData.val() === data.val()" },
+            "applicantNom":  { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "cv":            { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "phone":         { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "motivation":    { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "mode":          { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "appliedAt":     { ".validate": "!data.exists() || newData.val() === data.val()" },
+            "status":        { ".validate": false },
+            "archived":      { ".validate": "newData.isBoolean()" }
+          }
+        }
+      },
+      "candidate_applications": {
+        "$candidateUid": {
+          ".read":  "auth != null && auth.uid === $candidateUid",
+          ".write": false
+        }
       },
       "job_saved": {
         "$userFbKey": {

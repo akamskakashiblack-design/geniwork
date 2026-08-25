@@ -2,6 +2,20 @@
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
+  <!-- GROUPS-FREE-07-BIS-LIVE : sans <base>, toutes les ressources en
+       chemin relatif (css/, js/, ./img/...) se résolvent contre l'URL
+       COURANTE plutôt que la racine. Invisible tant que l'app n'était
+       accédée que depuis "/" (ou "/?query"), mais casse TOTALEMENT sur
+       tout chemin imbriqué servi par le catch-all SPA de vercel.json
+       (ex: /group/invite/{token}) — le navigateur demande alors
+       /group/invite/js/app.js, qui n'existe pas ; Vercel renvoie quand
+       même du HTML (200) pour cette URL inconnue, que le <script> ne
+       peut pas exécuter : aucun CSS ni JS ne charge. <base href="/">
+       force TOUTES les URLs relatives (attributs HTML ET calls JS type
+       fetch('relatif')) à toujours partir de la racine du site, quel
+       que soit le chemin affiché dans la barre d'adresse — les appels
+       fetch('/api/...') déjà en chemin absolu ne sont pas affectés. -->
+  <base href="/" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
   <meta name="theme-color" content="#060D1F" />
   <!-- Force Android WebView à ne pas mettre en cache les ressources -->
@@ -14,7 +28,7 @@
   <link rel="preconnect" href="https://accounts.google.com" crossorigin />
   <link rel="preconnect" href="https://firebaseio.com" crossorigin />
   <link rel="dns-prefetch" href="https://identitytoolkit.googleapis.com" />
-  <link rel="stylesheet" href="css/style.css?v=1784154646117e" />
+  <link rel="stylesheet" href="css/style.css?v=1787171355684e" />
   <link rel="stylesheet" href="libs/fontawesome/css/all.min.css" />
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -1266,7 +1280,7 @@
           <!-- Topbar -->
           <div class="msg-topbar">
             <h2 class="msg-title">Messages</h2>
-            <button class="msg-compose-btn" onclick="showToast('Nouvelle conversation bientôt','')">
+            <button class="msg-compose-btn" onclick="openNewDmPicker()">
               <i class="fas fa-pen-to-square"></i>
             </button>
           </div>
@@ -3646,8 +3660,8 @@
 
   <!-- hls.js — lecture des vidéos Cloudflare Stream (.m3u8) sur Android/Chrome -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js" crossorigin="anonymous" defer></script>
-  <script src="js/app.js?v=1754443500000" defer></script>
-  <script src="js/gw-messaging.js?v=1784154646117" defer></script>
+  <script src="js/app.js?v=1787171355684" defer></script>
+  <script src="js/gw-messaging.js?v=1787171355684" defer></script>
 
   <!-- ══ MODAL UPLOAD DOCUMENTS BADGE ══ -->
   <div id="badge-doc-modal" class="bdm-overlay hidden" onclick="_bdmBackdropClick(event)">

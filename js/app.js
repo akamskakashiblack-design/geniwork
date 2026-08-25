@@ -43,7 +43,7 @@ var _GW_FIREBASE_CONFIG = {
 /* ══════════════════════════════════════════
    MARKETPLACE — CONSTANTES GLOBALES
 ══════════════════════════════════════════ */
-var _GW_PAYPAL_CLIENT_ID = 'AQYA1UIAx8tFF4EoP-LT9yhIs6N-0fu9JRXOxZzDcI6rjKiiVZzj-F98lzCD069-aoAdLcQ3isZ1TYTh';
+var _GW_PAYPAL_CLIENT_ID = 'AQWqriIndW2igUkTe6Uu3Q03eXQyXBldQOaFHZcubHhipkx3EBfKPlK8jkUhH4ZjoJEa9jXRolWW_E2Q';
 var _GW_PAYPAL_EMAIL     = 'geniwork.admin@gmail.com';
 var _GW_COMMISSION_RATE  = 0.01;
 
@@ -67,6 +67,7 @@ var _MK_EBOOK_CATS = { business:'💼 Business', dev_perso:'🌱 Développement 
 var _mkCurrentListing = null;
 var _mkUserLocation   = null;
 var _mkPaypalLoaded   = false;
+var _mkPaypalEnabledLastSeen = null; /* Phase SYNC-OPTIONS-02 : derniere valeur paypalEnabled connue, evite tout rerender inutile */
 var _mkPickedImages   = [];
 var _mkCurrentType    = 'service';
 var _mkEbookFile      = null;   /* File object du PDF/EPUB sélectionné */
@@ -436,12 +437,24 @@ function _gwInitFirebase() {
     }
     console.log('[GW Firebase] ✅ Initialisé — URL:', _GW_FIREBASE_CONFIG.databaseURL);
     /* Test de connexion */
+    /* MESSAGING-GROUP-SYNC-03 : _gwWasConnected distingue une VRAIE
+       transition déconnexion→reconnexion (où le listener gw/group_msgs a pu
+       devenir silencieux, prouvé en LIVE MESSAGING-GROUP-SYNC-02) du tout
+       premier "connecté" au chargement de la page (où _initGroupAndInboxListeners
+       n'a peut-être pas encore été appelée du tout — _reinitFreeGroupRealtime
+       gère ce cas sans effet, ses propres gardes internes suffisent). */
+    var _gwWasConnected = null;
     _gwFbDB.ref('.info/connected').on('value', function(snap) {
-      if (snap.val() === true) {
+      var isConnected = snap.val() === true;
+      if (isConnected) {
         console.log('[GW Firebase] 🟢 CONNECTÉ à Firebase');
+        if (_gwWasConnected === false) {
+          try { _reinitFreeGroupRealtime(); } catch (e) {}
+        }
       } else {
         console.warn('[GW Firebase] 🔴 DÉCONNECTÉ de Firebase');
       }
+      _gwWasConnected = isConnected;
     });
     /* Reconnexion immédiate quand l'app revient au premier plan (écran déverrouillé,
        bascule WiFi↔4G, onglet réactivé) — évite le backoff exponentiel Firebase (≤60s) */
@@ -453,7 +466,26 @@ function _gwInitFirebase() {
     /* Quand l'auth passe d'anonyme → réelle (token custom restauré au démarrage),
        re-syncer les posts Firebase pour les rendre visibles aux autres utilisateurs.
        Évite la fenêtre où un post est publié pendant que l'auth est encore anonyme. */
+    var _gwFbBootstrapStarted = false;
+    function _gwFbBootstrapOnce() {
+      /* [AUTH-01-TER] Démarre sync/preload dès qu'une session Firebase
+         QUELCONQUE (réelle restaurée en premier, ou anonyme) devient active —
+         remplace l'ancien déclenchement fait uniquement dans le .then() de
+         signInAnonymously(), qui ratait le cas où la persistance native ou
+         _gwRestoreRealIdentity() fournit l'identité en premier. */
+      if (_gwFbBootstrapStarted) return;
+      _gwFbBootstrapStarted = true;
+      _gwAuthReady = true;
+      _gwAuthWaiters.forEach(function(fn) { try { fn(); } catch(e){} });
+      _gwAuthWaiters = [];
+      _gwFbSyncStart();
+      _gwFbPreloadAndStart();
+      _gwLoadHashtagCache();
+    }
+
     _gwFbAuth.onAuthStateChanged(function(user) {
+      if (user) _gwFbBootstrapOnce();
+
       if (user && !user.isAnonymous && _currentUser && _currentUser.email) {
         /* ─ Identité réelle confirmée ─ */
         if (!_gwRealAuthReady) {
@@ -476,23 +508,47 @@ function _gwInitFirebase() {
       }
     });
 
-    _gwFbAuth.signInAnonymously()
-      .then(function(cred) {
-        console.log('[GW Firebase] 🔒 Auth anonyme OK —', cred.user.uid);
-        _gwAuthReady = true;
-        _gwAuthWaiters.forEach(function(fn) { try { fn(); } catch(e){} });
-        _gwAuthWaiters = [];
-        _gwFbSyncStart();
-        _gwFbPreloadAndStart();
-        _gwLoadHashtagCache();
-      })
-      .catch(function(e) {
-        console.warn('[GW Firebase] Auth anonyme échouée :', e.code || e);
-        /* Démarrage quand même en mode dégradé (lectures publiques OK) */
-        _gwFbSyncStart();
-        _gwFbPreloadAndStart();
-        _gwLoadHashtagCache();
-      });
+    /* [AUTH-01-TER] signInAnonymously() était lancé inconditionnellement ici,
+       à CHAQUE chargement — y compris quand une identité réelle est déjà en
+       cours de restauration (persistance Firebase native déjà résolue, ou
+       _gwRestoreRealIdentity() sur le point d'aboutir via gw_session.authRefresh,
+       appelé juste après par _gwInstantAutoLogin()/_gwStartApp()). Quand cet
+       appel anonyme — un aller-retour réseau direct vers Firebase Auth —
+       résolvait APRÈS l'identité réelle (déjà observé en LIVE, Phase
+       AUTH-01-BIS), il l'écrasait silencieusement : signInAnonymously()
+       REMPLACE toujours currentUser, sans fusion possible. On ne touche pas à
+       onAuthStateChanged ni à _gwRestoreRealIdentity() : on se contente de ne
+       pas lancer l'appel anonyme en parallèle d'une restauration réelle
+       attendue. Un filet de sécurité borné (6s) couvre le cas où cette
+       restauration échoue ou n'aboutit jamais, pour ne pas priver
+       indéfiniment un visiteur légitime de toute identité Firebase. */
+    var _gwPendingRealRestore = false;
+    try {
+      var _gwRawSess = localStorage.getItem('gw_session');
+      var _gwSess = _gwRawSess ? JSON.parse(_gwRawSess) : null;
+      _gwPendingRealRestore = !!(_gwSess && _gwSess.authRefresh);
+    } catch(e) {}
+
+    if (_gwPendingRealRestore) {
+      setTimeout(function() {
+        if (_gwFbAuth.currentUser) return;  /* déjà réel (persistance/custom token) ou déjà anonyme via ce filet */
+        _gwFbAuth.signInAnonymously()
+          .then(function(cred) {
+            console.log('[GW Firebase] 🔒 Auth anonyme OK (filet, restauration réelle non aboutie) —', cred.user.uid);
+          })
+          .catch(function(e) {
+            console.warn('[GW Firebase] Auth anonyme échouée (filet) :', e.code || e);
+          });
+      }, 6000);
+    } else {
+      _gwFbAuth.signInAnonymously()
+        .then(function(cred) {
+          console.log('[GW Firebase] 🔒 Auth anonyme OK —', cred.user.uid);
+        })
+        .catch(function(e) {
+          console.warn('[GW Firebase] Auth anonyme échouée :', e.code || e);
+        });
+    }
   } catch(e) {
     console.error('[GW Firebase] ❌ Erreur init :', e);
   }
@@ -1478,9 +1534,15 @@ function _gwFbSyncStart() {
       _gwFbSkip = true;
       /* Les valeurs primitives (string/number/boolean) sont stockées brutes ;
          les objets/tableaux sont JSON-sérialisés. Evite les guillemets parasites
-         sur les logos/URLs qui cassent les src d'images. */
-      var toStore = (typeof val === 'object') ? JSON.stringify(val) : String(val);
-      localStorage.setItem(lsKey, toStore);
+         sur les logos/URLs qui cassent les src d'images.
+         Phase SYNC-OPTIONS-03 : écriture protégée — un quota localStorage
+         plein ne doit jamais empêcher onSync()/la remise à zéro de
+         _gwFbSkip, sous peine de geler tous les listeners partageant ce
+         même flag global (voir audit STORAGE-LOCAL-01). */
+      try {
+        var toStore = (typeof val === 'object') ? JSON.stringify(val) : String(val);
+        localStorage.setItem(lsKey, toStore);
+      } catch(e) { _gwLog('LS_QUOTA_EXCEEDED', { key: lsKey, status: 'LISTEN_CACHE_WRITE_FAILED', error: e && e.name }); }
       try { if (typeof onSync === 'function') onSync(val); } catch(e){}
       _gwFbSkip = false;
     });
@@ -1975,15 +2037,15 @@ function _gwFbSyncStart() {
     _prevReportCount = newCount;
   });
 
-  /* ── Marketplace listings ── auto-sync toutes les sections ── */
-  _listen('mk_listings', 'gw_mk_listings', function() {
-    try { _mkCheckExpired(); } catch(e){}
-    /* Rafraîchit toujours les annonces, que la page soit déjà ouverte ou non */
-    try { renderMarketplaceUserServices(); } catch(e){}
-    try { _mkRenderSystemListings(); }       catch(e){}
-    if (document.getElementById('mk-all-listings-wrap')) { try { _mkRefreshAllListings(); } catch(e){} }
-    try { _mkRenderTxTabs(); } catch(e){}
-  });
+  /* ── Marketplace listings ── auto-sync toutes les sections ──
+     Phase 7E (portée MK-01) : lit désormais gw/mk_listings_v2 (structure
+     par vendeur, Firebase-authoritative) au lieu de l'ancien tableau
+     gw/mk_listings (fermé, .read:false depuis une phase de sécurisation
+     antérieure) — aplati via _mkFlattenListings() avant stockage local,
+     pour que _mkGetListings()/localStorage.gw_mk_listings (et donc les
+     lecteurs Marketplace existants) ne voient aucune différence de
+     format. gw/mk_listings (legacy) n'est plus écouté ici. */
+  _mkListenListingsV2();
 
   /* ── Marketplace transactions ── */
   _listen('mk_txns', 'gw_mk_txns', function() {
@@ -1991,14 +2053,15 @@ function _gwFbSyncStart() {
     _admSync('payments'); /* Met à jour l'onglet paiements admin */
   });
 
-  /* ── Demandes de collaboration ── */
-  _listen('collab_requests', 'gw_collab_requests', function() {
-    if (document.getElementById('collab-list-wrap')) { try { _collabRender(); } catch(e){} }
-    _admSync('reports'); /* Visible dans signalements si modérés */
-  });
+  /* ── Demandes de collaboration ──
+     Phase 9D-ter-bis (portée COLLAB-01) : bascule vers gw/collab_requests_v2
+     (métadonnées publiques uniquement, structure objet et non tableau —
+     écouteur dédié _collabWatchV2, _listen() ne gère que les tableaux). */
+  _collabWatchV2();
 
-  /* ── Offres d'emploi ── */
-  _listen('jobs', 'gw_jobs', function() {
+  /* ── Offres d'emploi (Phase 8E, portée JOB-01 : gw/jobs_v2, l'ancien
+     tableau plat gw/jobs est fermé — .read:false) ── */
+  _jobListenAllV2(function() {
     if (document.getElementById('job-list-wrap')) { try { _jobRenderList(); } catch(e){} }
   });
 
@@ -2007,11 +2070,11 @@ function _gwFbSyncStart() {
     try { _jobApplyFeatureVisibility(); } catch(e){}
   });
 
-  /* ── Vérifications entreprise recruteur ── */
-  _listen('recruiter_verifs', 'gw_recruiter_verifs', function() { _admSync('recruiters'); try { _refreshSidebar(); } catch(e){} });
+  /* ── Vérifications entreprise recruteur (Phase 8E : gw/recruiter_verifs_v2/{ownUid}, jamais les demandes des autres) ── */
+  _jobListenMyVerifV2(function() { _admSync('recruiters'); try { _refreshSidebar(); } catch(e){} });
 
-  /* ── Candidatures simplifiées reçues par les recruteurs ── */
-  _listen('job_applications', 'gw_job_applications', function() {
+  /* ── Candidatures simplifiées reçues par les recruteurs + mon propre index candidat (Phase 8E : gw/job_applications_v2/{ownUid} + gw/candidate_applications/{ownUid}) ── */
+  _jobListenMyApplicationsV2(function() {
     try { _refreshSidebar(); } catch(e){}
     if (document.getElementById('job-recdash-card')) { try { _jobOpenRecruiterDashboard(); } catch(e){} }
   });
@@ -2025,7 +2088,7 @@ function _gwFbSyncStart() {
   });
 
   /* ── Config plans (activé/désactivé par admin) ── */
-  _listen('plans_config', 'gw_plans_config', function() {
+  _listen('plans_config', 'gw_plans_config', function(freshCfg) {
     /* Si page abonnements ouverte → masquer/afficher les cartes en temps réel */
     var ss = document.getElementById('sub-screen');
     if (ss && ss.classList.contains('open')) {
@@ -2034,6 +2097,20 @@ function _gwFbSyncStart() {
     _admSync('dashboard');
     /* Appliquer immédiatement les sections activées/désactivées */
     try { _gwApplyMkSections(); } catch(e) {}
+    /* Phase SYNC-OPTIONS-02 : re-rendre le bloc PayPal d'une fiche Marketplace
+       deja ouverte si paypalEnabled a reellement change — comparaison a la
+       derniere valeur connue pour eviter tout rerender inutile/boucle.
+       Valeur lue depuis le snapshot Firebase (freshCfg), jamais depuis
+       localStorage, pour rester correcte meme si l'ecriture locale a
+       echoue par quota (voir SYNC-OPTIONS-03). */
+    try {
+      var freshPaypalEnabled = !!(freshCfg && freshCfg.paypalEnabled);
+      if (_mkPaypalEnabledLastSeen !== null && freshPaypalEnabled !== _mkPaypalEnabledLastSeen &&
+          _mkCurrentListing && document.getElementById('mk-detail-card') && document.getElementById('mk-paypal-btn-wrap')) {
+        _mkLoadPayPal(_mkCurrentListing);
+      }
+      _mkPaypalEnabledLastSeen = freshPaypalEnabled;
+    } catch(e) {}
   });
 
   /* ── Profils utilisateurs — changements visibles en temps réel dans l'admin ── */
@@ -2159,6 +2236,16 @@ function _gwMergePost(snap) {
 function _gwMergeGroupMsg(snap) {
   if (!_currentUser || !snap) return;
   var fbKey = snap.key;
+  /* Groupes libres (Phase GROUPS-FREE-02) : chemin entièrement parallèle,
+     jamais gw_grp_{projId}___{ownerEmail} (collab, ci-dessous, inchangé).
+     GROUPS/MOBILE-ANR-01 (P1) : ne route plus vers _gwMergeFreeGroupMsg (qui
+     retraitait l'historique COMPLET du groupe à chaque message — cause
+     racine confirmée de l'ANR mobile après ~5-6 min). Les groupes libres ont
+     désormais leurs propres listeners incrémentaux par groupe, attachés via
+     _attachFreeGroupRealtimeListeners (child_added sur .../messages, coût
+     O(1) par message). Les groupes de collaboration ci-dessous restent
+     entièrement inchangés — seul ce chemin top-level free-group est retiré. */
+  if (fbKey && fbKey.indexOf('gw_grp_adhoc_') === 0) { return; }
   var data  = snap.val();
   if (!data) return;
   var lsKey = fbKey.replace(/__d__/g, '.').replace(/__a__/g, '@');
@@ -2245,6 +2332,7 @@ function _gwMergeGroupMsg(snap) {
    PRÉSENCE EN LIGNE — Temps réel admin
 ══════════════════════════════════════════ */
 var _gwOnlineRef = null;
+var _gwOnlineHeartbeatTimer = null;
 
 function _gwSetOnlinePresence(user) {
   if (!_gwFbReady || !_gwFbDB || !user) return;
@@ -2252,6 +2340,17 @@ function _gwSetOnlinePresence(user) {
   if (_privLoadForEmail(user.email).showOnline === false) return;
   var fbKey = _gwFbKey(user.email);
   var ref   = _gwFbDB.ref('gw/online/' + fbKey);
+
+  /* GROUPS/MOBILE-ANR-01 (P2) : l'ancien code réassignait _gwOnlineRef AVANT
+     de tester son ancien ._heartbeat — la garde "clear avant recréation"
+     inspectait donc toujours le NOUVEAU ref (jamais encore initialisé),
+     jamais l'ancien, laissant un setInterval(120000) orphelin actif à
+     chaque appel (confirmé par test : 5 appels → 5 intervals actifs).
+     Le timer est maintenant suivi indépendamment du ref et nettoyé AVANT
+     toute réassignation — un seul heartbeat actif, quel que soit le
+     nombre d'appels. */
+  if (_gwOnlineHeartbeatTimer) { clearInterval(_gwOnlineHeartbeatTimer); _gwOnlineHeartbeatTimer = null; }
+
   _gwOnlineRef = ref;
 
   /* Écrit la présence (peut échouer si auth pas encore établie → silencieux) */
@@ -2265,8 +2364,7 @@ function _gwSetOnlinePresence(user) {
   ref.onDisconnect().remove().catch(function(){});
 
   /* Renouvelle la présence toutes les 2 minutes (keepalive) */
-  if (_gwOnlineRef._heartbeat) clearInterval(_gwOnlineRef._heartbeat);
-  _gwOnlineRef._heartbeat = setInterval(function() {
+  _gwOnlineHeartbeatTimer = setInterval(function() {
     try { ref.update({ at: Date.now() }); } catch(e){}
   }, 120000);
 }
@@ -2354,7 +2452,9 @@ function _gwFbWatchUserNotifs(email) {
     }
     /* Trier du plus récent au plus ancien */
     arr.sort(function(a, b) { return (b.at || 0) - (a.at || 0); });
-    localStorage.setItem('gw_notifs_' + email, JSON.stringify(arr));
+    /* Phase SYNC-OPTIONS-03 : écriture protégée, voir _listen() plus haut. */
+    try { localStorage.setItem('gw_notifs_' + email, JSON.stringify(arr)); }
+    catch(e) { _gwLog('LS_QUOTA_EXCEEDED', { key: 'gw_notifs_' + email, status: 'NOTIFS_CACHE_WRITE_FAILED', error: e && e.name }); }
     _gwFbSkip = false;
     try { renderNotifs(); updateNotifBadge(); } catch(e){}
   });
@@ -2967,12 +3067,24 @@ function _gwStartApp() {
   if (_gwAppStarted) {
     /* ── App déjà lancée via fast-path localStorage ──
        Firebase vient de charger → sync silencieuse en arrière-plan.
-       On vérifie si le compte est banni / supprimé depuis la dernière visite,
-       puis on rafraîchit les données utilisateur sans re-lancer l'app. */
+       On vérifie si le compte est banni depuis la dernière visite,
+       puis on rafraîchit les données utilisateur sans re-lancer l'app.
+       [AUTH-01] gw/users est fermé (.read:false) depuis une phase de
+       sécurisation antérieure — findUser() ne peut donc JAMAIS être fiable
+       ici comme preuve de suppression de compte (gw_users en localStorage
+       n'est plus synchronisable via ce chemin). Avant ce correctif,
+       !bgUser était systématiquement vrai (gw_users jamais rafraîchi,
+       cf. Promise.all cassé dans _gwFbPreloadAndStart ci-dessous), ce qui
+       forçait une déconnexion + retour en session anonyme à CHAQUE
+       identité réelle confirmée — cause racine de l'instabilité Auth.
+       Seul un ban confirmé (gw/bans, toujours lisible) déclenche encore
+       une déconnexion forcée ici ; findUser() en échec retombe sur les
+       données de session, exactement comme le font déjà _gwInstantAutoLogin()
+       et le chemin normal ci-dessous (même garde-fou, désormais cohérent
+       aux 3 endroits). */
     if (!session) return;
-    var bgUser = findUser(session.email);
-    if (!bgUser || _admIsBanned(session.email)) {
-      /* Compte banni/supprimé → déconnexion forcée */
+    if (_admIsBanned(session.email)) {
+      /* Compte banni → déconnexion forcée */
       _gwAppStarted = false;
       localStorage.removeItem('gw_session');
       _currentUser = null;
@@ -2980,6 +3092,7 @@ function _gwStartApp() {
       try { goTo('screen-login'); } catch(e) {}
       return;
     }
+    var bgUser = findUser(session.email) || { nom: session.nom || session.email.split('@')[0], email: session.email, loginMethod: session.loginMethod || 'email' };
     /* Sync silencieuse : met à jour inbox, notifs, profil, DMs, etc. */
     _gwPreloadUserData(bgUser, function() {
       /* Rafraîchit les badges et compteurs sans tout re-rendre */
@@ -3071,6 +3184,17 @@ function _gwSilentRefresh(user) {
 
 function _gwHandleDeepLink() {
   try {
+    /* ── Deep link invitation de groupe (Phase GROUPS-FREE-07) : basé sur le
+       CHEMIN /group/invite/{token}, pas un paramètre — capturé AVANT connexion
+       par window.addEventListener('load',...) et stocké en sessionStorage,
+       même motif que gw_pending_post/gw_pending_song ci-dessous. ── */
+    var pendingInvite = sessionStorage.getItem('gw_pending_group_invite');
+    if (pendingInvite) {
+      sessionStorage.removeItem('gw_pending_group_invite');
+      _openGroupInviteScreen(pendingInvite);
+      return;
+    }
+
     var params = new URLSearchParams(window.location.search);
 
     /* ── Deep link musique : URL param OU sessionStorage (après login/signup) ── */
@@ -3318,17 +3442,31 @@ function _gwFbPreloadAndStart() {
     return;
   }
 
+  /* [AUTH-01] gw/users, gw/mk_listings, gw/collab_requests et gw/jobs sont
+     fermés (.read:false) depuis des phases de sécurisation antérieures —
+     ces 4 lectures échouaient donc à CHAQUE appel, ce qui rejetait
+     l'intégralité de ce Promise.all (une seule promesse rejetée suffit)
+     et faisait systématiquement tomber dans le .catch() ci-dessous, qui
+     lance _gwStartApp() SANS avoir synchronisé aucune des 10 sources
+     prévues — y compris les 6 légitimes (posts, bans, official_posts,
+     profiles, restrictions, restriction_appeals). Conséquence directe :
+     gw_users (localStorage) n'était plus jamais rafraîchi, ce qui rendait
+     findUser() indéfiniment peu fiable — cause racine de l'instabilité
+     Auth (cf. _gwStartApp() ci-dessus). Remplacées par des promesses déjà
+     résolues à null (même position dans le tableau, aucun index à
+     renuméroter) pour laisser les 6 lectures encore valides aboutir
+     réellement. */
   Promise.all([
-    _gwFbDB.ref('gw/users').once('value'),
+    Promise.resolve({ val: function() { return null; } }),  /* 0 — gw/users (fermé) */
     _gwFbDB.ref('gw/posts').once('value'),
     _gwFbDB.ref('gw/bans').once('value'),
     _gwFbDB.ref('gw/official_posts').once('value'),
-    _gwFbDB.ref('gw/mk_listings').once('value'),
-    _gwFbDB.ref('gw/collab_requests').once('value'),
+    Promise.resolve({ val: function() { return null; } }),  /* 4 — gw/mk_listings (fermé) */
+    Promise.resolve({ val: function() { return null; } }),  /* 5 — gw/collab_requests (fermé) */
     _gwFbDB.ref('gw/profiles').once('value'),
     _gwFbDB.ref('gw/restrictions').once('value'),
     _gwFbDB.ref('gw/restriction_appeals').once('value'),
-    _gwFbDB.ref('gw/jobs').once('value')
+    Promise.resolve({ val: function() { return null; } })   /* 9 — gw/jobs (fermé) */
   ]).then(function(snaps) {
 
     /* ── Utilisateurs ── */
@@ -3484,6 +3622,23 @@ function _gwProcessCapacitorDeepUrl(url) {
 
 /* Lance l'initialisation GIS quand la page est prête */
 window.addEventListener('load', function() {
+  /* ── Capture deep link invitation de groupe AVANT tout (Phase GROUPS-FREE-07) —
+     basé sur le CHEMIN /group/invite/{token} (le catch-all vercel.json sert déjà
+     index.html pour tout chemin non-API), pas un paramètre ?query comme les deep
+     links ci-dessous. Persiste en sessionStorage jusqu'après connexion, lu par
+     _gwHandleDeepLink(). Token = 16 à 128 caractères alphanumériques/_/- généré
+     par le serveur ou le client (_freeGroupGenerateInviteToken) — jamais d'email/
+     UID/structure Firebase dans l'URL elle-même. ── */
+  (function() {
+    try {
+      var m = window.location.pathname.match(/^\/group\/invite\/([A-Za-z0-9_-]{16,128})$/);
+      if (m) {
+        sessionStorage.setItem('gw_pending_group_invite', m[1]);
+        window.history.replaceState({}, '', '/');
+      }
+    } catch (e) {}
+  })();
+
   /* ── Capture deep link song AVANT tout (persiste après redirection login) ── */
   (function() {
     try {
@@ -4566,6 +4721,450 @@ function _gwPreloadShortUrls() {
   } catch(e) {}
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   DM v2 — NOUVEAU MODULE DE MESSAGERIE PRIVÉE 1-À-1, ISOLÉ
+   ────────────────────────────────────────────────────────────────────────
+   N'utilise NI gw/inboxes, NI gw/dm_msgs, NI _globalMsgPoll.
+   Ne démarre qu'après confirmation de l'identité Firebase réelle
+   (_gwRealAuthReady === true) — voir _dmInit(), appelé une seule fois
+   depuis initApp() ci-dessous (immédiatement ou via _gwRealAuthWaiters).
+
+   Chemins Firebase :
+     gw/dm_conversations_v2/{conversationId}
+       { participants:{uidA:true,uidB:true}, lastMessage, lastMessageAt, unread:{uid:number} }
+     gw/dm_messages/{conversationId}/{messageId}
+       { senderId, senderEmail, text, createdAt }
+     gw/dm_user_conversations/{uid}/{conversationId}
+       { updatedAt }
+
+   conversationId = _dmFbKey(emailA, emailB) — même principe déterministe
+   qu'utilisé par l'ancien système (indépendant de l'ordre A/B), réutilisé
+   tel quel, pas réinventé.
+
+   L'ANCIEN système (gw/inboxes, gw/dm_msgs, _dmWriteMsg) reste inchangé par
+   ce bloc — il est simplement remplacé au niveau des points d'appel
+   (sendChatMessage/openChat/openChatWithUser/closeChat) plus bas dans ce
+   fichier, puisque gw/inboxes et gw/dm_msgs sont fermés côté Rules
+   (.write:false) et que chaque envoi échouait silencieusement. ── */
+
+var _dmInitialized              = false;
+var _dmUserConversationsRef     = null;
+var _dmUserConversationsHandler = null;
+var _dmUserConversationsErrHandler = null;
+var _dmActiveConversationId     = null;
+var _dmMessagesRef              = null;
+var _dmMessagesHandler          = null;
+var _dmMessagesErrHandler       = null;
+var _dmPeerEmailCache           = {};   /* conversationId -> email du correspondant, résolu une fois */
+/* MESSAGING-STABILITY-05 (Fix A, H2-3/H2-4/H2-5/H2-9) :
+   _dmOpeningToken — incrémenté à chaque appel de _dmOpenConversation() ;
+   permet à une tentative de vérification participant (avec retry) de se
+   savoir périmée (une conversation plus récente a été ouverte entretemps)
+   et de s'auto-annuler silencieusement plutôt que d'attacher un listener
+   pour la mauvaise conversation.
+   _dmSilenceCheckTimer — filet de sécurité léger (voir _dmOpenConversation),
+   actif UNIQUEMENT tant que la conversation reste ouverte, jamais un poll
+   permanent global. */
+var _dmOpeningToken             = 0;
+var _dmSilenceCheckTimer        = null;
+/* MESSAGING-STABILITY-07 (Fix A2) :
+   _dmMetaRetryState — état PAR conversationId (jamais global) pour le
+   retry de la lecture metadata dans _dmHandleUserConversationsSnapshot().
+   La simple PRÉSENCE d'une entrée pour un id signifie "déjà en cours"
+   (lecture en vol OU en attente de retry programmé) — empêche toute
+   double chaîne concurrente si le snapshot d'index se redéclenche
+   pendant qu'un retry est déjà planifié pour le même id (H2-3/H2-4). */
+var _dmMetaRetryState           = {};
+var _DM_META_MAX_ATTEMPTS       = 5;
+var _DM_META_RETRY_DELAY        = 400;
+
+/* conversationId déterministe — réutilise _dmFbKey (déjà défini plus haut dans le fichier) */
+function _dmConversationId(emailA, emailB) {
+  return _dmFbKey(emailA, emailB);
+}
+
+/* ── Détecte une conversation DM v2 (id = _dmConversationId/_dmFbKey, jamais un groupe).
+   Un conv DM v2 a toujours un id chaîne "gw_dm_..." ; un conv legacy/groupe a toujours
+   un id numérique (_newConvId()). Utilisé comme barrière de sécurité pour empêcher
+   toute écriture legacy (gw/dm_msgs) depuis une conversation DM v2. ── */
+function _dmIsV2Conversation(conv) {
+  return !!(conv && !conv.isGroup && typeof conv.id === 'string' && conv.id.indexOf('gw_dm_') === 0);
+}
+
+/* ── Point d'entrée UNIQUE du module. Appelé une seule fois, seulement
+   après confirmation de l'identité Firebase réelle.
+   AUCUNE query sur gw/dm_conversations_v2 — écoute uniquement l'index privé
+   gw/dm_user_conversations/{monUid} (simple .on('value'), sécurisable par
+   auth.uid === $uid sans les limites des règles+query). ── */
+function _dmInit() {
+  if (_dmInitialized) return;                                   /* jamais deux fois */
+  if (!_gwRealAuthReady || !_gwFbDB || !_currentUser) return;    /* protection architecturale, pas dispersée */
+  _dmInitialized = true;
+
+  var myUid = _gwFbKey(_currentUser.email);
+
+  _dmUserConversationsHandler = function(snap) {
+    try { _dmHandleUserConversationsSnapshot(snap); } catch(e) { console.error('[DM v2] Erreur traitement index conversations:', e); }
+  };
+
+  /* Constaté en LIVE : au moment où _dmInit() est appelé via
+     _gwRealAuthWaiters (donc après onAuthStateChanged(user) confirmant
+     déjà user.isAnonymous===false côté SDK Auth), la connexion RTDB
+     (WebSocket séparé du SDK Auth) peut ne pas avoir encore fini sa
+     propre ré-authentification interne — même symptôme déjà présent sur
+     _gwSetOnlinePresence (écriture existante, même mécanisme d'attente),
+     qui échoue parfois avec permission_denied sur gw/online pour la même
+     raison. Un listener .on() qui échoue à l'attache initiale ne se
+     retente jamais automatiquement (Firebase n'appelle le callback
+     d'erreur qu'une fois puis annule le listener) — sans ce correctif,
+     un tel échec laisserait DM v2 durablement inactif pour toute la
+     session. Retry borné (8 tentatives, délai croissant jusqu'à ~21s
+     cumulés), jamais indéfini — constaté empiriquement qu'une fenêtre de
+     3 tentatives (~4s) n'était pas toujours suffisante. */
+  var _dmInitAttempt = 0;
+  var _DM_INIT_MAX_ATTEMPTS = 8;
+  function _dmAttachUserConversationsListener() {
+    _dmUserConversationsErrHandler = function(err) {
+      if (err && err.code === 'PERMISSION_DENIED' && _dmInitAttempt < _DM_INIT_MAX_ATTEMPTS) {
+        _dmInitAttempt++;
+        setTimeout(_dmAttachUserConversationsListener, 600 * _dmInitAttempt);
+        return;
+      }
+      console.error('[DM v2] Listener index conversations refusé :', err && err.code, err && err.message, '| tentatives:', _dmInitAttempt);
+    };
+    _dmUserConversationsRef = _gwFbDB.ref('gw/dm_user_conversations/' + myUid);
+    _dmUserConversationsRef.on('value', _dmUserConversationsHandler, _dmUserConversationsErrHandler);
+  }
+  _dmAttachUserConversationsListener();
+}
+
+/* ── Détache tout (listener index conversations + listener messages actif).
+   Appelé au logout / changement d'utilisateur. ── */
+function _dmShutdown() {
+  if (_dmUserConversationsRef && _dmUserConversationsHandler) {
+    try { _dmUserConversationsRef.off('value', _dmUserConversationsHandler); } catch(e){}
+  }
+  _dmUserConversationsRef        = null;
+  _dmUserConversationsHandler    = null;
+  _dmUserConversationsErrHandler = null;
+  _dmCloseConversation();
+  _dmInitialized = false;
+}
+
+/* ── Pour chaque conversationId présent dans mon index privé, lit DIRECTEMENT
+   (par chemin, pas par query) gw/dm_conversations_v2/{conversationId}.
+   Un accès par chemin direct respecte correctement une règle définie au
+   niveau $conversationId (contrairement à une query au niveau parent). ── */
+function _dmHandleUserConversationsSnapshot(snap) {
+  if (!_currentUser || !_gwFbDB) return;
+  var index = snap.val() || {};
+  var ids = Object.keys(index);
+  ids.forEach(function(conversationId) {
+    _dmLoadConversationMeta(conversationId);
+  });
+}
+
+/* MESSAGING-STABILITY-07 (Fix A2, H2-3/H2-4 — premier contact jamais
+   découvert) : point d'entrée du retry — n'agit QUE si aucune tentative
+   n'est déjà en cours pour cet id précis (dédoublonnage, A2-5/A2-6).
+   Ce mécanisme ne remplace jamais le "retry accidentel" déjà existant
+   (le .on('value') sur l'index se redéclenche naturellement à tout
+   changement) — il comble seulement le cas où RIEN d'autre ne
+   redéclenche jamais cet index (contact unique). */
+function _dmLoadConversationMeta(conversationId) {
+  if (_dmMetaRetryState[conversationId]) return;  /* déjà en vol ou en attente de retry — aucune double chaîne */
+  _dmMetaRetryState[conversationId] = { attempts: 0, timer: null };
+  _dmAttemptConversationMeta(conversationId);
+}
+
+function _dmAttemptConversationMeta(conversationId) {
+  var state = _dmMetaRetryState[conversationId];
+  if (!state) return;  /* état nettoyé entretemps (succès déjà obtenu par une autre voie, etc.) */
+  if (!_currentUser || !_gwFbDB) { delete _dmMetaRetryState[conversationId]; return; }  /* session terminée : arrêt propre sans dépendre de _dmShutdown() */
+  state.attempts++;
+
+  _gwFbDB.ref('gw/dm_conversations_v2/' + conversationId).once('value').then(function(convSnap) {
+    var st = _dmMetaRetryState[conversationId];
+    if (!st) return;
+    var data = convSnap.val();
+    if (data) {
+      delete _dmMetaRetryState[conversationId];  /* succès : annule tout retry restant pour cet id */
+      _dmHandleConversationData(conversationId, data);
+      return;
+    }
+    _dmScheduleConversationMetaRetry(conversationId);
+  }).catch(function(err) {
+    console.error('[DM v2] Lecture conversation refusée :', conversationId, err && err.code, err && err.message);
+    _dmScheduleConversationMetaRetry(conversationId);
+  });
+}
+
+function _dmScheduleConversationMetaRetry(conversationId) {
+  var state = _dmMetaRetryState[conversationId];
+  if (!state) return;
+  if (state.attempts >= _DM_META_MAX_ATTEMPTS) {
+    console.error('[DM v2] Métadonnée conversation introuvable après ' + state.attempts + ' tentative(s), abandon :', conversationId);
+    delete _dmMetaRetryState[conversationId];  /* jamais de retry infini */
+    return;
+  }
+  state.timer = setTimeout(function() { _dmAttemptConversationMeta(conversationId); }, _DM_META_RETRY_DELAY * state.attempts);
+}
+
+/* ── Traite une conversation individuelle : construit/met à jour l'entrée
+   DEMO_CONVERSATIONS correspondante pour le rendu (renderConversations).
+   Résolution de l'email du correspondant, dans l'ordre :
+   1. email déjà connu localement (conv existante ou créée via openChatWithUser) ;
+   2. senderEmail du dernier message envoyé par l'AUTRE participant (gw/dm_messages,
+      chemin où j'ai déjà le droit de lecture en tant que participant) ;
+   3. fallback générique "Conversation" si impossible. ── */
+function _dmHandleConversationData(conversationId, data) {
+  if (!_currentUser || !_gwFbDB || !data || !data.participants) return;
+  var myUid    = _gwFbKey(_currentUser.email);
+  var otherUid = Object.keys(data.participants).filter(function(uid) { return uid !== myUid; })[0];
+  if (!otherUid) return;
+
+  function _applyConv(email) {
+    var unreadMoi = (data.unread && data.unread[myUid]) || 0;
+    var lastMsg   = data.lastMessage || 'Démarrez la conversation';
+    var lastAt    = data.lastMessageAt || null;
+    var row = DEMO_CONVERSATIONS.find(function(c) { return c.id === conversationId; });
+    if (row) {
+      row.lastMsg = lastMsg;
+      row.lastAt  = lastAt || row.lastAt;
+      row.unread  = unreadMoi;
+      if (email && !row.email) row.email = email;
+    } else {
+      var nom = email ? getDisplayName(email, email) : 'Conversation';
+      DEMO_CONVERSATIONS.unshift({
+        id: conversationId, name: nom, email: email || null, role: 'Membre Geniwork',
+        verified: false, online: false,
+        avatar: { type: 'color', color: '#2563EB', initials: getInitials(nom) },
+        at: lastAt || Date.now(), time: '', lastMsg: lastMsg, lastAt: lastAt,
+        unread: unreadMoi, archived: false, messages: []
+      });
+    }
+    _renderConvDebounced();
+  }
+
+  var existingRow = DEMO_CONVERSATIONS.find(function(c) { return c.id === conversationId; });
+  var knownEmail  = (existingRow && existingRow.email) || _dmPeerEmailCache[conversationId] || null;
+  if (knownEmail) { _applyConv(knownEmail); return; }
+
+  /* Résolution via le dernier message de l'AUTRE participant — lecture sur mon propre
+     chemin de conversation (autorisé), jamais sur l'index privé d'un autre utilisateur. */
+  _gwFbDB.ref('gw/dm_messages/' + conversationId)
+    .orderByChild('senderId').equalTo(otherUid).limitToLast(1)
+    .once('value')
+    .then(function(msnap) {
+      var val = msnap.val();
+      var email = null;
+      if (val) {
+        var k = Object.keys(val)[0];
+        email = val[k] && val[k].senderEmail || null;
+      }
+      if (email) _dmPeerEmailCache[conversationId] = email;
+      _applyConv(email);
+    })
+    .catch(function(err) {
+      console.error('[DM v2] Résolution email correspondant échouée :', conversationId, err && err.code, err && err.message);
+      _applyConv(null);
+    });
+}
+
+/* ── Ouvre une conversation :
+   1. vérifie que l'utilisateur courant est bien participant (lecture directe,
+      pas de confiance aveugle côté client) ;
+   2. détache l'ancienne écoute messages s'il y en avait une ;
+   3. attache UN SEUL listener sur gw/dm_messages/{conversationId} ;
+   4. remet unread à 0 pour moi. ── */
+/* MESSAGING-STABILITY-05 (Fix A) : constantes du retry participant — bornées,
+   jamais indéfinies. 5 tentatives, délai croissant 400ms/tentative (~6s
+   cumulés max), même principe que le retry déjà en production sur
+   _dmInit() (borné + croissant), adapté ici à un .once('value') qui
+   RÉSOUT avec une valeur fausse (pas une erreur) plutôt qu'à un .on()
+   qui échoue avec un code d'erreur — le mécanisme de garde est donc
+   nécessairement différent, mais le principe (borné, croissant, jamais
+   de boucle infinie) est le même. */
+var _DM_PARTICIPANT_MAX_ATTEMPTS = 5;
+var _DM_PARTICIPANT_RETRY_DELAY  = 400;
+/* Filet de sécurité léger contre un listener child_added attaché avec
+   succès mais qui cesse silencieusement de livrer des événements (H2-5,
+   confirmé par harnais — même classe de bug déjà rencontrée et corrigée
+   pour les groupes libres, MESSAGING-GROUP-SYNC-03, mais implémenté ici
+   de façon totalement indépendante : aucune fonction de groupe touchée).
+   Actif UNIQUEMENT tant que cette conversation précise reste ouverte —
+   jamais un poll global permanent. */
+var _DM_SILENCE_CHECK_INTERVAL = 20000;
+
+function _dmOpenConversation(conversationId) {
+  if (!_gwRealAuthReady || !_gwFbDB || !_currentUser || !conversationId) return;
+  var myUid  = _gwFbKey(_currentUser.email);
+  var myToken = ++_dmOpeningToken;  /* invalide toute tentative précédente encore en vol */
+
+  function checkParticipant(attempt) {
+    if (myToken !== _dmOpeningToken) return;  /* une ouverture plus récente a pris le relais — abandon silencieux */
+    _gwFbDB.ref('gw/dm_conversations_v2/' + conversationId + '/participants/' + myUid).once('value').then(function(snap) {
+      if (myToken !== _dmOpeningToken) return;
+      if (snap.val() !== true) {
+        if (attempt < _DM_PARTICIPANT_MAX_ATTEMPTS) {
+          setTimeout(function() { checkParticipant(attempt + 1); }, _DM_PARTICIPANT_RETRY_DELAY * attempt);
+          return;
+        }
+        console.error('[DM v2] Ouverture refusée — utilisateur non participant après ' + attempt + ' tentative(s) :', conversationId);
+        return;
+      }
+      attachMessagesListener();
+    }).catch(function(err) {
+      if (myToken !== _dmOpeningToken) return;
+      if (attempt < _DM_PARTICIPANT_MAX_ATTEMPTS) {
+        setTimeout(function() { checkParticipant(attempt + 1); }, _DM_PARTICIPANT_RETRY_DELAY * attempt);
+        return;
+      }
+      console.error('[DM v2] Vérification participant échouée après ' + attempt + ' tentative(s) :', conversationId, err && err.code, err && err.message);
+    });
+  }
+
+  function attachMessagesListener() {
+    _dmCloseConversation();  /* jamais deux listeners messages actifs simultanément */
+    _dmActiveConversationId = conversationId;
+    /* MVP DM v2 texte seul : adapte {senderId, senderEmail, text, createdAt} vers le
+       format attendu par _buildBubbleHtml, sans jamais écrire de nouveaux champs dans
+       Firebase. Pas de reply/suppression/média/accusé de lecture par message ici. */
+    _dmMessagesHandler = function(msnap) {
+      try {
+        var m = msnap.val();
+        if (!m || !m.senderId || typeof m.text !== 'string') return;
+        var isMine  = m.senderId === myUid;
+        var adapted = { id: msnap.key, from: m.senderEmail, text: m.text, at: m.createdAt, type: m.type || 'text' };
+        if (m.payload) { for (var _k in m.payload) { adapted[_k] = m.payload[_k]; } }
+
+        var convRow = DEMO_CONVERSATIONS.find(function(c) { return c.id === conversationId; });
+        if (convRow) {
+          if (!convRow.messages) convRow.messages = [];
+          if (!convRow.messages.some(function(x) { return String(x.id) === String(adapted.id); })) {
+            convRow.messages.push(adapted);
+          }
+        }
+
+        if (_chatConvId === conversationId) {
+          var box = document.getElementById('chat-messages');
+          if (box && !box.querySelector('[data-msg-id="' + adapted.id + '"]')) {
+            var row = document.createElement('div');
+            row.className = 'chat-msg-row ' + (isMine ? 'mine' : 'theirs');
+            row.setAttribute('data-msg-id', String(adapted.id));
+            row.innerHTML = _buildBubbleHtml(adapted, isMine);
+            box.appendChild(row);
+            _scrollChatToBottom();
+          }
+        }
+      } catch(e) { console.error('[DM v2] Erreur rendu message :', e); }
+    };
+    _dmMessagesErrHandler = function(err) {
+      console.error('[DM v2] Listener messages refusé :', err && err.code, err && err.message);
+    };
+    _dmMessagesRef = _gwFbDB.ref('gw/dm_messages/' + conversationId);
+    _dmMessagesRef.on('child_added', _dmMessagesHandler, _dmMessagesErrHandler);
+
+    _gwFbDB.ref('gw/dm_conversations_v2/' + conversationId + '/unread/' + myUid).set(0).catch(function(){});
+
+    /* Filet de sécurité (H2-5/H2-9) : relit périodiquement le nœud complet
+       et rejoue chaque message pas encore connu à TRAVERS _dmMessagesHandler
+       elle-même (réemploi direct — même dédoublonnage par id, même rendu,
+       zéro logique dupliquée). Ne remplace jamais le listener temps réel,
+       compense seulement s'il reste silencieux. */
+    if (_dmSilenceCheckTimer) { clearInterval(_dmSilenceCheckTimer); }
+    _dmSilenceCheckTimer = setInterval(function() {
+      if (_dmActiveConversationId !== conversationId || !_gwFbDB) {
+        clearInterval(_dmSilenceCheckTimer);
+        _dmSilenceCheckTimer = null;
+        return;
+      }
+      _gwFbDB.ref('gw/dm_messages/' + conversationId).once('value').then(function(snap) {
+        if (_dmActiveConversationId !== conversationId) return;
+        var val = snap.val() || {};
+        Object.keys(val).forEach(function(msgId) {
+          _dmMessagesHandler({ key: msgId, val: function() { return val[msgId]; } });
+        });
+      }).catch(function() {});
+    }, _DM_SILENCE_CHECK_INTERVAL);
+  }
+
+  checkParticipant(1);
+}
+
+/* ── Ferme la conversation active : détache le listener, vide les références,
+   arrête le filet de sécurité et invalide toute tentative d'ouverture encore
+   en cours (retry participant en vol pour une conversation qu'on vient de
+   quitter). ── */
+function _dmCloseConversation() {
+  if (_dmMessagesRef && _dmMessagesHandler) {
+    try { _dmMessagesRef.off('child_added', _dmMessagesHandler); } catch(e){}
+  }
+  _dmMessagesRef        = null;
+  _dmMessagesHandler    = null;
+  _dmMessagesErrHandler = null;
+  _dmActiveConversationId = null;
+  if (_dmSilenceCheckTimer) { clearInterval(_dmSilenceCheckTimer); _dmSilenceCheckTimer = null; }
+  _dmOpeningToken++;
+}
+
+/* ── Envoie un message, en DEUX étapes séquentielles (nécessaire pour rester
+   compatible avec des règles Firebase strictes par participant) :
+   Étape A — crée/met à jour dm_conversations_v2 + mon propre index. Doit réussir
+             avant toute autre écriture (ni message, ni index du destinataire).
+   Étape B — seulement après succès confirmé de A : écrit le message et
+             l'index du destinataire (autorisable désormais, puisque je suis
+             un participant confirmé de la conversation depuis l'étape A). ── */
+function _dmSendMessage(conversationId, otherEmail, text, messageId, type, payload) {
+  if (!_gwRealAuthReady || !_gwFbDB || !_currentUser) return Promise.resolve(false);
+  if (!conversationId || !otherEmail || !text) return Promise.resolve(false);
+
+  var myUid    = _gwFbKey(_currentUser.email);
+  var otherUid = _gwFbKey(otherEmail);
+  /* messageId : paramètre optionnel — permet à l'appelant (sendChatMessage) de générer
+     la clé À L'AVANCE pour afficher la bulle optimiste avec le MÊME id que celui reçu
+     ensuite via le listener child_added, et éviter un doublon visuel. Si absent, générée ici. */
+  messageId = messageId || _gwFbDB.ref('gw/dm_messages/' + conversationId).push().key;
+  var createdAt = Date.now();
+
+  var updatesA = {};
+  updatesA['gw/dm_conversations_v2/' + conversationId + '/participants/' + myUid]    = true;
+  updatesA['gw/dm_conversations_v2/' + conversationId + '/participants/' + otherUid] = true;
+  updatesA['gw/dm_user_conversations/' + myUid + '/' + conversationId + '/updatedAt'] = createdAt;
+
+  return _gwFbDB.ref().update(updatesA)
+    .then(function() {
+      var message = {
+        senderId:    myUid,
+        senderEmail: _currentUser.email,
+        text:        text,
+        createdAt:   createdAt
+      };
+      if (type)    message.type    = type;
+      if (payload) message.payload = payload;
+      var updatesB = {};
+      updatesB['gw/dm_messages/' + conversationId + '/' + messageId] = message;
+      updatesB['gw/dm_conversations_v2/' + conversationId + '/lastMessage']   = text;
+      updatesB['gw/dm_conversations_v2/' + conversationId + '/lastMessageAt'] = createdAt;
+      updatesB['gw/dm_conversations_v2/' + conversationId + '/unread/' + otherUid] =
+        (firebase.database.ServerValue && firebase.database.ServerValue.increment)
+          ? firebase.database.ServerValue.increment(1)
+          : 1; /* repli si increment indisponible sur cette version du SDK */
+      updatesB['gw/dm_user_conversations/' + otherUid + '/' + conversationId + '/updatedAt'] = createdAt;
+
+      return _gwFbDB.ref().update(updatesB)
+        .then(function() { return true; })
+        .catch(function(errB) {
+          console.error('[DM v2] Échec étape B (message/index destinataire) :', errB && errB.code, errB && errB.message);
+          return false;
+        });
+    })
+    .catch(function(errA) {
+      console.error('[DM v2] Échec étape A (conversation) :', errA && errA.code, errA && errA.message);
+      return false;
+    });
+}
+
 function initApp(user) {
   _currentUser = user;
   try { _jobApplyFeatureVisibility(); } catch(e){}
@@ -4584,13 +5183,24 @@ function initApp(user) {
     if (_gwFbDB) {
       if (_gwFbDB._prevInboxRef) _gwFbDB._prevInboxRef.off();
       if (_gwFbDB._prevGrpInboxRef) _gwFbDB._prevGrpInboxRef.off();
+      /* GROUPS-FREE-05 : ce .off() manquait pour l'inbox groupe libre (seul
+         le pendant collab ci-dessus était nettoyé) — un ré-appel d'initApp()
+         dans la même session aurait pu empiler un second listener 'value'
+         sur gw/group_inboxes/free_{uid}, doublant _checkFreeGroupInbox(). */
+      if (_gwFbDB._prevGrpFreeInboxRef) _gwFbDB._prevGrpFreeInboxRef.off();
       _gwFbDB.ref('gw/dms').off('child_added');
       _gwFbDB.ref('gw/dms').off('child_changed');
       _gwFbDB.ref('gw/profiles').off('child_added');
       _gwFbDB.ref('gw/profiles').off('child_changed');
       _gwFbDB.ref('gw/group_msgs').off('child_added');
       _gwFbDB.ref('gw/group_msgs').off('child_changed');
+      _gwFbDB.ref('gw/group_msgs').off('child_removed');
     }
+    /* MESSAGING-GROUP-SYNC-02 : les listeners ci-dessus viennent d'être
+       détachés — autorise _initGroupAndInboxListeners() à les réattacher
+       pour ce nouveau cycle (reconnexion), sans jamais dépasser 1 attache
+       active par cycle réel (garde interne de la fonction elle-même). */
+    _groupListenersInitialized = false;
   } catch(e){}
 
   /* ── Firebase : écoute les notifs en temps réel pour cet utilisateur ── */
@@ -4602,129 +5212,42 @@ function initApp(user) {
   /* ── Présence en ligne (visible par l'admin en temps réel) ── */
   _gwSetOnlinePresence(user);
 
-  /* ── Firebase : sync DMs, inbox et profils en temps réel ── */
-  if (_gwFbReady && _gwFbDB && user.email) {
-    var _myFbKey = _gwFbKey(user.email);
+  /* ── DM v2 (module isolé) : _dmInit() ne démarre qu'après identité réelle confirmée,
+     une seule fois. Même mécanisme d'attente que ci-dessus (_gwRealAuthWaiters). ── */
+  if (_gwRealAuthReady) {
+    _dmInit();
+  } else {
+    _gwRealAuthWaiters.push(function() { _dmInit(); });
+  }
 
-    /* Suivi toast par expéditeur — évite les doublons et les problèmes de décalage d'horloge */
-    var _inboxFirstLoad = true;
-    var _dmToastedMap = {};  /* senderFbKey → dernier at toasté */
+  /* MESSAGING-GROUP-SYNC-02 : ce bloc (inbox DM legacy, profils, group_inboxes
+     — collab ET libre —, group_msgs) était auparavant attaché immédiatement,
+     gardé uniquement par _gwFbReady/_gwFbDB/user.email — jamais par
+     _gwRealAuthReady. doLogin() appelle _gwSignInRealIdentity() SANS attendre
+     sa résolution (commentaire du code lui-même : "rien n'est bloquant"),
+     puis initApp() démarre via un setTimeout(900). Si l'échange du jeton
+     personnalisé prend plus longtemps que ces 900 ms, ces listeners
+     s'attachaient alors que Firebase Auth était ENCORE anonyme — auth.uid ne
+     correspondait pas à _gwFbKey(email réel). Pour gw/group_inboxes/free_{uid}
+     et gw/group_msgs, dont les Rules exigent explicitement ce uid réel, la
+     lecture était alors refusée. Comme .on('value'/'child_added'/...) n'a
+     JAMAIS reçu de cancelCallback ici, ce refus était silencieux et le
+     listener restait définitivement mort — même une fois l'auth réelle
+     établie ensuite (Firebase ne réessaie pas seul un .on() déjà refusé).
+     Cause racine confirmée par lecture directe + reproduction LIVE à 2
+     comptes réels (MESSAGING-GROUP-SYNC-01).
 
-    function _showInboxToast(entry) {
-      if (!entry || !entry.fromEmail || !_currentUser) return;
-      var _sk = _gwFbKey(entry.fromEmail);
-      if (entry.at && _dmToastedMap[_sk] && entry.at <= _dmToastedMap[_sk]) return;
-      var _msgPageActive = (function() {
-        var pg = document.getElementById('p-messages');
-        var sc = document.getElementById('chat-screen');
-        return pg && pg.classList.contains('active') && sc && sc.classList.contains('open');
-      })();
-      var _convOpen = _msgPageActive && _chatConvId && DEMO_CONVERSATIONS.find(function(c) {
-        return c.id === _chatConvId && !c.isGroup && c.email === entry.fromEmail;
-      });
-      if (_convOpen) return;
-      if (entry.at) _dmToastedMap[_sk] = entry.at;
-      var _senderName = entry.fromName || entry.fromEmail || 'Quelqu\'un';
-      var _preview    = (entry.lastMsg || '').slice(0, 35);
-      showToast('💬 ' + _senderName + (_preview ? ' : ' + _preview : ' vous a écrit'), 'ok');
-    }
-
-    /* Inbox */
-    var _inboxRef = _gwFbDB.ref('gw/inboxes/' + _myFbKey);
-    _gwFbDB._prevInboxRef = _inboxRef;
-    console.log('[DM] 👂 Écoute inbox:', 'gw/inboxes/' + _myFbKey);
-    _inboxRef.on('value', function(snap) {
-      var inbox = snap.val();
-      console.log('[DM] 📬 inbox reçu:', inbox ? Object.keys(inbox).length + ' entrée(s)' : 'vide');
-      if (!inbox || !_currentUser) return;
-      var list = Array.isArray(inbox) ? inbox : Object.values(inbox);
-      if (_inboxFirstLoad) {
-        /* Premier chargement : pré-marquer tous les messages existants → pas de toast */
-        _inboxFirstLoad = false;
-        list.forEach(function(e) {
-          if (e && e.fromEmail && e.at) _dmToastedMap[_gwFbKey(e.fromEmail)] = e.at;
-        });
-        try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(list)); } catch(e){}
-        try { _checkDMInbox(); } catch(e){}
-      } else {
-        /* Mise à jour ultérieure : toast pour chaque nouveau message */
-        list.forEach(function(e) { try { _showInboxToast(e); } catch(e2){} });
-        try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(list)); } catch(e){}
-        try { _checkDMInbox(); } catch(e){}
-      }
-    });
-
-    /* DMs : gw/dm_msgs (per-message, atomique) est l'unique source de vérité désormais.
-       Les anciens listeners gw/dms sont supprimés pour éviter les doublons et conflits. */
-
-    /* Profils des autres utilisateurs — child_added charge tous les profils existants au login,
-       child_changed met à jour en temps réel quand un profil change */
-    function _onProfileSnap(snap) {
-      try {
-        var pFbKey = snap.key;
-        var data   = snap.val();
-        if (!data) return;
-        var email2 = pFbKey.replace(/__d__/g,'.').replace(/__a__/g,'@');
-        var existing2 = loadUserProfile(email2) || {};
-        /* Firebase est source de vérité — on prend la photo Firebase si elle existe,
-           sinon on garde la photo locale (et on re-pousse vers Firebase pour le propriétaire) */
-        var merged2;
-        if (data.photo) {
-          merged2 = Object.assign({}, existing2, data);
-        } else if (existing2.photo) {
-          merged2 = Object.assign({}, existing2, data, { photo: existing2.photo });
-        } else {
-          merged2 = Object.assign({}, existing2, data);
-        }
-        /* ── Badge : Firebase est toujours autoritaire.
-           Si un champ badge a été supprimé côté admin, il doit disparaître ici aussi.
-           Object.assign ne supprime pas les clés absentes de `data` — on le fait manuellement. */
-        var _badgeKeys = ['badgeType','badgeStatus','badgeApprovedAt','badgeCertifiedBy',
-                          'badgeCertifiedAt','badgeRevokedAt','badgeRevokedMotif','badgeRevokedBy'];
-        _badgeKeys.forEach(function(k) {
-          if (k in data) { merged2[k] = data[k]; }
-          else           { delete merged2[k]; }
-        });
-        try { localStorage.setItem('gw_profile_' + email2, JSON.stringify(merged2)); _invalidateProfileCache(email2); } catch(e2){}
-        /* Si c'est l'utilisateur courant → synchronise les limites en temps réel */
-        if (_currentUser && email2 === _currentUser.email) {
-          try { _updateChatMsgCounter(); } catch(e2){}
-          try { _subUpdateSidebarChip(merged2.planType || 'free'); } catch(e2){}
-        }
-        /* Rafraîchit le feed pour mettre à jour les avatars (debounce 300ms) */
-        if (document.getElementById('feed-list')) { try { renderFeed(_getFeedPosts()); } catch(e2){} }
-      } catch(e){}
-    }
-    _gwFbDB.ref('gw/profiles').on('child_added',   _onProfileSnap);
-    _gwFbDB.ref('gw/profiles').on('child_changed', _onProfileSnap);
-
-    /* Groupes — inbox : notifie quand on est ajouté à un groupe depuis un autre appareil */
-    var _grpInboxRef = _gwFbDB.ref('gw/group_inboxes/' + _myFbKey);
-    _gwFbDB._prevGrpInboxRef = _grpInboxRef;
-    _grpInboxRef.on('value', function(snap) {
-      var grpInbox = snap.val();
-      if (!grpInbox || !_currentUser) return;
-      var list = Array.isArray(grpInbox) ? grpInbox : Object.values(grpInbox);
-      try {
-        var _grpKey = 'gw_group_inbox_' + String(_currentUser.email).replace(/[^a-z0-9@._]/gi, '_');
-        localStorage.setItem(_grpKey, JSON.stringify(list));
-        _checkGroupInbox();
-      } catch(e){}
-    });
-
-    /* Groupes — messages : sync en temps réel */
-    _gwFbDB.ref('gw/group_msgs').on('child_added',   function(snap) { try { _gwMergeGroupMsg(snap); } catch(e){} });
-    _gwFbDB.ref('gw/group_msgs').on('child_changed', function(snap) { try { _gwMergeGroupMsg(snap); } catch(e){} });
-
-    /* Charge les posts de tous les utilisateurs depuis Firebase au login */
-    _gwFbDB.ref('gw/posts').once('value').then(function(snap) {
-      var allPosts = snap.val() || {};
-      Object.keys(allPosts).forEach(function(fk) {
-        try { _gwPostsMerge(fk, allPosts[fk]); } catch(e) {}
-      });
-      _persistedPostsLoaded = true;
-      try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e){}
-    }).catch(function(){});
+     Correctif : même mécanisme que _dmInit() ci-dessus (_gwRealAuthReady +
+     _gwRealAuthWaiters), pas un second système. _initGroupAndInboxListeners()
+     (définie après initApp(), plus bas) porte sa propre garde anti-doublon
+     (_groupListenersInitialized), réinitialisée par le nettoyage .off()
+     ci-dessus à chaque appel d'initApp() — un ré-appel légitime
+     (reconnexion) peut donc toujours réattacher les listeners, mais jamais
+     plus d'une fois par cycle. */
+  if (_gwRealAuthReady) {
+    _initGroupAndInboxListeners(user);
+  } else {
+    _gwRealAuthWaiters.push(function() { _initGroupAndInboxListeners(user); });
   }
 
   /* Initiales de l'avatar */
@@ -4848,6 +5371,253 @@ function getInitials(nom) {
   return nom.slice(0, 2).toUpperCase();
 }
 
+/* MESSAGING-GROUP-SYNC-02 — extrait d'initApp() (voir l'appel + le
+   commentaire de justification là-bas). Attache l'inbox DM legacy, les
+   profils, les inbox de groupes (collab ET libre) et les listeners
+   gw/group_msgs — SEULEMENT une fois l'identité Firebase réelle confirmée
+   (_gwRealAuthReady), jamais avant. Garde anti-doublon : _groupListenersInitialized
+   est remise à false par le nettoyage .off() en tête d'initApp() à chaque
+   appel, donc une reconnexion légitime peut réattacher les listeners, mais
+   jamais plus d'une fois par cycle réel (même mécanisme que _dmInitialized
+   pour _dmInit(), adapté pour rester réattachable après un .off()). */
+var _groupListenersInitialized = false;
+
+/* GROUPS-FREE-09 : état de retry DÉDIÉ au seul listener
+   gw/group_inboxes/free_{uid} — jamais mêlé à _groupListenersInitialized
+   (qui couvre les 7 AUTRES listeners de _initGroupAndInboxListeners : DM,
+   profils, group_inboxes collab, group_msgs — tous hors périmètre de ce
+   correctif). Cause racine confirmée par simulation (GROUPS-FREE-08-BIS,
+   hypothèse H1) : ce .on('value') n'avait aucun cancelCallback — un refus
+   à l'attache (Rules ou décalage transitoire entre confirmation Auth SDK
+   et réauthentification effective de la connexion Database SDK) le
+   laissait mort en silence pour toute la session, sans qu'aucun mécanisme
+   existant (poll 3s, réouverture d'onglet Messages) ne puisse le rattraper
+   — seule une VRAIE reconnexion Firebase (.info/connected) le pouvait,
+   jamais garantie sur un simple login. Backoff borné (1s/2s/4s/8s puis
+   abandon avec log) : un client neuf a le temps de récupérer d'un refus
+   transitoire sans jamais boucler indéfiniment. */
+var _freeInboxRetryTimer    = null;
+var _freeInboxRetryAttempt  = 0;
+var _FREE_INBOX_MAX_RETRIES = 4;
+var _FREE_INBOX_RETRY_DELAYS = [1000, 2000, 4000, 8000];
+
+/* Attache (ou réattache) LE SEUL listener gw/group_inboxes/free_{uid},
+   avec cancelCallback + retry borné. Toujours appelée avec .off() préalable
+   sur ce chemin précis → au plus UN listener actif à tout instant, quel
+   que soit le nombre d'appels (attache initiale, retry, reconnexion via
+   _reinitFreeGroupRealtime → _initGroupAndInboxListeners). _isRetry===true
+   signale un appel programmé par le backoff lui-même : ne remet PAS le
+   compteur de tentatives à zéro (contrairement à un appel frais). */
+function _attachFreeGroupInboxListener(user, _isRetry) {
+  if (!_gwRealAuthReady || !_gwFbReady || !_gwFbDB || !user || !user.email) {
+    if (_freeInboxRetryTimer) { clearTimeout(_freeInboxRetryTimer); _freeInboxRetryTimer = null; }
+    return;
+  }
+  if (_freeInboxRetryTimer) { clearTimeout(_freeInboxRetryTimer); _freeInboxRetryTimer = null; }
+  if (!_isRetry) _freeInboxRetryAttempt = 0;
+
+  var myUid = _gwFbKey(user.email);
+  var path  = 'gw/group_inboxes/free_' + myUid;
+  try { _gwFbDB.ref(path).off('value'); } catch (e) {}
+
+  var ref = _gwFbDB.ref(path);
+  _gwFbDB._prevGrpFreeInboxRef = ref;
+
+  ref.on('value', function(snap) {
+    _freeInboxRetryAttempt = 0;
+    if (_freeInboxRetryTimer) { clearTimeout(_freeInboxRetryTimer); _freeInboxRetryTimer = null; }
+    var freeInbox = snap.val();
+    if (!_currentUser) return;
+    try {
+      var _grpFreeKey = 'gw_free_group_inbox_' + String(_currentUser.email).replace(/[^a-z0-9@._]/gi, '_');
+      localStorage.setItem(_grpFreeKey, JSON.stringify(freeInbox || {}));
+      _checkFreeGroupInbox();
+    } catch(e){}
+  }, function(err) {
+    /* cancelCallback — voir commentaire au-dessus de _freeInboxRetryTimer.
+       uid tronqué, jamais l'email complet ni de secret. */
+    console.warn('[Groups] free-group inbox listener failed — retrying', {
+      attempt: _freeInboxRetryAttempt + 1,
+      uidPrefix: myUid.slice(0, 6) + '…',
+      error: err && err.message
+    });
+    if (!_gwRealAuthReady || !_gwFbReady || !_gwFbDB) {
+      console.warn('[Groups] free-group inbox retry cancelled — auth/Firebase indisponible');
+      return;
+    }
+    if (_freeInboxRetryAttempt >= _FREE_INBOX_MAX_RETRIES) {
+      console.warn('[Groups] free-group inbox listener — abandon après ' + _FREE_INBOX_MAX_RETRIES + ' tentatives');
+      return;
+    }
+    var delay = _FREE_INBOX_RETRY_DELAYS[_freeInboxRetryAttempt] || _FREE_INBOX_RETRY_DELAYS[_FREE_INBOX_RETRY_DELAYS.length - 1];
+    _freeInboxRetryAttempt++;
+    _freeInboxRetryTimer = setTimeout(function() {
+      _freeInboxRetryTimer = null;
+      _attachFreeGroupInboxListener(user, true);
+    }, delay);
+  });
+}
+
+function _initGroupAndInboxListeners(user) {
+  if (_groupListenersInitialized) return;
+  if (!_gwRealAuthReady || !_gwFbReady || !_gwFbDB || !user || !user.email) return;
+  _groupListenersInitialized = true;
+
+  var _myFbKey = _gwFbKey(user.email);
+
+  /* Suivi toast par expéditeur — évite les doublons et les problèmes de décalage d'horloge */
+  var _inboxFirstLoad = true;
+  var _dmToastedMap = {};  /* senderFbKey → dernier at toasté */
+
+  function _showInboxToast(entry) {
+    if (!entry || !entry.fromEmail || !_currentUser) return;
+    var _sk = _gwFbKey(entry.fromEmail);
+    if (entry.at && _dmToastedMap[_sk] && entry.at <= _dmToastedMap[_sk]) return;
+    var _msgPageActive = (function() {
+      var pg = document.getElementById('p-messages');
+      var sc = document.getElementById('chat-screen');
+      return pg && pg.classList.contains('active') && sc && sc.classList.contains('open');
+    })();
+    var _convOpen = _msgPageActive && _chatConvId && DEMO_CONVERSATIONS.find(function(c) {
+      return c.id === _chatConvId && !c.isGroup && c.email === entry.fromEmail;
+    });
+    if (_convOpen) return;
+    if (entry.at) _dmToastedMap[_sk] = entry.at;
+    var _senderName = entry.fromName || entry.fromEmail || 'Quelqu\'un';
+    var _preview    = (entry.lastMsg || '').slice(0, 35);
+    showToast('💬 ' + _senderName + (_preview ? ' : ' + _preview : ' vous a écrit'), 'ok');
+  }
+
+  /* Inbox */
+  var _inboxRef = _gwFbDB.ref('gw/inboxes/' + _myFbKey);
+  _gwFbDB._prevInboxRef = _inboxRef;
+  console.log('[DM] 👂 Écoute inbox:', 'gw/inboxes/' + _myFbKey);
+  _inboxRef.on('value', function(snap) {
+    var inbox = snap.val();
+    console.log('[DM] 📬 inbox reçu:', inbox ? Object.keys(inbox).length + ' entrée(s)' : 'vide');
+    if (!inbox || !_currentUser) return;
+    var list = Array.isArray(inbox) ? inbox : Object.values(inbox);
+    if (_inboxFirstLoad) {
+      /* Premier chargement : pré-marquer tous les messages existants → pas de toast */
+      _inboxFirstLoad = false;
+      list.forEach(function(e) {
+        if (e && e.fromEmail && e.at) _dmToastedMap[_gwFbKey(e.fromEmail)] = e.at;
+      });
+      try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(list)); } catch(e){}
+      try { _checkDMInbox(); } catch(e){}
+    } else {
+      /* Mise à jour ultérieure : toast pour chaque nouveau message */
+      list.forEach(function(e) { try { _showInboxToast(e); } catch(e2){} });
+      try { localStorage.setItem('gw_dm_inbox_' + _currentUser.email, JSON.stringify(list)); } catch(e){}
+      try { _checkDMInbox(); } catch(e){}
+    }
+  });
+
+  /* DMs : gw/dm_msgs (per-message, atomique) est l'unique source de vérité désormais.
+     Les anciens listeners gw/dms sont supprimés pour éviter les doublons et conflits. */
+
+  /* Profils des autres utilisateurs — child_added charge tous les profils existants au login,
+     child_changed met à jour en temps réel quand un profil change */
+  function _onProfileSnap(snap) {
+    try {
+      var pFbKey = snap.key;
+      var data   = snap.val();
+      if (!data) return;
+      var email2 = pFbKey.replace(/__d__/g,'.').replace(/__a__/g,'@');
+      var existing2 = loadUserProfile(email2) || {};
+      /* Firebase est source de vérité — on prend la photo Firebase si elle existe,
+         sinon on garde la photo locale (et on re-pousse vers Firebase pour le propriétaire) */
+      var merged2;
+      if (data.photo) {
+        merged2 = Object.assign({}, existing2, data);
+      } else if (existing2.photo) {
+        merged2 = Object.assign({}, existing2, data, { photo: existing2.photo });
+      } else {
+        merged2 = Object.assign({}, existing2, data);
+      }
+      /* ── Badge : Firebase est toujours autoritaire.
+         Si un champ badge a été supprimé côté admin, il doit disparaître ici aussi.
+         Object.assign ne supprime pas les clés absentes de `data` — on le fait manuellement. */
+      var _badgeKeys = ['badgeType','badgeStatus','badgeApprovedAt','badgeCertifiedBy',
+                        'badgeCertifiedAt','badgeRevokedAt','badgeRevokedMotif','badgeRevokedBy'];
+      _badgeKeys.forEach(function(k) {
+        if (k in data) { merged2[k] = data[k]; }
+        else           { delete merged2[k]; }
+      });
+      try { localStorage.setItem('gw_profile_' + email2, JSON.stringify(merged2)); _invalidateProfileCache(email2); } catch(e2){}
+      /* Si c'est l'utilisateur courant → synchronise les limites en temps réel */
+      if (_currentUser && email2 === _currentUser.email) {
+        try { _updateChatMsgCounter(); } catch(e2){}
+        try { _subUpdateSidebarChip(merged2.planType || 'free'); } catch(e2){}
+      }
+      /* Rafraîchit le feed pour mettre à jour les avatars (debounce 300ms) */
+      if (document.getElementById('feed-list')) { try { renderFeed(_getFeedPosts()); } catch(e2){} }
+    } catch(e){}
+  }
+  _gwFbDB.ref('gw/profiles').on('child_added',   _onProfileSnap);
+  _gwFbDB.ref('gw/profiles').on('child_changed', _onProfileSnap);
+
+  /* Groupes — inbox : notifie quand on est ajouté à un groupe depuis un autre appareil */
+  var _grpInboxRef = _gwFbDB.ref('gw/group_inboxes/' + _myFbKey);
+  _gwFbDB._prevGrpInboxRef = _grpInboxRef;
+  _grpInboxRef.on('value', function(snap) {
+    var grpInbox = snap.val();
+    if (!grpInbox || !_currentUser) return;
+    var list = Array.isArray(grpInbox) ? grpInbox : Object.values(grpInbox);
+    try {
+      var _grpKey = 'gw_group_inbox_' + String(_currentUser.email).replace(/[^a-z0-9@._]/gi, '_');
+      localStorage.setItem(_grpKey, JSON.stringify(list));
+      _checkGroupInbox();
+    } catch(e){}
+  });
+
+  /* Groupes libres (GROUPS-FREE-02) — inbox dédiée, chemin Firebase distinct
+     (free_{uid}, jamais {uid}) et structure objet (jamais le tableau du
+     chemin collab ci-dessus) — voir _writeFreeGroupInbox/_checkFreeGroupInbox.
+     GROUPS-FREE-09 : attache + cancelCallback + retry borné extraits dans
+     _attachFreeGroupInboxListener (définie juste au-dessus de cette
+     fonction) — voir son commentaire pour la cause racine (H1). */
+  _attachFreeGroupInboxListener(user);
+
+  /* GROUPS/MOBILE-ANR-01 : rattrapage robuste — attache les listeners
+     incrémentaux par groupe (_attachFreeGroupRealtimeListeners) pour tout
+     groupe libre déjà connu (cache localStorage d'une session précédente)
+     à cet instant, où _gwFbReady/_gwFbDB sont GARANTIS prêts (contrairement
+     à l'appel équivalent dans _loadGroupConvs, qui peut s'exécuter avant).
+     Idempotent (garde interne _freeGroupRtListeners) — sans effet si déjà
+     attaché. */
+  try { _loadGroupConvs(); } catch(e) {}
+  DEMO_CONVERSATIONS.filter(function(c) { return c.isGroup && c.isFreeGroup; }).forEach(function(c) {
+    try { _attachFreeGroupRealtimeListeners(c.id); } catch(e) {}
+  });
+
+  /* Groupes — messages : sync en temps réel (collab ET libre, dispatch dans
+     _gwMergeGroupMsg selon le préfixe $grpFbKey — cf. GROUPS-FREE-02). */
+  _gwFbDB.ref('gw/group_msgs').on('child_added',   function(snap) { try { _gwMergeGroupMsg(snap); } catch(e){} });
+  _gwFbDB.ref('gw/group_msgs').on('child_changed', function(snap) { try { _gwMergeGroupMsg(snap); } catch(e){} });
+  /* GROUPS-FREE-05 : détecte en temps réel un groupe libre supprimé ou une
+     exclusion (perte d'accès en lecture à ce noeud). Scope volontairement
+     limité aux groupes libres ici (_freeGroupHandleRemoved ignore tout
+     $grpFbKey qui n'est pas gw_grp_adhoc_ / pas dans DEMO_CONVERSATIONS,
+     donc aucun effet sur les groupes de collaboration Marketplace,
+     inchangés). Complété par _pollFreeGroupsMetaSafetyNet (délai borné
+     ~15 s) au cas où cet évènement ne se déclenche pas comme documenté
+     pour ce cas précis — voir _freeGroupApplyMetaSync pour la justification. */
+  _gwFbDB.ref('gw/group_msgs').on('child_removed', function(snap) {
+    try { if (snap && snap.key && snap.key.indexOf('gw_grp_adhoc_') === 0) _freeGroupHandleRemoved(snap.key); } catch(e){}
+  });
+
+  /* Charge les posts de tous les utilisateurs depuis Firebase au login */
+  _gwFbDB.ref('gw/posts').once('value').then(function(snap) {
+    var allPosts = snap.val() || {};
+    Object.keys(allPosts).forEach(function(fk) {
+      try { _gwPostsMerge(fk, allPosts[fk]); } catch(e) {}
+    });
+    _persistedPostsLoaded = true;
+    try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e){}
+  }).catch(function(){});
+}
+
 /* ── Avatar HTML : photo si dispo, sinon initiales ── */
 function getAvatarHtml(email, nom, extraClass) {
   var cls = 'user-av' + (extraClass ? ' ' + extraClass : '');
@@ -4870,6 +5640,17 @@ function getDisplayName(email, fallback) {
   if (!email) return fallback || '?';
   var p = loadUserProfile(email);
   return (p && p.nom) ? p.nom : (fallback || '?');
+}
+
+/* GROUPS-FREE-05 : nom affichable pour l'UI groupe libre — ne retombe
+   JAMAIS sur l'adresse email (contrairement à getDisplayName ci-dessus,
+   dont les nombreux appelants existants hors périmètre ne sont pas
+   modifiés ici). "Utilisateur" est un repli générique volontaire, jamais
+   une partie de l'email — voir mandat : "aucune adresse email brute ne
+   doit être affichée, même pour l'admin". */
+function _gwPublicName(email) {
+  var p = email ? loadUserProfile(email) : null;
+  return (p && p.nom) ? p.nom : 'Utilisateur';
 }
 
 /* ── Domaine/rôle toujours à jour depuis le profil ── */
@@ -5154,16 +5935,18 @@ function navTo(btn, pageId) {
     try { _gwApplyMkSections(); }           catch(e) {}
     /* Sync Firebase en arrière-plan → re-rendu automatique sans bouton */
     if (_gwFbReady && _gwFbDB) {
+      /* Phase 9D-ter-bis (portée MK-01) : gw/mk_listings et gw/collab_requests
+         (legacy, tous deux .read:false) retirés de ce Promise.all —
+         _mkListenListingsV2()/_collabWatchV2() gèrent déjà le rafraîchissement
+         en temps réel ; les lire ici encore aurait cassé TOUT ce bloc
+         (listings + transactions inclus) à cause du .catch() global. */
       Promise.all([
-        _gwFbDB.ref('gw/mk_listings').once('value'),
-        _gwFbDB.ref('gw/collab_requests').once('value'),
+        _gwFbDB.ref('gw/mk_listings_v2').once('value'), /* Phase 7E : structure par vendeur */
         _gwFbDB.ref('gw/mk_txns').once('value')
       ]).then(function(snaps) {
         var lstVal    = snaps[0].val();
-        var collabVal = snaps[1].val();
-        var txVal     = snaps[2].val();
-        if (lstVal    !== null) try { localStorage.setItem('gw_mk_listings',      JSON.stringify(Array.isArray(lstVal)    ? lstVal    : Object.values(lstVal)));    } catch(e){}
-        if (collabVal !== null) try { localStorage.setItem('gw_collab_requests',  JSON.stringify(Array.isArray(collabVal) ? collabVal : Object.values(collabVal))); } catch(e){}
+        var txVal     = snaps[1].val();
+        if (lstVal    !== null) try { localStorage.setItem('gw_mk_listings',      JSON.stringify(_mkFlattenListings(lstVal))); } catch(e){}
         if (txVal     !== null) try { localStorage.setItem('gw_mk_txns',          JSON.stringify(Array.isArray(txVal)     ? txVal     : Object.values(txVal)));     } catch(e){}
         try { renderMarketplaceUserServices(); } catch(e) {}
         try { _mkRenderSystemListings(); }       catch(e) {}
@@ -5176,9 +5959,9 @@ function navTo(btn, pageId) {
   if (pageId === 'p-jobs') {
     try { _jobRenderList(); } catch(e) {}
     if (_gwFbReady && _gwFbDB) {
-      _gwFbDB.ref('gw/jobs').once('value').then(function(snap) {
+      _gwFbDB.ref('gw/jobs_v2').once('value').then(function(snap) { /* Phase 8E : structure par recruteur, remplace gw/jobs */
         var jobsVal = snap.val();
-        if (jobsVal !== null) try { localStorage.setItem('gw_jobs', JSON.stringify(Array.isArray(jobsVal) ? jobsVal : Object.values(jobsVal))); } catch(e){}
+        if (jobsVal !== null) try { localStorage.setItem('gw_jobs', JSON.stringify(_jobFlattenNested(jobsVal))); } catch(e){}
         try { _jobRenderList(); } catch(e) {}
       }).catch(function(){});
     }
@@ -17872,12 +18655,12 @@ function markAllRead() {
 })();
 
 function getNotifIcon(type) {
-  var icons = { like: 'fa-heart', comment: 'fa-comment', share: 'fa-share-nodes', follow: 'fa-user-plus', system: 'fa-bell', milestone: 'fa-trophy', bug_report: 'fa-bug', plan_limit: 'fa-lock', official: 'fa-bullhorn', artiste_approved: 'fa-microphone', artiste_copyright_notice: 'fa-scale-balanced', tag: 'fa-at' };
+  var icons = { like: 'fa-heart', comment: 'fa-comment', share: 'fa-share-nodes', follow: 'fa-user-plus', system: 'fa-bell', milestone: 'fa-trophy', bug_report: 'fa-bug', plan_limit: 'fa-lock', official: 'fa-bullhorn', artiste_approved: 'fa-microphone', artiste_copyright_notice: 'fa-scale-balanced', tag: 'fa-at', group_invite: 'fa-user-group' };
   return icons[type] || 'fa-bell';
 }
 
 function getNotifBadgeCls(type) {
-  var cls = { like: 'nb-like', comment: 'nb-comment', share: 'nb-share', follow: 'nb-follow', system: 'nb-system', milestone: 'nb-milestone', bug_report: 'nb-system', plan_limit: 'nb-system', official: 'nb-system', artiste_approved: 'nb-milestone', artiste_copyright_notice: 'nb-system', tag: 'nb-tag' };
+  var cls = { like: 'nb-like', comment: 'nb-comment', share: 'nb-share', follow: 'nb-follow', system: 'nb-system', milestone: 'nb-milestone', bug_report: 'nb-system', plan_limit: 'nb-system', official: 'nb-system', artiste_approved: 'nb-milestone', artiste_copyright_notice: 'nb-system', tag: 'nb-tag', group_invite: 'nb-follow' };
   return cls[type] || 'nb-system';
 }
 
@@ -17962,6 +18745,10 @@ function _openNotifDetail(notif) {
       (notif.type === 'artiste_approved'
         ? '<button class="ndd-btn-primary" onclick="_closeGenericSheet(\'notif-detail\');setMkCat(\'artiste\');setTimeout(function(){_artisteOpenPublishForm();},300)">' +
             '<i class="fas fa-microphone"></i> Publier un son' +
+          '</button>'
+        : notif.type === 'group_invite' && notif.inviteToken
+        ? '<button class="ndd-btn-primary" onclick="_closeGenericSheet(\'notif-detail\');_openGroupInviteScreen(\'' + String(notif.inviteToken).replace(/'/g,"") + '\')">' +
+            '<i class="fas fa-user-group"></i> Voir l\'invitation' +
           '</button>'
         : notif.postId
           ? '<button class="ndd-btn-primary" onclick="_nddGoPost(' + notif.postId + ',\'' + (notif.type || '') + '\')">' +
@@ -20941,6 +21728,49 @@ function _getGroupMsgKey(projId, ownerEmail) {
          '___' + String(ownerEmail).replace(/[^a-z0-9@._-]/gi, '_');
 }
 
+/* Même transformation que _saveGroupMsg pour obtenir la clé Firebase exacte
+   (gw_grp_... → __d__/__a__), nécessaire pour synchroniser meta/members. */
+function _collabGroupFbKey(projId, ownerEmail) {
+  return _getGroupMsgKey(projId, ownerEmail).replace(/\./g, '__d__').replace(/@/g, '__a__');
+}
+
+/* ── Sécurité : synchronise la liste des membres d'un groupe de collaboration
+   vers gw/group_msgs/{fbKey}/meta/members — ces groupes n'avaient jusqu'ici
+   AUCUNE donnée de membres côté Firebase (uniquement messages/lastMsg/lastAt),
+   ce qui rendait impossible toute règle de sécurité basée sur l'appartenance.
+   Écriture idempotente, appelée à chaque ouverture du groupe (_getOrCreateGroupConv).
+   Ne modifie ni ne supprime rien du système existant (messages, localStorage). ── */
+function _syncCollabGroupMembers(projId, ownerEmail, members) {
+  if (!_currentUser || !_gwFbDB || !members || !members.length) return Promise.resolve();
+  var fbGrpKey = _collabGroupFbKey(projId, ownerEmail);
+  var ownerUid = _gwFbKey(ownerEmail);
+
+  /* Établir meta/owner : seul le propriétaire réel peut écrire ce champ
+     (règle dédiée) — tentative séparée et best-effort, pour ne jamais
+     bloquer la synchronisation des membres ci-dessous si c'est un
+     collaborateur (pas le propriétaire) qui déclenche cette fonction. */
+  var ownerUpdates = {};
+  ownerUpdates['gw/group_msgs/' + fbGrpKey + '/meta/owner']      = ownerUid;
+  ownerUpdates['gw/group_msgs/' + fbGrpKey + '/meta/ownerEmail'] = ownerEmail;
+  var ownerPromise = _gwFbDB.ref().update(ownerUpdates).catch(function(){});
+
+  var memberUpdates = {};
+  members.forEach(function(m) {
+    if (!m.email) return;
+    var uid = _gwFbKey(m.email);
+    memberUpdates['gw/group_msgs/' + fbGrpKey + '/meta/members/' + uid]      = true;
+    memberUpdates['gw/group_msgs/' + fbGrpKey + '/meta/memberEmails/' + uid] = m.email;
+  });
+  var memberPromise = _gwFbDB.ref().update(memberUpdates).catch(function(err) {
+    console.error('[Groupe collab] Échec synchronisation membres :', err && err.code, err && err.message);
+  });
+  /* Phase 9A : retourne une Promise — la règle Firebase durcie exige
+     désormais l'appartenance (meta/members/{auth.uid}) pour écrire un
+     message ou lastMsg/lastAt ; les appelants doivent donc attendre la
+     fin de cette synchronisation avant d'écrire le premier message. */
+  return Promise.all([ownerPromise, memberPromise]);
+}
+
 /* Sauvegarde UN message dans le storage partagé du groupe (merge par ID) */
 function _saveGroupMsg(conv, msg) {
   if (!conv || !conv.projId || !conv.projOwnerEmail) return;
@@ -21104,9 +21934,21 @@ function _loadGroupConvs() {
       if (!DEMO_CONVERSATIONS.find(function(c) { return c.id === gc.id; })) {
         DEMO_CONVERSATIONS.unshift(gc);
       }
-      /* Charge les messages partagés depuis le storage commun */
+      /* Charge les messages partagés depuis le storage commun — chemin
+         parallèle groupe libre (GROUPS-FREE-02), jamais _loadGroupMsgs
+         (couplée projId/ownerEmail, no-op pour un groupe libre). */
       var inMem = DEMO_CONVERSATIONS.find(function(c) { return c.id === gc.id; });
-      if (inMem) _loadGroupMsgs(inMem);
+      if (inMem) {
+        if (inMem.isFreeGroup) {
+          _loadFreeGroupMsgs(inMem);
+          /* GROUPS/MOBILE-ANR-01 : no-op silencieux si Firebase pas encore
+             prêt à cet instant — voir le rattrapage robuste dans
+             _initGroupAndInboxListeners (garanti après auth réelle). */
+          try { _attachFreeGroupRealtimeListeners(inMem.id); } catch(e) {}
+        } else {
+          _loadGroupMsgs(inMem);
+        }
+      }
     });
   } catch(e) {}
 }
@@ -21114,21 +21956,42 @@ function _loadGroupConvs() {
 function _saveGroupConvs() {
   if (!_currentUser) return;
   try {
-    /* Sauvegarde uniquement les métadonnées (messages dans gw_grp_*) */
+    /* Sauvegarde uniquement les métadonnées (messages dans gw_grp_ / gw_free_grp_ ).
+       Champs isFreeGroup/groupId/description/owner ajoutés en GROUPS-FREE-02,
+       purement additifs — absents/undefined pour les groupes collab existants. */
     var groups = DEMO_CONVERSATIONS.filter(function(c) { return c.isGroup; }).map(function(c) {
-      return {
+      var g = {
         id: c.id, isGroup: true, projId: c.projId, projOwnerEmail: c.projOwnerEmail,
         name: c.name, avatar: c.avatar, at: c.at, time: c.time,
         lastMsg: c.lastMsg, lastAt: c.lastAt, unread: 0,
         archived: c.archived || false, online: false,
         members: c.members, messages: []
       };
+      if (c.isFreeGroup) {
+        g.isFreeGroup = true; g.groupId = c.groupId; g.description = c.description;
+        g.owner = c.owner; g.ownerEmail = c.ownerEmail;
+        g.coverUpdatedAt = c.coverUpdatedAt || null; g.admins = c.admins || null;
+      }
+      return g;
     });
     localStorage.setItem('gw_group_convs_' + _currentUser.email, JSON.stringify(groups));
   } catch(e) {}
 }
 
 /* ── Inbox de groupe : notifier un membre qu'un groupe existe ── */
+/* Phase 9F-BIS-TER : la synchronisation Firebase cross-utilisateur passe
+   désormais par le serveur (compte de service), qui revérifie l'appartenance
+   réelle de l'appelant ET du destinataire via gw/group_msgs/{fbGrpKey}/meta/members
+   avant d'écrire. L'ancien .set() direct depuis le client sur
+   gw/group_inboxes/{targetUid} exigeait une règle .write ouverte à tout
+   utilisateur authentifié (aucune règle Firebase ne peut valider un .set()
+   intégral de tableau item par item), ce qui permettait à un tiers
+   quelconque de lire/écraser la boîte de n'importe qui — voir rapport
+   Phase 9F-BIS-TER §7/§8. Le cache localStorage local (affichage optimiste)
+   est conservé à l'identique.
+   Phase 9F-BIS-TER-QUINQUIES : consolidé dans /api/notify (eventType:
+   'group_inbox') plutôt qu'un endpoint dédié, pour rester sous la limite
+   de 12 Serverless Functions Vercel Hobby — voir api/notify.js. */
 function _writeGroupInbox(targetEmail, groupMeta) {
   if (!targetEmail || !groupMeta) return;
   try {
@@ -21149,10 +22012,18 @@ function _writeGroupInbox(targetEmail, groupMeta) {
       if (idx !== -1) inbox[idx] = Object.assign({}, inbox[idx], groupMeta);
       localStorage.setItem(key, JSON.stringify(inbox));
     }
-    /* ── Sync Firebase inbox groupe ── */
-    if (_gwFbReady && _gwFbDB) {
-      var _fbGrpInboxKey = _gwFbKey(targetEmail);
-      _gwFbDB.ref('gw/group_inboxes/' + _fbGrpInboxKey).set(inbox).catch(function(){});
+    /* ── Sync Firebase inbox groupe — serveur, plus de .set() client direct ── */
+    var _wgiSession = _gwLoadSession();
+    if (_wgiSession && _wgiSession.authRefresh && groupMeta.projId && groupMeta.projOwnerEmail) {
+      fetch('/api/notify', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventType: 'group_inbox',
+          authRefreshToken: _wgiSession.authRefresh,
+          projId: groupMeta.projId, ownerEmail: groupMeta.projOwnerEmail,
+          targetEmail: targetEmail, groupMeta: groupMeta
+        })
+      }).catch(function(){});
     }
   } catch(e) {}
 }
@@ -21203,6 +22074,1855 @@ function _checkGroupInbox() {
   } catch(e) {}
 }
 
+/* ══════════════════════════════════════════════════════════════
+   GROUPES LIBRES — Phase GROUPS-FREE-02
+   Système entièrement parallèle au bloc Collaboration ci-dessus (jamais
+   modifié) : préfixe d'ID distinct (gw_grp_adhoc_, jamais gw_grp_{projId}),
+   schéma de message distinct (senderId/senderEmail/text/createdAt côté
+   Firebase, imposé par les Rules pour ce préfixe — cf. GROUPS-FREE-01 §4),
+   clé locale distincte (gw_free_grp_{groupId}, jamais _getGroupMsgKey).
+   conv.id === conv.groupId === le $grpFbKey Firebase : aucune indirection
+   projId/ownerEmail. Aucune Rule modifiée (vérifié GROUPS-FREE-01 §2). ══ */
+
+function _newFreeGroupId() {
+  return 'gw_grp_adhoc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+/* ── Création : écriture atomique unique de meta, via .set() sur le NŒUD META
+   ENTIER (jamais un update() multi-chemins sur des sous-champs individuels).
+   Distinction critique et vérifiée par test émulateur direct (voir rapport
+   GROUPS-FREE-02 §"Correction critique") : la règle meta.write compound
+   (!data.exists() && newData.owner===auth.uid && newData.members[auth.uid]===true)
+   n'est RECONSULTÉE PAR FIREBASE QUE pour une écriture qui cible le nœud meta
+   lui-même — un update() multi-chemins touchant seulement des sous-champs
+   (meta/owner, meta/members/{uid}, …) est validé UNIQUEMENT par les règles
+   propres à chacun de ces sous-champs, dont aucune (à l'except du cas no-op
+   "même valeur") ne vérifie réellement auth.uid pour un groupe neuf — ce qui
+   permettait à N'IMPORTE QUEL utilisateur authentifié de forger un groupe au
+   nom d'un tiers. Le .set() sur meta entier est la SEULE forme d'écriture qui
+   fait réellement respecter cette règle (confirmé : tentative forgée refusée,
+   création légitime toujours acceptée). Aucune Rule modifiée. ── */
+function _createFreeGroup(name, description, memberEmails) {
+  if (!_currentUser || !_gwFbReady || !_gwFbDB) { showToast('Connexion requise', 'err'); return; }
+  var ownerEmail = _currentUser.email;
+  var ownerUid   = _gwFbKey(ownerEmail);
+  var groupId    = _newFreeGroupId();
+  var now        = Date.now();
+
+  var members      = {};
+  var memberEmailsMap = {};
+  members[ownerUid]      = true;
+  memberEmailsMap[ownerUid] = ownerEmail;
+  var uniqueInvitees = [];
+  memberEmails.forEach(function(email) {
+    if (!email || email === ownerEmail) return;
+    var uid = _gwFbKey(email);
+    members[uid]      = true;
+    memberEmailsMap[uid] = email;
+    uniqueInvitees.push(email);
+  });
+
+  var meta = {
+    groupId: groupId, name: name, owner: ownerUid, ownerEmail: ownerEmail,
+    createdAt: now, isFreeGroup: true, members: members, memberEmails: memberEmailsMap
+  };
+  if (description) meta.description = description;
+
+  _gwFbDB.ref('gw/group_msgs/' + groupId + '/meta').set(meta).then(function() {
+    var memberObjs = [{ email: ownerEmail }].concat(uniqueInvitees.map(function(e) { return { email: e }; }));
+    var conv = {
+      id: groupId, groupId: groupId, isGroup: true, isFreeGroup: true,
+      name: name, description: description || '',
+      owner: ownerUid, ownerEmail: ownerEmail,
+      avatar: { type: 'group', members: memberObjs },
+      at: now, time: 'À l\'instant',
+      lastMsg: 'Groupe créé', lastAt: now,
+      unread: 0, archived: false, online: false,
+      members: memberObjs, messages: []
+    };
+    DEMO_CONVERSATIONS.unshift(conv);
+    _saveGroupConvs();
+    try { _attachFreeGroupRealtimeListeners(groupId); } catch(e) {}
+
+    /* Ouverture immédiate — même choréographie que _openChatAndCloseUpv,
+       sans profil visité à fermer ici. */
+    var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+    navTo(msgsBtn, 'p-messages');
+    renderConversations();
+    setTimeout(function() { openChat(groupId); }, 220);
+
+    /* Étape 2 (best-effort, non-bloquante) — uniquement après confirmation
+       de l'étape 1 : root.child('meta/members/'+auth.uid).exists() (requis
+       par la Rule group_inboxes free_) ne peut être vrai qu'une fois meta
+       réellement écrit côté serveur. Le owner doit aussi recevoir sa propre
+       entrée d'inbox (Rule : $userFbKey === 'free_'+auth.uid l'autorise
+       directement), sinon une session fraîche sans cache local ne revoit
+       jamais le groupe qu'il a créé. */
+    _writeFreeGroupInbox(ownerEmail, groupId, { name: name, ownerEmail: ownerEmail, createdAt: now });
+    uniqueInvitees.forEach(function(email) {
+      _writeFreeGroupInbox(email, groupId, { name: name, ownerEmail: ownerEmail, createdAt: now });
+    });
+  }).catch(function(err) {
+    console.error('[Groupe libre] Échec création :', err && err.code, err && err.message);
+    showToast('Erreur lors de la création du groupe', 'err');
+  });
+}
+
+/* ── Group Inbox dédiée aux groupes libres — PAS _writeGroupInbox (collab,
+   projId/ownerEmail, tableau via /api/notify). Écriture CLIENTE directe,
+   autorisée par les Rules group_inboxes/free_{uid}/{groupId} dès lors que
+   l'auteur est déjà membre confirmé du groupe (root.child(meta/members/...)),
+   ce qui est vrai ici puisque cette fonction n'est appelée qu'après le
+   succès de l'écriture meta ci-dessus. ── */
+function _writeFreeGroupInbox(targetEmail, groupId, meta) {
+  if (!_gwFbReady || !_gwFbDB || !targetEmail || !groupId) return;
+  var targetUid = _gwFbKey(targetEmail);
+  var payload = { groupId: groupId, name: meta.name, ownerEmail: meta.ownerEmail, createdAt: meta.createdAt };
+  _gwFbDB.ref('gw/group_inboxes/free_' + targetUid + '/' + groupId).set(payload).catch(function(err) {
+    console.error('[Groupe libre] Échec notification inbox pour ' + targetEmail + ' :', err && err.code, err && err.message);
+  });
+}
+
+/* ── Charge l'historique local (cache gw_free_grp_{groupId}) — parallèle de
+   _loadGroupMsgs, jamais couplée à projId/ownerEmail. Tri par .at (les id
+   de messages sont des clés Firebase, non ordonnables numériquement). ── */
+function _loadFreeGroupMsgs(conv) {
+  if (!conv || !conv.id) return;
+  var key = 'gw_free_grp_' + conv.id;
+  try {
+    var data = JSON.parse(localStorage.getItem(key));
+    if (!data || !Array.isArray(data.messages)) return;
+    var convMap = {};
+    conv.messages.forEach(function(m) { convMap[String(m.id)] = true; });
+    var merged = conv.messages.slice();
+    data.messages.forEach(function(m) {
+      if (!convMap[String(m.id)]) { merged.push(m); convMap[String(m.id)] = true; }
+    });
+    merged.sort(function(a, b) { return (Number(a.at) || 0) - (Number(b.at) || 0); });
+    conv.messages = merged;
+    if (data.lastMsg) conv.lastMsg = data.lastMsg;
+    if (data.lastAt)  conv.lastAt  = data.lastAt;
+  } catch(e) {}
+}
+
+/* ── Envoi — schéma EXACT imposé par les Rules pour gw_grp_adhoc_ :
+   senderId/senderEmail/text/createdAt (jamais id/from/text/at côté Firebase,
+   contrairement au schéma legacy collab). Le message local (rendu, cache)
+   garde le format {id,from,text,at,type} déjà attendu par _buildBubbleHtml/
+   _renderChatMessages, réutilisés tels quels. ── */
+function _sendFreeGroupMessage(conv, msg) {
+  if (!conv || !conv.id || !_gwFbReady || !_gwFbDB || !_currentUser || !msg) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  var fbMsg = { id: msg.id, senderId: myUid, senderEmail: _currentUser.email, text: msg.text, createdAt: msg.at };
+  var updates = {};
+  updates['messages/' + msg.id] = fbMsg;
+  updates['lastMsg'] = msg.text;
+  updates['lastAt']  = msg.at;
+  _gwFbDB.ref('gw/group_msgs/' + conv.id).update(updates).catch(function(err) {
+    console.error('[Groupe libre] Échec envoi message :', err && err.code, err && err.message);
+  });
+  var key = 'gw_free_grp_' + conv.id;
+  try {
+    var existing = null;
+    try { existing = JSON.parse(localStorage.getItem(key)); } catch(e) {}
+    var stored = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
+    if (!stored.some(function(m) { return String(m.id) === String(msg.id); })) stored.push(msg);
+    var toCache = stored.length > _FREE_GRP_CACHE_MAX ? stored.slice(-_FREE_GRP_CACHE_MAX) : stored;
+    localStorage.setItem(key, JSON.stringify({ messages: toCache, lastMsg: msg.text, lastAt: msg.at }));
+  } catch(e) {}
+}
+
+/* MESSAGING-FILES-01 : pièce jointe (photo/vidéo/fichier) pour un groupe
+   libre — miroir de _sendFreeGroupMessage(), étendu au schéma pièce jointe.
+   Le Storage a déjà été uploadé par handleChatAttach() (chat_images/
+   chat_videos/chat_docs, même chemin que le DM — aucun second système
+   d'upload) ; ici on écrit uniquement la référence + métadonnées dans
+   gw/group_msgs, jamais le contenu binaire (le principe "pas de base64
+   dans la RTDB" tenu depuis GROUPS-FREE-04 pour les couvertures s'applique
+   identiquement aux pièces jointes de message). Rules : hasChildren(['senderId',
+   'senderEmail','text','createdAt']) n'interdit pas des champs additionnels
+   (type/fileName/fileSize/data_url) — aucune évolution de Rules nécessaire. */
+function _sendFreeGroupAttachment(conv, msg) {
+  if (!conv || !conv.id || !_gwFbReady || !_gwFbDB || !_currentUser || !msg) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  var fbMsg = {
+    id: msg.id, senderId: myUid, senderEmail: _currentUser.email,
+    text: msg.text || '', createdAt: msg.at,
+    type: msg.type, fileName: msg.fileName, fileSize: msg.fileSize
+  };
+  if (msg.data_url) fbMsg.data_url = msg.data_url;
+  var updates = {};
+  updates['messages/' + msg.id] = fbMsg;
+  updates['lastMsg'] = conv.lastMsg;
+  updates['lastAt']  = msg.at;
+  _gwFbDB.ref('gw/group_msgs/' + conv.id).update(updates).catch(function(err) {
+    console.error('[Groupe libre] Échec envoi pièce jointe :', err && err.code, err && err.message);
+  });
+  var key = 'gw_free_grp_' + conv.id;
+  try {
+    var existing = null;
+    try { existing = JSON.parse(localStorage.getItem(key)); } catch(e) {}
+    var stored = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
+    if (!stored.some(function(m) { return String(m.id) === String(msg.id); })) stored.push(msg);
+    var toCache2 = stored.length > _FREE_GRP_CACHE_MAX ? stored.slice(-_FREE_GRP_CACHE_MAX) : stored;
+    localStorage.setItem(key, JSON.stringify({ messages: toCache2, lastMsg: conv.lastMsg, lastAt: msg.at }));
+  } catch(e) {}
+}
+
+/* ── Fusion temps réel — appelée depuis _gwMergeGroupMsg() (branche ajoutée
+   en tête, cf. plus bas) pour tout $grpFbKey préfixé gw_grp_adhoc_. Miroir
+   structurel de _gwMergeGroupMsg (DOM direct si le chat est ouvert, incrément
+   unread sinon), adapté au schéma/clé des groupes libres.
+
+   CORRECTIF GROUPS-FREE-03 (cause racine du bug "message pas systématiquement
+   visible chez tous les membres") : cette fonction bailait AVANT de mettre à
+   jour le cache localStorage (gw_free_grp_{groupId}) si aucune conv locale
+   n'existait encore — cas systématique pour un membre venant d'être invité,
+   puisque le listener temps réel gw/group_msgs (global, group-agnostic) peut
+   recevoir l'événement AVANT que _checkFreeGroupInbox() (déclenché par un
+   listener Firebase SÉPARÉ sur gw/group_inboxes/free_{uid}, sans ordre garanti
+   entre les deux) n'ait créé l'objet conversation local. Le message était alors
+   perdu de façon définitive : _checkFreeGroupInbox()/_loadFreeGroupMsgs() ne
+   lisent QUE ce cache local, jamais Firebase directement. Corrigé en mettant
+   TOUJOURS à jour le cache en premier, indépendamment de l'existence de conv —
+   seule la suite (rendu DOM/unread/renderConversations) reste conditionnée à
+   la présence d'une conv locale. Voir aussi le correctif jumeau dans
+   _checkFreeGroupInbox (fetch direct de messages, pas seulement du cache). ── */
+/* ── Phase GROUPS-FREE-05 : synchronisation temps réel des métadonnées ──
+   Jusqu'ici, _gwMergeFreeGroupMsg ne traitait que data.messages et sortait
+   avant tout traitement s'il n'y avait aucun NOUVEAU message — data.meta
+   (membres, admins, description, couverture) n'était donc jamais lu, même
+   quand child_changed s'était bien déclenché suite à sa modification par un
+   AUTRE membre. Ces deux fonctions sont partagées entre le chemin temps réel
+   (_gwMergeFreeGroupMsg, ci-dessous) et le filet de sécurité par sondage
+   (_pollFreeGroupsMetaSafetyNet) — voir sa justification plus bas : le
+   comportement exact de child_removed pour une perte d'accès par Rule n'a
+   pas pu être vérifié via l'émulateur RTDB pour ce projet (listener sur
+   gw/group_msgs, collection sans .read propre, uniquement .read par enfant —
+   l'émulateur annule IMMÉDIATEMENT ce type d'écoute avec PERMISSION_DENIED,
+   ce qui contredit des mois d'observation LIVE en production où cette même
+   écoute fonctionne pour child_added/child_changed ; divergence emulateur
+   documentée, pas une hypothèse — voir rapport GROUPS-FREE-05). Le sondage
+   apporte une garantie de convergence en délai borné (~15 s) même si
+   child_removed ne se déclenche pas comme attendu en production. */
+function _freeGroupApplyMetaSync(conv, meta) {
+  if (!conv || !meta) return false;
+  var changed = false;
+
+  var newDescription = meta.description || '';
+  if (conv.description !== newDescription) { conv.description = newDescription; changed = true; }
+
+  var newAdmins = meta.admins || null;
+  if (JSON.stringify(conv.admins || null) !== JSON.stringify(newAdmins)) { conv.admins = newAdmins; changed = true; }
+
+  var newCoverUpdatedAt = meta.coverUpdatedAt || null;
+  if (conv.coverUpdatedAt !== newCoverUpdatedAt) { conv.coverUpdatedAt = newCoverUpdatedAt; changed = true; }
+
+  var newMemberEmails = meta.memberEmails ? Object.keys(meta.memberEmails).map(function(u) { return meta.memberEmails[u]; }).sort() : [];
+  var oldMemberEmails = (conv.members || []).map(function(m) { return m.email; }).sort();
+  if (JSON.stringify(oldMemberEmails) !== JSON.stringify(newMemberEmails)) {
+    conv.members = newMemberEmails.map(function(e) { return { email: e }; });
+    conv.avatar = { type: 'group', members: conv.members };
+    changed = true;
+  }
+
+  if (changed) {
+    _saveGroupConvs();
+    var infoOpen = _chatConvId === conv.id && document.getElementById('grp-info-card');
+    if (infoOpen && _currentUser) {
+      var myUid = _gwFbKey(_currentUser.email);
+      _renderFreeGroupInfoBody(conv, conv.owner === myUid, !!(conv.admins && conv.admins[myUid]));
+    }
+    renderConversations();
+  }
+  return changed;
+}
+
+/* Retrait/suppression détectés (child_removed temps réel OU sondage de
+   secours) : nettoyage complet, identique quelle que soit la cause (exclu
+   par un admin/owner, ou groupe supprimé) — dans les deux cas, ce membre n'a
+   plus aucun accès au noeud, le résultat visible attendu est le même. */
+function _freeGroupHandleRemoved(groupId) {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.isGroup && c.isFreeGroup && c.id === groupId; });
+  if (!conv) return;
+  var wasOpen = _chatConvId === groupId;
+  if (wasOpen) {
+    try { _closeGenericSheet('grp-info'); } catch(e){}
+    try { closeChat(); } catch(e){}
+  }
+  var idx = DEMO_CONVERSATIONS.indexOf(conv);
+  if (idx !== -1) DEMO_CONVERSATIONS.splice(idx, 1);
+  try { localStorage.removeItem('gw_free_grp_' + groupId); } catch(e){}
+  try { _detachFreeGroupRealtimeListeners(groupId); } catch(e){}
+  _saveGroupConvs();
+  renderConversations();
+  if (!wasOpen) { try { showToast('Un groupe a été supprimé ou vous en avez été retiré', 'info'); } catch(e){} }
+}
+
+/* MESSAGING-GROUP-SYNC-03, révisée GROUPS/MOBILE-ANR-01 (P1/D) : relit
+   gw/group_msgs/{id}/messages pour UN groupe, désormais via une requête
+   BORNÉE (orderByChild('createdAt').startAt(curseur)) plutôt qu'un
+   .once('value') sur le nœud entier — dont le coût croissait avec
+   l'historique COMPLET du groupe à CHAQUE cycle (confirmé cause racine de
+   l'ANR mobile après ~5-6 min, diagnostic MOBILE-ANR-01). Curseur =
+   conv.lastAt (dernier message déjà connu), INCLUSIF (pas +1) car
+   createdAt n'est PAS garanti unique — un +1 risquerait de sauter un
+   message partageant exactement le même timestamp que le curseur.
+   Dédoublonnage final toujours par identifiant Firebase stable (jamais un
+   timestamp), qui absorbe sans risque le fait que le message-curseur
+   lui-même est re-livré par cette requête inclusive.
+   Fusionne dans conv.messages de façon idempotente. Fonction PARTAGÉE par
+   le filet de sécurité périodique (_pollFreeGroupsMetaSafetyNet ci-dessous)
+   et par le réattachement sur reconnexion (_reinitFreeGroupRealtime) — un
+   seul mécanisme de resynchronisation, pas deux. N'écrit jamais rien côté
+   serveur, lecture seule. */
+function _resyncFreeGroupMessages(conv) {
+  if (!conv || !_gwFbDB || !_currentUser) return Promise.resolve([]);
+  var cursor = conv.lastAt || 0;
+  return _gwFbDB.ref('gw/group_msgs/' + conv.id + '/messages')
+    .orderByChild('createdAt').startAt(cursor).once('value').then(function(snap) {
+    var raw = snap.val();
+    var rawList = raw && typeof raw === 'object' ? Object.keys(raw).map(function(k) { return raw[k]; }) : [];
+    var incoming = rawList.filter(function(m) { return m && m.id; }).map(function(m) {
+      var a = { id: m.id, from: m.senderEmail, text: m.text, at: m.createdAt, type: m.type || 'text' };
+      if (m.fileName) a.fileName = m.fileName;
+      if (m.fileSize) a.fileSize = m.fileSize;
+      if (m.data_url) a.data_url = m.data_url;
+      return a;
+    });
+    /* La requête est déjà triée par createdAt (orderByChild) — un simple
+       filtre suffit, plus besoin de retrier ni relire tout conv.messages. */
+    var convIds = {};
+    conv.messages.forEach(function(m) { convIds[String(m.id)] = true; });
+    var added = incoming.filter(function(m) { return !convIds[String(m.id)]; });
+    if (!added.length) return added; /* rien de nouveau → AUCUN localStorage.setItem, AUCUN render */
+
+    added.forEach(function(m) { conv.messages.push(m); });
+
+    try {
+      var cacheKey = 'gw_free_grp_' + conv.id;
+      var toCache = conv.messages.length > _FREE_GRP_CACHE_MAX ? conv.messages.slice(-_FREE_GRP_CACHE_MAX) : conv.messages;
+      localStorage.setItem(cacheKey, JSON.stringify({ messages: toCache, lastMsg: conv.lastMsg, lastAt: conv.lastAt }));
+    } catch (e) {}
+
+    var grpChatBox  = document.getElementById('chat-messages');
+    var grpChatOpen = _chatConvId === conv.id && grpChatBox;
+    if (grpChatOpen) {
+      added.forEach(function(m) {
+        if (m.from === _currentUser.email) return;
+        if (grpChatBox.querySelector('[data-msg-id="' + m.id + '"]')) return;
+        var row = document.createElement('div');
+        var sProfile = loadUserProfile(m.from) || {};
+        var sName    = sProfile.nom || m.from || '';
+        var sAv = sProfile.photo
+          ? '<img src="' + escHtml(sProfile.photo) + '" class="chat-group-av" alt="">'
+          : '<div class="chat-group-av chat-group-av-init">' + escHtml(sName.charAt(0).toUpperCase()) + '</div>';
+        var senderHtml = '<div class="chat-group-sender-row">' + sAv +
+          '<span class="chat-group-sender-name">' + escHtml(sName) + '</span></div>';
+        row.className = 'chat-msg-row theirs';
+        row.setAttribute('data-msg-id', m.id);
+        row.innerHTML = senderHtml + _buildBubbleHtml(m, false);
+        grpChatBox.appendChild(row);
+      });
+      try { _scrollChatToBottom(); } catch (e) {}
+    } else {
+      conv.unread = (conv.unread || 0) + added.filter(function(m) { return m.from !== _currentUser.email; }).length;
+    }
+    var lastAdded = added[added.length - 1];
+    conv.lastMsg = lastAdded.text || conv.lastMsg;
+    conv.lastAt  = Math.max(conv.lastAt || 0, Number(lastAdded.at) || 0);
+    renderConversations();
+    return added;
+  }).catch(function() { return []; });
+}
+
+/* Sondage de secours (~15 s, throttlé sur _globalMsgPoll qui tourne toutes
+   les 3 s) : revalide chaque groupe libre déjà chargé localement en relisant
+   son /meta réel ET ses /messages réels (MESSAGING-GROUP-SYNC-03 — le
+   listener temps réel gw/group_msgs peut devenir silencieux sur une session
+   longue, prouvé en LIVE ; ce filet de sécurité garantit une convergence à
+   délai borné même si l'écho temps réel ne se déclenche plus). Complète (ne
+   remplace pas) le chemin temps réel — voir justification en tête de
+   _freeGroupApplyMetaSync et _resyncFreeGroupMessages. */
+var _freeGroupMetaPollTick = 0;
+function _pollFreeGroupsMetaSafetyNet() {
+  if (!_currentUser || !_gwFbReady || !_gwFbDB) return;
+  _freeGroupMetaPollTick++;
+  if (_freeGroupMetaPollTick % 5 !== 0) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  DEMO_CONVERSATIONS.filter(function(c) { return c.isGroup && c.isFreeGroup; }).forEach(function(conv) {
+    _gwFbDB.ref('gw/group_msgs/' + conv.id + '/meta').once('value').then(function(snap) {
+      var meta = snap.val();
+      if (!meta || !meta.members || meta.members[myUid] !== true) { _freeGroupHandleRemoved(conv.id); return; }
+      _freeGroupApplyMetaSync(conv, meta);
+      _resyncFreeGroupMessages(conv);
+    }).catch(function() { _freeGroupHandleRemoved(conv.id); });
+  });
+}
+
+/* MESSAGING-GROUP-SYNC-03 : réattache proprement les listeners groupe/inbox
+   et resynchronise immédiatement les messages de chaque groupe libre déjà
+   chargé — appelée sur transition de reconnexion Firebase détectée via
+   /.info/connected (voir _gwInitFirebase). Réutilise EXACTEMENT le même
+   mécanisme d'attache qu'à l'auth réelle initiale (_initGroupAndInboxListeners
+   + _groupListenersInitialized, MESSAGING-GROUP-SYNC-02) — aucun second
+   système créé. .off() puis réattache : jamais deux listeners actifs. */
+function _reinitFreeGroupRealtime() {
+  if (!_gwRealAuthReady || !_gwFbReady || !_gwFbDB || !_currentUser) return;
+  try {
+    _gwFbDB.ref('gw/group_msgs').off('child_added');
+    _gwFbDB.ref('gw/group_msgs').off('child_changed');
+    _gwFbDB.ref('gw/group_msgs').off('child_removed');
+  } catch (e) {}
+  _groupListenersInitialized = false;
+  _initGroupAndInboxListeners(_currentUser);
+  DEMO_CONVERSATIONS.filter(function(c) { return c.isGroup && c.isFreeGroup; }).forEach(function(conv) {
+    _resyncFreeGroupMessages(conv);
+  });
+}
+
+function _gwMergeFreeGroupMsg(snap) {
+  if (!_currentUser || !snap) return;
+  var groupId = snap.key;
+  var data = snap.val();
+  if (!data) return;
+  /* Synchronisation meta INCONDITIONNELLE — avant toute dépendance aux
+     messages, contrairement au reste de la fonction (inchangé ci-dessous). */
+  try { if (data.meta) _freeGroupApplyMetaSync(DEMO_CONVERSATIONS.find(function(c) { return c.isGroup && c.isFreeGroup && c.id === groupId; }), data.meta); } catch(e) {}
+  try {
+    var rawMsgs = data.messages;
+    var rawList = rawMsgs && typeof rawMsgs === 'object' ? Object.keys(rawMsgs).map(function(k) { return rawMsgs[k]; }) : [];
+    if (!rawList.length) return;
+    var incomingMsgs = rawList.filter(function(m) { return m && m.id; }).map(function(m) {
+      /* MESSAGING-FILES-01 : préserve le type/pièce jointe (auparavant écrasé
+         en 'text' inconditionnellement, perdant type/fileName/fileSize/
+         data_url pour tout message reçu via le temps réel ou la découverte). */
+      var _adapted = { id: m.id, from: m.senderEmail, text: m.text, at: m.createdAt, type: m.type || 'text' };
+      if (m.fileName)  _adapted.fileName  = m.fileName;
+      if (m.fileSize)  _adapted.fileSize  = m.fileSize;
+      if (m.data_url)  _adapted.data_url  = m.data_url;
+      return _adapted;
+    });
+    if (!incomingMsgs.length) return;
+
+    /* Mise à jour inconditionnelle du cache — AVANT toute dépendance à conv. */
+    var key = 'gw_free_grp_' + groupId;
+    var existing = null;
+    try { existing = JSON.parse(localStorage.getItem(key)); } catch(e){}
+    var stored = (existing && Array.isArray(existing.messages)) ? existing.messages : [];
+    var storedMap = {};
+    stored.forEach(function(m) { storedMap[String(m.id)] = true; });
+    var newForCache = [];
+    incomingMsgs.forEach(function(m) {
+      if (!storedMap[String(m.id)]) { stored.push(m); newForCache.push(m); }
+    });
+    if (newForCache.length) {
+      stored.sort(function(a, b) { return (Number(a.at) || 0) - (Number(b.at) || 0); });
+      var lastCacheMsg = newForCache[newForCache.length - 1];
+      try { localStorage.setItem(key, JSON.stringify({ messages: stored, lastMsg: lastCacheMsg.text || (data.lastMsg || ''), lastAt: data.lastAt || Date.now() })); } catch(e) {}
+    }
+
+    /* La conv locale peut ne pas exister encore (course avec _checkFreeGroupInbox,
+       cf. commentaire au-dessus) — le cache est déjà à jour dans ce cas, rien
+       de plus à faire ici : _checkFreeGroupInbox()/_loadFreeGroupMsgs() le
+       récupéreront à la création de la conv. */
+    if (!_groupConvsReady) { try { _loadGroupConvs(); } catch(e){} }
+    var conv = DEMO_CONVERSATIONS.find(function(c) { return c.isGroup && c.isFreeGroup && c.id === groupId; });
+    if (!conv) return;
+
+    /* MESSAGING-GROUP-SYNC-03 : dédoublonnage désormais comparé directement à
+       conv.messages, PAS uniquement à newForCache (relatif au cache local).
+       Cause du bug découvert en LIVE (MESSAGING-GROUP-SYNC-02, test manuel) :
+       _sendFreeGroupMessage() pré-remplit le cache de l'EXPÉDITEUR de façon
+       synchrone, avant même que l'écho temps réel n'arrive — quand cet écho
+       arrivait, newForCache (relatif au cache déjà à jour) était vide pour ce
+       message, et l'ancien code sortait alors AVANT même de regarder
+       conv.messages, qui ne recevait donc jamais ce message. Comparer
+       directement à conv.messages élimine cette dépendance à l'état du
+       cache — l'identifiant Firebase stable (push key) reste la seule clé
+       de dédoublonnage utilisée, jamais un timestamp. */
+    var convIds = {};
+    conv.messages.forEach(function(m) { convIds[String(m.id)] = true; });
+    var newForConv = incomingMsgs.filter(function(m) { return !convIds[String(m.id)]; });
+    if (!newForConv.length) return;
+
+    var grpChatBox  = document.getElementById('chat-messages');
+    var grpChatOpen = _chatConvId === conv.id && grpChatBox;
+
+    newForConv.forEach(function(m) {
+      conv.messages.push(m);
+      if (grpChatOpen && m.from !== _currentUser.email) {
+        if (!grpChatBox.querySelector('[data-msg-id="' + m.id + '"]')) {
+          var row = document.createElement('div');
+          var sProfile = loadUserProfile(m.from) || {};
+          var sName    = sProfile.nom || m.from || '';
+          var sAv = sProfile.photo
+            ? '<img src="' + escHtml(sProfile.photo) + '" class="chat-group-av" alt="">'
+            : '<div class="chat-group-av chat-group-av-init">' + escHtml(sName.charAt(0).toUpperCase()) + '</div>';
+          var senderHtml = '<div class="chat-group-sender-row">' + sAv +
+            '<span class="chat-group-sender-name">' + escHtml(sName) + '</span></div>';
+          row.className = 'chat-msg-row theirs';
+          row.setAttribute('data-msg-id', m.id);
+          row.innerHTML = senderHtml + _buildBubbleHtml(m, false);
+          grpChatBox.appendChild(row);
+        }
+      }
+    });
+
+    conv.messages.sort(function(a, b) { return (Number(a.at) || 0) - (Number(b.at) || 0); });
+    var lastConvMsg = newForConv[newForConv.length - 1];
+    conv.lastMsg = lastConvMsg.text || conv.lastMsg;
+    conv.lastAt  = data.lastAt || Date.now();
+
+    if (grpChatOpen) {
+      try { _scrollChatToBottom(); } catch(e) {}
+    } else {
+      conv.unread = (conv.unread || 0) + newForConv.filter(function(m) { return m.from !== _currentUser.email; }).length;
+    }
+    renderConversations();
+  } catch(e) {}
+}
+/* GROUPS/MOBILE-ANR-01 (P1) : _gwMergeFreeGroupMsg ci-dessus n'est plus
+   appelée (voir le dispatch dans _gwMergeGroupMsg) — conservée telle
+   quelle, non supprimée, au cas où une référence externe existerait
+   encore. Le chemin temps réel des groupes libres passe désormais par
+   les fonctions ci-dessous. */
+
+/* ══════════════════════════════════════════════════════════════
+   GROUPS/MOBILE-ANR-01 (P1) — Listeners temps réel INCRÉMENTAUX, un par
+   groupe libre. Remplace le chemin top-level gw/group_msgs child_changed
+   (_gwMergeFreeGroupMsg ci-dessus) qui retransmettait/retraitait
+   l'HISTORIQUE COMPLET du groupe à chaque nouveau message — confirmé
+   cause racine de l'ANR mobile après ~5-6 min (diagnostic MOBILE-ANR-01,
+   preuve : aucune pagination sur gw/group_msgs/{id}/messages, child_changed
+   livre TOUJOURS la valeur intégrale du nœud parent).
+
+   child_added sur .../messages ne délivre QUE le message concerné — payload
+   borné, indépendant de la taille de l'historique — SAUF au tout premier
+   attach, où Firebase rejoue child_added pour chaque message déjà existant
+   (coût ponctuel, une seule fois par groupe par session, comparable au
+   chargement initial déjà fait par _checkFreeGroupInbox — PAS un coût
+   répété). Dédoublonné par ID Firebase stable (jamais un timestamp, jamais
+   supposé unique).
+
+   Ne concerne QUE les groupes libres. Les groupes de collaboration
+   restent intégralement sur l'ancien chemin top-level (_gwMergeGroupMsg),
+   inchangé — voir consigne explicite "ne pas toucher Collaboration". ── */
+var _freeGroupRtListeners = {}; /* groupId -> { messagesRef, metaRef } */
+
+function _attachFreeGroupRealtimeListeners(groupId) {
+  if (!_gwFbDB || !groupId || _freeGroupRtListeners[groupId]) return;
+  var messagesRef = _gwFbDB.ref('gw/group_msgs/' + groupId + '/messages');
+  var metaRef     = _gwFbDB.ref('gw/group_msgs/' + groupId + '/meta');
+  _freeGroupRtListeners[groupId] = { messagesRef: messagesRef, metaRef: metaRef };
+
+  messagesRef.on('child_added', function(snap) {
+    try { _gwHandleFreeGroupNewMessage(groupId, snap); } catch(e) {}
+  });
+  metaRef.on('value', function(snap) {
+    try {
+      var meta = snap.val();
+      if (!meta) return;
+      var conv = DEMO_CONVERSATIONS.find(function(c) { return c.isGroup && c.isFreeGroup && c.id === groupId; });
+      if (conv) _freeGroupApplyMetaSync(conv, meta);
+    } catch(e) {}
+  });
+}
+
+function _detachFreeGroupRealtimeListeners(groupId) {
+  var l = _freeGroupRtListeners[groupId];
+  if (!l) return;
+  try { l.messagesRef.off('child_added'); } catch(e) {}
+  try { l.metaRef.off('value'); } catch(e) {}
+  delete _freeGroupRtListeners[groupId];
+}
+
+/* Taille max du cache localStorage PERSISTÉ par groupe libre (PAS de la
+   mémoire vive conv.messages, jamais tronquée en session — seul ce qui est
+   écrit sur disque est borné, pour éviter une croissance illimitée entre
+   sessions sans jamais perdre de messages déjà affichés/scrollés dans la
+   session en cours ni toucher aux données serveur). */
+var _FREE_GRP_CACHE_MAX = 300;
+
+/* Traite UN SEUL message entrant (child_added) — coût O(1) par appel :
+   jamais de relecture/reparse de l'historique du groupe, jamais de sort()
+   sur tout conv.messages (child_added livre les messages dans l'ordre
+   chronologique de création, replay initial inclus — un simple push
+   préserve donc l'ordre). */
+function _gwHandleFreeGroupNewMessage(groupId, snap) {
+  if (!_currentUser || !snap) return;
+  var raw = snap.val();
+  if (!raw) return;
+  var msgId = snap.key || raw.id;
+  if (!msgId) return;
+
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.isGroup && c.isFreeGroup && c.id === groupId; });
+  /* conv pas encore matérialisée (course avec _checkFreeGroupInbox) : sans
+     effet ici, sa création chargera l'historique complet une seule fois. */
+  if (!conv) return;
+
+  /* Dédoublonnage par ID Firebase stable — couvre le replay initial de
+     child_added (messages déjà connus via le chargement initial) ET l'écho
+     de nos propres envois. */
+  if (conv.messages.some(function(x) { return String(x.id) === String(msgId); })) return;
+
+  var m = { id: msgId, from: raw.senderEmail, text: raw.text, at: raw.createdAt, type: raw.type || 'text' };
+  if (raw.fileName) m.fileName = raw.fileName;
+  if (raw.fileSize) m.fileSize = raw.fileSize;
+  if (raw.data_url) m.data_url = raw.data_url;
+
+  conv.messages.push(m);
+  conv.lastMsg = m.text || conv.lastMsg;
+  conv.lastAt  = Math.max(conv.lastAt || 0, Number(m.at) || 0);
+
+  var grpChatBox  = document.getElementById('chat-messages');
+  var grpChatOpen = _chatConvId === conv.id && grpChatBox;
+  if (grpChatOpen && m.from !== _currentUser.email) {
+    if (!grpChatBox.querySelector('[data-msg-id="' + m.id + '"]')) {
+      var row = document.createElement('div');
+      var sProfile = loadUserProfile(m.from) || {};
+      var sName    = sProfile.nom || m.from || '';
+      var sAv = sProfile.photo
+        ? '<img src="' + escHtml(sProfile.photo) + '" class="chat-group-av" alt="">'
+        : '<div class="chat-group-av chat-group-av-init">' + escHtml(sName.charAt(0).toUpperCase()) + '</div>';
+      var senderHtml = '<div class="chat-group-sender-row">' + sAv +
+        '<span class="chat-group-sender-name">' + escHtml(sName) + '</span></div>';
+      row.className = 'chat-msg-row theirs';
+      row.setAttribute('data-msg-id', m.id);
+      row.innerHTML = senderHtml + _buildBubbleHtml(m, false);
+      grpChatBox.appendChild(row);
+    }
+    try { _scrollChatToBottom(); } catch(e) {}
+  } else if (m.from !== _currentUser.email) {
+    conv.unread = (conv.unread || 0) + 1;
+  }
+
+  /* Cache local : append-only sur le tableau déjà en mémoire — jamais de
+     re-lecture/re-parse de gw/group_msgs. Écriture localStorage bornée
+     (_FREE_GRP_CACHE_MAX) — uniquement le fichier PERSISTÉ, jamais
+     conv.messages lui-même (jamais tronqué en mémoire pendant la session). */
+  try {
+    var cacheKey = 'gw_free_grp_' + groupId;
+    var toCache = conv.messages.length > _FREE_GRP_CACHE_MAX
+      ? conv.messages.slice(-_FREE_GRP_CACHE_MAX) : conv.messages;
+    localStorage.setItem(cacheKey, JSON.stringify({ messages: toCache, lastMsg: conv.lastMsg, lastAt: conv.lastAt }));
+  } catch (e) {}
+
+  renderConversations();
+}
+
+/* ── Group Inbox (découverte d'un groupe libre auquel on vient d'être ajouté,
+   sur un autre appareil ou après reconnexion) — parallèle de _checkGroupInbox,
+   jamais couplée à projId/ownerEmail. Le cache local ne contient que des
+   métadonnées légères (groupId/name/ownerEmail/createdAt, écrites par
+   _writeFreeGroupInbox) ; la liste complète des membres est relue une fois
+   depuis gw/group_msgs/{groupId} — lecture autorisée puisque l'appartenance
+   est déjà confirmée par la simple existence de cette entrée d'inbox.
+
+   CORRECTIF GROUPS-FREE-03 : lit désormais le NŒUD GROUPE ENTIER (meta +
+   messages), pas seulement /meta — auparavant, l'historique des messages
+   n'était chargé QUE depuis le cache local (_loadFreeGroupMsgs), lequel
+   pouvait être vide si _gwMergeFreeGroupMsg n'avait pas encore eu l'occasion
+   de le peupler (course entre les deux listeners Firebase indépendants,
+   group_msgs vs group_inboxes/free_{uid}, sans ordre garanti). Cette lecture
+   directe de /messages rend la découverte auto-suffisante, quelle que soit
+   l'issue de cette course — voir le correctif jumeau dans
+   _gwMergeFreeGroupMsg (mise à jour inconditionnelle du cache). ── */
+function _checkFreeGroupInbox() {
+  if (!_currentUser || !_gwFbReady || !_gwFbDB) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  try {
+    var key = 'gw_free_group_inbox_' + String(_currentUser.email).replace(/[^a-z0-9@._]/gi, '_');
+    var inbox = JSON.parse(localStorage.getItem(key) || '{}');
+    var groupIds = (inbox && typeof inbox === 'object') ? Object.keys(inbox) : [];
+    if (!groupIds.length) return;
+    groupIds.forEach(function(groupId) {
+      if (DEMO_CONVERSATIONS.some(function(c) { return c.isGroup && c.isFreeGroup && c.id === groupId; })) return;
+      _gwFbDB.ref('gw/group_msgs/' + groupId).once('value').then(function(snap) {
+        var node = snap.val();
+        var meta = node ? node.meta : null;
+        if (!meta || !meta.members || meta.members[myUid] !== true) return;
+        if (DEMO_CONVERSATIONS.some(function(c) { return c.isGroup && c.isFreeGroup && c.id === groupId; })) return;
+        var memberEmails = meta.memberEmails ? Object.keys(meta.memberEmails).map(function(u) { return meta.memberEmails[u]; }) : [];
+        var conv = {
+          id: groupId, groupId: groupId, isGroup: true, isFreeGroup: true,
+          name: meta.name || 'Groupe', description: meta.description || '',
+          owner: meta.owner, ownerEmail: meta.ownerEmail,
+          avatar: { type: 'group', members: memberEmails.map(function(e) { return { email: e }; }) },
+          at: meta.createdAt || Date.now(), time: 'À l\'instant',
+          lastMsg: node.lastMsg || 'Groupe créé', lastAt: node.lastAt || meta.createdAt || Date.now(),
+          unread: 0, archived: false, online: false,
+          members: memberEmails.map(function(e) { return { email: e }; }),
+          messages: []
+        };
+
+        /* Historique direct depuis ce même snapshot (meta+messages lus d'un
+           coup) — normalisé au format local {id,from,text,at,type}, fusionné
+           avec le cache existant (peut déjà contenir des messages plus
+           récents si _gwMergeFreeGroupMsg a entre-temps gagné la course). */
+        var rawMsgs = node.messages;
+        var rawList = rawMsgs && typeof rawMsgs === 'object' ? Object.keys(rawMsgs).map(function(k) { return rawMsgs[k]; }) : [];
+        var fetchedMsgs = rawList.filter(function(m) { return m && m.id; }).map(function(m) {
+          /* MESSAGING-FILES-01 : préserve le type/pièce jointe (auparavant écrasé
+         en 'text' inconditionnellement, perdant type/fileName/fileSize/
+         data_url pour tout message reçu via le temps réel ou la découverte). */
+      var _adapted = { id: m.id, from: m.senderEmail, text: m.text, at: m.createdAt, type: m.type || 'text' };
+      if (m.fileName)  _adapted.fileName  = m.fileName;
+      if (m.fileSize)  _adapted.fileSize  = m.fileSize;
+      if (m.data_url)  _adapted.data_url  = m.data_url;
+      return _adapted;
+        });
+        var lsKey = 'gw_free_grp_' + groupId;
+        var cached = null;
+        try { cached = JSON.parse(localStorage.getItem(lsKey)); } catch(e) {}
+        var mergedMsgs = (cached && Array.isArray(cached.messages)) ? cached.messages.slice() : [];
+        var mergedMap = {};
+        mergedMsgs.forEach(function(m) { mergedMap[String(m.id)] = true; });
+        fetchedMsgs.forEach(function(m) { if (!mergedMap[String(m.id)]) { mergedMsgs.push(m); mergedMap[String(m.id)] = true; } });
+        mergedMsgs.sort(function(a, b) { return (Number(a.at) || 0) - (Number(b.at) || 0); });
+        try {
+          /* GROUPS/MOBILE-ANR-01 (P1/C) : cache PERSISTÉ borné — conv.messages
+             lui-même (ci-dessous, chargé par _loadFreeGroupMsgs) reste intact. */
+          var toCache619 = mergedMsgs.length > _FREE_GRP_CACHE_MAX ? mergedMsgs.slice(-_FREE_GRP_CACHE_MAX) : mergedMsgs;
+          localStorage.setItem(lsKey, JSON.stringify({ messages: toCache619, lastMsg: conv.lastMsg, lastAt: conv.lastAt }));
+        } catch(e) {}
+
+        _loadFreeGroupMsgs(conv);
+        conv.unread = conv.messages.filter(function(m) { return m.from && m.from !== _currentUser.email; }).length;
+        DEMO_CONVERSATIONS.unshift(conv);
+        _saveGroupConvs();
+        try { _attachFreeGroupRealtimeListeners(groupId); } catch(e) {}
+        var msgPage = document.getElementById('p-messages');
+        if (msgPage && msgPage.classList.contains('active')) renderConversations();
+      }).catch(function(err) {
+        /* GROUPS-FREE-09 : auparavant totalement silencieux. Pas de retry
+           ici — _globalMsgPoll (toutes les 3s) rappelle déjà _checkFreeGroupInbox()
+           tant que ce groupId n'est pas dans DEMO_CONVERSATIONS, donc un échec
+           ponctuel se rattrape seul. Ce log rend juste un échec persistant
+           diagnosticable au lieu d'être avalé sans trace. */
+        console.warn('[Groups] free-group meta read failed for ' + groupId + ' — will retry on next poll cycle', err && err.message);
+      });
+    });
+  } catch(e) {}
+}
+
+/* ══════════════════════════════════════════════════════════════
+   INFORMATIONS DU GROUPE — panneau (Phase GROUPS-FREE-03)
+   Uniquement pour un groupe libre (conv.isFreeGroup) — n'affecte jamais
+   les groupes de collaboration Marketplace. Réutilise cam-sheet-,
+   collab-sheet, collab-search-results, collab-user-row, collab-av,
+   collab-section-label, collab-invite-btn, collab-empty (aucune nouvelle
+   classe CSS). Aucun prompt() navigateur (édition inline dans la feuille).
+
+   HORS PÉRIMÈTRE de cette phase (audité, voir rapport GROUPS-FREE-03) :
+   - photo de couverture : aucun chemin Storage n'existe pour les groupes
+     (storage.rules audité intégralement — fallback global "deny all",
+     aucun match existant réutilisable), nécessiterait une nouvelle
+     Storage Rule → non ajoutée sans autorisation dédiée.
+   - modification du nom : meta/name est write-once (règle vérifiée,
+     confirmée GROUPS-FREE-01/03), nécessiterait une évolution des Rules.
+   - administrateurs : meta/admins n'a AUCUNE règle propre ; après création
+     du groupe, meta.write (parent) exige !data.exists() — devenu faux —
+     donc TOUTE écriture à meta/admins/{uid} est refusée pour tout le monde,
+     y compris le owner. Non implémentable sans ajout de Rule.
+   - suppression du groupe : comportement exact (ordre de nettoyage
+     group_inboxes puis group_msgs, Storage) documenté au rapport mais
+     bouton non ajouté, conformément au mandat. ══════════════════════ */
+function _openFreeGroupInfo() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !conv.isGroup || !conv.isFreeGroup || !_currentUser) return;
+  _closeGenericSheet('chat-menu');
+  _closeGenericSheet('grp-info');
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'grp-info-bg';
+  bg.onclick = function() { _closeGenericSheet('grp-info'); };
+
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card collab-sheet'; card.id = 'grp-info-card';
+
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+
+  var myUid = _gwFbKey(_currentUser.email);
+  var isOwner = conv.owner === myUid;
+  var isAdmin = !!(conv.admins && conv.admins[myUid]);
+  /* GROUPS-FREE-07-BIS : _renderFreeGroupInfoBody() recharge elle-même la
+     couverture (voir son commentaire) — un second appel ici ferait deux
+     requêtes /api/groups/cover-view concurrentes pour rien. */
+  _renderFreeGroupInfoBody(conv, isOwner, isAdmin);
+}
+
+/* Photo de couverture — Phase GROUPS-FREE-04 étape 2. Chemin Storage privé
+   (aucune Storage Rule dédiée : lecture/écriture passent exclusivement par
+   ces 3 endpoints serveur, seuls capables de vérifier l'appartenance réelle
+   au groupe via le compte de service — voir api/groups/_lib/gcsrest.js).
+   Toujours re-demandée au serveur à l'ouverture du panneau (pas de cache
+   client) : les couvertures changent rarement, un aller-retour de plus par
+   ouverture reste largement acceptable et évite toute logique de staleness. */
+function _freeGroupInfoLoadCover(conv, canManage) {
+  var box = document.getElementById('grp-info-cover');
+  if (!box) return;
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) { box.innerHTML = ''; return; }
+  fetch('/api/groups/cover-view', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: session.authRefresh, groupId: conv.id })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    box = document.getElementById('grp-info-cover');
+    if (!box) return;
+    box.innerHTML = _freeGroupCoverHtml(d && d.ok ? d.dataUri : null, canManage);
+  }).catch(function() {
+    box = document.getElementById('grp-info-cover');
+    if (box) box.innerHTML = _freeGroupCoverHtml(null, canManage);
+  });
+}
+
+function _freeGroupCoverHtml(dataUri, canManage) {
+  var img = dataUri
+    ? '<img src="' + dataUri + '" style="width:100%;aspect-ratio:3/1;object-fit:cover;display:block" alt="">'
+    : '<div style="width:100%;aspect-ratio:3/1;background:#F3F4F6;display:flex;align-items:center;justify-content:center;color:#9CA3AF">' +
+        '<i class="fas fa-image" style="font-size:22px"></i></div>';
+  if (!canManage) return img;
+  return img +
+    '<div style="display:flex;gap:8px;padding:8px 16px 0;flex-wrap:wrap">' +
+      '<button class="collab-invite-btn" onclick="_freeGroupInfoPickCover()"><i class="fas fa-image"></i> ' + (dataUri ? 'Remplacer' : 'Ajouter') + ' la couverture</button>' +
+      (dataUri ? '<button class="collab-invite-btn" style="background:#FEF2F2;color:#DC2626" onclick="_freeGroupInfoDeleteCover()"><i class="fas fa-trash"></i> Supprimer</button>' : '') +
+    '</div>' +
+    /* GROUPS-FREE-07 : accept="image/*" (pas la liste MIME explicite) — un
+       accept trop restrictif masque une partie de la galerie sur certains
+       navigateurs mobiles et exclut totalement les photos HEIC (format par
+       défaut de l'appareil photo iPhone), qui ne sont ni JPEG ni PNG ni
+       WebP. Le format réel reste validé après sélection (_FREE_GRP_COVER_TYPES),
+       avec message explicite si le fichier choisi n'est pas convertible.
+       Jamais l'attribut "capture" : il forcerait l'appareil photo et
+       empêcherait justement de choisir une photo déjà dans la galerie. */
+    '<input type="file" id="grp-info-cover-input" accept="image/*" style="display:none" onchange="_freeGroupInfoCoverChosen(this)">';
+}
+
+function _freeGroupInfoPickCover() {
+  var inp = document.getElementById('grp-info-cover-input');
+  if (inp) inp.click();
+}
+
+var _FREE_GRP_COVER_TYPES = { 'image/jpeg': 1, 'image/png': 1, 'image/webp': 1 };
+var _FREE_GRP_COVER_MAX_BYTES = 5 * 1024 * 1024;
+
+function _freeGroupInfoCoverChosen(input) {
+  var file = input && input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+  if (!_FREE_GRP_COVER_TYPES[file.type]) {
+    /* GROUPS-FREE-07 : accept="image/*" laisse maintenant passer des formats
+       comme HEIC (photos iPhone) — message explicite plutôt qu'une erreur
+       générique, jamais "Stock insuffisant". */
+    var _isHeic = /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name || '');
+    showToast(_isHeic
+      ? 'Photo au format HEIC non supporté — exportez-la en JPEG depuis votre galerie puis réessayez'
+      : 'Format non supporté (JPG, PNG ou WebP uniquement)', 'err');
+    return;
+  }
+  if (file.size > _FREE_GRP_COVER_MAX_BYTES) { showToast('Image trop volumineuse (5 Mo max)', 'err'); return; }
+
+  var img = new Image();
+  var objUrl = URL.createObjectURL(file);
+  img.onload = function() {
+    if (img.naturalWidth < 900 || img.naturalHeight < 300) {
+      URL.revokeObjectURL(objUrl);
+      showToast('Image trop petite (minimum 900×300px, recommandé 1200×400px)', 'err');
+      return;
+    }
+    _freeGroupInfoShowCoverPreview(file, objUrl);
+  };
+  img.onerror = function() { URL.revokeObjectURL(objUrl); showToast('Image invalide', 'err'); };
+  img.src = objUrl;
+}
+
+/* GROUPS-FREE-07 : aperçu avant upload — "Utiliser cette photo" / "Annuler".
+   objUrl (blob: local, jamais envoyé au serveur) est libéré dans les DEUX
+   cas (confirmation ou annulation) — jamais stocké, jamais en localStorage. */
+function _freeGroupInfoShowCoverPreview(file, objUrl) {
+  var overlay = document.createElement('div');
+  overlay.id = 'grp-cover-preview-bg';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:410;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:20px;box-sizing:border-box';
+  overlay.innerHTML =
+    '<div style="width:100%;max-width:430px;aspect-ratio:3/1;border-radius:12px;overflow:hidden;background:#111">' +
+      '<img src="' + objUrl + '" style="width:100%;height:100%;object-fit:cover;display:block" alt="Aperçu couverture">' +
+    '</div>' +
+    '<div style="width:100%;max-width:430px;display:flex;gap:10px">' +
+      '<button id="grp-cover-preview-cancel" class="collab-invite-btn" style="flex:1;justify-content:center;padding:11px;background:#fff">' +
+        '<i class="fas fa-xmark"></i> Annuler</button>' +
+      '<button id="grp-cover-preview-confirm" class="collab-invite-btn" style="flex:1;justify-content:center;padding:11px">' +
+        '<i class="fas fa-check"></i> Utiliser cette photo</button>' +
+    '</div>';
+  document.body.appendChild(overlay);
+
+  function cleanup() {
+    try { URL.revokeObjectURL(objUrl); } catch (e) {}
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+  }
+  document.getElementById('grp-cover-preview-cancel').onclick = cleanup;
+  document.getElementById('grp-cover-preview-confirm').onclick = function() {
+    cleanup();
+    _freeGroupInfoUploadCover(file);
+  };
+}
+
+function _freeGroupInfoUploadCover(file) {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  var session = _gwLoadSession();
+  if (!conv || !session || !session.authRefresh) { showToast('Session expirée, reconnectez-vous', 'err'); return; }
+  var reader = new FileReader();
+  reader.onload = function() {
+    var base64 = String(reader.result).split(',')[1] || '';
+    fetch('/api/groups/cover-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ authRefreshToken: session.authRefresh, groupId: conv.id, contentType: file.type, imageBase64: base64 })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      if (!d.ok) { showToast(d.error || 'Échec de l\'upload', 'err'); return; }
+      conv.coverUpdatedAt = d.coverUpdatedAt;
+      _saveGroupConvs();
+      var myUid = _gwFbKey(_currentUser.email);
+      _freeGroupInfoLoadCover(conv, conv.owner === myUid || !!(conv.admins && conv.admins[myUid]));
+      showToast('Couverture mise à jour ✓', 'ok');
+    }).catch(function() { showToast('Erreur réseau — réessayez.', 'err'); });
+  };
+  reader.readAsDataURL(file);
+}
+
+function _freeGroupInfoDeleteCover() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  var session = _gwLoadSession();
+  if (!conv || !session || !session.authRefresh) { showToast('Session expirée, reconnectez-vous', 'err'); return; }
+  fetch('/api/groups/cover-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: session.authRefresh, groupId: conv.id })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) { showToast(d.error || 'Échec de la suppression', 'err'); return; }
+    conv.coverUpdatedAt = null;
+    _saveGroupConvs();
+    var myUid = _gwFbKey(_currentUser.email);
+    _freeGroupInfoLoadCover(conv, conv.owner === myUid || !!(conv.admins && conv.admins[myUid]));
+    showToast('Couverture supprimée', 'ok');
+  }).catch(function() { showToast('Erreur réseau — réessayez.', 'err'); });
+}
+
+function _renderFreeGroupInfoBody(conv, isOwner, isAdmin) {
+  var card = document.getElementById('grp-info-card');
+  if (!card || !conv) return;
+  var memberEmails = (conv.members || []).map(function(m) { return m.email; }).filter(Boolean);
+  var canKickAny = isOwner || isAdmin;
+
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="collab-sheet-head">' +
+      '<h4><i class="fas fa-users"></i> Informations du groupe</h4>' +
+    '</div>' +
+    '<div id="grp-info-cover" style="border-radius:12px;overflow:hidden;margin:0 16px 4px"></div>' +
+    '<div class="collab-search-results">' +
+      '<div style="text-align:center;padding:8px 16px 4px">' +
+        _groupAvatar(conv, 72) +
+        '<div style="font-size:17px;font-weight:800;color:#111827;margin-top:10px">' + escHtml(conv.name) + '</div>' +
+        '<div style="font-size:12.5px;color:#9CA3AF;margin-top:2px">' + memberEmails.length + ' membre' + (memberEmails.length > 1 ? 's' : '') + ' · Groupe privé</div>' +
+      '</div>' +
+      '<div style="padding:6px 16px 10px">' +
+        '<p class="collab-section-label">Description</p>' +
+        '<p id="grp-info-desc" style="font-size:13px;color:#374151;white-space:pre-wrap;min-height:18px;margin:0 0 8px">' +
+          (conv.description ? escHtml(conv.description) : '<span style="color:#9CA3AF">Aucune description</span>') +
+        '</p>' +
+        (isOwner ? '<button class="collab-invite-btn" onclick="_freeGroupInfoEditDescription()"><i class="fas fa-pen"></i> Modifier la description</button>' : '') +
+      '</div>' +
+      '<div style="padding:0 16px 10px;display:flex;gap:8px">' +
+        '<button class="collab-invite-btn" style="flex:1;justify-content:center;padding:9px" onclick="_freeGroupOpenInviteSheet()"><i class="fas fa-user-plus"></i> Inviter des amis</button>' +
+        (canKickAny ? '<button class="collab-invite-btn" style="flex:1;justify-content:center;padding:9px" onclick="_freeGroupOpenAddMemberSheet()"><i class="fas fa-user-group"></i> Ajouter</button>' : '') +
+      '</div>' +
+      '<p class="collab-section-label" style="padding:0 16px">Membres (' + memberEmails.length + ')</p>' +
+      memberEmails.map(function(email) {
+        var profile = loadUserProfile(email) || {};
+        var name = _gwPublicName(email);
+        var av = profile.photo
+          ? '<img src="' + escHtml(profile.photo) + '" class="collab-av" alt="">'
+          : '<div class="collab-av collab-av-init">' + escHtml(name.charAt(0).toUpperCase()) + '</div>';
+        var isThisOwner = email === conv.ownerEmail;
+        var isThisAdmin = !!(conv.admins && conv.admins[_gwFbKey(email)]);
+        var canKick = canKickAny && !isThisOwner;
+        return '<div class="collab-user-row">' + av +
+          '<div class="collab-user-info"><b>' + escHtml(name) + '</b><span>' + (isThisOwner ? 'Propriétaire' : (isThisAdmin ? 'Administrateur' : 'Membre')) + '</span></div>' +
+          (canKick ? '<button class="collab-invite-btn" onclick="_freeGroupInfoKick(\'' + email.replace(/'/g,"\\'") + '\')"><i class="fas fa-user-minus"></i> Retirer</button>' : '') +
+        '</div>';
+      }).join('') +
+      '<p class="collab-section-label" style="padding:0 16px">Administrateurs</p>' +
+      (isOwner
+        ? (memberEmails.filter(function(e) { return e !== conv.ownerEmail; }).length
+            ? memberEmails.filter(function(e) { return e !== conv.ownerEmail; }).map(function(email) {
+                var name = _gwPublicName(email);
+                var isThisAdmin = !!(conv.admins && conv.admins[_gwFbKey(email)]);
+                return '<div class="collab-user-row">' +
+                  '<div class="collab-user-info"><b>' + escHtml(name) + '</b><span>' + (isThisAdmin ? 'Administrateur' : 'Membre') + '</span></div>' +
+                  (isThisAdmin
+                    ? '<button class="collab-invite-btn" style="background:#FEF2F2;color:#DC2626" onclick="_freeGroupInfoDemoteAdmin(\'' + email.replace(/'/g,"\\'") + '\')"><i class="fas fa-user-minus"></i> Retirer admin</button>'
+                    : '<button class="collab-invite-btn" onclick="_freeGroupInfoPromoteAdmin(\'' + email.replace(/'/g,"\\'") + '\')"><i class="fas fa-user-shield"></i> Nommer admin</button>') +
+                '</div>';
+              }).join('')
+            : '<div class="collab-empty" style="padding:10px 16px"><p style="margin:0;font-size:12px">Aucun autre membre à promouvoir</p></div>')
+        : (memberEmails.filter(function(e) { return conv.admins && conv.admins[_gwFbKey(e)]; }).length
+            ? memberEmails.filter(function(e) { return conv.admins && conv.admins[_gwFbKey(e)]; }).map(function(email) {
+                return '<div class="collab-user-row"><div class="collab-user-info"><b>' + escHtml(_gwPublicName(email)) + '</b><span>Administrateur</span></div></div>';
+              }).join('')
+            : '<div class="collab-empty" style="padding:10px 16px"><p style="margin:0;font-size:12px">Aucun administrateur</p></div>')) +
+    '</div>' +
+    '<div class="collab-search-row" id="grp-info-footer">' +
+      (isOwner
+        ? '<p style="margin:0 0 8px;font-size:11px;color:#9CA3AF;text-align:center">En tant que propriétaire, vous ne pouvez pas quitter ce groupe.</p>' +
+          '<button class="collab-invite-btn" style="width:100%;justify-content:center;padding:10px;background:#FEF2F2;color:#DC2626" onclick="_freeGroupInfoConfirmDeleteGroup()"><i class="fas fa-trash"></i> Supprimer le groupe</button>'
+        : '<button class="collab-invite-btn" style="width:100%;justify-content:center;padding:10px;background:#FEF2F2;color:#DC2626" onclick="_freeGroupInfoLeave()"><i class="fas fa-right-from-bracket"></i> Quitter le groupe</button>') +
+    '</div>';
+
+  /* GROUPS-FREE-07-BIS (P4) : card.innerHTML ci-dessus RECRÉE un
+     #grp-info-cover vide à chaque appel — cette fonction est réappelée par
+     de nombreux chemins (édition description, ajout/retrait de membre,
+     promotion/rétrogradation admin, annulation suppression, ET la
+     synchronisation temps réel _freeGroupApplyMetaSync quand un AUTRE
+     membre modifie le groupe pendant que le panneau est ouvert). Aucun de
+     ces appelants ne rechargeait la couverture ensuite : le bouton
+     "Ajouter/Remplacer la couverture" disparaissait silencieusement dès la
+     moindre action, y compris déclenchée par quelqu'un d'autre en live —
+     cause la plus probable de "le bouton n'apparaît plus" en test réel.
+     Recharge donc systématiquement ici, un seul endroit, plutôt que de
+     compter sur chaque appelant pour s'en souvenir. */
+  _freeGroupInfoLoadCover(conv, isOwner || isAdmin);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   AJOUT DIRECT DE MEMBRES (Phase GROUPS-FREE-07 — owner/admin
+   UNIQUEMENT, imposé côté Rules — voir database.rules.json
+   members/$uid et memberEmails/$uid, durcies dans cette même phase :
+   un membre simple ne peut plus ajouter directement, seule
+   l'invitation §ci-dessous lui reste ouverte). Membre = adhésion
+   IMMÉDIATE, sans acceptation — distinct à 100% de l'invitation.
+   Réutilise le même motif recherche+puces que le sélecteur de
+   création de groupe (_grpPicker*, GROUPS-FREE-02), sans dupliquer
+   son code (portée différente : exclusion des membres déjà présents
+   plutôt que d'une sélection en cours de création). ══════════════ */
+var _freeGroupAddSelected = {};
+
+function _freeGroupOpenAddMemberSheet() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !_currentUser) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  var isOwner = conv.owner === myUid;
+  var isAdmin = !!(conv.admins && conv.admins[myUid]);
+  if (!isOwner && !isAdmin) return;
+  _closeGenericSheet('grp-addmember');
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'grp-addmember-bg';
+  bg.onclick = function() { _closeGenericSheet('grp-addmember'); };
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card collab-sheet'; card.id = 'grp-addmember-card';
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+
+  _freeGroupAddSelected = {};
+  _renderFreeGroupAddMemberSheet();
+}
+
+function _renderFreeGroupAddMemberSheet() {
+  var card = document.getElementById('grp-addmember-card');
+  if (!card) return;
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="collab-sheet-head"><h4><i class="fas fa-user-group"></i> Ajouter des membres</h4></div>' +
+    '<div class="collab-search-row">' +
+      '<div class="collab-search-wrap"><i class="fas fa-magnifying-glass"></i>' +
+        '<input id="grp-addmember-search" class="collab-search-input" type="text" placeholder="Rechercher un contact…" oninput="_freeGroupAddMemberSearch(this.value)" autocomplete="off">' +
+      '</div>' +
+    '</div>' +
+    '<div id="grp-addmember-chips"></div>' +
+    '<div id="grp-addmember-results" class="collab-search-results"></div>' +
+    '<div class="collab-search-row">' +
+      '<button id="grp-addmember-btn" class="collab-invite-btn" style="width:100%;justify-content:center;padding:10px;opacity:0.5;pointer-events:none" onclick="_freeGroupAddMemberConfirm()">' +
+        '<i class="fas fa-check"></i> Ajouter' +
+      '</button>' +
+    '</div>';
+  _freeGroupAddMemberSearch('');
+}
+
+function _freeGroupAddMemberSearch(query) {
+  var resultsEl = document.getElementById('grp-addmember-results');
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!resultsEl || !_currentUser || !conv) return;
+  var q = String(query || '').trim().toLowerCase();
+  var memberEmailSet = {};
+  (conv.members || []).forEach(function(m) { if (m.email) memberEmailSet[m.email] = true; });
+
+  var found = [];
+  for (var i = 0; i < localStorage.length; i++) {
+    var key = localStorage.key(i);
+    if (!key || key.indexOf('gw_profile_') !== 0) continue;
+    var email = key.replace('gw_profile_', '');
+    if (!email || email === _currentUser.email) continue;
+    if (memberEmailSet[email]) continue;
+    if (_freeGroupAddSelected[email]) continue;
+    if (_admIsBanned(email)) continue;
+    var profile;
+    try { profile = JSON.parse(localStorage.getItem(key) || 'null'); } catch(e) { profile = null; }
+    if (!profile) continue;
+    var name = (profile.nom || '').toLowerCase();
+    if (q && name.indexOf(q) === -1 && email.toLowerCase().indexOf(q) === -1) continue;
+    found.push({ email: email, name: _gwPublicName(email), photo: profile.photo || null });
+  }
+  found.sort(function(a, b) { return a.name.localeCompare(b.name); });
+
+  if (!found.length) {
+    resultsEl.innerHTML = '<div class="collab-empty"><i class="fas fa-user-slash"></i><p>Aucun utilisateur trouvé</p></div>';
+    return;
+  }
+  resultsEl.innerHTML = found.slice(0, 20).map(function(u) {
+    var av = u.photo
+      ? '<img src="' + escHtml(u.photo) + '" class="collab-av" alt="">'
+      : '<div class="collab-av collab-av-init">' + escHtml(u.name.charAt(0).toUpperCase()) + '</div>';
+    return '<div class="collab-user-row">' + av +
+      '<div class="collab-user-info"><b>' + escHtml(u.name) + '</b></div>' +
+      '<button class="collab-invite-btn" onclick="_freeGroupAddMemberToggle(\'' + u.email.replace(/'/g,"\\'") + '\')">' +
+        '<i class="fas fa-plus"></i> Ajouter' +
+      '</button></div>';
+  }).join('');
+}
+
+function _freeGroupAddMemberToggle(email) {
+  if (!email || _freeGroupAddSelected[email]) return;
+  var profile = loadUserProfile(email);
+  _freeGroupAddSelected[email] = { name: _gwPublicName(email), photo: (profile && profile.photo) || null };
+  _freeGroupAddMemberRenderChips();
+  var inp = document.getElementById('grp-addmember-search');
+  _freeGroupAddMemberSearch(inp ? inp.value : '');
+  _freeGroupAddMemberUpdateBtn();
+}
+function _freeGroupAddMemberRemove(email) {
+  delete _freeGroupAddSelected[email];
+  _freeGroupAddMemberRenderChips();
+  var inp = document.getElementById('grp-addmember-search');
+  _freeGroupAddMemberSearch(inp ? inp.value : '');
+  _freeGroupAddMemberUpdateBtn();
+}
+function _freeGroupAddMemberRenderChips() {
+  var chipsEl = document.getElementById('grp-addmember-chips');
+  if (!chipsEl) return;
+  var emails = Object.keys(_freeGroupAddSelected);
+  if (!emails.length) { chipsEl.innerHTML = ''; return; }
+  chipsEl.innerHTML =
+    '<p class="collab-section-label">À ajouter (' + emails.length + ')</p>' +
+    emails.map(function(email) {
+      var u = _freeGroupAddSelected[email];
+      var av = u.photo
+        ? '<img src="' + escHtml(u.photo) + '" class="collab-av collab-av-sm" alt="">'
+        : '<div class="collab-av collab-av-sm collab-av-init">' + escHtml((u.name || 'Utilisateur').charAt(0).toUpperCase()) + '</div>';
+      return '<div class="collab-user-row">' + av +
+        '<div class="collab-user-info"><b>' + escHtml(u.name || 'Utilisateur') + '</b></div>' +
+        '<button class="collab-invite-btn" onclick="_freeGroupAddMemberRemove(\'' + email.replace(/'/g,"\\'") + '\')">' +
+          '<i class="fas fa-xmark"></i>' +
+        '</button></div>';
+    }).join('');
+}
+function _freeGroupAddMemberUpdateBtn() {
+  var btn = document.getElementById('grp-addmember-btn');
+  if (!btn) return;
+  var has = Object.keys(_freeGroupAddSelected).length > 0;
+  btn.style.opacity = has ? '1' : '0.5';
+  btn.style.pointerEvents = has ? 'auto' : 'none';
+}
+
+/* Écriture directe (owner/admin), un .update() atomique par membre sur
+   meta/{members,memberEmails}/{uid} — mêmes 2 feuilles que le Rule vérifie
+   indépendamment, mais un seul aller-retour réseau au lieu de deux .set()
+   séquentiels. Notifie chaque nouveau membre via _writeFreeGroupInbox
+   (même fonction que la création de groupe, aucune duplication). */
+function _freeGroupAddMemberConfirm() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  var emails = Object.keys(_freeGroupAddSelected);
+  if (!conv || !emails.length || !_currentUser || !_gwFbReady || !_gwFbDB) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  var isOwner = conv.owner === myUid;
+  var isAdmin = !!(conv.admins && conv.admins[myUid]);
+  if (!isOwner && !isAdmin) { showToast('Seul le propriétaire ou un administrateur peut ajouter des membres', 'err'); return; }
+
+  var groupId = conv.id;
+  var writes = emails.map(function(email) {
+    var uid = _gwFbKey(email);
+    var patch = {};
+    patch['members/' + uid] = true;
+    patch['memberEmails/' + uid] = email;
+    return _gwFbDB.ref('gw/group_msgs/' + groupId + '/meta').update(patch).then(function() {
+      _writeFreeGroupInbox(email, groupId, { name: conv.name, ownerEmail: conv.ownerEmail, createdAt: conv.at });
+      return { email: email, ok: true };
+    }).catch(function(err) {
+      console.error('[Groupe libre] Échec ajout membre ' + email + ' :', err && err.code, err && err.message);
+      return { email: email, ok: false };
+    });
+  });
+
+  Promise.all(writes).then(function(results) {
+    var okEmails = results.filter(function(r) { return r.ok; }).map(function(r) { return r.email; });
+    okEmails.forEach(function(email) { conv.members.push({ email: email }); });
+    if (okEmails.length) _saveGroupConvs();
+    _closeGenericSheet('grp-addmember');
+    var myUid2 = _gwFbKey(_currentUser.email);
+    _renderFreeGroupInfoBody(conv, conv.owner === myUid2, !!(conv.admins && conv.admins[myUid2]));
+    var failCount = results.length - okEmails.length;
+    showToast(failCount
+      ? (okEmails.length + ' ajouté(s), ' + failCount + ' échec(s)')
+      : ('Membre' + (okEmails.length > 1 ? 's ajoutés' : ' ajouté') + ' ✓'), failCount ? 'err' : 'ok');
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════
+   INVITATION PAR LES MEMBRES (Phase GROUPS-FREE-07) — DISTINCTE de
+   l'ajout direct ci-dessus : n'importe quel membre (pas seulement
+   owner/admin) peut inviter, mais l'invité doit ACCEPTER — jamais
+   d'adhésion immédiate. Deux canaux :
+   1) Lien générique (Copier / WhatsApp) — écriture CLIENTE directe de
+      gw/group_invites/{token}, autorisée par les Rules (membre du
+      groupe, inviterUid auto-attesté === auth.uid, status initial
+      forcé à "pending" — testé GROUPS-FREE-07 rules cas H/I/J/K).
+      Jamais d'email/UID/structure Firebase dans le texte partagé —
+      uniquement le nom du groupe + le lien public /group/invite/{token}.
+   2) "Partager dans Geniwork" — passe par /api/groups/invite-send car
+      la notification cross-utilisateur (gw/notifs/{cible}) est fermée
+      à l'écriture client (même contrainte que _admApproveRecruiterVerif
+      Phase 8E/9C) ; le serveur crée l'invitation ET la notification
+      dans le même appel pour garantir qu'elles restent cohérentes. ══ */
+var _freeGroupInviteSelected = {};
+var _FREE_GRP_INVITE_TOKEN_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
+function _freeGroupGenerateInviteToken() {
+  var t = '';
+  for (var i = 0; i < 24; i++) t += _FREE_GRP_INVITE_TOKEN_CHARS.charAt(Math.floor(Math.random() * _FREE_GRP_INVITE_TOKEN_CHARS.length));
+  return t;
+}
+
+function _freeGroupOpenInviteSheet() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !_currentUser) return;
+  _closeGenericSheet('grp-invite');
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'grp-invite-bg';
+  bg.onclick = function() { _closeGenericSheet('grp-invite'); };
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card collab-sheet'; card.id = 'grp-invite-card';
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+
+  _freeGroupInviteSelected = {};
+  _renderFreeGroupInviteSheet(conv);
+}
+
+function _renderFreeGroupInviteSheet(conv) {
+  var card = document.getElementById('grp-invite-card');
+  if (!card) return;
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="collab-sheet-head"><h4><i class="fas fa-user-plus"></i> Inviter des amis</h4></div>' +
+    '<div class="collab-search-row">' +
+      '<button class="collab-invite-btn" style="width:100%;justify-content:center;padding:10px" onclick="_freeGroupInviteGenerateLink()">' +
+        '<i class="fas fa-link"></i> Créer un lien d\'invitation' +
+      '</button>' +
+    '</div>' +
+    '<div id="grp-invite-link-box" style="padding:0 16px"></div>' +
+    '<p class="collab-section-label" style="padding:14px 16px 0">Ou partager dans Geniwork</p>' +
+    '<div class="collab-search-row">' +
+      '<div class="collab-search-wrap"><i class="fas fa-magnifying-glass"></i>' +
+        '<input id="grp-invite-search" class="collab-search-input" type="text" placeholder="Rechercher un contact…" oninput="_freeGroupInviteSearch(this.value)" autocomplete="off">' +
+      '</div>' +
+    '</div>' +
+    '<div id="grp-invite-chips"></div>' +
+    '<div id="grp-invite-results" class="collab-search-results"></div>' +
+    '<div class="collab-search-row">' +
+      '<button id="grp-invite-send-btn" class="collab-invite-btn" style="width:100%;justify-content:center;padding:10px;opacity:0.5;pointer-events:none" onclick="_freeGroupInviteSendSelected()">' +
+        _FREE_GRP_INVITE_SEND_BTN_LABEL +
+      '</button>' +
+    '</div>';
+  _freeGroupInviteSearch('');
+}
+
+/* Lien générique : écriture cliente directe, membre-only, jamais d'email/
+   UID dans le texte WhatsApp — uniquement conv.name (public) + le lien. */
+function _freeGroupInviteGenerateLink() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !_currentUser || !_gwFbReady || !_gwFbDB) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  var token = _freeGroupGenerateInviteToken();
+  _gwFbDB.ref('gw/group_invites/' + token).set({
+    groupId: conv.id, inviterUid: myUid, inviterEmail: _currentUser.email, status: 'pending', createdAt: Date.now()
+  }).then(function() {
+    var link = 'https://www.geniwork.fr/group/invite/' + token;
+    var box = document.getElementById('grp-invite-link-box');
+    if (!box) return;
+    var waText = encodeURIComponent('Rejoins le groupe « ' + conv.name + ' » sur Geniwork : ' + link);
+    box.innerHTML =
+      '<input id="grp-invite-link-field" readonly value="' + escHtml(link) + '" ' +
+        'style="width:100%;box-sizing:border-box;background:#F3F4F6;border:none;border-radius:10px;padding:10px;font-size:12px;color:#374151;margin-bottom:8px" ' +
+        'onclick="this.select()">' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="collab-invite-btn" style="flex:1;justify-content:center;padding:10px" onclick="_freeGroupInviteCopyLink(\'' + link + '\')"><i class="fas fa-copy"></i> Copier</button>' +
+        '<a class="collab-invite-btn" style="flex:1;justify-content:center;padding:10px;background:#25D366;color:#fff;text-decoration:none" target="_blank" rel="noopener" href="https://wa.me/?text=' + waText + '"><i class="fab fa-whatsapp"></i> WhatsApp</a>' +
+      '</div>';
+  }).catch(function(err) {
+    console.error('[Groupe libre] Échec création invitation :', err && err.code, err && err.message);
+    showToast('Erreur lors de la création du lien', 'err');
+  });
+}
+/* P3 (GROUPS-FREE-07-BIS) : navigator.clipboard n'est disponible que dans un
+   contexte sécurisé (HTTPS) ET selon le support du navigateur/WebView —
+   sur certains navigateurs mobiles ou WebView Capacitor plus anciens, il
+   peut être absent ou silencieusement rejeté (permission refusée). Repli à
+   deux niveaux : document.execCommand('copy') via un textarea temporaire
+   (fonctionne sans l'API moderne), puis en dernier recours sélection du
+   champ visible #grp-invite-link-field pour une copie manuelle par
+   l'utilisateur — jamais un bouton qui ne fait rien. */
+function _freeGroupInviteCopyLink(link) {
+  function ok() { showToast('Lien copié ✓', 'ok'); }
+  function manualFallback() {
+    var field = document.getElementById('grp-invite-link-field');
+    if (field && field.select) {
+      field.select();
+      if (field.setSelectionRange) field.setSelectionRange(0, 99999);
+    }
+    showToast('Copie automatique indisponible — le lien est sélectionné, copiez-le manuellement', 'err');
+  }
+  function execCommandFallback() {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = link;
+      ta.style.position = 'fixed'; ta.style.opacity = '0'; ta.style.left = '-9999px'; ta.style.top = '0';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      var success = document.execCommand && document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (success) { ok(); return; }
+    } catch (e) {}
+    manualFallback();
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(link).then(ok).catch(execCommandFallback);
+  } else {
+    execCommandFallback();
+  }
+}
+
+/* "Partager dans Geniwork" — même motif recherche+puces que
+   _freeGroupAddMember* ci-dessus, portée volontairement distincte
+   (_freeGroupInviteSelected, pas _freeGroupAddSelected). */
+function _freeGroupInviteSearch(query) {
+  var resultsEl = document.getElementById('grp-invite-results');
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!resultsEl || !_currentUser || !conv) return;
+  var q = String(query || '').trim().toLowerCase();
+  var memberEmailSet = {};
+  (conv.members || []).forEach(function(m) { if (m.email) memberEmailSet[m.email] = true; });
+
+  var found = [];
+  for (var i = 0; i < localStorage.length; i++) {
+    var key = localStorage.key(i);
+    if (!key || key.indexOf('gw_profile_') !== 0) continue;
+    var email = key.replace('gw_profile_', '');
+    if (!email || email === _currentUser.email) continue;
+    if (memberEmailSet[email]) continue;
+    if (_freeGroupInviteSelected[email]) continue;
+    if (_admIsBanned(email)) continue;
+    var profile;
+    try { profile = JSON.parse(localStorage.getItem(key) || 'null'); } catch(e) { profile = null; }
+    if (!profile) continue;
+    var name = (profile.nom || '').toLowerCase();
+    if (q && name.indexOf(q) === -1 && email.toLowerCase().indexOf(q) === -1) continue;
+    found.push({ email: email, name: _gwPublicName(email), photo: profile.photo || null });
+  }
+  found.sort(function(a, b) { return a.name.localeCompare(b.name); });
+
+  if (!found.length) {
+    resultsEl.innerHTML = '<div class="collab-empty"><i class="fas fa-user-slash"></i><p>Aucun utilisateur trouvé</p></div>';
+    return;
+  }
+  resultsEl.innerHTML = found.slice(0, 20).map(function(u) {
+    var av = u.photo
+      ? '<img src="' + escHtml(u.photo) + '" class="collab-av" alt="">'
+      : '<div class="collab-av collab-av-init">' + escHtml(u.name.charAt(0).toUpperCase()) + '</div>';
+    return '<div class="collab-user-row">' + av +
+      '<div class="collab-user-info"><b>' + escHtml(u.name) + '</b></div>' +
+      '<button class="collab-invite-btn" onclick="_freeGroupInviteToggle(\'' + u.email.replace(/'/g,"\\'") + '\')">' +
+        '<i class="fas fa-plus"></i> Ajouter' +
+      '</button></div>';
+  }).join('');
+}
+function _freeGroupInviteToggle(email) {
+  if (!email || _freeGroupInviteSelected[email]) return;
+  var profile = loadUserProfile(email);
+  _freeGroupInviteSelected[email] = { name: _gwPublicName(email), photo: (profile && profile.photo) || null };
+  _freeGroupInviteRenderChips();
+  var inp = document.getElementById('grp-invite-search');
+  _freeGroupInviteSearch(inp ? inp.value : '');
+  _freeGroupInviteUpdateSendBtn();
+}
+function _freeGroupInviteRemove(email) {
+  delete _freeGroupInviteSelected[email];
+  _freeGroupInviteRenderChips();
+  var inp = document.getElementById('grp-invite-search');
+  _freeGroupInviteSearch(inp ? inp.value : '');
+  _freeGroupInviteUpdateSendBtn();
+}
+function _freeGroupInviteRenderChips() {
+  var chipsEl = document.getElementById('grp-invite-chips');
+  if (!chipsEl) return;
+  var emails = Object.keys(_freeGroupInviteSelected);
+  if (!emails.length) { chipsEl.innerHTML = ''; return; }
+  chipsEl.innerHTML =
+    '<p class="collab-section-label">Contacts sélectionnés (' + emails.length + ')</p>' +
+    emails.map(function(email) {
+      var u = _freeGroupInviteSelected[email];
+      var av = u.photo
+        ? '<img src="' + escHtml(u.photo) + '" class="collab-av collab-av-sm" alt="">'
+        : '<div class="collab-av collab-av-sm collab-av-init">' + escHtml((u.name || 'Utilisateur').charAt(0).toUpperCase()) + '</div>';
+      return '<div class="collab-user-row">' + av +
+        '<div class="collab-user-info"><b>' + escHtml(u.name || 'Utilisateur') + '</b></div>' +
+        '<button class="collab-invite-btn" onclick="_freeGroupInviteRemove(\'' + email.replace(/'/g,"\\'") + '\')">' +
+          '<i class="fas fa-xmark"></i>' +
+        '</button></div>';
+    }).join('');
+}
+var _FREE_GRP_INVITE_SEND_BTN_LABEL = '<i class="fas fa-paper-plane"></i> Envoyer l\'invitation';
+function _freeGroupInviteUpdateSendBtn() {
+  var btn = document.getElementById('grp-invite-send-btn');
+  if (!btn) return;
+  var has = Object.keys(_freeGroupInviteSelected).length > 0;
+  btn.style.opacity = has ? '1' : '0.5';
+  btn.style.pointerEvents = has ? 'auto' : 'none';
+  /* P2 (GROUPS-FREE-07-BIS) : restaure le libellé — sans ça, après un envoi
+     en échec, le bouton restait bloqué sur le spinner "Envoi…" pour
+     toujours (réactivé mais visuellement figé, donnant l'impression qu'il
+     ne fait plus rien). */
+  btn.innerHTML = _FREE_GRP_INVITE_SEND_BTN_LABEL;
+}
+function _freeGroupInviteSendSelected() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  var emails = Object.keys(_freeGroupInviteSelected);
+  if (!conv || !emails.length) return;
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) { showToast('Session expirée, reconnectez-vous', 'err'); return; }
+  var btn = document.getElementById('grp-invite-send-btn');
+  if (btn) { btn.style.opacity = '0.5'; btn.style.pointerEvents = 'none'; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Envoi…'; }
+  fetch('/api/groups/invite-send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: session.authRefresh, groupId: conv.id, targetEmails: emails })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) { showToast(d.error || 'Erreur lors de l\'envoi', 'err'); _freeGroupInviteUpdateSendBtn(); return; }
+    _closeGenericSheet('grp-invite');
+    showToast(d.sent.length > 1 ? 'Invitations envoyées ✓' : 'Invitation envoyée ✓', 'ok');
+  }).catch(function() { showToast('Erreur réseau — réessayez.', 'err'); _freeGroupInviteUpdateSendBtn(); });
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ÉCRAN D'ACCEPTATION D'INVITATION (Phase GROUPS-FREE-07)
+   Atteint via https://www.geniwork.fr/group/invite/{token} — capturé
+   AVANT connexion (voir window.addEventListener('load',...), stocké
+   en sessionStorage, puis rejoué par _gwHandleDeepLink() après login,
+   même motif que gw_pending_post/gw_pending_song. Aperçu via
+   /api/groups/invite-view (compte de service — un non-membre ne peut
+   pas lire gw/group_msgs/{id}/meta directement, Rule .read exige déjà
+   membre). Refuser = écriture cliente directe (Rules le permettent à
+   n'importe quel authentifié, voir group_invites/$token/status).
+   Accepter = passe par /api/groups/invite-accept (seul chemin capable
+   d'écrire status="accepted", fermé au client par les Rules). ══════ */
+function _openGroupInviteScreen(token, _retriesLeft) {
+  if (!token) return;
+  /* GROUPS-FREE-07-BIS-LIVE : _gwAppStarted n'est mis à true QUE par les
+     chemins d'auto-connexion (_gwInstantAutoLogin, restauration de session
+     au chargement) — jamais par doLogin() ni startGoogleSignIn(), les deux
+     chemins qu'emprunte réellement quelqu'un qui clique un lien
+     d'invitation sans être déjà connecté. Avec la garde d'origine (basée
+     sur _gwAppStarted), cette fonction se re-planifiait alors indéfiniment
+     sans jamais s'exécuter — confirmé en LIVE (session capturée
+     correctement, mais l'écran d'invitation ne s'ouvrait jamais après
+     connexion). _currentUser seul suffit : il est déjà posé de façon
+     synchrone par CHAQUE chemin de connexion avant tout appel à
+     initApp()/goTo('screen-app'), et _gwLoadSession() juste après vérifie
+     déjà qu'une session exploitable existe. Plafond de tentatives pour ne
+     jamais boucler indéfiniment si l'utilisateur abandonne l'écran de
+     connexion (30 × 400ms = 12s). */
+  if (_retriesLeft === undefined) _retriesLeft = 30;
+  if (!_currentUser) {
+    if (_retriesLeft <= 0) return;
+    setTimeout(function() { _openGroupInviteScreen(token, _retriesLeft - 1); }, 400);
+    return;
+  }
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) return;
+
+  _closeGenericSheet('grp-invite-view');
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'grp-invite-view-bg';
+  bg.onclick = function() { _closeGenericSheet('grp-invite-view'); };
+  var card = document.createElement('div');
+  card.className = 'cam-sheet-card collab-sheet'; card.id = 'grp-invite-view-card';
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="collab-sheet-head"><h4><i class="fas fa-user-group"></i> Invitation</h4></div>' +
+    '<div id="grp-invite-view-body" class="collab-search-results" style="padding:24px 16px;text-align:center;color:#9CA3AF">' +
+      '<i class="fas fa-spinner fa-spin"></i>' +
+    '</div>';
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+
+  fetch('/api/groups/invite-view', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: session.authRefresh, token: token })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    _renderGroupInviteView(token, d);
+  }).catch(function() {
+    _renderGroupInviteView(token, { ok: false, error: 'Erreur réseau' });
+  });
+}
+
+function _renderGroupInviteView(token, d) {
+  var body = document.getElementById('grp-invite-view-body');
+  if (!body) return;
+  body.style.textAlign = '';
+  body.style.color = '';
+
+  if (!d || !d.ok) {
+    body.innerHTML =
+      '<p style="color:#DC2626;font-size:13px;margin:20px 0;text-align:center">' + escHtml((d && d.error) || 'Invitation introuvable') + '</p>' +
+      '<button class="collab-invite-btn" style="width:100%;justify-content:center;padding:10px" onclick="_closeGenericSheet(\'grp-invite-view\')">Fermer</button>';
+    return;
+  }
+
+  if (d.status !== 'pending') {
+    var msg = d.status === 'accepted' ? 'Vous êtes déjà membre de ce groupe.'
+      : d.status === 'declined' ? 'Cette invitation a déjà été refusée.'
+      : d.status === 'revoked'  ? 'Cette invitation a été annulée.'
+      : 'Cette invitation a expiré.';
+    body.innerHTML =
+      '<p style="color:#6B7280;font-size:13px;margin:20px 0;text-align:center">' + escHtml(msg) + '</p>' +
+      '<button class="collab-invite-btn" style="width:100%;justify-content:center;padding:10px" onclick="_closeGenericSheet(\'grp-invite-view\')">Fermer</button>';
+    return;
+  }
+
+  var coverHtml = d.coverDataUri
+    ? '<div style="width:100%;aspect-ratio:3/1;border-radius:12px;overflow:hidden;margin-bottom:14px"><img src="' + d.coverDataUri + '" style="width:100%;height:100%;object-fit:cover;display:block" alt=""></div>'
+    : '<div style="width:100%;aspect-ratio:3/1;border-radius:12px;margin-bottom:14px;background:linear-gradient(135deg,#EEF2FF,#E0E7FF);display:flex;align-items:center;justify-content:center;color:#6366F1"><i class="fas fa-users" style="font-size:32px"></i></div>';
+
+  body.innerHTML =
+    coverHtml +
+    '<div style="text-align:center;padding:0 4px">' +
+      '<div style="font-size:17px;font-weight:800;color:#111827">' + escHtml(d.groupName) + '</div>' +
+      '<div style="font-size:12.5px;color:#9CA3AF;margin-top:2px">' + d.memberCount + ' membre' + (d.memberCount > 1 ? 's' : '') + ' · Groupe privé</div>' +
+      (d.description ? '<p style="font-size:13px;color:#374151;white-space:pre-wrap;margin:10px 0 0">' + escHtml(d.description) + '</p>' : '') +
+      '<div style="font-size:12px;color:#6B7280;margin-top:12px">Invité par <b>' + escHtml(d.inviterName) + '</b></div>' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;padding:18px 4px 4px">' +
+      '<button class="collab-invite-btn" style="flex:1;justify-content:center;padding:11px;background:#FEF2F2;color:#DC2626" onclick="_freeGroupInviteDecline(\'' + token + '\')"><i class="fas fa-xmark"></i> Refuser</button>' +
+      '<button class="collab-invite-btn" style="flex:1;justify-content:center;padding:11px" onclick="_freeGroupInviteAccept(\'' + token + '\')"><i class="fas fa-check"></i> Accepter</button>' +
+    '</div>';
+}
+
+function _freeGroupInviteDecline(token) {
+  if (!token || !_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/group_invites/' + token + '/status').set('declined').then(function() {
+    _closeGenericSheet('grp-invite-view');
+    showToast('Invitation refusée', 'ok');
+  }).catch(function() {
+    showToast('Erreur — réessayez.', 'err');
+  });
+}
+
+function _freeGroupInviteAccept(token) {
+  if (!token) return;
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) { showToast('Session expirée, reconnectez-vous', 'err'); return; }
+  var body = document.getElementById('grp-invite-view-body');
+  if (body) body.innerHTML = '<div style="text-align:center;color:#9CA3AF;padding:24px 0"><i class="fas fa-spinner fa-spin"></i></div>';
+  fetch('/api/groups/invite-accept', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: session.authRefresh, token: token })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) { showToast(d.error || 'Erreur', 'err'); _closeGenericSheet('grp-invite-view'); return; }
+    _closeGenericSheet('grp-invite-view');
+    showToast('Vous avez rejoint le groupe ✓', 'ok');
+    _freeGroupJoinRefreshAndOpen(d.groupId);
+  }).catch(function() { showToast('Erreur réseau — réessayez.', 'err'); });
+}
+
+/* Le listener temps réel gw/group_inboxes/free_{uid} (SYNC-02/03) doit
+   normalement déjà avoir peuplé DEMO_CONVERSATIONS via _checkFreeGroupInbox()
+   au moment où invite-accept répond — mais pour une ouverture immédiate sans
+   attendre le round-trip du listener, force une lecture ponctuelle en secours
+   (même fonction _checkFreeGroupInbox, aucun second mécanisme). */
+function _freeGroupJoinRefreshAndOpen(groupId) {
+  function tryOpen() {
+    var conv = DEMO_CONVERSATIONS.find(function(c) { return c.isGroup && c.isFreeGroup && c.id === groupId; });
+    if (!conv) return false;
+    var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+    navTo(msgsBtn, 'p-messages');
+    renderConversations();
+    setTimeout(function() { openChat(groupId); }, 220);
+    return true;
+  }
+  if (tryOpen()) return;
+  if (!_gwFbReady || !_gwFbDB || !_currentUser) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  _gwFbDB.ref('gw/group_inboxes/free_' + myUid).once('value').then(function(snap) {
+    var freeInbox = snap.val();
+    try {
+      var key = 'gw_free_group_inbox_' + String(_currentUser.email).replace(/[^a-z0-9@._]/gi, '_');
+      localStorage.setItem(key, JSON.stringify(freeInbox || {}));
+    } catch (e) {}
+    _checkFreeGroupInbox();
+    setTimeout(function() {
+      if (!tryOpen()) {
+        var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+        navTo(msgsBtn, 'p-messages');
+        renderConversations();
+      }
+    }, 300);
+  }).catch(function() {});
+}
+
+/* Confirmation inline (pas de confirm() navigateur) avant l'action
+   destructive et irréversible — seule action de tout le panneau qui ne peut
+   pas être annulée après coup (contrairement à kick/leave, ré-invitables). */
+function _freeGroupInfoConfirmDeleteGroup() {
+  var footer = document.getElementById('grp-info-footer');
+  if (!footer) return;
+  footer.innerHTML =
+    '<p style="margin:0 0 8px;font-size:12.5px;color:#DC2626;text-align:center;font-weight:700">Supprimer définitivement ce groupe ?</p>' +
+    '<p style="margin:0 0 10px;font-size:11px;color:#9CA3AF;text-align:center">Messages, membres et couverture seront supprimés pour tout le monde. Action irréversible.</p>' +
+    '<div style="display:flex;gap:8px">' +
+      '<button class="collab-invite-btn" style="flex:1;justify-content:center;padding:10px;background:#FEF2F2;color:#DC2626" onclick="_freeGroupInfoDeleteGroup()"><i class="fas fa-trash"></i> Confirmer</button>' +
+      '<button class="collab-invite-btn" style="flex:1;justify-content:center;padding:10px" onclick="_freeGroupInfoCancelDeleteGroup()"><i class="fas fa-xmark"></i> Annuler</button>' +
+    '</div>';
+}
+function _freeGroupInfoCancelDeleteGroup() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  var myUid = _currentUser ? _gwFbKey(_currentUser.email) : null;
+  if (conv) _renderFreeGroupInfoBody(conv, conv.owner === myUid, !!(conv.admins && myUid && conv.admins[myUid]));
+}
+
+/* Suppression complète — owner uniquement, imposée côté Rules (le noeud
+   racine gw/group_msgs/{groupId}.write exige déjà owner===auth.uid pour
+   TOUTE écriture y compris une suppression — aucune évolution de Rules
+   nécessaire, vérifié émulateur). Ordre imposé : INBOXES → COVER STORAGE
+   → DONNÉES GROUPE → CACHE LOCAL. Best-effort sur 1 et 2 (une entrée
+   d'inbox ou une couverture qui échoue à se nettoyer ne doit jamais bloquer
+   la suppression réelle du groupe, qui reste l'action qui compte) ; la
+   suppression du groupe lui-même (étape 3) doit réussir ou échouer au vu
+   de l'utilisateur. Idempotent par construction : une deuxième suppression
+   (double-clic ou appareil concurrent) échoue proprement côté Rules
+   (owner===auth.uid ne peut plus être vérifié sur un noeud déjà vide) —
+   traité ici comme "déjà supprimé", pas comme une erreur alarmante. */
+function _freeGroupInfoDeleteGroup() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !_currentUser || !_gwFbReady || !_gwFbDB) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  if (conv.owner !== myUid) { showToast('Seul le propriétaire peut supprimer le groupe', 'err'); return; }
+  var groupId = conv.id;
+  var memberUids = (conv.members || []).map(function(m) { return _gwFbKey(m.email); });
+
+  var inboxCleanup = Promise.all(memberUids.map(function(uid) {
+    return _gwFbDB.ref('gw/group_inboxes/free_' + uid + '/' + groupId).remove().catch(function() {});
+  }));
+
+  inboxCleanup.then(function() {
+    var session = _gwLoadSession();
+    if (!session || !session.authRefresh) return null;
+    return fetch('/api/groups/cover-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ authRefreshToken: session.authRefresh, groupId: groupId })
+    }).catch(function() { return null; });
+  }).then(function() {
+    return _gwFbDB.ref('gw/group_msgs/' + groupId).remove();
+  }).then(function() {
+    _freeGroupInfoCleanupLocalAfterDelete(conv);
+    showToast('Groupe supprimé', 'ok');
+  }).catch(function(err) {
+    console.error('[Groupe libre] Échec suppression groupe :', err && err.code, err && err.message);
+    /* Idempotence : si la suppression échoue parce que le groupe n'existe
+       déjà plus (double-clic, appareil concurrent), l'état local doit
+       quand même être nettoyé — le résultat visible est identique. */
+    _freeGroupInfoCleanupLocalAfterDelete(conv);
+    showToast('Groupe déjà supprimé ou synchronisation en cours', 'err');
+  });
+}
+function _freeGroupInfoCleanupLocalAfterDelete(conv) {
+  _closeGenericSheet('grp-info');
+  closeChat();
+  var idx = DEMO_CONVERSATIONS.indexOf(conv);
+  if (idx !== -1) DEMO_CONVERSATIONS.splice(idx, 1);
+  try { localStorage.removeItem('gw_free_grp_' + conv.id); } catch (e) {}
+  _saveGroupConvs();
+  renderConversations();
+}
+
+/* Édition inline (pas de prompt() navigateur) — owner uniquement, imposé
+   côté Rules (meta/description.write exige owner===auth.uid après création,
+   déjà vérifié GROUPS-FREE-01), pas seulement masqué côté UI. */
+function _freeGroupInfoEditDescription() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !_currentUser) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  if (conv.owner !== myUid) return;
+  var descEl = document.getElementById('grp-info-desc');
+  if (!descEl) return;
+  descEl.outerHTML =
+    '<textarea id="grp-info-desc-input" class="collab-search-input" ' +
+      'style="width:100%;min-height:60px;background:#F3F4F6;border-radius:10px;padding:8px;resize:vertical;box-sizing:border-box" ' +
+      'maxlength="300">' + escHtml(conv.description || '') + '</textarea>' +
+    '<div style="display:flex;gap:8px;margin-top:6px">' +
+      '<button class="collab-invite-btn" onclick="_freeGroupInfoSaveDescription()"><i class="fas fa-check"></i> Enregistrer</button>' +
+      '<button class="collab-invite-btn" onclick="_freeGroupInfoCancelEditDescription()"><i class="fas fa-xmark"></i> Annuler</button>' +
+    '</div>';
+}
+function _freeGroupInfoCancelEditDescription() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  var myUid = _currentUser ? _gwFbKey(_currentUser.email) : null;
+  if (conv) _renderFreeGroupInfoBody(conv, conv.owner === myUid, !!(conv.admins && myUid && conv.admins[myUid]));
+}
+function _freeGroupInfoSaveDescription() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  var inp = document.getElementById('grp-info-desc-input');
+  if (!conv || !inp || !_currentUser || !_gwFbReady || !_gwFbDB) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  if (conv.owner !== myUid) return;
+  var next = inp.value.trim();
+  _gwFbDB.ref('gw/group_msgs/' + conv.id + '/meta/description').set(next).then(function() {
+    conv.description = next;
+    _saveGroupConvs();
+    _renderFreeGroupInfoBody(conv, true, false);
+    showToast('Description mise à jour ✓', 'ok');
+  }).catch(function(err) {
+    console.error('[Groupe libre] Échec modification description :', err && err.code, err && err.message);
+    showToast('Erreur lors de la modification', 'err');
+  });
+}
+
+/* Retrait d'un membre — owner OU admin (jamais le owner lui-même comme
+   cible), imposé côté Rules (meta/members/{uid} branches 5 et 6 : owner
+   toujours autorisé, admin autorisé seulement si la cible n'est pas le
+   owner — GROUPS-FREE-02 scénario J + GROUPS-FREE-04 étape 3 scénario C). */
+function _freeGroupInfoKick(email) {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !_currentUser || !email || !_gwFbReady || !_gwFbDB) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  var isOwner = conv.owner === myUid;
+  var isAdmin = !!(conv.admins && conv.admins[myUid]);
+  if (!isOwner && !isAdmin) { showToast('Seul le propriétaire ou un administrateur peut retirer un membre', 'err'); return; }
+  if (email === conv.ownerEmail) { showToast('Le propriétaire ne peut pas être retiré', 'err'); return; }
+  var targetUid = _gwFbKey(email);
+  var updates = {};
+  updates['meta/members/' + targetUid]      = null;
+  updates['meta/memberEmails/' + targetUid] = null;
+  /* meta/admins/{uid}.write exige owner===auth.uid (Rules) : un admin qui
+     retire un autre admin ne peut pas nettoyer cette entrée lui-même (le
+     multi-path update échouerait entièrement) — seul le owner le fait ici ;
+     l'entrée orpheline résiduelle est sans effet, cover-upload/cover-delete
+     exigent aussi isMember côté serveur (voir api/groups/_lib/perm.js). */
+  if (isOwner) updates['meta/admins/' + targetUid] = null;
+  _gwFbDB.ref('gw/group_msgs/' + conv.id).update(updates).then(function() {
+    conv.members = (conv.members || []).filter(function(m) { return m.email !== email; });
+    conv.avatar = { type: 'group', members: conv.members };
+    if (conv.admins) delete conv.admins[targetUid];
+    _saveGroupConvs();
+    renderConversations();
+    _renderFreeGroupInfoBody(conv, isOwner, isAdmin);
+    showToast('Membre retiré', 'ok');
+    /* Nettoyage Group Inbox du membre retiré — autorisé par les Rules tant
+       que l'auteur (owner ou admin) reste lui-même membre du groupe (même
+       condition que le nettoyage d'inbox utilisé en suppression, déjà
+       vérifiée émulateur GROUPS-FREE-04). Best-effort : ne bloque jamais
+       le retrait lui-même si ce nettoyage échoue. */
+    _gwFbDB.ref('gw/group_inboxes/free_' + targetUid + '/' + conv.id).remove().catch(function() {});
+  }).catch(function(err) {
+    console.error('[Groupe libre] Échec retrait membre :', err && err.code, err && err.message);
+    showToast('Erreur lors du retrait', 'err');
+  });
+}
+
+/* Nommer/retirer un administrateur — owner uniquement, imposé côté Rules
+   (meta/admins/{uid}.write exige owner===auth.uid, cible membre existant,
+   cible ≠ owner — GROUPS-FREE-04 étape 3 scénarios A/B/E/G/H). */
+function _freeGroupInfoPromoteAdmin(email) {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !_currentUser || !email || !_gwFbReady || !_gwFbDB) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  if (conv.owner !== myUid) { showToast('Seul le propriétaire peut nommer un administrateur', 'err'); return; }
+  var targetUid = _gwFbKey(email);
+  _gwFbDB.ref('gw/group_msgs/' + conv.id + '/meta/admins/' + targetUid).set(true).then(function() {
+    if (!conv.admins) conv.admins = {};
+    conv.admins[targetUid] = true;
+    _saveGroupConvs();
+    _renderFreeGroupInfoBody(conv, true, false);
+    showToast('Administrateur nommé', 'ok');
+  }).catch(function(err) {
+    console.error('[Groupe libre] Échec nomination admin :', err && err.code, err && err.message);
+    showToast('Erreur lors de la nomination', 'err');
+  });
+}
+function _freeGroupInfoDemoteAdmin(email) {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !_currentUser || !email || !_gwFbReady || !_gwFbDB) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  if (conv.owner !== myUid) { showToast('Seul le propriétaire peut retirer un administrateur', 'err'); return; }
+  var targetUid = _gwFbKey(email);
+  _gwFbDB.ref('gw/group_msgs/' + conv.id + '/meta/admins/' + targetUid).remove().then(function() {
+    if (conv.admins) delete conv.admins[targetUid];
+    _saveGroupConvs();
+    _renderFreeGroupInfoBody(conv, true, false);
+    showToast('Administrateur retiré', 'ok');
+  }).catch(function(err) {
+    console.error('[Groupe libre] Échec retrait admin :', err && err.code, err && err.message);
+    showToast('Erreur lors du retrait', 'err');
+  });
+}
+
+/* Quitter le groupe — self-service, imposé côté Rules (meta/members/{uid}
+   branche 4 : $uid===auth.uid, déjà vérifiée GROUPS-FREE-02 scénario K).
+   Le owner ne peut pas quitter (protection produit, cf. en-tête). */
+function _freeGroupInfoLeave() {
+  var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
+  if (!conv || !_currentUser || !_gwFbReady || !_gwFbDB) return;
+  var myUid = _gwFbKey(_currentUser.email);
+  if (conv.owner === myUid) { showToast('Le propriétaire ne peut pas quitter le groupe', 'err'); return; }
+  var updates = {};
+  updates['meta/members/' + myUid]      = null;
+  updates['meta/memberEmails/' + myUid] = null;
+  _gwFbDB.ref('gw/group_msgs/' + conv.id).update(updates).then(function() {
+    _closeGenericSheet('grp-info');
+    closeChat();
+    var idx = DEMO_CONVERSATIONS.indexOf(conv);
+    if (idx !== -1) DEMO_CONVERSATIONS.splice(idx, 1);
+    try { localStorage.removeItem('gw_free_grp_' + conv.id); } catch(e) {}
+    _saveGroupConvs();
+    renderConversations();
+    showToast('Vous avez quitté le groupe', 'ok');
+    /* Nettoyage de sa propre Group Inbox — autorisé par les Rules pour soi
+       ($userFbKey === 'free_'+auth.uid). Best-effort. */
+    _gwFbDB.ref('gw/group_inboxes/free_' + myUid + '/' + conv.id).remove().catch(function() {});
+  }).catch(function(err) {
+    console.error('[Groupe libre] Échec pour quitter le groupe :', err && err.code, err && err.message);
+    showToast('Erreur — réessayez', 'err');
+  });
+}
+
 function _getOrCreateGroupConv(projId, ownerEmail, projTitle, members) {
   _loadGroupConvs();
   var existing = DEMO_CONVERSATIONS.find(function(c) {
@@ -21213,6 +23933,7 @@ function _getOrCreateGroupConv(projId, ownerEmail, projTitle, members) {
     existing.members = members;
     existing.avatar.members = members;
     _saveGroupConvs();
+    _syncCollabGroupMembers(projId, ownerEmail, members);
     return existing;
   }
   var _gTs = Date.now();
@@ -21241,9 +23962,15 @@ function _getOrCreateGroupConv(projId, ownerEmail, projTitle, members) {
     messages:       [_sysMsg]
   };
   DEMO_CONVERSATIONS.unshift(conv);
-  /* Sauvegarder le message système dans le storage partagé */
-  _saveGroupMsg(conv, _sysMsg);
   _saveGroupConvs();
+  /* Phase 9A : la règle Firebase gw/group_msgs exige l'appartenance
+     (meta/members/{auth.uid}) pour écrire un message — synchroniser les
+     membres D'ABORD, puis seulement écrire le message système une fois
+     l'appartenance confirmée côté serveur (sinon ce tout premier message
+     serait refusé). */
+  _syncCollabGroupMembers(projId, ownerEmail, members).then(function() {
+    _saveGroupMsg(conv, _sysMsg);
+  });
   /* Notifier tous les membres (sauf le créateur) que ce groupe existe */
   var _groupMeta0 = {
     id:             conv.id,
@@ -21441,7 +24168,7 @@ function openChatWithUser() {
   var profile  = email ? loadUserProfile(email) : null;
   var hasBadge = profile && (profile.badgeType === 'verified' || profile.badgeType === 'premium');
   var newConv  = {
-    id:       _newConvId(),
+    id:       _dmConversationId(_currentUser.email, email),
     name:     nom,
     email:    email,
     role:     role,
@@ -21456,7 +24183,7 @@ function openChatWithUser() {
   };
 
   DEMO_CONVERSATIONS.unshift(newConv);
-  _saveDMConvList(); /* Persiste pour survivre au refresh */
+  /* DM v2 : la persistance vient de gw/dm_user_conversations dès le 1er envoi — _saveDMConvList (legacy) n'est plus appelé */
   _openChatAndCloseUpv(newConv.id);
 }
 
@@ -21468,6 +24195,297 @@ function _openChatAndCloseUpv(convId) {
   renderConversations();
   /* Petit délai pour que l'animation de fermeture se termine */
   setTimeout(function() { openChat(convId); }, 220);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   NOUVELLE CONVERSATION — sélecteur de destinataire (Phase MESSAGING-UI-03)
+   Réutilise le système de feuille générique (cam-sheet-*, _closeGenericSheet)
+   et les classes déjà stylées de l'invite Collab (collab-search-*,
+   collab-user-row, collab-av, collab-empty — voir _openCollabInvite /
+   _renderCollabResults, css/style.css:3128-3170), et la SOURCE UTILISATEUR
+   déjà existante et réellement à jour : les entrées gw_profile_{email} de
+   localStorage, réhydratées depuis gw/profiles (ouvert en lecture) à chaque
+   démarrage (_gwFbPreloadAndStart) — contrairement à gw_users/gw/users,
+   fermé en lecture depuis AUTH-01 et plus jamais rafraîchi.
+   Aucun nouveau système DM : la sélection délègue entièrement à
+   openChatWithUser() (dédoublonnage DEMO_CONVERSATIONS, création locale
+   sans écriture Firebase avant le premier message, ouverture via
+   _openChatAndCloseUpv) — inchangée. ══════════════════════════════════ */
+function openNewDmPicker() {
+  if (!_currentUser) { showToast('Connectez-vous pour envoyer un message', 'err'); return; }
+  _closeGenericSheet('dm-picker');
+
+  var bg = document.createElement('div');
+  bg.className = 'cam-sheet-bg'; bg.id = 'dm-picker-bg';
+  bg.onclick = function() { _closeGenericSheet('dm-picker'); };
+
+  var card = document.createElement('div');
+  /* collab-sheet (max-height:80vh + flex column + overflow:hidden, css/style.css:3127)
+     est INDISPENSABLE pour que collab-search-results (flex:1 + overflow-y:auto) scrolle
+     réellement au lieu de faire grandir la feuille hors écran — bug identifié en
+     GROUPS-FREE-02 §13, absent par erreur depuis MESSAGING-UI-03 (seul _openCollabInvite
+     l'appliquait déjà). Corrigé ici avant d'ajouter le sélecteur multi-membres. */
+  card.className = 'cam-sheet-card collab-sheet'; card.id = 'dm-picker-card';
+  document.body.appendChild(bg);
+  document.body.appendChild(card);
+  requestAnimationFrame(function() { bg.classList.add('open'); card.classList.add('open'); });
+
+  _renderDmPickerDmBody();
+}
+
+/* Corps du picker en mode "Nouvelle conversation" (DM) — extrait de openNewDmPicker()
+   (Phase MESSAGING-UI-03) pour pouvoir y revenir depuis le mode "Créer un groupe"
+   (Phase GROUPS-FREE-02) sans recréer bg/card (évite tout risque de double handler). */
+function _renderDmPickerDmBody() {
+  var card = document.getElementById('dm-picker-card');
+  if (!card) return;
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="collab-sheet-head" style="display:flex;align-items:center;justify-content:space-between;gap:8px">' +
+      '<h4><i class="fas fa-comment-dots"></i> Nouvelle conversation</h4>' +
+      '<button class="collab-invite-btn" onclick="_switchPickerToGroupMode()">' +
+        '<i class="fas fa-users"></i> Créer un groupe' +
+      '</button>' +
+    '</div>' +
+    '<div class="collab-search-row">' +
+      '<div class="collab-search-wrap">' +
+        '<i class="fas fa-magnifying-glass"></i>' +
+        '<input id="dm-picker-search" class="collab-search-input" type="text" ' +
+               'placeholder="Rechercher par nom ou email…" oninput="_dmPickerSearch(this.value)" autocomplete="off">' +
+      '</div>' +
+    '</div>' +
+    '<div id="dm-picker-results" class="collab-search-results"></div>';
+
+  _dmPickerSearch('');
+  setTimeout(function() {
+    var inp = document.getElementById('dm-picker-search');
+    if (inp) inp.focus();
+  }, 300);
+}
+
+/* Recherche : parcourt gw_profile_{email} (localStorage), exclut l'utilisateur
+   courant et les comptes bannis (_admIsBanned, même filtre déjà appliqué à la
+   liste des conversations dans renderConversations()). */
+function _dmPickerSearch(query) {
+  var resultsEl = document.getElementById('dm-picker-results');
+  if (!resultsEl || !_currentUser) return;
+  var q = String(query || '').trim().toLowerCase();
+
+  var found = [];
+  for (var i = 0; i < localStorage.length; i++) {
+    var key = localStorage.key(i);
+    if (!key || key.indexOf('gw_profile_') !== 0) continue;
+    var email = key.replace('gw_profile_', '');
+    if (!email || email === _currentUser.email) continue;
+    if (_admIsBanned(email)) continue;
+    var profile;
+    try { profile = JSON.parse(localStorage.getItem(key) || 'null'); } catch(e) { profile = null; }
+    if (!profile) continue;
+    var name = (profile.nom || '').toLowerCase();
+    if (q && name.indexOf(q) === -1 && email.toLowerCase().indexOf(q) === -1) continue;
+    found.push({ email: email, name: profile.nom || email, photo: profile.photo || null });
+  }
+  found.sort(function(a, b) { return a.name.localeCompare(b.name); });
+
+  if (!found.length) {
+    resultsEl.innerHTML = '<div class="collab-empty"><i class="fas fa-user-slash"></i><p>Aucun utilisateur trouvé</p></div>';
+    return;
+  }
+  resultsEl.innerHTML = found.slice(0, 20).map(function(u) {
+    var av = u.photo
+      ? '<img src="' + escHtml(u.photo) + '" class="collab-av" alt="">'
+      : '<div class="collab-av collab-av-init">' + escHtml((u.name || u.email).charAt(0).toUpperCase()) + '</div>';
+    return '<div class="collab-user-row">' + av +
+      '<div class="collab-user-info"><b>' + escHtml(u.name) + '</b><span>' + escHtml(u.email) + '</span></div>' +
+      '<button class="collab-invite-btn" onclick="_dmPickerSelect(\'' + u.email.replace(/'/g,"\\'") + '\')">' +
+        '<i class="fas fa-comment"></i> Message' +
+      '</button></div>';
+  }).join('');
+}
+
+/* Sélection : ferme la feuille puis délègue entièrement à openChatWithUser()
+   (identité réelle _currentUser.email uniquement, dédoublonnage inclus,
+   auto-message déjà refusé par sa propre garde) — aucune logique de création
+   dupliquée ici. */
+function _dmPickerSelect(email) {
+  if (!email) return;
+  _closeGenericSheet('dm-picker');
+  _upvTarget = { email: email };
+  openChatWithUser();
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CRÉER UN GROUPE — sélecteur multi-membres (Phase GROUPS-FREE-02)
+   Même feuille que "Nouvelle conversation" (#dm-picker-card), mode alterné —
+   pas une seconde feuille, pas de second listener. Réutilise intégralement
+   cam-sheet-, collab-search-, collab-user-row, collab-av (aucune nouvelle
+   classe CSS). Distinct à 100% de la Collaboration Marketplace : ne touche
+   ni _getOrCreateGroupConv, ni _openCollabGroupChat*, ni aucun code lié à
+   un projId. Voir GROUPS-FREE-01 pour la conception validée. ══════════════ */
+var _grpPickerSelected = {}; /* email -> {name, photo} */
+
+function _switchPickerToGroupMode() {
+  _grpPickerSelected = {};
+  var card = document.getElementById('dm-picker-card');
+  if (!card) return;
+  card.innerHTML =
+    '<div class="cam-sheet-handle"></div>' +
+    '<div class="collab-sheet-head" style="display:flex;align-items:center;gap:10px">' +
+      '<button onclick="_switchPickerToDmMode()" style="border:none;background:none;cursor:pointer;font-size:16px;color:#6B7280;padding:4px">' +
+        '<i class="fas fa-arrow-left"></i>' +
+      '</button>' +
+      '<h4><i class="fas fa-users"></i> Créer un groupe</h4>' +
+    '</div>' +
+    '<div class="collab-search-row">' +
+      '<div class="collab-search-wrap">' +
+        '<i class="fas fa-pen"></i>' +
+        '<input id="grp-picker-name" class="collab-search-input" type="text" ' +
+               'placeholder="Nom du groupe" maxlength="80" oninput="_grpPickerUpdateCreateBtn()" autocomplete="off">' +
+      '</div>' +
+    '</div>' +
+    '<div class="collab-search-row">' +
+      '<div class="collab-search-wrap">' +
+        '<i class="fas fa-align-left"></i>' +
+        '<input id="grp-picker-desc" class="collab-search-input" type="text" ' +
+               'placeholder="Description (facultatif)" maxlength="200" autocomplete="off">' +
+      '</div>' +
+    '</div>' +
+    '<div id="grp-picker-chips"></div>' +
+    '<div class="collab-search-row">' +
+      '<div class="collab-search-wrap">' +
+        '<i class="fas fa-magnifying-glass"></i>' +
+        '<input id="grp-picker-search" class="collab-search-input" type="text" ' +
+               'placeholder="Ajouter des membres…" oninput="_grpPickerSearch(this.value)" autocomplete="off">' +
+      '</div>' +
+    '</div>' +
+    '<div id="grp-picker-results" class="collab-search-results"></div>' +
+    '<div class="collab-search-row">' +
+      '<button id="grp-picker-create-btn" class="collab-invite-btn" ' +
+              'style="width:100%;justify-content:center;padding:10px;opacity:0.5;pointer-events:none" ' +
+              'onclick="_grpPickerCreate()">' +
+        '<i class="fas fa-check"></i> Créer le groupe' +
+      '</button>' +
+    '</div>';
+
+  _grpPickerRenderChips();
+  _grpPickerSearch('');
+  setTimeout(function() {
+    var inp = document.getElementById('grp-picker-name');
+    if (inp) inp.focus();
+  }, 300);
+}
+
+function _switchPickerToDmMode() {
+  _grpPickerSelected = {};
+  _renderDmPickerDmBody();
+}
+
+/* Recherche de membres à ajouter — même source (gw_profile_*) et mêmes
+   exclusions (soi-même, bannis) que _dmPickerSearch, plus exclusion des
+   membres déjà sélectionnés (affichés séparément dans les puces). */
+function _grpPickerSearch(query) {
+  var resultsEl = document.getElementById('grp-picker-results');
+  if (!resultsEl || !_currentUser) return;
+  var q = String(query || '').trim().toLowerCase();
+
+  var found = [];
+  for (var i = 0; i < localStorage.length; i++) {
+    var key = localStorage.key(i);
+    if (!key || key.indexOf('gw_profile_') !== 0) continue;
+    var email = key.replace('gw_profile_', '');
+    if (!email || email === _currentUser.email) continue;
+    if (_grpPickerSelected[email]) continue;
+    if (_admIsBanned(email)) continue;
+    var profile;
+    try { profile = JSON.parse(localStorage.getItem(key) || 'null'); } catch(e) { profile = null; }
+    if (!profile) continue;
+    var name = (profile.nom || '').toLowerCase();
+    if (q && name.indexOf(q) === -1 && email.toLowerCase().indexOf(q) === -1) continue;
+    found.push({ email: email, name: _gwPublicName(email), photo: profile.photo || null });
+  }
+  found.sort(function(a, b) { return a.name.localeCompare(b.name); });
+
+  if (!found.length) {
+    resultsEl.innerHTML = '<div class="collab-empty"><i class="fas fa-user-slash"></i><p>Aucun utilisateur trouvé</p></div>';
+    return;
+  }
+  resultsEl.innerHTML = found.slice(0, 20).map(function(u) {
+    var av = u.photo
+      ? '<img src="' + escHtml(u.photo) + '" class="collab-av" alt="">'
+      : '<div class="collab-av collab-av-init">' + escHtml(u.name.charAt(0).toUpperCase()) + '</div>';
+    return '<div class="collab-user-row">' + av +
+      '<div class="collab-user-info"><b>' + escHtml(u.name) + '</b></div>' +
+      '<button class="collab-invite-btn" onclick="_grpPickerToggleMember(\'' + u.email.replace(/'/g,"\\'") + '\')">' +
+        '<i class="fas fa-plus"></i> Ajouter' +
+      '</button></div>';
+  }).join('');
+}
+
+function _grpPickerToggleMember(email) {
+  if (!email || _grpPickerSelected[email]) return;
+  var profile = loadUserProfile(email);
+  _grpPickerSelected[email] = { name: _gwPublicName(email), photo: (profile && profile.photo) || null };
+  _grpPickerRenderChips();
+  var searchInp = document.getElementById('grp-picker-search');
+  _grpPickerSearch(searchInp ? searchInp.value : '');
+  _grpPickerUpdateCreateBtn();
+}
+
+function _grpPickerRemoveMember(email) {
+  delete _grpPickerSelected[email];
+  _grpPickerRenderChips();
+  var searchInp = document.getElementById('grp-picker-search');
+  _grpPickerSearch(searchInp ? searchInp.value : '');
+  _grpPickerUpdateCreateBtn();
+}
+
+function _grpPickerRenderChips() {
+  var chipsEl = document.getElementById('grp-picker-chips');
+  if (!chipsEl) return;
+  var emails = Object.keys(_grpPickerSelected);
+  if (!emails.length) { chipsEl.innerHTML = ''; return; }
+  chipsEl.innerHTML =
+    '<p class="collab-section-label">Membres sélectionnés (' + emails.length + ')</p>' +
+    emails.map(function(email) {
+      var u = _grpPickerSelected[email];
+      var av = u.photo
+        ? '<img src="' + escHtml(u.photo) + '" class="collab-av collab-av-sm" alt="">'
+        : '<div class="collab-av collab-av-sm collab-av-init">' + escHtml((u.name || 'Utilisateur').charAt(0).toUpperCase()) + '</div>';
+      return '<div class="collab-user-row">' + av +
+        '<div class="collab-user-info"><b>' + escHtml(u.name || 'Utilisateur') + '</b></div>' +
+        '<button class="collab-invite-btn" onclick="_grpPickerRemoveMember(\'' + email.replace(/'/g,"\\'") + '\')">' +
+          '<i class="fas fa-xmark"></i>' +
+        '</button></div>';
+    }).join('');
+}
+
+/* Bouton Créer actif seulement si nom non vide ET au moins 1 membre invité —
+   règle produit validée en GROUPS-FREE-01 §7 (créateur seul non autorisé). */
+function _grpPickerUpdateCreateBtn() {
+  var btn = document.getElementById('grp-picker-create-btn');
+  if (!btn) return;
+  var nameInp = document.getElementById('grp-picker-name');
+  var nameOk = nameInp && nameInp.value.trim().length > 0;
+  var hasMember = Object.keys(_grpPickerSelected).length > 0;
+  if (nameOk && hasMember) {
+    btn.style.opacity = '1'; btn.style.pointerEvents = 'auto';
+  } else {
+    btn.style.opacity = '0.5'; btn.style.pointerEvents = 'none';
+  }
+}
+
+function _grpPickerCreate() {
+  if (!_currentUser) return;
+  var nameInp = document.getElementById('grp-picker-name');
+  var descInp = document.getElementById('grp-picker-desc');
+  var name = nameInp ? nameInp.value.trim() : '';
+  var description = descInp ? descInp.value.trim() : '';
+  var memberEmails = Object.keys(_grpPickerSelected);
+  if (!name) { showToast('Le nom du groupe est obligatoire', 'err'); return; }
+  if (!memberEmails.length) { showToast('Ajoutez au moins un membre', 'err'); return; }
+
+  _closeGenericSheet('dm-picker');
+  _createFreeGroup(name, description, memberEmails);
 }
 
 function switchMsgTab(btn, tab) {
@@ -21504,6 +24522,14 @@ function openChat(convId) {
       var mc = (conv.members || []).length;
       statusEl.textContent = mc + ' membre' + (mc > 1 ? 's' : '') + ' · Groupe privé';
     }
+    /* Zone d'en-tête cliquable → Informations du groupe (Phase GROUPS-FREE-03),
+       UNIQUEMENT pour un groupe libre — les groupes de collaboration Marketplace
+       ne reçoivent ni ce cursor ni ce handler, comportement inchangé pour eux. */
+    [avWrap, nameEl, statusEl].forEach(function(el) {
+      if (!el) return;
+      if (conv.isFreeGroup) { el.style.cursor = 'pointer'; el.onclick = _openFreeGroupInfo; }
+      else { el.style.cursor = ''; el.onclick = null; }
+    });
   } else {
     if (avWrap) avWrap.innerHTML = _convAvatar(conv, 38);
     var liveName = conv.email ? getDisplayName(conv.email, conv.name) : conv.name;
@@ -21515,15 +24541,32 @@ function openChat(convId) {
     }
   }
 
-  /* Groupes : charge depuis le storage partagé + rendu synchrone */
+  /* Groupes : charge depuis le storage partagé + rendu synchrone.
+     Groupe libre (GROUPS-FREE-02) : chemin parallèle _loadFreeGroupMsgs,
+     jamais _loadGroupMsgs (couplée projId/ownerEmail, no-op sinon). */
   if (conv.isGroup) {
-    _loadGroupMsgs(conv);
+    if (conv.isFreeGroup) { _loadFreeGroupMsgs(conv); } else { _loadGroupMsgs(conv); }
     _renderChatMessages(conv);
   } else {
     /* DM : rendu immédiat avec les messages en mémoire (vide si 1ère ouverture),
        puis _dmOpen charge tout depuis Firebase et re-rend */
-    _renderChatMessages(conv);
-    _dmOpen(conv);
+    /* DM v2 : conversationId déterministe, écoute Firebase directe.
+       L'ancien _dmOpen (gw/dm_msgs, fermé) n'est plus appelé par cette branche.
+       MESSAGING-STABILITY-07-LIVE (Fix C) : conv.id EST déjà le conversationId
+       correct — c'est exactement comment cette conv a été trouvée ci-dessus
+       (conv.id === convId). Le recalculer depuis conv.email cassait tout
+       quand conv.email est null (résolution jamais aboutie, cf.
+       _dmHandleConversationData) : _dmConversationId(monEmail, null) donne
+       "...monEmail__" (Array.join convertit null en chaîne vide), un id qui
+       ne correspond à AUCUNE conversation réelle → PERMISSION_DENIED après
+       les 5 tentatives de Fix A → écran vide en permanence, sans jamais
+       s'auto-guérir. Conservé pour toute conv DM non-v2 (Marketplace legacy,
+       hors périmètre), inchangé pour elles. */
+    var conversationId = _dmIsV2Conversation(conv) ? conv.id : _dmConversationId(_currentUser.email, conv.email);
+    conv.messages = [];
+    var _chatBox = document.getElementById('chat-messages');
+    if (_chatBox) _chatBox.innerHTML = '';
+    _dmOpenConversation(conversationId);
   }
   /* Affiche le compteur de messages dès l'ouverture */
   _updateChatMsgCounter();
@@ -21607,9 +24650,9 @@ function _showMsgDeleteMenu(msgId, isMine) {
   var msg = conv.messages.find(function(m) { return String(m.id) === String(msgId); });
   if (!msg || msg.deletedForAll) return;
 
-  /* ≤ 60 secondes depuis l'envoi ? */
+  /* ≤ 60 secondes depuis l'envoi ? DM v2 exclu : suppression "pour tous" désactivée pour ce MVP. */
   var sentAt      = Number(msg.at) || Number(msg.id) || 0;
-  var withinLimit = isMine && (Date.now() - sentAt) <= 60000;
+  var withinLimit = isMine && !_dmIsV2Conversation(conv) && (Date.now() - sentAt) <= 60000;
 
   _closeGenericSheet('msg-del-menu');
   var bg = document.createElement('div');
@@ -21667,6 +24710,13 @@ function _showMsgDeleteMenu(msgId, isMine) {
 function _doDeleteMsgForAll(msgId, conv) {
   if (conv.isGroup) {
     _updateGroupMsg(conv, msgId, { deletedForAll: true, text: '', type: 'text' });
+  } else if (_dmIsV2Conversation(conv)) {
+    /* DM v2 : suppression "pour tous" désactivée pour ce MVP (décision déjà validée) —
+       ne jamais appeler _updateDMMsg ni écrire dans gw/dm_msgs (fermé). Le bouton
+       correspondant n'est déjà plus proposé pour ces conversations (cf.
+       _showMsgDeleteMenu) ; cette branche est une barrière de sécurité en cas
+       d'appel direct. */
+    return;
   } else {
     _updateDMMsg(conv, msgId, { deletedForAll: true, text: '', type: 'text' });
   }
@@ -21696,7 +24746,8 @@ function _doDeleteMsgForMe(msgId) {
 
 function closeChat() {
   _stopChatPolling();
-  _dmClose();
+  _dmClose();               /* legacy — inerte depuis que _dmOpen n'est plus appelé */
+  _dmCloseConversation();   /* DM v2 */
   closeChatProfilePanel();
   var screen = document.getElementById('chat-screen');
   screen.classList.remove('open');
@@ -21942,6 +24993,23 @@ function openChatMenu() {
   card.innerHTML =
     '<div class="cam-sheet-handle"></div>' +
     '<p class="chat-menu-title">Options de conversation</p>' +
+
+    /* ── Informations du groupe (Phase GROUPS-FREE-03) — UNIQUEMENT pour un
+       groupe libre (conv.isFreeGroup) ; les groupes de collaboration Marketplace
+       gardent EXACTEMENT ce même menu inchangé (mute/archive/signaler/bloquer),
+       sans cette entrée. ── */
+    (conv.isFreeGroup
+      ? '<button class="chat-menu-item" onclick="_openFreeGroupInfo()">' +
+          '<span class="chat-menu-ico" style="background:#EEF2FF;color:#4F46E5">' +
+            '<i class="fas fa-circle-info"></i>' +
+          '</span>' +
+          '<div class="chat-menu-text">' +
+            '<span>Informations du groupe</span>' +
+            '<small>Membres, description, quitter le groupe</small>' +
+          '</div>' +
+        '</button>' +
+        '<div class="chat-menu-sep"></div>'
+      : '') +
 
     /* ── Sourdine ── */
     '<button class="chat-menu-item" onclick="_chatToggleMute()">' +
@@ -23364,13 +26432,39 @@ function handleChatAttach(input) {
     }
   }
 
-  /* ── Fonction commune : construit + envoie le message ── */
+  /* ── Fonction commune : construit + envoie le message ──
+     MESSAGING-FILES-01 : cette fonction envoyait les DM via _dmWriteMsg(),
+     qui écrit sur gw/dm_msgs/{fbKey} — chemin FERMÉ par les Rules
+     (.write:false, migration DM v2) depuis une phase antérieure. Toute pièce
+     jointe en DM échouait donc silencieusement (catch → toast générique).
+     Corrigé : réutilise _dmSendMessage() (le même chemin DM v2 déjà validé
+     pour le texte), qui supporte déjà type/payload — jamais câblés jusqu'ici
+     côté écriture, mais déjà lus côté réception (_dmOpenConversation).
+     Pour un groupe libre, _saveGroupMsg() exige conv.projId/projOwnerEmail
+     (champs qui n'existent JAMAIS sur un groupe libre) → no-op silencieux,
+     perte totale de la pièce jointe. Corrigé via _sendFreeGroupAttachment(),
+     miroir de _sendFreeGroupMessage() étendu au schéma pièce jointe. Les
+     groupes de collaboration (legacy, _saveGroupMsg) restent inchangés. */
   function _dispatchChatMedia(dataOrUrl, isStorageUrl) {
     var conv = DEMO_CONVERSATIONS.find(function(c) { return c.id === _chatConvId; });
     if (!conv) return;
     var msgType = isImage ? 'img' : (isVideo ? 'video' : 'file');
+    var label   = isImage ? '📷 Photo' : (isVideo ? '🎥 Vidéo' : '📎 ' + file.name);
+
+    /* Id = clé Firebase générée à l'avance (DM v2 et groupe libre), même
+       raison que sendChatMessage() : la bulle optimiste doit porter le
+       MÊME id que l'écho temps réel pour éviter tout doublon visuel. */
+    var msgId;
+    if (conv.isGroup && conv.isFreeGroup) {
+      msgId = _gwFbDB ? _gwFbDB.ref('gw/group_msgs/' + conv.id + '/messages').push().key : String(Date.now());
+    } else if (!conv.isGroup) {
+      msgId = _gwFbDB ? _gwFbDB.ref('gw/dm_messages/' + _dmConversationId(_currentUser.email, conv.email)).push().key : String(Date.now());
+    } else {
+      msgId = Date.now(); /* groupe de collaboration (legacy), inchangé */
+    }
+
     var msg = {
-      id:       Date.now(),
+      id:       msgId,
       from:     _currentUser.email,
       to:       conv.email,
       text:     isImage ? '' : file.name,
@@ -23385,14 +26479,14 @@ function handleChatAttach(input) {
     else              { msg.data     = dataOrUrl; }
 
     conv.messages.push(msg);
-    conv.lastMsg = isImage ? '📷 Photo' : (isVideo ? '🎥 Vidéo' : '📎 ' + file.name);
+    conv.lastMsg = label;
     conv.lastAt  = Date.now();
 
     var box = document.getElementById('chat-messages');
     if (box) {
       var row = document.createElement('div');
       row.className = 'chat-msg-row mine';
-      row.setAttribute('data-msg-id', msg.id);
+      row.setAttribute('data-msg-id', String(msg.id));
       row.innerHTML = _buildBubbleHtml(msg, true);
       /* Retire le placeholder de chargement si présent */
       var placeholder = box.querySelector('[data-msg-id="uploading_' + file.name + '"]');
@@ -23400,17 +26494,43 @@ function handleChatAttach(input) {
       box.appendChild(row);
       _scrollChatToBottom();
     }
-    if (conv.isGroup) {
+    if (conv.isGroup && conv.isFreeGroup) {
+      _sendFreeGroupAttachment(conv, msg);
+      _saveGroupConvs();
+    } else if (conv.isGroup) {
       _saveGroupMsg(conv, msg);
       _saveGroupConvs();
     } else {
-      /* DM : écriture directe dans Firebase */
-      _dmWriteMsg(conv, msg);
-      _saveDMConvList();
-      if (conv.email) {
-        var _fLabel = isImage ? '📷 Photo' : (isVideo ? '🎥 Vidéo' : '📎 ' + file.name);
-        _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', _fLabel, 'msg-' + _gwFbKey(conv.email));
-      }
+      /* DM v2 — même chemin que le texte (sendChatMessage), jamais _dmWriteMsg. */
+      /* MESSAGING-STABILITY-03-BIS (correctif HIGH-1 MEDIA) : même anti-pattern
+         que sendChatMessage() avant STABILITY-03 — _gwSendPushNotif() était hors
+         du .then(), donc envoyé que l'écriture Firebase du message (après upload
+         Storage déjà confirmé) réussisse ou non. Déplacé à l'intérieur, gardé par
+         ok!==true, .catch() ajouté (absent avant). Storage lui-même n'est pas en
+         cause : _dispatchChatMedia n'est appelée qu'après getDownloadURL() résolu. */
+      var _attConvId = _dmConversationId(_currentUser.email, conv.email);
+      console.log('[SEND] before _dmSendMessage (media)', { conversationId: _attConvId, messageId: msg.id, type: msgType, at: Date.now() });
+      _dmSendMessage(_attConvId, conv.email, label, msg.id, msgType, {
+        data_url: dataOrUrl, fileName: file.name, fileSize: _formatFileSize(file.size)
+      }).then(function(ok) {
+        console.log('[SEND] _dmSendMessage resolved (media)', { conversationId: _attConvId, messageId: msg.id, ok: ok, at: Date.now() });
+        if (ok !== true) {
+          var failedRow = document.querySelector('.chat-msg-row[data-msg-id="' + msg.id + '"]');
+          if (failedRow) { failedRow.classList.add('msg-failed'); failedRow.style.opacity = '0.55'; }
+          showToast('Pièce jointe non envoyée — réessayez', 'err');
+          console.log('[PUSH] skipped because send returned false (media)', { conversationId: _attConvId, messageId: msg.id });
+          return;
+        }
+        if (conv.email) {
+          console.log('[PUSH] sending after ack (media)', { conversationId: _attConvId, messageId: msg.id, at: Date.now() });
+          _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', label, 'msg-' + msg.id + '-' + Date.now());
+        }
+      }).catch(function(err) {
+        console.log('[SEND] _dmSendMessage threw (media)', { conversationId: _attConvId, messageId: msg.id, error: err && err.message });
+        var failedRow = document.querySelector('.chat-msg-row[data-msg-id="' + msg.id + '"]');
+        if (failedRow) { failedRow.classList.add('msg-failed'); failedRow.style.opacity = '0.55'; }
+        showToast('Pièce jointe non envoyée — réessayez', 'err');
+      });
     }
     renderConversations();
   }
@@ -23486,7 +26606,6 @@ function sendChatMessage() {
   if (!text) return;
   if (!_currentUser) { showToast('Reconnectez-vous pour envoyer des messages', 'err'); return; }
   if (!_chatConvId)  { showToast('Conversation introuvable — réouvrez la discussion', 'err'); return; }
-  console.log('[DM] 📤 sendChatMessage → convId:', _chatConvId, '| user:', _currentUser && _currentUser.email);
 
   /* ── Vérification restriction ── */
   if (_gwIsRestricted(_currentUser.email)) {
@@ -23537,17 +26656,39 @@ function sendChatMessage() {
   _updateChatMsgCounter();  /* Met à jour le placeholder selon le nouveau compteur */
 
   var ts = Date.now();
-  var newMsg = {
-    id:   ts,
-    from: _currentUser.email,
-    to:   conv.email,
-    text: text,
-    type: 'text',
-    at:   ts,
-    read: false   /* ← sera mis à true par le destinataire quand il ouvre la conv */
-  };
-  /* Ajoute replyTo seulement si présent (Firebase n'accepte pas undefined) */
-  if (_chatReplyRef) newMsg.replyTo = _chatReplyRef;
+  var _dmConvId = null, _dmMsgId = null;
+  var newMsg;
+  if (conv.isGroup && conv.isFreeGroup) {
+    /* Groupe libre (GROUPS-FREE-02) : id = clé Firebase (push key) générée
+       à l'avance — même raison que le DM v2 ci-dessous (bulle optimiste =
+       même id que l'écho temps réel via _gwMergeFreeGroupMsg, pas de doublon).
+       Schéma local {id,from,text,at,type} pour rester compatible avec
+       _buildBubbleHtml/_renderChatMessages, inchangés ; le schéma Firebase
+       réel (senderId/senderEmail/text/createdAt) est construit séparément
+       dans _sendFreeGroupMessage(), conformément aux Rules. */
+    var _grpMsgId = _gwFbDB ? _gwFbDB.ref('gw/group_msgs/' + conv.id + '/messages').push().key : String(ts);
+    newMsg = { id: _grpMsgId, from: _currentUser.email, text: text, type: 'text', at: ts };
+  } else if (conv.isGroup) {
+    newMsg = {
+      id:   ts,
+      from: _currentUser.email,
+      to:   conv.email,
+      text: text,
+      type: 'text',
+      at:   ts,
+      read: false   /* ← sera mis à true par le destinataire quand il ouvre la conv */
+    };
+    /* Ajoute replyTo seulement si présent (Firebase n'accepte pas undefined) */
+    if (_chatReplyRef) newMsg.replyTo = _chatReplyRef;
+  } else {
+    /* DM v2 — MVP texte seul : id = clé Firebase (push key) générée À L'AVANCE,
+       pour que le listener child_added de _dmOpenConversation reconnaisse la bulle
+       optimiste déjà affichée (même data-msg-id) et n'affiche pas de doublon.
+       Pas de to/read/replyTo : non supportés par le schéma DM v2 pour ce MVP. */
+    _dmConvId = _dmConversationId(_currentUser.email, conv.email);
+    _dmMsgId  = _gwFbDB ? _gwFbDB.ref('gw/dm_messages/' + _dmConvId).push().key : String(ts);
+    newMsg = { id: _dmMsgId, from: _currentUser.email, text: text, type: 'text', at: ts };
+  }
   cancelChatReply();
 
   /* ── Affichage optimiste immédiat pour l'expéditeur ── */
@@ -23555,7 +26696,7 @@ function sendChatMessage() {
   if (box) {
     var row = document.createElement('div');
     row.className = 'chat-msg-row mine';
-    row.setAttribute('data-msg-id', String(ts));
+    row.setAttribute('data-msg-id', String(newMsg.id));
     row.innerHTML = _buildBubbleHtml(newMsg, true);
     box.appendChild(row);
     _scrollChatToBottom();
@@ -23567,16 +26708,43 @@ function sendChatMessage() {
   renderConversations();
 
   /* ── Écriture Firebase ── */
-  if (conv.isGroup) {
+  if (conv.isGroup && conv.isFreeGroup) {
+    _sendFreeGroupMessage(conv, newMsg);
+    _saveGroupConvs();
+  } else if (conv.isGroup) {
     _saveGroupMsg(conv, newMsg);
     _saveGroupConvs();
   } else {
-    /* DM : child_added sur l'autre appareil affichera le message automatiquement */
-    _dmWriteMsg(conv, newMsg);
-    _saveDMConvList();
-    if (conv.email) {
-      _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', text, 'msg-' + _gwFbKey(conv.email));
-    }
+    /* DM v2 uniquement — l'ancien _dmWriteMsg/_saveDMConvList/inbox legacy (fermés
+       côté Rules) ne sont plus appelés ici. */
+    /* MESSAGING-STABILITY-03 (correctif HIGH-1) : _gwSendPushNotif() ne doit
+       partir qu'APRÈS confirmation ok===true de _dmSendMessage() — avant ce
+       correctif, l'appel était hors du .then(), donc synchrone et systématique,
+       y compris si l'écriture Firebase du message échouait (preuve harness :
+       T2 < T1 garanti par la microtask queue JS, indépendamment de toute
+       latence réseau). Tag enrichi d'un suffixe temporel unique par message
+       (Étape 4) pour éviter qu'une notification en attente soit fusionnée/
+       remplacée par une autre du même expéditeur avant d'être vue. */
+    console.log('[SEND] before _dmSendMessage', { conversationId: _dmConvId, messageId: _dmMsgId, at: Date.now() });
+    _dmSendMessage(_dmConvId, conv.email, text, _dmMsgId).then(function(ok) {
+      console.log('[SEND] _dmSendMessage resolved', { conversationId: _dmConvId, messageId: _dmMsgId, ok: ok, at: Date.now() });
+      if (ok !== true) {
+        var failedRow = document.querySelector('.chat-msg-row[data-msg-id="' + _dmMsgId + '"]');
+        if (failedRow) { failedRow.classList.add('msg-failed'); failedRow.style.opacity = '0.55'; }
+        showToast('Message non envoyé — réessayez', 'err');
+        console.log('[PUSH] skipped because send returned false', { conversationId: _dmConvId, messageId: _dmMsgId });
+        return;
+      }
+      if (conv.email) {
+        console.log('[PUSH] sending after ack', { conversationId: _dmConvId, messageId: _dmMsgId, at: Date.now() });
+        _gwSendPushNotif(conv.email, _currentUser.nom || 'Message', text, 'msg-' + _dmMsgId + '-' + Date.now());
+      }
+    }).catch(function(err) {
+      console.log('[SEND] _dmSendMessage threw', { conversationId: _dmConvId, messageId: _dmMsgId, error: err && err.message });
+      var failedRow = document.querySelector('.chat-msg-row[data-msg-id="' + _dmMsgId + '"]');
+      if (failedRow) { failedRow.classList.add('msg-failed'); failedRow.style.opacity = '0.55'; }
+      showToast('Message non envoyé — réessayez', 'err');
+    });
   }
 }
 
@@ -24397,19 +27565,24 @@ function _inviteCollaborator(projId, targetEmail) {
 
   var tp = loadUserProfile(targetEmail) || {};
   proj.collaborators.push({ email: targetEmail, name: tp.nom || targetEmail, photo: tp.photo || null, status: 'invited' });
-  saveProjects(_currentUser.email, list);
+  saveProjects(_currentUser.email, list); /* écriture sur SES PROPRES projets — inchangé */
 
-  /* Notification pour l'invité */
-  var invites = _getCollabInvites(targetEmail);
-  invites.unshift({
-    id: Date.now(),
-    projId:     projId,
-    projTitle:  proj.title,
-    ownerEmail: _currentUser.email,
-    ownerName:  _currentUser.nom || _currentUser.email,
-    ownerPhoto: _currentUser.photo || null
-  });
-  _saveCollabInvites(targetEmail, invites);
+  /* Phase 9D : l'invitation dans la boîte du DESTINATAIRE (gw/collab_invites/
+     {targetUid}) passe désormais par le serveur (/api/collab-invite) —
+     c'était auparavant une écriture cross-user directe (_saveCollabInvites),
+     permettant d'injecter une invitation arbitraire (ownerEmail forgé) dans
+     la boîte de n'importe qui. Le serveur revérifie que l'appelant possède
+     réellement ce projet avant d'écrire. */
+  var _icSession = _gwLoadSession();
+  if (!_icSession || !_icSession.authRefresh) return;
+  fetch('/api/collab-invite', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      authRefreshToken: _icSession.authRefresh, action: 'invite',
+      toEmail: targetEmail, projId: projId,
+      ownerName: _currentUser.nom || _currentUser.email, ownerPhoto: _currentUser.photo || null
+    })
+  }).catch(function(){});
 
   /* Créer un DM entre l'invitant et l'invité avec une carte d'invitation */
   var targetNom = tp.nom || targetEmail;
@@ -24421,7 +27594,7 @@ function _inviteCollaborator(projId, targetEmail) {
     dmConv = existingDM;
   } else {
     dmConv = {
-      id:       _newConvId(),
+      id:       _dmConversationId(_currentUser.email, targetEmail),  /* DM v2 */
       name:     targetNom,
       email:    targetEmail,
       role:     tp.domain || 'Membre Geniwork',
@@ -24437,8 +27610,8 @@ function _inviteCollaborator(projId, targetEmail) {
       messages: []
     };
     DEMO_CONVERSATIONS.unshift(dmConv);
-    _saveDMConvList();
   }
+  var invText = '💼 Invitation à collaborer sur "' + proj.title + '"';
   var invMsg = {
     id:        Date.now(),
     from:      _currentUser.email,
@@ -24447,12 +27620,13 @@ function _inviteCollaborator(projId, targetEmail) {
     type:      'collab_invite_card',
     projId:    projId,
     projTitle: proj.title,
-    text:      '💼 Invitation à collaborer sur "' + proj.title + '"'
+    text:      invText
   };
   dmConv.messages.push(invMsg);
   dmConv.lastMsg = invMsg.text;
   dmConv.lastAt  = invMsg.at;
-  _dmWriteMsg(dmConv, invMsg);
+  /* DM v2 : projId omis du payload (jamais lu par le renderer, cf. audit) */
+  _dmSendMessage(dmConv.id, targetEmail, invText, undefined, 'collab_invite_card', { projTitle: proj.title });
 
   showToast('Invitation envoyée !', 'ok');
   _closeGenericSheet('collab-invite');
@@ -24462,36 +27636,70 @@ function _inviteCollaborator(projId, targetEmail) {
   setTimeout(function() { openChat(dmConv.id); }, 220);
 }
 
-/* ── Accepter une invitation ── */
+/* ── Accepter une invitation ──
+   Phase 9D-bis : la mise à jour de collaborators[].status dans le projet
+   du PROPRIÉTAIRE passait par une écriture cross-user directe
+   (saveProjects(ownerEmail,...)) — désormais gw/projects/{uid}.write est
+   scopé au propriétaire, donc cette mutation légitime mais ciblée passe
+   par /api/collab-invite (action:'accept'), qui résout l'invitation
+   réelle depuis la boîte de l'appelant lui-même avant de modifier
+   uniquement son entrée collaborators. */
 function _acceptCollabInvite(inviteId, projId, ownerEmail) {
   if (!_currentUser) return;
+  var _aiSession = _gwLoadSession();
+  if (!_aiSession || !_aiSession.authRefresh) return;
 
-  var invites = _getCollabInvites(_currentUser.email).filter(function(i) { return i.id !== inviteId; });
-  _saveCollabInvites(_currentUser.email, invites);
+  fetch('/api/collab-invite', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: _aiSession.authRefresh, action: 'accept', inviteId: inviteId })
+  }).then(function(r) { return r.json().then(function(j) { return { status: r.status, data: j }; }); })
+    .then(function(r) {
+      if (!r.data || !r.data.ok) { showToast((r.data && r.data.error) || 'Échec de l\'acceptation', 'err'); return; }
 
-  /* Mettre à jour le statut dans les projets du propriétaire */
-  var ownerList = loadProjects(ownerEmail);
-  var ownerProj = ownerList.find(function(p) { return p.id === projId; });
-  if (ownerProj && ownerProj.collaborators) {
-    ownerProj.collaborators.forEach(function(c) {
-      if (c.email === _currentUser.email) c.status = 'accepted';
-    });
-    saveProjects(ownerEmail, ownerList);
-  }
+      var invites = _getCollabInvites(_currentUser.email).filter(function(i) { return i.id !== inviteId; });
+      _saveCollabInvites(_currentUser.email, invites);
 
-  /* Ouvrir / créer le groupe de discussion */
-  _openCollabGroupChat(projId, ownerEmail);
+      /* Ouvrir / créer le groupe de discussion */
+      _openCollabGroupChat(projId, ownerEmail);
 
-  showToast('Collaboration acceptée ! Discussion de groupe ouverte.', 'ok');
-  _renderCollabInvitesBanner();
-  renderProfileProjects();
+      showToast('Collaboration acceptée ! Discussion de groupe ouverte.', 'ok');
+      _renderCollabInvitesBanner();
+      renderProfileProjects();
+    })
+    .catch(function() { showToast('Échec de l\'acceptation', 'err'); });
 }
 
-/* ── Créer/ouvrir la discussion de groupe du projet ── */
+/* ── Créer/ouvrir la discussion de groupe du projet ──
+   Sécurité (Phase 4) : loadProjects(ownerEmail) est une lecture localStorage
+   PURE — chez un collaborateur qui n'a encore jamais visité le profil du
+   propriétaire, cette clé n'existe pas dans son navigateur, donc "proj" est
+   introuvable et la liste de membres construite ci-dessous ne contient QUE
+   le propriétaire (le collaborateur qui vient d'accepter en est absent).
+   _syncCollabGroupMembers() reçoit alors une liste incomplète. Repli
+   Firebase ajouté ici (même mécanisme déjà utilisé par renderProfileProjects
+   pour le même problème) pour garantir une liste exacte avant de synchroniser
+   l'appartenance côté Firebase. ── */
 function _openCollabGroupChat(projId, ownerEmail) {
-  /* Récupère le projet depuis les données du propriétaire */
   var ownerList = loadProjects(ownerEmail);
   var proj = ownerList.find(function(p) { return p.id === projId; });
+  if (proj || !_gwFbReady || !_gwFbDB) {
+    _openCollabGroupChatWithProj(projId, ownerEmail, proj);
+    return;
+  }
+  _gwFbDB.ref('gw/projects/' + _gwFbKey(ownerEmail)).once('value').then(function(snap) {
+    var fbList = snap.val();
+    var fbProj = null;
+    if (fbList && Array.isArray(fbList)) {
+      try { localStorage.setItem('gw_projects_' + ownerEmail, JSON.stringify(fbList)); } catch(e){}
+      fbProj = fbList.find(function(p) { return p.id === projId; });
+    }
+    _openCollabGroupChatWithProj(projId, ownerEmail, fbProj);
+  }).catch(function() {
+    _openCollabGroupChatWithProj(projId, ownerEmail, null);
+  });
+}
+
+function _openCollabGroupChatWithProj(projId, ownerEmail, proj) {
   var projTitle = proj ? proj.title : 'Projet collaboratif';
 
   /* Construit la liste des membres (propriétaire + collaborateurs acceptés) */
@@ -24536,8 +27744,13 @@ function _openCollabGroupChat(projId, ownerEmail) {
       conv.messages.push(_joinMsg);
       conv.lastMsg = _joinMsg.text;
       conv.lastAt  = _joinTs;
-      /* Ecriture dans le storage PARTAGÉ → visible par tous les membres */
-      _saveGroupMsg(conv, _joinMsg);
+      /* Ecriture dans le storage PARTAGÉ → visible par tous les membres.
+         Phase 9A : re-confirme (idempotent) l'appartenance du nouvel arrivant
+         AVANT d'écrire son message de bienvenue — la règle exige
+         meta/members/{auth.uid} au moment de l'écriture du message. */
+      _syncCollabGroupMembers(projId, ownerEmail, members).then(function() {
+        _saveGroupMsg(conv, _joinMsg);
+      });
       _saveGroupConvs();
 
       /* Notifier tous les autres membres pour qu'ils découvrent le groupe */
@@ -24568,23 +27781,29 @@ function _openCollabGroupChat(projId, ownerEmail) {
   setTimeout(function() { openChat(conv.id); }, 280);
 }
 
-/* ── Refuser une invitation ── */
+/* ── Refuser une invitation ──
+   Phase 9D-bis : même principe que _acceptCollabInvite — le retrait de
+   l'entrée collaborators dans le projet du propriétaire passe désormais
+   par /api/collab-invite (action:'decline'). */
 function _declineCollabInvite(inviteId, ownerEmail, projId) {
   if (!_currentUser) return;
+  var _dcSession = _gwLoadSession();
+  if (!_dcSession || !_dcSession.authRefresh) return;
 
-  var invites = _getCollabInvites(_currentUser.email).filter(function(i) { return i.id !== inviteId; });
-  _saveCollabInvites(_currentUser.email, invites);
+  fetch('/api/collab-invite', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: _dcSession.authRefresh, action: 'decline', inviteId: inviteId })
+  }).then(function(r) { return r.json().then(function(j) { return { status: r.status, data: j }; }); })
+    .then(function(r) {
+      if (!r.data || !r.data.ok) { showToast((r.data && r.data.error) || 'Échec du refus', 'err'); return; }
 
-  /* Retirer le collaborateur de la liste du propriétaire */
-  var ownerList = loadProjects(ownerEmail);
-  var ownerProj = ownerList.find(function(p) { return p.id === projId; });
-  if (ownerProj && ownerProj.collaborators) {
-    ownerProj.collaborators = ownerProj.collaborators.filter(function(c) { return c.email !== _currentUser.email; });
-    saveProjects(ownerEmail, ownerList);
-  }
+      var invites = _getCollabInvites(_currentUser.email).filter(function(i) { return i.id !== inviteId; });
+      _saveCollabInvites(_currentUser.email, invites);
 
-  showToast('Invitation refusée', 'ok');
-  _renderCollabInvitesBanner();
+      showToast('Invitation refusée', 'ok');
+      _renderCollabInvitesBanner();
+    })
+    .catch(function() { showToast('Échec du refus', 'err'); });
 }
 
 /* ── Bannière d'invitations en attente (profil) ── */
@@ -26063,13 +29282,16 @@ function _mkEditListingPrice(listingId) {
   var listings = _mkGetListings();
   var l = listings.find(function(x){ return x.id === listingId; });
   if (!l) return;
+  /* Phase 7A : garde-fou cote client uniquement — voir _mkIsOwnListing() */
+  if (!_mkIsOwnListing(l)) { showToast('Vous n\'êtes pas le vendeur de cette annonce', 'err'); return; }
 
   var newPrice = prompt('Nouveau prix pour "' + l.title + '" (actuel : ' + _gwFmtPrice(l.price, l.currency) + ') :');
   if (!newPrice) return;
   var p = parseFloat(newPrice);
   if (isNaN(p) || p < 0) { showToast('Prix invalide', 'err'); return; }
   l.price = p;
-  _mkSaveListings(listings);
+  localStorage.setItem('gw_mk_listings', JSON.stringify(listings)); /* affichage immediat */
+  _mkUpdateOwnListingFieldV2(listingId, { price: p }); /* Phase 7E : update cible gw/mk_listings_v2/{ownUid}/{id} */
   showToast('Prix mis à jour : ' + _gwFmtPrice(p, l.currency), 'ok');
   /* Rafraîchir l'écran */
   _mkCloseScreen('mk-sales-screen');
@@ -27396,13 +30618,34 @@ function _subRenderRenewalInfo(profile, planType) {
       '<button class="sub-ren-resume-btn" onclick="_subResumePlan()">Réactiver</button>';
   } else {
     var deadlineStr = _subGetCancelDeadline(profile.planRenewalDate);
+    /* Phase PAYPAL-SUB-FIX-01 (Option B) : plus de mention de renouvellement
+       automatique — aucun prélèvement récurrent n'existe réellement (audit
+       PAYPAL-SUB-AUDIT-02). Le paiement est unique par période ; à
+       expiration le compte repasse en Gratuit (sync-status.js). */
     band.innerHTML =
-      '<div class="sub-ren-icon"><i class="fas fa-rotate"></i></div>' +
+      '<div class="sub-ren-icon"><i class="fas fa-calendar-check"></i></div>' +
       '<div class="sub-ren-text">' +
-        '<strong>Renouvellement automatique</strong><br>' +
-        'Abonnement ' + billingLabel + ' · Prochain prélèvement le <strong>' + renewalStr + '</strong><br>' +
+        '<strong>Abonnement valable jusqu\'au ' + renewalStr + '</strong><br>' +
+        'Abonnement ' + billingLabel + ' · Date d\'expiration : <strong>' + renewalStr + '</strong><br>' +
         '<span class="sub-ren-days">Annulation gratuite avant le ' + deadlineStr + '</span>' +
       '</div>';
+  }
+
+  /* Phase PAYPAL-SUB-FIX-01 : bouton remboursement, visible UNIQUEMENT
+     dans la fenêtre de 7 jours (UTC) suivant le paiement et si aucun
+     remboursement n'a déjà été traité — reflète fidèlement l'état
+     serveur (subLastRefundStatus/subLastPaymentAt écrits par
+     capture-order.js), jamais une promesse sans implémentation
+     (corrige l'écart identifié en PAYPAL-SUB-AUDIT-02). */
+  if (profile.subLastRefundStatus === 'none' && profile.subLastPaymentAt) {
+    var paidMs = Date.parse(profile.subLastPaymentAt);
+    if (Number.isFinite(paidMs) && (Date.now() - paidMs) <= 7 * 24 * 3600 * 1000) {
+      var refundBtn = document.createElement('button');
+      refundBtn.className = 'sub-ren-refund-btn';
+      refundBtn.textContent = 'Demander un remboursement';
+      refundBtn.onclick = _subRequestRefund;
+      band.appendChild(refundBtn);
+    }
   }
 
   /* Insérer avant la garantie */
@@ -27410,32 +30653,56 @@ function _subRenderRenewalInfo(profile, planType) {
   if (guarantee) guarantee.parentNode.insertBefore(band, guarantee);
 }
 
-/* Réactiver un abonnement annulé */
+/* Réactiver un abonnement annulé — Phase PAYPAL-SUB-FIX-02 : appel
+   serveur authoritaire (api/subscriptions/resume.js), plus aucune
+   écriture Firebase directe côté client (dernier point identifié en
+   PAYPAL-SUB-FIX-01 §12 Risques). */
 function _subResumePlan() {
   if (!_currentUser) return;
   var profile = loadUserProfile(_currentUser.email) || {};
   if (!profile.planCancelled) return;
 
-  profile.planCancelled   = false;
-  profile.planCancelledAt = null;
-  saveUserProfile(_currentUser.email, profile);
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) {
+    showToast('Session expirée, reconnectez-vous', 'err');
+    return;
+  }
 
-  var planLabels = { premium: 'Premium 👑', business: 'Business Pro 💼' };
-  var planLabel  = planLabels[profile.planType] || profile.planType;
-  var renewalStr = profile.planRenewalDate
-    ? new Date(profile.planRenewalDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
-    : '—';
+  fetch('/api/subscriptions/resume', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ authRefreshToken: session.authRefresh })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) {
+      showToast(d.error || 'Impossible de réactiver l\'abonnement', 'err');
+      return;
+    }
+    /* Reflet local UNIQUEMENT — la réactivation a déjà été appliquée
+       côté serveur ; aucune écriture Firebase directe ici. */
+    profile.planCancelled   = false;
+    profile.planCancelledAt = null;
+    profile.planStatus      = 'active';
+    try { localStorage.setItem('gw_profile_' + _currentUser.email, JSON.stringify(profile)); } catch(e) {}
 
-  var notif = {
-    id: genNotifId(), type: 'plan_resumed',
-    msg: '✅ Votre abonnement ' + planLabel + ' a été réactivé. Renouvellement prévu le ' + renewalStr + '. Un e-mail de confirmation a été envoyé à ' + _currentUser.email + '.',
-    at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null
-  };
-  var ns = getNotifs(_currentUser.email); ns.unshift(notif); saveNotifs(_currentUser.email, ns);
-  try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+    var planLabels = { premium: 'Premium 👑', business: 'Business Pro 💼' };
+    var planLabel  = planLabels[profile.planType] || profile.planType;
+    var renewalStr = profile.planRenewalDate
+      ? new Date(profile.planRenewalDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+      : '—';
 
-  _subRenderCurrentPlan();
-  showToast('Abonnement ' + planLabel + ' réactivé ✅', 'ok');
+    var notif = {
+      id: genNotifId(), type: 'plan_resumed',
+      msg: '✅ Votre abonnement ' + planLabel + ' a été réactivé. Valable jusqu\'au ' + renewalStr + '.',
+      at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null
+    };
+    var ns = getNotifs(_currentUser.email); ns.unshift(notif); saveNotifs(_currentUser.email, ns);
+    try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+
+    _subRenderCurrentPlan();
+    showToast('Abonnement ' + planLabel + ' réactivé ✅', 'ok');
+  }).catch(function() {
+    showToast('Erreur réseau, réessayez', 'err');
+  });
 }
 
 /* Met à jour le chip de plan dans la sidebar */
@@ -27537,31 +30804,93 @@ function _subLoadPayPal() {
   document.head.appendChild(script);
 }
 
-function _subRenderPayPalBtn(amount) {
+function _subRenderPayPalBtn() {
   var container = document.getElementById('sub-paypal-btn-container');
   if (!container || !window.paypal) return;
   container.innerHTML = '';
 
   var plan    = _subPending;
+  var billing = _subBilling;
   var labels  = { premium: 'Geniwork Premium', business: 'Geniwork Business Pro' };
-  var billing = (_subBilling === 'year') ? 'Annuel' : 'Mensuel';
-  var descStr = (labels[plan] || 'Geniwork') + ' · ' + billing;
 
   try {
     paypal.Buttons({
       style: { layout: 'vertical', color: 'blue', shape: 'rect', label: 'pay', height: 44 },
       createOrder: function(data, actions) {
-        return actions.order.create({
-          purchase_units: [{
-            description: descStr,
-            amount: { value: amount.toFixed(2), currency_code: 'EUR' }
-          }]
+        var session = _gwLoadSession();
+        if (!session || !session.authRefresh) {
+          showToast('Session expirée, reconnectez-vous', 'err');
+          return Promise.reject(new Error('Session expirée'));
+        }
+        return fetch('/api/subscriptions/create-order', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ authRefreshToken: session.authRefresh, plan: plan, billing: billing })
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          if (!d.ok) {
+            showToast(d.error || 'Impossible de créer la commande', 'err');
+            throw new Error(d.error || 'create-order failed');
+          }
+          return d.orderID;
         });
       },
       onApprove: function(data, actions) {
-        return actions.order.capture().then(function(details) {
+        var session = _gwLoadSession();
+        if (!session || !session.authRefresh) {
+          showToast('Session expirée, reconnectez-vous', 'err');
+          return Promise.resolve();
+        }
+        return fetch('/api/subscriptions/capture-order', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ authRefreshToken: session.authRefresh, orderID: data.orderID })
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          if (!d.ok) {
+            showToast(d.error || 'Paiement non confirmé — contactez le support', 'err');
+            return;
+          }
           _subClosePayModal();
-          _subActivatePlan(plan, _subBilling, details);
+
+          /* Mise à jour locale optimiste (lecture seule — jamais de push
+             Firebase depuis le client, l'écriture réelle a déjà été faite
+             côté serveur). Le listener temps réel gw/profiles déjà en
+             place (_onProfileSnap) reflétera aussi ce changement dès
+             réception ; ceci évite juste d'attendre pour l'UI immédiate. */
+          var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
+          profile.planType        = d.plan;
+          profile.planBilling     = d.billing;
+          profile.planRenewalDate = d.planRenewalDate;
+          profile.planCancelled   = false;
+          profile.planSince       = new Date().toISOString();
+          if (d.plan === 'premium' || d.plan === 'business') {
+            profile.badgeType        = 'premium';
+            profile.badgeStatus      = 'approved';
+            profile.identityVerified = true;
+          }
+          try {
+            localStorage.setItem('gw_profile_' + _currentUser.email, JSON.stringify(profile));
+            _invalidateProfileCache(_currentUser.email);
+          } catch(e) {}
+
+          /* ── Notification locale (gw/notifs), comme avant. ── */
+          var notif = {
+            id: genNotifId(), type: 'plan_activated',
+            msg: '🎉 Paiement PayPal confirmé ! Votre abonnement ' + (labels[d.plan] || d.plan) + ' est maintenant actif.',
+            time: 'À l\'instant', unread: true, fromUser: null
+          };
+          var notifs = getNotifs(_currentUser.email);
+          notifs.unshift(notif);
+          saveNotifs(_currentUser.email, notifs);
+          try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+
+          var planLabels = { premium: 'Premium 👑', business: 'Business Pro 💼' };
+          _subRenderCurrentPlan();
+          showToast('Abonnement ' + (planLabels[d.plan] || d.plan) + ' activé ! 🎉', 'ok');
+          try { _renderBadgePage(); } catch(e) {}
+          try {
+            var ds = document.getElementById('dash-screen');
+            if (ds && ds.classList.contains('open')) _renderDashboard();
+          } catch(e) {}
         });
       },
       onCancel: function() {
@@ -27575,68 +30904,6 @@ function _subRenderPayPalBtn(amount) {
   } catch(e) {
     console.error('PayPal render error', e);
   }
-}
-
-/* ── Active le plan après paiement PayPal confirmé ── */
-function _subActivatePlan(plan, billing, paypalDetails) {
-  if (!plan || !_currentUser) return;
-
-  var profile = loadUserProfile(_currentUser.email) || getDefaultProfile(_currentUser);
-  profile.planType      = plan;
-  profile.planBilling   = billing || 'month';
-  profile.planSince     = new Date().toISOString();
-  profile.planCancelled = false;
-  var renewalMs = (billing === 'year') ? 365 * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000;
-  profile.planRenewalDate = new Date(Date.now() + renewalMs).toISOString();
-
-  /* Badge automatique */
-  if (plan === 'premium' || plan === 'business') {
-    profile.badgeType        = 'premium';
-    profile.badgeStatus      = 'approved';
-    profile.badgeApprovedAt  = new Date().toISOString();
-    profile.identityVerified = true;
-  }
-  saveUserProfile(_currentUser.email, profile);
-
-  /* ── Enregistrement du paiement (admin) ── */
-  var amounts = { premium: { month: '4,99 €', year: '49,99 €' }, business: { month: '14,99 €', year: '149,99 €' } };
-  var payment = {
-    id        : 'pay_' + (paypalDetails && paypalDetails.id ? paypalDetails.id : Date.now()),
-    email     : _currentUser.email,
-    nom       : _currentUser.nom || _currentUser.email,
-    plan      : plan,
-    billing   : billing,
-    amount    : amounts[plan] ? amounts[plan][billing || 'month'] : '—',
-    paypalTxId: paypalDetails && paypalDetails.id ? paypalDetails.id : null,
-    date      : new Date().toISOString(),
-    status    : 'completed'
-  };
-  var pays = _admGetPayments();
-  pays.unshift(payment);
-  _admSavePayments(pays);
-
-  /* ── Notification ── */
-  var labels = { premium: 'Premium 👑', business: 'Business Pro 💼' };
-  var notif = {
-    id      : genNotifId(),
-    type    : 'plan_activated',
-    msg     : '🎉 Paiement PayPal confirmé ! Votre abonnement ' + labels[plan] + ' est maintenant actif.',
-    time    : 'À l\'instant',
-    unread  : true,
-    fromUser: null
-  };
-  var notifs = getNotifs(_currentUser.email);
-  notifs.unshift(notif);
-  saveNotifs(_currentUser.email, notifs);
-  try { renderNotifs(); updateNotifBadge(); } catch(e) {}
-
-  _subRenderCurrentPlan();
-  showToast('Abonnement ' + labels[plan] + ' activé ! 🎉', 'ok');
-  try { _renderBadgePage(); } catch(e) {}
-  try {
-    var ds = document.getElementById('dash-screen');
-    if (ds && ds.classList.contains('open')) _renderDashboard();
-  } catch(e) {}
 }
 
 /* ══════════════════════════════════════════
@@ -27701,44 +30968,116 @@ function _subGetCancelDeadline(renewalIso) {
   return deadline.toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
 }
 
-/* Confirme l'annulation */
+/* Confirme l'annulation — Phase PAYPAL-SUB-FIX-01 : appel serveur
+   authoritaire (api/subscriptions/cancel.js), plus aucune écriture
+   Firebase directe côté client (corrige la faille identifiée en
+   PAYPAL-SUB-AUDIT-02, où cette écriture était silencieusement rejetée
+   par les Rules). */
 function _subConfirmCancel() {
   if (!_currentUser) return;
-  var modal   = document.getElementById('sub-cancel-modal');
+  var modal = document.getElementById('sub-cancel-modal');
   if (modal) modal.remove();
 
-  var profile     = loadUserProfile(_currentUser.email) || {};
-  var plan        = profile.planType || 'free';
-  var planLabels  = { premium: 'Premium 👑', business: 'Business Pro 💼' };
-  var planLabel   = planLabels[plan] || plan;
-  var renewalDate = profile.planRenewalDate
-    ? new Date(profile.planRenewalDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
-    : 'à la prochaine échéance';
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) {
+    showToast('Session expirée, reconnectez-vous', 'err');
+    return;
+  }
 
-  /* Marquer comme annulé — reste actif jusqu'à la fin de période */
-  profile.planCancelled   = true;
-  profile.planCancelledAt = new Date().toISOString();
-  saveUserProfile(_currentUser.email, profile);
+  fetch('/api/subscriptions/cancel', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ authRefreshToken: session.authRefresh })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) {
+      showToast(d.error || 'Impossible d\'annuler l\'abonnement', 'err');
+      return;
+    }
+    var profile     = loadUserProfile(_currentUser.email) || {};
+    var plan        = profile.planType || 'free';
+    var planLabels  = { premium: 'Premium 👑', business: 'Business Pro 💼' };
+    var planLabel   = planLabels[plan] || plan;
+    var renewalDate = d.accessUntil
+      ? new Date(d.accessUntil).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+      : 'à la prochaine échéance';
 
-  /* Notification + simulation email */
-  var notif = {
-    id      : genNotifId(),
-    type    : 'plan_cancelled',
-    msg     : '📧 Annulation confirmée — Votre abonnement ' + planLabel +
-              ' restera actif jusqu\'au ' + renewalDate +
-              '. Un e-mail de confirmation a été envoyé à ' + _currentUser.email +
-              '. Sans action de votre part, le plan passera automatiquement en Gratuit à cette date.',
-    time    : 'À l\'instant',
-    unread  : true,
-    fromUser: null
-  };
-  var notifs = getNotifs(_currentUser.email);
-  notifs.unshift(notif);
-  saveNotifs(_currentUser.email, notifs);
-  try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+    /* Reflet local UNIQUEMENT (cache d'affichage) — la valeur serveur,
+       déjà confirmée, fait autorité ; jamais de ref.set() Firebase ici. */
+    profile.planCancelled   = true;
+    profile.planCancelledAt = new Date().toISOString();
+    profile.planStatus      = 'cancelled';
+    try { localStorage.setItem('gw_profile_' + _currentUser.email, JSON.stringify(profile)); } catch(e) {}
 
-  _subRenderCurrentPlan();
-  showToast('Annulation enregistrée · Actif jusqu\'au ' + renewalDate, 'ok');
+    var notif = {
+      id      : genNotifId(),
+      type    : 'plan_cancelled',
+      msg     : '📧 Annulation confirmée — Votre abonnement ' + planLabel +
+                ' restera actif jusqu\'au ' + renewalDate +
+                '. Sans action de votre part, le plan passera automatiquement en Gratuit à cette date.',
+      time    : 'À l\'instant',
+      unread  : true,
+      fromUser: null
+    };
+    var notifs = getNotifs(_currentUser.email);
+    notifs.unshift(notif);
+    saveNotifs(_currentUser.email, notifs);
+    try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+
+    _subRenderCurrentPlan();
+    showToast('Annulation enregistrée · Actif jusqu\'au ' + renewalDate, 'ok');
+  }).catch(function() {
+    showToast('Erreur réseau, réessayez', 'err');
+  });
+}
+
+/* Demande de remboursement — Phase PAYPAL-SUB-FIX-01 : appel serveur
+   authoritaire (api/subscriptions/refund.js). Fenêtre 7 jours UTC,
+   remboursement intégral, jamais initié au-delà de cet appel côté
+   client (aucun montant, aucune décision d'éligibilité côté client —
+   le serveur revérifie tout). */
+function _subRequestRefund() {
+  if (!_currentUser) return;
+  var profile = loadUserProfile(_currentUser.email) || {};
+  var orderID = profile.subLastOrderId;
+  if (!orderID) { showToast('Aucune transaction à rembourser', 'err'); return; }
+  if (!confirm('Confirmer la demande de remboursement intégral de votre dernier paiement ?')) return;
+
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) {
+    showToast('Session expirée, reconnectez-vous', 'err');
+    return;
+  }
+
+  fetch('/api/subscriptions/refund', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ authRefreshToken: session.authRefresh, orderID: orderID })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) {
+      showToast(d.error || 'Remboursement impossible', 'err');
+      return;
+    }
+    /* Reflet local UNIQUEMENT — le remboursement/downgrade a déjà été
+       appliqué côté serveur. */
+    profile.planType            = 'free';
+    profile.planBilling         = null;
+    profile.planRenewalDate     = null;
+    profile.planStatus          = 'expired';
+    profile.planCancelled       = false;
+    profile.planCancelledAt     = null;
+    profile.subLastRefundStatus = 'refunded';
+    if (profile.badgeType === 'premium') {
+      delete profile.badgeType;
+      delete profile.badgeStatus;
+      delete profile.badgeApprovedAt;
+      delete profile.badgeSource;
+    }
+    try { localStorage.setItem('gw_profile_' + _currentUser.email, JSON.stringify(profile)); } catch(e) {}
+    try { _subRenderCurrentPlan(); } catch(e) {}
+    showToast('Remboursement effectué ✓ — passage en Gratuit', 'ok');
+  }).catch(function() {
+    showToast('Erreur réseau, réessayez', 'err');
+  });
 }
 
 /* ══════════════════════════════════════════
@@ -27759,75 +31098,62 @@ function _subCheckRenewalAndExpiry() {
   var planLabel    = planLabels[plan] || plan;
   var renewalStr   = renewalDate.toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
 
-  /* ── Plan expiré ? ── */
+  /* ── Plan expiré ? Phase PAYPAL-SUB-FIX-01 : le downgrade est désormais
+     déterminé ET écrit EXCLUSIVEMENT par le serveur (sync-status.js) —
+     ce check local ne sert plus qu'à décider QUAND interroger le
+     serveur, il ne calcule ni n'écrit plus jamais l'expiration lui-même
+     (corrige la faille identifiée en PAYPAL-SUB-AUDIT-02 : écriture
+     Firebase directe côté client, silencieusement rejetée par les
+     Rules). ── */
   if (now >= renewalDate) {
-    if (profile.planCancelled) {
-      /* Annulation → downgrade vers Gratuit */
+    var session = _gwLoadSession();
+    if (!session || !session.authRefresh) return;
+    fetch('/api/subscriptions/sync-status', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ authRefreshToken: session.authRefresh })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      if (!d.ok || !d.downgraded) return;
+      /* Reflet local UNIQUEMENT — le downgrade a déjà été appliqué côté
+         serveur ; aucune écriture Firebase directe ici. */
       profile.planType        = 'free';
       profile.planBilling     = null;
       profile.planRenewalDate = null;
+      profile.planStatus      = 'expired';
       profile.planCancelled   = false;
       profile.planCancelledAt = null;
-      /* Retire le badge premium automatique */
       if (profile.badgeType === 'premium') {
         delete profile.badgeType;
         delete profile.badgeStatus;
         delete profile.badgeApprovedAt;
+        delete profile.badgeSource;
       }
-      saveUserProfile(_currentUser.email, profile);
+      try { localStorage.setItem('gw_profile_' + _currentUser.email, JSON.stringify(profile)); } catch(e) {}
       var expNotif = {
         id: genNotifId(), type: 'plan_expired',
-        msg: '⚠️ Votre abonnement ' + planLabel + ' a expiré. Votre compte est maintenant sur le plan Gratuit. Repassez à Premium pour retrouver vos avantages.',
+        msg: '⚠️ Votre abonnement ' + planLabel + ' a expiré. Votre compte est maintenant sur le plan Gratuit. Repassez à Premium/Business pour retrouver vos avantages.',
         at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null
       };
       var ns = getNotifs(_currentUser.email); ns.unshift(expNotif); saveNotifs(_currentUser.email, ns);
       try { renderNotifs(); updateNotifBadge(); } catch(e) {}
+      try { _subRenderCurrentPlan(); } catch(e) {}
       showToast('Abonnement ' + planLabel + ' expiré — passage en Gratuit', 'err');
-    } else {
-      /* Renouvellement automatique */
-      var renewMs = profile.planBilling === 'year' ? 365 * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000;
-      profile.planRenewalDate = new Date(Date.now() + renewMs).toISOString();
-      profile.planSince       = new Date().toISOString();
-      saveUserProfile(_currentUser.email, profile);
-
-      /* Enregistre le renouvellement comme paiement */
-      var amounts = { premium: { month: '4,99 €', year: '49,99 €' }, business: { month: '14,99 €', year: '149,99 €' } };
-      var renewPay = {
-        id: 'pay_' + Date.now(), email: _currentUser.email,
-        nom: _currentUser.nom || _currentUser.email,
-        plan: plan, billing: profile.planBilling || 'month',
-        amount: amounts[plan] ? amounts[plan][profile.planBilling || 'month'] : '—',
-        date: new Date().toISOString(), status: 'completed'
-      };
-      var pays = _admGetPayments(); pays.unshift(renewPay); _admSavePayments(pays);
-
-      var newRenewalStr = new Date(profile.planRenewalDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
-      var renewNotif = {
-        id: genNotifId(), type: 'plan_renewed',
-        msg: '✅ Votre abonnement ' + planLabel + ' a été renouvelé automatiquement. Prochain renouvellement le ' + newRenewalStr + '. Un e-mail de confirmation a été envoyé à ' + _currentUser.email + '.',
-        at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null
-      };
-      var rns = getNotifs(_currentUser.email); rns.unshift(renewNotif); saveNotifs(_currentUser.email, rns);
-      try { renderNotifs(); updateNotifBadge(); } catch(e) {}
-    }
+    }).catch(function() {});
     return;
   }
 
-  /* ── Rappel 14 jours avant renouvellement ── */
+  /* ── Rappel 14 jours avant expiration ── */
   var daysLeft = Math.round((renewalDate - now) / (24 * 3600 * 1000));
   if (daysLeft <= 14) {
     /* N'envoyer le rappel qu'une seule fois par période */
     var reminderKey = 'gw_renewal_reminder_' + _currentUser.email + '_' + renewalDate.toISOString().slice(0,10);
     if (!localStorage.getItem(reminderKey)) {
       localStorage.setItem(reminderKey, '1');
-      var action = profile.planCancelled
-        ? 'votre plan Gratuit sera actif après cette date.'
-        : 'votre abonnement sera renouvelé automatiquement. Pour annuler, rendez-vous dans Abonnements avant cette date.';
+      var action = 'votre plan Gratuit sera actif après cette date. Pour continuer, repassez à ' + planLabel + ' avant cette échéance.';
       var remNotif = {
         id: 'reminder_' + Date.now(), type: 'plan_reminder',
         msg: '📧 Rappel — Votre abonnement ' + planLabel + ' arrive à échéance le ' + renewalStr +
-             ' (dans ' + daysLeft + ' jour' + (daysLeft > 1 ? 's' : '') + '). ' + action +
-             '\n\nUn e-mail a été envoyé à ' + _currentUser.email + '.',
+             ' (dans ' + daysLeft + ' jour' + (daysLeft > 1 ? 's' : '') + '). ' + action,
         at: Date.now(), time: 'À l\'instant', unread: true, fromUser: null
       };
       var remNs = getNotifs(_currentUser.email); remNs.unshift(remNotif); saveNotifs(_currentUser.email, remNs);
@@ -30013,15 +33339,17 @@ function _admSwitchTab(tab) {
   var titleEl = document.getElementById('adm-topbar-title');
   if (titleEl) titleEl.textContent = titles[tab] || tab;
 
-  /* Recruteurs : on force une lecture directe Firebase à l'ouverture de l'onglet,
-     pour éviter de dépendre du timing du listener temps réel (sync cross-appareil). */
-  if (tab === 'recruiters' && _gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/recruiter_verifs').once('value').then(function(snap) {
-      var val = snap.val();
-      if (val !== null && val !== undefined) localStorage.setItem('gw_recruiter_verifs', JSON.stringify(val));
+  /* Recruteurs : Phase 8E (portée JOB-01) — gw/recruiter_verifs_v2/{applicantUid}
+     n'est lisible par le client que pour SA PROPRE demande (auth.uid===$applicantUid) ;
+     un admin ne peut donc plus lire directement toutes les demandes via Firebase.
+     On force un appel serveur dédié (compte de service) à l'ouverture de l'onglet,
+     pour ne jamais dépendre du timing du listener temps réel (qui ne voit de toute
+     façon que la propre demande de l'admin, le cas échéant). */
+  if (tab === 'recruiters') {
+    _jobAdminFetchAllVerifsV2(function() {
       _admRender();
       try { _admUpdateNavBadges(); } catch(e){}
-    }).catch(function() { _admRender(); });
+    });
     return;
   }
 
@@ -30054,7 +33382,10 @@ function _admRefreshAll(btn) {
       ['gw/admins',               'gw_admins'],
       ['gw/mk_txns',              'gw_mk_txns'],
       ['gw/mk_listings',          'gw_mk_listings'],
-      ['gw/collab_requests',      'gw_collab_requests'],
+      /* Phase 9F (portée COLLAB-01) : gw/collab_requests (legacy) retiré —
+         fermé en lecture depuis 9D-ter-bis (.read:false), cette entrée
+         échouait systématiquement sans jamais rafraîchir quoi que ce soit
+         (le panel admin n'a d'ailleurs pas de vue dédiée gw_collab_requests). */
       ['gw/restrictions',         'gw_restrictions'],
       ['gw/restriction_appeals',  'gw_restriction_appeals'],
       ['gw/online',               null]
@@ -31794,59 +35125,52 @@ function _admBuildJobRequests() {
   return html;
 }
 
+/* Phase 8E (portée JOB-01) : ces 3 actions passent desormais par le serveur
+   (compte de service, api/admin/moderate.js) — gw/recruiter_verifs_v2/{applicantUid}
+   n'est plus modifiable en cross-user depuis le client (auth.uid===$applicantUid).
+   Plus de _jobSaveVerifs()/ecriture legacy ; la liste admin est rafraichie via
+   _jobAdminFetchAllVerifsV2() apres chaque decision, seul chemin qui peut lire
+   TOUTES les demandes. */
 function _admApproveRecruiterVerif(id) {
   var all = _jobGetVerifs();
   var v   = all.find(function(x) { return x.id === id; });
   if (!v) return;
-  v.status     = 'approved';
-  v.reviewedAt = new Date().toISOString();
-  _jobSaveVerifs(all);
 
-  if (v.logo) _jobSetRecruiterLogo(v.email, v.logo);
+  _admApi('moderate', { token: _admSessionToken, action: 'approveRecruiterVerif', targetEmail: v.email, verifId: v.id }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      showToast(res.data && res.data.error ? res.data.error : 'Erreur serveur', 'err');
+      return;
+    }
 
-  pushNotif(v.email, {
-    id:      genNotifId(),
-    type:    'system',
-    title:   '✅ Entreprise vérifiée',
-    message: '"' + v.company + '" a été vérifiée par l\'équipe Geniwork. Vous pouvez maintenant publier des offres d\'emploi.',
-    date:    new Date().toISOString(),
-    read:    false
+    if (v.logo) _jobSetRecruiterLogo(v.email, v.logo);
+
+    /* Phase 9C : la notification est desormais ecrite cote serveur, dans
+       la meme action moderate.js deja verifiee (session admin valide) —
+       plus de pushNotif() client redondant (aurait de toute facon echoue,
+       gw/notifs/{cible}.write cross-user est ferme). */
+
+    showToast('Entreprise approuvée', 'ok');
+    _jobAdminFetchAllVerifsV2(function() { _admRender(); });
   });
-
-  showToast('Entreprise approuvée', 'ok');
-  _admRender();
 }
 
-/* Retire une vérification déjà approuvée — bloque les futures publications et clôture les offres actives */
+/* Retire une vérification déjà approuvée — bloque les futures publications et clôture les offres actives (cloture faite cote serveur, voir moderate.js) */
 function _admRevokeRecruiterVerif(id) {
   var all = _jobGetVerifs();
   var v   = all.find(function(x) { return x.id === id; });
   if (!v) return;
 
-  v.status       = 'rejected';
-  v.rejectReason = 'Vérification retirée par l\'équipe Geniwork';
-  v.reviewedAt   = new Date().toISOString();
-  _jobSaveVerifs(all);
+  _admApi('moderate', { token: _admSessionToken, action: 'revokeRecruiterVerif', targetEmail: v.email, verifId: v.id }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      showToast(res.data && res.data.error ? res.data.error : 'Erreur serveur', 'err');
+      return;
+    }
 
-  /* Clôture toutes les offres actives de ce recruteur */
-  var jobs = _jobGetAll();
-  var changed = false;
-  jobs.forEach(function(j) {
-    if (j.postedBy === v.email && j.status === 'active') { j.status = 'closed'; changed = true; }
+    /* Phase 9C : notification ecrite cote serveur (voir approveRecruiterVerif ci-dessus). */
+
+    showToast('Vérification retirée', 'ok');
+    _jobAdminFetchAllVerifsV2(function() { _admRender(); });
   });
-  if (changed) _jobSaveAll(jobs);
-
-  pushNotif(v.email, {
-    id:      genNotifId(),
-    type:    'system',
-    title:   '⚠️ Vérification retirée',
-    message: 'La vérification de "' + v.company + '" a été retirée par l\'équipe Geniwork. Vos offres ont été clôturées et vous devez soumettre une nouvelle vérification pour publier à nouveau.',
-    date:    new Date().toISOString(),
-    read:    false
-  });
-
-  showToast('Vérification retirée', 'ok');
-  _admRender();
 }
 
 function _admRejectRecruiterVerif(id) {
@@ -31854,22 +35178,18 @@ function _admRejectRecruiterVerif(id) {
   var v   = all.find(function(x) { return x.id === id; });
   if (!v) return;
   var reason = prompt('Motif du refus (visible par le recruteur) :') || '';
-  v.status       = 'rejected';
-  v.reviewedAt   = new Date().toISOString();
-  v.rejectReason = reason.trim();
-  _jobSaveVerifs(all);
 
-  pushNotif(v.email, {
-    id:      genNotifId(),
-    type:    'system',
-    title:   '❌ Vérification refusée',
-    message: 'La vérification de "' + v.company + '" a été refusée' + (reason ? ' : ' + reason : '') + '. Vous pouvez soumettre une nouvelle demande.',
-    date:    new Date().toISOString(),
-    read:    false
+  _admApi('moderate', { token: _admSessionToken, action: 'rejectRecruiterVerif', targetEmail: v.email, verifId: v.id, reason: reason.trim() }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      showToast(res.data && res.data.error ? res.data.error : 'Erreur serveur', 'err');
+      return;
+    }
+
+    /* Phase 9C : notification ecrite cote serveur (voir approveRecruiterVerif ci-dessus). */
+
+    showToast('Demande refusée', 'ok');
+    _jobAdminFetchAllVerifsV2(function() { _admRender(); });
   });
-
-  showToast('Demande refusée', 'ok');
-  _admRender();
 }
 
 function _admBuildMarketplace() {
@@ -36474,6 +39794,13 @@ function _globalMsgPoll() {
 
   /* Vérifie l'inbox de groupe — crée les groupes reçus hors connexion */
   _checkGroupInbox();
+  /* Idem pour les groupes libres (GROUPS-FREE-02) — chemin parallèle */
+  _checkFreeGroupInbox();
+  /* GROUPS-FREE-05 : filet de sécurité borné (~15 s) pour les métadonnées
+     des groupes libres DÉJÀ chargés localement — _checkFreeGroupInbox()
+     ci-dessus ne découvre que les NOUVEAUX groupes (elle ignore explicitement
+     tout groupe déjà présent dans DEMO_CONVERSATIONS). */
+  _pollFreeGroupsMetaSafetyNet();
 
   /* Poll des groupes en arrière-plan (convs non ouvertes) */
   var hadGroupNew = false;
@@ -36524,11 +39851,84 @@ setInterval(function() {
    Annonces, PayPal, Ads sponsorisées
 ══════════════════════════════════════════ */
 
-/* ── Data helpers ── */
+/* ── Data helpers ──
+   Phase 7E : _mkGetListings() reste inchangee — lit toujours le
+   tableau plat depuis localStorage.gw_mk_listings. Ce que Firebase
+   contient reellement derriere ce cache a change (gw/mk_listings_v2,
+   structure par vendeur) mais aucun des ~25 lecteurs Marketplace n'a
+   besoin de le savoir. Phase 9F : _mkSaveListings() (ancien writer,
+   .set() du tableau complet gw/mk_listings) confirmé sans appelant
+   restant (son unique appelant, _mkCheckExpired(), était lui-même mort)
+   — supprimé avec lui. */
 function _mkGetListings()      { try { var r = JSON.parse(localStorage.getItem('gw_mk_listings') || '[]'); return Array.isArray(r) ? r : Object.values(r); } catch(e){ return []; } }
-function _mkSaveListings(list) { localStorage.setItem('gw_mk_listings', JSON.stringify(list)); _gwFbSet('mk_listings', list); }
 function _mkGetTxns()          { try { return JSON.parse(localStorage.getItem('gw_mk_txns') || '[]'); } catch(e){ return []; } }
 function _mkSaveTxns(list)     { localStorage.setItem('gw_mk_txns', JSON.stringify(list)); _gwFbSet('mk_txns', list); }
+
+/* ── Phase 7E — structure par vendeur gw/mk_listings_v2/{sellerUid}/{listingId} ── */
+function _mkFlattenListings(nested) {
+  var out = [];
+  if (!nested || typeof nested !== 'object') return out;
+  Object.keys(nested).forEach(function(sellerUid) {
+    var bySeller = nested[sellerUid];
+    if (!bySeller || typeof bySeller !== 'object') return;
+    Object.keys(bySeller).forEach(function(listingId) {
+      var l = bySeller[listingId];
+      if (l) out.push(l);
+    });
+  });
+  return out;
+}
+
+function _mkSellerUidSelf() {
+  return _currentUser ? _gwFbKey(_currentUser.email) : null;
+}
+
+/* ── Phase 7E — écritures ciblées gw/mk_listings_v2/{ownUid}/{listingId},
+   remplacent l'ancien _mkSaveListings() (.set() du tableau complet).
+   N'écrivent jamais que le sous-arbre du vendeur courant — modifier ou
+   supprimer l'annonce d'un tiers est désormais structurellement
+   impossible (imposé par les règles Firebase, plus seulement une garde
+   JS comme en Phase 7A). ── */
+function _mkPublishListingToFirebaseV2(listing) {
+  var uid = _mkSellerUidSelf();
+  if (!uid || !_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/mk_listings_v2/' + uid + '/' + listing.id).set(listing).catch(function(){});
+}
+
+function _mkUpdateOwnListingFieldV2(listingId, patch) {
+  var uid = _mkSellerUidSelf();
+  if (!uid || !_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/mk_listings_v2/' + uid + '/' + listingId).update(patch).catch(function(){});
+}
+
+function _mkDeleteOwnListingV2(listingId) {
+  var uid = _mkSellerUidSelf();
+  if (!uid || !_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/mk_listings_v2/' + uid + '/' + listingId).remove().catch(function(){});
+}
+
+/* Listener dedie (ne modifie pas le _listen() generique, partage par
+   ~14 autres noeuds) — aplatit gw/mk_listings_v2 avant de le stocker
+   dans localStorage.gw_mk_listings, exactement au format que
+   _mkGetListings() attend deja. */
+function _mkListenListingsV2() {
+  _gwFbDB.ref('gw/mk_listings_v2').on('value', function(snap) {
+    if (_gwFbSkip) return;
+    var val = snap.val();
+    if (val === null || val === undefined) return;
+    _gwFbSkip = true;
+    var flat = _mkFlattenListings(val);
+    /* Phase SYNC-OPTIONS-03 : écriture protégée, voir _listen() plus haut. */
+    try { localStorage.setItem('gw_mk_listings', JSON.stringify(flat)); }
+    catch(e) { _gwLog('LS_QUOTA_EXCEEDED', { key: 'gw_mk_listings', status: 'MK_CACHE_WRITE_FAILED', error: e && e.name }); }
+    try { _mkCheckExpiredV2(); }             catch(e){}
+    try { renderMarketplaceUserServices(); } catch(e){}
+    try { _mkRenderSystemListings(); }       catch(e){}
+    if (document.getElementById('mk-all-listings-wrap')) { try { _mkRefreshAllListings(); } catch(e){} }
+    try { _mkRenderTxTabs(); } catch(e){}
+    _gwFbSkip = false;
+  });
+}
 
 function _mkGetUserPlanKey(email) {
   if (!email) return 'free';
@@ -36544,6 +39944,25 @@ function _mkCanPublish(email) {
   return mine.length < limits.maxListings;
 }
 
+/* Phase 7D-BIS : verification SERVEUR du quota maxListings
+   (api/marketplace/check-publish-limit.js) — _mkCanPublish() ci-dessus
+   reste un pre-check instantane (cache local, UX uniquement, plus
+   jamais considere comme la preuve finale). En cas d'echec
+   reseau/session, retourne null (fail-open vers le comportement local
+   deja existant, pour ne jamais bloquer une publication a cause d'une
+   panne non liee au quota lui-meme). */
+function _mkCheckPublishLimitServer() {
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) return Promise.resolve(null);
+  return fetch('/api/marketplace/check-publish-limit', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ authRefreshToken: session.authRefresh })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    return (d && d.ok) ? d : null;
+  }).catch(function() { return null; });
+}
+
 function _mkDistanceKm(lat1, lng1, lat2, lng2) {
   var R = 6371;
   var dLat = (lat2-lat1)*Math.PI/180;
@@ -36552,21 +39971,43 @@ function _mkDistanceKm(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-function _mkCheckExpired() {
-  var listings = _mkGetListings();
-  var changed  = false;
+/* Phase 9F : _mkCheckExpired() (ancien writer .set() du tableau complet
+   gw/mk_listings) confirmé sans appelant restant — supprimé, avec son
+   unique appelée _mkSaveListings(). Remplacé par _mkCheckExpiredV2()
+   ci-dessous. */
+
+/* Phase 7E : remplace _mkCheckExpired() — sous gw/mk_listings_v2, seul
+   le propriétaire peut écrire sous son propre sellerUid (Firebase
+   l'impose désormais structurellement, plus seulement une convention
+   client). Ne traite donc que les annonces de _currentUser, avec un
+   update() ciblé sur le champ status uniquement — jamais un .set() du
+   nœud global. expiresAt reste la source de vérité temporelle réelle
+   (immuable après création, cf. règles 7D) ; status ne fait que
+   refléter cet état pour l'affichage — un lecteur prudent devrait donc
+   toujours traiter expiresAt comme fiable même si status n'a pas
+   encore été mis à jour par le propriétaire (cf. limitation documentée
+   en 7D §8/7E §10 : un vendeur non reconnecté ne fait pas passer ses
+   annonces à 'expired'). Aucun cron introduit cette phase. */
+function _mkCheckExpiredV2() {
+  if (!_currentUser || !_gwFbReady || !_gwFbDB) return;
+  var uid = _mkSellerUidSelf();
+  if (!uid) return;
   var now = Date.now();
-  listings.forEach(function(l) {
-    if (l.status === 'active' && l.expiresAt && new Date(l.expiresAt).getTime() < now) {
-      l.status  = 'expired';
-      changed   = true;
-    }
-  });
-  if (changed) _mkSaveListings(listings);
+  _mkGetListings()
+    .filter(function(l){ return l.sellerEmail === _currentUser.email; })
+    .forEach(function(l) {
+      if (l.status === 'active' && l.expiresAt && l.expiresAt < now) {
+        _gwFbDB.ref('gw/mk_listings_v2/' + uid + '/' + l.id + '/status').set('expired').catch(function(){});
+      }
+    });
 }
 
-/* ── Créer une annonce ── */
-function _mkOpenCreate() {
+/* ── Créer une annonce ──
+   Phase 7D-BIS : le pre-check local (_mkCanPublish, cache client) reste
+   pour l'instantaneite UX, mais n'ouvre plus le formulaire seul — le
+   serveur (check-publish-limit.js, source Firebase reelle) tranche en
+   dernier ressort avant que le formulaire ne s'affiche. */
+async function _mkOpenCreate() {
   if (!_currentUser) { showToast('Connectez-vous pour vendre', 'err'); return; }
   if (!_mkCanPublish(_currentUser.email)) {
     var _mkPlan = _mkGetUserPlanKey(_currentUser.email);
@@ -36574,6 +40015,16 @@ function _mkOpenCreate() {
     _showPlanLimitModal(
       'Limite d\'annonces atteinte',
       'Le plan Gratuit autorise ' + _mkMax + ' annonce(s) active(s) maximum dans le marketplace. Passez Premium pour publier sans limite.',
+      'mk_listings'
+    );
+    return;
+  }
+  var _mkServerCheck = await _mkCheckPublishLimitServer();
+  if (_mkServerCheck && _mkServerCheck.allowed === false) {
+    var _mkPlanLabels = { free: 'Gratuit', premium: 'Premium', business: 'Business' };
+    _showPlanLimitModal(
+      'Limite d\'annonces atteinte',
+      'Le plan ' + (_mkPlanLabels[_mkServerCheck.plan] || _mkServerCheck.plan) + ' autorise ' + _mkServerCheck.maxListings + ' annonce(s) active(s) maximum dans le marketplace. Passez Premium pour publier sans limite.',
       'mk_listings'
     );
     return;
@@ -37017,7 +40468,12 @@ function _mkPublishListing() {
   var plan       = _mkGetUserPlanKey(_currentUser.email);
   var limits     = _MK_PLAN_LIMITS[plan] || _MK_PLAN_LIMITS.free;
   var daysExp    = limits.durationDays;
-  var expiresAt  = new Date(Date.now() + daysExp*24*3600*1000).toISOString();
+  /* Phase 7E : expiresAt en epoch ms (nombre), pas ISO string — les
+     regles gw/mk_listings_v2 comparent ce champ a `now` numeriquement
+     (impossible fiablement avec une chaine, demontre en Phase 7D).
+     new Date(nombre) reste identique a new Date(chaine ISO) pour tout
+     affichage existant, aucun lecteur ne casse. */
+  var expiresAt  = Date.now() + daysExp*24*3600*1000;
   var profile    = loadUserProfile(_currentUser.email) || {};
 
   var listing = {
@@ -37049,7 +40505,8 @@ function _mkPublishListing() {
 
   var listings = _mkGetListings();
   listings.unshift(listing);
-  _mkSaveListings(listings);
+  localStorage.setItem('gw_mk_listings', JSON.stringify(listings)); /* affichage immediat */
+  _mkPublishListingToFirebaseV2(listing); /* Phase 7E : ecriture ciblee gw/mk_listings_v2/{ownUid}/{id}, jamais le tableau legacy */
 
   var bg   = document.getElementById('mk-create-bg');
   var card = document.getElementById('mk-create-card');
@@ -37112,7 +40569,6 @@ function _mkPublishEbook() {
       isFree:        !isPaid,
       currency:      isPaid ? currency : 'EUR',
       coverImage:    _mkEbookCover || '',
-      ebookUrl:      ebookUrl,
       images:        _mkEbookCover ? [_mkEbookCover] : [],
       location:      { city: city || '', country: country || '' },
       radius:        9999,
@@ -37123,7 +40579,8 @@ function _mkPublishEbook() {
       sellerPlan:    plan,
       status:        'active',
       createdAt:     new Date().toISOString(),
-      expiresAt:     new Date(Date.now() + (limits.durationDays||30)*24*3600*1000).toISOString(),
+      /* Phase 7E : epoch ms (nombre), voir _mkPublishListing() */
+      expiresAt:     Date.now() + (limits.durationDays||30)*24*3600*1000,
       views:         0, downloads: 0,
       isPriority:    plan === 'business',
       canAd:         limits.canAd
@@ -37132,13 +40589,37 @@ function _mkPublishEbook() {
     try {
       var listings = _mkGetListings();
       listings.unshift(listing);
-      _mkSaveListings(listings);
+      localStorage.setItem('gw_mk_listings', JSON.stringify(listings)); /* affichage immediat */
+      _mkPublishListingToFirebaseV2(listing); /* Phase 7E : ecriture ciblee gw/mk_listings_v2/{ownUid}/{id} */
     } catch(saveErr) {
       console.error('[Ebook save]', saveErr);
       showToast('Erreur sauvegarde — espace local insuffisant.', 'err');
       _resetPubBtn();
       return;
     }
+
+    /* Phase MK-EBK-SEC-01 : ebookUrl n'est plus jamais écrit sur le
+       listing public (gw/mk_listings_v2, .read:true) — il est enregistré
+       ici séparément, côté serveur, dans un chemin sans aucune règle
+       d'accès (refus par défaut pour tout client), résolu uniquement
+       via /api/marketplace/ebook-download après vérification d'un achat
+       réel. Best-effort : la publication elle-même est déjà faite,
+       une erreur ici n'empêche pas l'annonce d'exister (juste son
+       fichier restera indisponible tant que le vendeur ne réessaie pas). */
+    try {
+      var _ebRegSession = _gwLoadSession();
+      if (_ebRegSession && _ebRegSession.authRefresh) {
+        fetch('/api/marketplace/ebook-register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ authRefreshToken: _ebRegSession.authRefresh, listingId: listing.id, ebookUrl: ebookUrl })
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          if (!d.ok) { showToast('Ebook publié, mais erreur de sécurisation du fichier — contactez le support.', 'err'); }
+        }).catch(function() {
+          showToast('Ebook publié, mais erreur de sécurisation du fichier — contactez le support.', 'err');
+        });
+      }
+    } catch(e) {}
 
     _mkEbookFile = null; _mkEbookCover = null; _mkPickedImages = [];
 
@@ -37213,7 +40694,15 @@ function _mkOpenDetail(listingId) {
         var newViews = res.snapshot ? res.snapshot.val() : null;
         if (newViews !== null) {
           listing.views = newViews;
-          _mkSaveListings(listings);
+          /* Phase 7E : gw/mk_listing_stats reste le compteur canonique
+             (ouvert, non affecté) ; la copie miroir sur gw/mk_listings_v2
+             n'est écriture-possible que par le vendeur lui-même — la
+             quasi-totalité des vues venant d'AUTRES utilisateurs, cette
+             copie reste généralement en retard jusqu'à la prochaine
+             connexion du vendeur (limitation mineure, non sécuritaire,
+             même principe que _mkEbookCountDownload()). */
+          localStorage.setItem('gw_mk_listings', JSON.stringify(listings));
+          if (_mkIsOwnListing(listing)) { _mkUpdateOwnListingFieldV2(listing.id, { views: newViews }); }
           /* Met à jour l'affichage si la fiche est ouverte */
           var el = document.getElementById('mk-stat-views-' + listing.id);
           if (el) el.textContent = newViews + ' vue(s)';
@@ -37221,7 +40710,7 @@ function _mkOpenDetail(listingId) {
       }).catch(function(){});
     } else {
       listing.views = (listing.views || 0) + 1;
-      _mkSaveListings(listings);
+      localStorage.setItem('gw_mk_listings', JSON.stringify(listings));
     }
   }
   /* Charger les stats temps réel depuis Firebase avant d'afficher */
@@ -37405,16 +40894,14 @@ function _mkOpenEbookDetail(listing) {
   if (actionWrap && !isMine) {
     if (isFree) {
       actionWrap.innerHTML =
-        '<a href="'+escHtml(listing.ebookUrl)+'" download target="_blank" '+
-        'onclick="_mkEbookCountDownload(\''+listing.id+'\')" '+
-        'style="display:block;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;margin-bottom:8px">'+
-        '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger gratuitement</a>';
+        '<button onclick="_mkDownloadEbook(\''+listing.id+'\')" '+
+        'style="display:block;width:100%;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;margin-bottom:8px">'+
+        '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger gratuitement</button>';
     } else if (hasBought) {
       actionWrap.innerHTML =
-        '<a href="'+escHtml(listing.ebookUrl)+'" download target="_blank" '+
-        'onclick="_mkEbookCountDownload(\''+listing.id+'\')" '+
-        'style="display:block;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;margin-bottom:8px">'+
-        '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger (déjà acheté)</a>';
+        '<button onclick="_mkDownloadEbook(\''+listing.id+'\')" '+
+        'style="display:block;width:100%;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;margin-bottom:8px">'+
+        '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger (déjà acheté)</button>';
     } else {
       /* Ebook payant non acheté — afficher immédiatement l'UI selon paypalEnabled */
       var _ebCfg = _admGetPlansConfig ? _admGetPlansConfig() : {};
@@ -37428,10 +40915,9 @@ function _mkOpenEbookDetail(listing) {
             '<div style="font-size:11px;color:#4ADE80">Vous avez utilisé votre accès unique. Contactez le vendeur si besoin.</div>'+
           '</div>';
         }
-        return '<a href="'+escHtml(listing.ebookUrl)+'" download target="_blank" '+
-          'onclick="_mkEbookCountDownload(\''+listing.id+'\');_mkMarkEbookDownloaded(\''+listing.id+'\')" '+
-          'style="display:block;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;margin-bottom:8px">'+
-          '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger mon ebook</a>'+
+        return '<button onclick="_mkDownloadEbook(\''+listing.id+'\');_mkMarkEbookDownloaded(\''+listing.id+'\')" '+
+          'style="display:block;width:100%;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;margin-bottom:8px">'+
+          '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger mon ebook</button>'+
           '<div style="font-size:11px;color:#94A3B8;text-align:center"><i class="fas fa-info-circle" style="margin-right:3px"></i>Accès unique accordé par le vendeur</div>';
       }
 
@@ -37468,6 +40954,39 @@ function _mkOpenEbookDetail(listing) {
       }
     }
   }
+}
+
+/* Phase MK-EBK-SEC-01 : résout et déclenche le téléchargement d'un ebook
+   via le serveur (authRefreshToken + vérification gw/ebook_access côté
+   service-account) — remplace tout accès direct à listing.ebookUrl,
+   qui n'existe plus jamais sur le listing public (gw/mk_listings_v2,
+   .read:true). */
+function _mkDownloadEbook(listingId) {
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) {
+    showToast('Session expirée, reconnectez-vous', 'err');
+    return;
+  }
+  _mkEbookCountDownload(listingId);
+  fetch('/api/marketplace/ebook-download', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: session.authRefresh, listingId: listingId })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok || !d.url) {
+      showToast(d.error || 'Téléchargement impossible', 'err');
+      return;
+    }
+    var a = document.createElement('a');
+    a.href = d.url;
+    a.download = '';
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }).catch(function() {
+    showToast('Erreur réseau — réessayez.', 'err');
+  });
 }
 
 function _mkCheckEbookAccess(listingId, callback) {
@@ -37514,6 +41033,12 @@ function _mkGrantEbookAccessConfirm(listingId) {
   var buyerEmail = (input.value || '').trim().toLowerCase();
   if (!buyerEmail || buyerEmail.indexOf('@') < 0) { showToast('Entrez un email valide', 'err'); input.focus(); return; }
   if (!_gwFbDB) { showToast('Connexion Firebase indisponible', 'err'); return; }
+  /* Phase 7A : garde-fou cote client uniquement — gw/ebook_access reste en
+     ecriture "auth != null" sans verification serveur que l'appelant est
+     bien le vendeur de listingId. Ne protege pas contre un appel direct
+     au SDK/REST Firebase hors de cette fonction. */
+  var _grantListing = (_mkGetListings() || []).find(function(x){ return x.id === listingId; });
+  if (!_mkIsOwnListing(_grantListing)) { showToast('Vous n\'êtes pas le vendeur de cette annonce', 'err'); return; }
 
   var btn = document.querySelector('[onclick="_mkGrantEbookAccessConfirm(\''+listingId+'\')"]');
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Envoi…'; }
@@ -37527,6 +41052,8 @@ function _mkGrantEbookAccessConfirm(listingId) {
     if (form) form.remove();
     pushNotif(buyerEmail, {
       id: genNotifId(), type: 'system',
+      eventType: 'marketplace_ebook_access', /* Phase 9C : le serveur revérifie gw/ebook_access + propriété réelle de l'annonce */
+      listingId: listingId,
       title: '📖 Téléchargement autorisé !',
       message: 'Le vendeur a autorisé votre téléchargement. Ouvrez la fiche ebook pour télécharger votre fichier (accès unique).',
       date: new Date().toISOString(), read: false
@@ -37549,14 +41076,13 @@ function _mkContactEbookSeller(sellerEmail, sellerNom, listingTitle, listingId) 
     var profile  = loadUserProfile(sellerEmail);
     var hasBadge = profile && (profile.badgeType === 'verified' || profile.badgeType === 'premium');
     conv = {
-      id: _newConvId(), name: sellerNom, email: sellerEmail,
+      id: _dmConversationId(_currentUser.email, sellerEmail), name: sellerNom, email: sellerEmail,  /* DM v2 */
       role: 'Vendeur Geniwork', verified: hasBadge, online: false,
       avatar: { type: 'color', color: '#6366F1', initials: getInitials(sellerNom) },
       at: Date.now(), time: 'À l\'instant',
       lastMsg: 'Démarrez la conversation', unread: 0, archived: false, messages: []
     };
     DEMO_CONVERSATIONS.unshift(conv);
-    _saveDMConvList();
   }
 
   /* Message auto : carte ebook + texte d'introduction */
@@ -37565,7 +41091,10 @@ function _mkContactEbookSeller(sellerEmail, sellerNom, listingTitle, listingId) 
   var alreadySent = conv.messages.some(function(m) { return m.ebookId === listingId && m.from === _currentUser.email; });
 
   if (!alreadySent) {
-    /* Carte ebook (image couverture + détails) */
+    /* Carte ebook — payload limité aux champs réellement lus par le renderer (cf. audit) :
+       ni listingImg (base64, potentiellement volumineux — le renderer a déjà un repli
+       graphique), ni ebookId/listingType (jamais lus). */
+    var cardText = '📖 ' + listingTitle + (listing ? ' — ' + _gwFmtPrice(listing.price, listing.currency) : '');
     var cardMsg = {
       id: _ts, from: _currentUser.email, type: 'listing_card',
       ebookId: listingId,
@@ -37576,29 +41105,35 @@ function _mkContactEbookSeller(sellerEmail, sellerNom, listingTitle, listingId) 
       listingImg:      listing ? (listing.coverImage || (listing.images && listing.images[0]) || null) : null,
       listingCat:      listing ? listing.category : '',
       listingType:     'ebook',
-      text: '📖 ' + listingTitle + (listing ? ' — ' + _gwFmtPrice(listing.price, listing.currency) : ''),
+      text: cardText,
       time: _nowTime(), at: _ts
     };
     /* Message texte pré-rempli de l'acheteur */
+    var autoText = 'Bonjour, je suis intéressé(e) par votre ebook « ' + listingTitle + ' »' +
+          (listing ? ' vendu à ' + _gwFmtPrice(listing.price, listing.currency) : '') +
+          '. Comment procéder pour finaliser l\'achat ?';
     var autoMsg = {
       id: _ts + 1, from: _currentUser.email, type: 'text',
-      text: 'Bonjour, je suis intéressé(e) par votre ebook « ' + listingTitle + ' »' +
-            (listing ? ' vendu à ' + _gwFmtPrice(listing.price, listing.currency) : '') +
-            '. Comment procéder pour finaliser l\'achat ?',
+      text: autoText,
       time: _nowTime(), at: _ts + 1
     };
     conv.messages.push(cardMsg);
     conv.messages.push(autoMsg);
     conv.lastMsg = autoMsg.text;
     conv.lastAt  = _ts + 1;
-    /* Écriture Firebase → carte + message visibles côté vendeur */
-    _dmWriteMsg(conv, cardMsg);
-    _dmWriteMsg(conv, autoMsg);
-    _writeDMInbox(sellerEmail, _currentUser.email, _currentUser.nom || _currentUser.email,
-                  _currentUser.role || 'Membre Geniwork', autoMsg.text);
+    /* DM v2 — deux écritures séquentielles : carte puis texte, dans le même ordre qu'avant */
+    _dmSendMessage(conv.id, sellerEmail, cardText, undefined, 'listing_card', {
+      listingId: listingId, listingTitle: listingTitle,
+      listingPrice: listing ? listing.price : 0,
+      listingCurrency: listing ? (listing.currency || 'EUR') : 'EUR',
+      listingCat: listing ? listing.category : ''
+    });
+    _dmSendMessage(conv.id, sellerEmail, autoText);
     /* Notif push au vendeur */
     pushNotif(sellerEmail, {
       id: genNotifId(), type: 'system',
+      eventType: 'marketplace_contact', /* Phase 9C : le serveur revérifie que sellerEmail est bien le vendeur réel de listingId */
+      listingId: listingId,
       title: '📖 Demande d\'achat ebook',
       message: (_currentUser.nom || _currentUser.email) + ' est intéressé(e) par « ' + listingTitle + ' ».',
       date: new Date().toISOString(), read: false
@@ -37625,6 +41160,9 @@ function _mkEbookCountDownload(listingId) {
   sessionStorage.setItem(_dKey, '1');
 
   if (_gwFbDB) {
+    /* gw/mk_listing_stats reste ouvert (hors périmètre 7C/7D/7E) — le
+       compteur canonique s'incrémente toujours, quel que soit l'appelant
+       (le plus souvent l'acheteur, pas le vendeur). */
     _gwFbDB.ref('gw/mk_listing_stats/' + listingId + '/downloads').transaction(function(cur) {
       return (cur || 0) + 1;
     }).then(function(res) {
@@ -37632,7 +41170,18 @@ function _mkEbookCountDownload(listingId) {
       if (newDl !== null) {
         var listings = _mkGetListings();
         var l = listings.find(function(x){ return x.id === listingId; });
-        if (l) { l.downloads = newDl; _mkSaveListings(listings); }
+        if (l) {
+          l.downloads = newDl;
+          localStorage.setItem('gw_mk_listings', JSON.stringify(listings)); /* affichage local, tout appelant */
+          /* Phase 7E : la copie miroir sur gw/mk_listings_v2 n'est
+             écriture-possible que par le VENDEUR lui-même (structurel,
+             plus une convention) — un acheteur qui télécharge ne peut
+             plus la synchroniser ; le compteur canonique ci-dessus reste
+             correct dans tous les cas, seul cet affichage miroir peut
+             rester temporairement en retard jusqu'à la prochaine
+             connexion du vendeur (limitation mineure, non sécuritaire). */
+          if (_mkIsOwnListing(l)) { _mkUpdateOwnListingFieldV2(listingId, { downloads: newDl }); }
+        }
         var el = document.getElementById('mk-stat-dl-' + listingId);
         if (el) el.textContent = newDl + ' téléchargement(s)';
       }
@@ -37640,7 +41189,7 @@ function _mkEbookCountDownload(listingId) {
   } else {
     var listings = _mkGetListings();
     var l = listings.find(function(x){ return x.id === listingId; });
-    if (l) { l.downloads = (l.downloads || 0) + 1; _mkSaveListings(listings); }
+    if (l) { l.downloads = (l.downloads || 0) + 1; localStorage.setItem('gw_mk_listings', JSON.stringify(listings)); }
   }
 }
 
@@ -37673,49 +41222,62 @@ function _mkLoadEbookPayPal(listing) {
   }
 }
 
+/* Phase 7B : createOrder/capture ne sont plus construits/exécutés côté
+   client — montant, devise, commission, vendeur, écriture de la
+   transaction ET octroi de gw/ebook_access viennent désormais du serveur
+   (/api/marketplace/create-order puis capture-order, déjà utilisés par
+   _mkRenderPayPalBtn depuis la Phase 6B-6). Le client ne transmet que
+   listingId ; listing.price/listing.sellerPaypal ne servent plus qu'à
+   l'affichage local, jamais à l'autorité du paiement. Le client n'écrit
+   plus jamais gw/mk_txns ni gw/ebook_access lui-même. */
 function _mkRenderEbookPayPalBtn(listing) {
   var wrap = document.getElementById('mk-ebook-paypal-wrap');
   if (!wrap || typeof paypal === 'undefined') return;
   wrap.innerHTML = '<div id="paypal-ebook-container"></div>';
-  var commission   = parseFloat((listing.price * _GW_COMMISSION_RATE).toFixed(2));
-  var sellerAmount = parseFloat((listing.price - commission).toFixed(2));
+
   paypal.Buttons({
     createOrder: function(data, actions) {
-      return _gwConvertToEUR(listing.price, listing.currency).then(function(eurAmount) {
-        return actions.order.create({
-          purchase_units: [{ description: listing.title,
-            amount: { value: eurAmount.toFixed(2), currency_code: 'EUR' },
-            payee: { email_address: listing.sellerPaypal }
-          }]
-        });
+      var session = _gwLoadSession();
+      if (!session || !session.authRefresh) {
+        showToast('Session expirée, reconnectez-vous', 'err');
+        return Promise.reject(new Error('Session expirée'));
+      }
+      return fetch('/api/marketplace/create-order', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ authRefreshToken: session.authRefresh, listingId: listing.id })
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (!d.ok) {
+          showToast(d.error || 'Impossible de créer la commande', 'err');
+          throw new Error(d.error || 'create-order failed');
+        }
+        return d.orderID;
       });
     },
     onApprove: function(data, actions) {
-      return actions.order.capture().then(function(details) {
-        var txns = _mkGetTxns();
-        txns.unshift({
-          id: 'txn_'+Date.now(), listingId: listing.id, listingTitle: listing.title,
-          listingType: 'ebook', ebookUrl: listing.ebookUrl,
-          amount: listing.price, currency: listing.currency, commission: commission, sellerNet: sellerAmount,
-          sellerEmail: listing.sellerEmail,
-          buyerEmail:  _currentUser ? _currentUser.email : '',
-          paypalOrderId: details.id, status: 'completed', date: new Date().toISOString()
-        });
-        _mkSaveTxns(txns);
+      var session = _gwLoadSession();
+      if (!session || !session.authRefresh) {
+        showToast('Session expirée, reconnectez-vous', 'err');
+        return Promise.resolve();
+      }
+      return fetch('/api/marketplace/capture-order', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ authRefreshToken: session.authRefresh, orderID: data.orderID })
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (!d.ok) {
+          showToast(d.error || 'Paiement non confirmé — contactez le support', 'err');
+          return;
+        }
         _mkEbookCountDownload(listing.id);
-        /* Notif vendeur */
-        pushNotif(listing.sellerEmail, {
-          id: genNotifId(), type:'system',
-          title: '📖 Ebook vendu !',
-          message: (_currentUser?_currentUser.nom:'Quelqu\'un')+' a acheté "'+listing.title+'" pour '+listing.price+'€. Vous recevrez '+sellerAmount+'€ (1% commission Geniwork).',
-          date: new Date().toISOString(), read: false
-        });
-        /* Fermer et afficher bouton téléchargement */
+        /* Notification vendeur volontairement hors périmètre de cette
+           phase (même exclusion que _mkRenderPayPalBtn depuis 6B-6) —
+           branchement /api/notify différé, voir rapport Phase 7B §6. */
         var wrap2 = document.getElementById('mk-ebook-action-wrap');
         if (wrap2) {
-          wrap2.innerHTML = '<a href="'+escHtml(listing.ebookUrl)+'" download target="_blank" '+
-            'style="display:block;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;margin-bottom:8px">'+
-            '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger votre ebook ✓</a>'+
+          wrap2.innerHTML = '<button onclick="_mkDownloadEbook(\''+listing.id+'\')" '+
+            'style="display:block;width:100%;padding:14px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;border:none;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;margin-bottom:8px">'+
+            '<i class="fas fa-download" style="margin-right:6px"></i>Télécharger votre ebook ✓</button>'+
             '<div style="font-size:11px;color:#10B981;text-align:center;font-weight:600"><i class="fas fa-check-circle" style="margin-right:4px"></i>Paiement confirmé ! Merci.</div>';
         }
         showToast('Achat réussi ! Téléchargez votre ebook ✓', 'ok');
@@ -37756,56 +41318,76 @@ function _mkLoadPayPal(listing) {
   }
 }
 
+/* Phase 6B-6 : createOrder/capture ne sont plus construits/exécutés
+   côté client — montant, devise, commission, vendeur et écriture de
+   la transaction viennent désormais du serveur (/api/marketplace/
+   create-order puis capture-order, Phases 6B-2/6B-4/6B-5). Le client
+   ne transmet plus que "listingId" ; il ne fait plus jamais confiance
+   à listing.price/listing.sellerPaypal pour construire le paiement
+   (ces valeurs ne servent plus qu'à l'affichage local, comme avant
+   la migration, jamais à l'autorité du paiement).
+
+   ⚠️ IMPORTANT — NE PAS DÉPLOYER cette fonction tant que
+   process.env.PAYPAL_CLIENT_SECRET n'est pas configuré ET que
+   REAL_MODE_ENABLED (api/marketplace/_lib/paypal.js) n'a pas été
+   explicitement mis à true dans une phase d'implémentation validée.
+   Tant que le backend reste en MODE MOCK, createOrder() renvoie un
+   orderID fictif ("MOCK_ORDER_...") que PayPal ne reconnaît pas :
+   déployer cette version romprait le bouton d'achat réel (PayPal
+   affichera une erreur au moment de l'ouverture du paiement) pour
+   tous les acheteurs — voir rapport Phase 6B-6. */
 function _mkRenderPayPalBtn(listing) {
   var wrap = document.getElementById('mk-paypal-btn-wrap');
   if (!wrap || typeof paypal === 'undefined') return;
   wrap.innerHTML = '<div id="paypal-button-container" style="margin-bottom:4px"></div>'+
     '<div style="font-size:10.5px;color:#94A3B8;text-align:center"><i class="fas fa-lock" style="margin-right:3px"></i>Paiement sécurisé PayPal · 1% de commission Geniwork</div>';
 
-  var commission   = parseFloat((listing.price * _GW_COMMISSION_RATE).toFixed(2));
-  var sellerAmount = parseFloat((listing.price - commission).toFixed(2));
+  var _lastOrderAmount = null; /* renseigné par create-order, réutilisé pour l'affichage après capture */
 
   paypal.Buttons({
     createOrder: function(data, actions) {
-      return _gwConvertToEUR(listing.price, listing.currency).then(function(eurAmount) {
-        return actions.order.create({
-          purchase_units: [{
-            description: listing.title,
-            amount: { value: eurAmount.toFixed(2), currency_code: 'EUR' },
-            payee: { email_address: listing.sellerPaypal }
-          }]
-        });
+      var session = _gwLoadSession();
+      if (!session || !session.authRefresh) {
+        showToast('Session expirée, reconnectez-vous', 'err');
+        return Promise.reject(new Error('Session expirée'));
+      }
+      return fetch('/api/marketplace/create-order', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ authRefreshToken: session.authRefresh, listingId: listing.id })
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (!d.ok) {
+          showToast(d.error || 'Impossible de créer la commande', 'err');
+          throw new Error(d.error || 'create-order failed');
+        }
+        _lastOrderAmount = { amount: d.amount, currency: d.currency };
+        return d.orderID;
       });
     },
     onApprove: function(data, actions) {
-      return actions.order.capture().then(function(details) {
-        var txns = _mkGetTxns();
-        txns.unshift({
-          id:            'txn_'+Date.now(),
-          listingId:     listing.id,
-          listingTitle:  listing.title,
-          amount:        listing.price,
-          currency:      listing.currency,
-          commission:    commission,
-          sellerNet:     sellerAmount,
-          sellerEmail:   listing.sellerEmail,
-          buyerEmail:    _currentUser ? _currentUser.email : '',
-          paypalOrderId: details.id,
-          status:        'completed',
-          date:          new Date().toISOString()
-        });
-        _mkSaveTxns(txns);
-        pushNotif(listing.sellerEmail, {
-          id: genNotifId(), type:'system',
-          title: '💰 Vente réalisée !',
-          message: _currentUser.nom+' a acheté "'+listing.title+'" pour '+listing.price+'€.\nVous recevrez '+sellerAmount+'€ (après 1% de commission Geniwork).',
-          date: new Date().toISOString(), read: false
-        });
+      var session = _gwLoadSession();
+      if (!session || !session.authRefresh) {
+        showToast('Session expirée, reconnectez-vous', 'err');
+        return Promise.resolve();
+      }
+      return fetch('/api/marketplace/capture-order', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ authRefreshToken: session.authRefresh, orderID: data.orderID })
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (!d.ok) {
+          showToast(d.error || 'Paiement non confirmé — contactez le support', 'err');
+          return;
+        }
         var bg   = document.getElementById('mk-detail-bg');
         var card = document.getElementById('mk-detail-card');
         if (bg)   bg.remove();
         if (card) card.remove();
-        showToast('Paiement réussi ✓ Le vendeur a été notifié !', 'ok');
+        /* Phase 6B-6 : notification vendeur volontairement hors périmètre
+           de cette phase (branchement /api/notify différé, voir 6B-2 §10) —
+           le vendeur n'est donc pas notifié automatiquement pour l'instant. */
+        var _amountLabel = _lastOrderAmount ? ' (' + _lastOrderAmount.amount.toFixed(2) + ' ' + _lastOrderAmount.currency + ')' : '';
+        showToast('Paiement réussi ✓' + _amountLabel, 'ok');
       });
     },
     onError: function(err) {
@@ -37824,6 +41406,8 @@ function _mkSendOffer() {
   if (isNaN(offer) || offer <= 0) { showToast('Montant invalide', 'err'); return; }
   pushNotif(listing.sellerEmail, {
     id: genNotifId(), type:'system',
+    eventType: 'marketplace_contact', /* Phase 9C : le serveur revérifie que listing.sellerEmail est bien le vendeur réel de listing.id */
+    listingId: listing.id,
     title: '💬 Nouvelle offre reçue',
     message: (_currentUser?_currentUser.nom:'Quelqu\'un')+' propose '+offer+'€ pour "'+listing.title+'" (prix : '+listing.price+'€).\n\nContactez-le pour conclure.',
     date: new Date().toISOString(), read: false
@@ -37859,7 +41443,7 @@ function _mkContactSeller(email, listingId) {
     conv = existing;
   } else {
     conv = {
-      id:       _newConvId(),
+      id:       _dmConversationId(_currentUser.email, email),  /* DM v2 */
       name:     sellerNom,
       email:    email,
       role:     profile.domain || 'Membre Geniwork',
@@ -37873,13 +41457,13 @@ function _mkContactSeller(email, listingId) {
       messages: []
     };
     DEMO_CONVERSATIONS.unshift(conv);
-    _saveDMConvList();
   }
 
   /* Injecter le message carte-annonce si une annonce est liée */
   if (listing) {
     var now = new Date();
     var timeStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2,'0');
+    var cardText = '📦 ' + listing.title + ' — ' + _gwFmtPrice(listing.price, listing.currency);
     var cardMsg = {
       id:        Date.now(),
       from:      _currentUser.email,
@@ -37893,18 +41477,20 @@ function _mkContactSeller(email, listingId) {
       listingImg:      listing.images && listing.images.length ? listing.images[0] : null,
       listingCat:      listing.category,
       listingType:     listing.type,
-      text:         '📦 ' + listing.title + ' — ' + _gwFmtPrice(listing.price, listing.currency)
+      text:         cardText
     };
     conv.messages.push(cardMsg);
     conv.lastMsg = '📦 ' + listing.title;
     conv.lastAt  = Date.now();
-    /* Écriture Firebase → carte visible dans le chat + notification inbox vendeur */
-    _dmWriteMsg(conv, cardMsg);
-  } else {
-    /* Annonce introuvable localement — notifier quand même le vendeur */
-    _writeDMInbox(email, _currentUser.email, _currentUser.nom || _currentUser.email,
-                  _currentUser.role || 'Membre Geniwork', 'Nouveau message');
+    /* DM v2 — payload limité aux champs réellement lus par le renderer (pas listingImg, cf. audit) */
+    _dmSendMessage(conv.id, email, cardText, undefined, 'listing_card', {
+      listingId: listing.id, listingTitle: listing.title,
+      listingPrice: listing.price, listingCurrency: listing.currency || 'EUR',
+      listingCat: listing.category
+    });
   }
+  /* Annonce introuvable localement : plus de notification legacy gw/inboxes — aucun
+     message réel n'était composé dans ce cas (rien à transporter vers DM v2). */
 
   /* Aller sur Messages et ouvrir le chat */
   var msgsBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
@@ -37913,11 +41499,24 @@ function _mkContactSeller(email, listingId) {
   setTimeout(function() { openChat(conv.id); }, 220);
 }
 
+/* Phase 7A : garde-fou cote client uniquement — gw/mk_listings restant en
+   ecriture "auth != null" sans decoupage par vendeur (tableau plat, .set()
+   integral a chaque sauvegarde), cette verification ne protege PAS contre un
+   appel direct au SDK/REST Firebase hors de ces fonctions. Elle bloque
+   seulement un appel accidentel/via console utilisant ces memes fonctions
+   avec l'id d'une annonce d'autrui — pas une garantie serveur. */
+function _mkIsOwnListing(l) {
+  return !!(l && _currentUser && l.sellerEmail === _currentUser.email);
+}
+
 function _mkMarkSold(listingId) {
   if (!confirm('Marquer cette annonce comme vendue ?')) return;
   var listings = _mkGetListings();
   var l = listings.find(function(x){ return x.id === listingId; });
-  if (l) { l.status = 'sold'; _mkSaveListings(listings); }
+  if (!_mkIsOwnListing(l)) { showToast('Vous n\'êtes pas le vendeur de cette annonce', 'err'); return; }
+  l.status = 'sold';
+  localStorage.setItem('gw_mk_listings', JSON.stringify(listings)); /* affichage immediat */
+  _mkUpdateOwnListingFieldV2(listingId, { status: 'sold' }); /* Phase 7E : update cible */
   var bg   = document.getElementById('mk-detail-bg');
   var card = document.getElementById('mk-detail-card');
   if (bg)   bg.remove();
@@ -37928,7 +41527,11 @@ function _mkMarkSold(listingId) {
 
 function _mkDeleteListing(listingId) {
   if (!confirm('Supprimer cette annonce ?')) return;
-  _mkSaveListings(_mkGetListings().filter(function(l){ return l.id !== listingId; }));
+  var listings = _mkGetListings();
+  var l = listings.find(function(x){ return x.id === listingId; });
+  if (!_mkIsOwnListing(l)) { showToast('Vous n\'êtes pas le vendeur de cette annonce', 'err'); return; }
+  localStorage.setItem('gw_mk_listings', JSON.stringify(listings.filter(function(x){ return x.id !== listingId; }))); /* affichage immediat */
+  _mkDeleteOwnListingV2(listingId); /* Phase 7E : remove cible gw/mk_listings_v2/{ownUid}/{id} */
   var bg   = document.getElementById('mk-detail-bg');
   var card = document.getElementById('mk-detail-card');
   if (bg)   bg.remove();
@@ -38058,7 +41661,7 @@ function _mkGroupCardsIntoRows(container, cards, perRow, maxRows) {
 }
 
 function _mkRenderSystemListings() {
-  _mkCheckExpired();
+  _mkCheckExpiredV2();
   var mkListings = _mkGetListings().filter(function(l){ return l.status==='active'; });
 
   /* ── Section "Annonces des membres" ── */
@@ -38250,14 +41853,44 @@ function _admBuildMkCommissions() {
    MODULE COLLABORATION — Chercher un collaborateur
 ══════════════════════════════════════════════════════════════ */
 
-/* ── Données ── */
+/* ── Données ──
+   Phase 9D-ter-bis : bascule vers gw/collab_requests_v2/{ownerUid}/
+   {requestId} (métadonnées publiques uniquement — jamais de document).
+   _collabGetAll() reconstruit un TABLEAU PLAT (ownerUid injecté sur
+   chaque entrée) depuis le cache local alimenté par _collabWatchV2(),
+   pour que le reste du code (rendu liste/détail/tri) n'ait pas besoin
+   d'être réécrit au-delà de la lecture des champs déplacés
+   (attachments → photos/hasDocument, applicants array → map). */
 function _collabGetAll() {
-  try { return JSON.parse(localStorage.getItem('gw_collab_requests') || '[]'); } catch(e) { return []; }
+  try {
+    var tree = JSON.parse(localStorage.getItem('gw_collab_requests_v2') || '{}');
+    var out = [];
+    Object.keys(tree).forEach(function(ownerUid) {
+      Object.keys(tree[ownerUid] || {}).forEach(function(requestId) {
+        out.push(Object.assign({ ownerUid: ownerUid }, tree[ownerUid][requestId]));
+      });
+    });
+    return out;
+  } catch(e) { return []; }
 }
-function _collabSaveAll(list) {
-  localStorage.setItem('gw_collab_requests', JSON.stringify(list));
-  _gwFbSet('collab_requests', list);
+/* Écoute gw/collab_requests_v2 en temps réel (métadonnées publiques
+   uniquement — jamais gw/collab_request_docs_v2, chargé à la demande
+   uniquement, cf. _collabOpenDetail). */
+function _collabWatchV2() {
+  if (!_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/collab_requests_v2').on('value', function(snap) {
+    var val = snap.val();
+    try { localStorage.setItem('gw_collab_requests_v2', JSON.stringify(val || {})); } catch(e) {}
+    if (document.getElementById('collab-list-wrap')) { try { _collabRender(); } catch(e) {} }
+    /* _admSync('reports') retiré : fonction privée au closure de bootstrap
+       d'origine, inaccessible depuis ce module — _collabWatchV2() est
+       défini hors de ce scope (contrairement à l'ancien _listen() en
+       ligne). Le panel admin se resynchronise via ses propres cycles. */
+  });
 }
+/* Phase 9F : _collabSaveAll() (code mort depuis la Phase 9D — create/
+   apply/close passent par /api/collab, compte de service) confirmé sans
+   appelant restant — supprimé. */
 
 /* ── Domaines disponibles ── */
 var _COLLAB_DOMAINS = {
@@ -38313,7 +41946,7 @@ function _collabRender() {
     var durLabel  = _COLLAB_DURATIONS[c.duration] || c.duration || '';
     var ago       = _collabTimeAgo(c.date);
     var isMine    = _currentUser && c.postedBy === _currentUser.email;
-    var hasApplied = _currentUser && (c.applicants || []).indexOf(_currentUser.email) !== -1;
+    var hasApplied = _currentUser && !!(c.applicants && c.applicants[_gwFbKey(_currentUser.email)]);
 
     var skillsHtml = (c.skills || []).slice(0, 3).map(function(s) {
       return '<span class="collab-skill-tag">' + escHtml(s) + '</span>';
@@ -38330,17 +41963,19 @@ function _collabRender() {
       '<div class="collab-card-title">' + escHtml(c.title) + '</div>' +
       '<div class="collab-card-desc">' + escHtml((c.description || '').slice(0, 80)) + (c.description && c.description.length > 80 ? '…' : '') + '</div>' +
       (skillsHtml ? '<div class="collab-skills-row">' + skillsHtml + '</div>' : '') +
-      /* Aperçu photos jointes */
-      (c.attachments && c.attachments.some(function(a){ return a.isImg; })
+      /* Aperçu photos jointes (publiques, champ dédié depuis 9D-ter-bis) */
+      (c.photos && c.photos.length
         ? '<div style="display:flex;gap:5px;margin:6px 0 4px">' +
-            c.attachments.filter(function(a){ return a.isImg; }).slice(0,3).map(function(a) {
+            c.photos.slice(0,3).map(function(a) {
               return '<img src="' + escHtml(a.data) + '" style="width:52px;height:52px;border-radius:7px;object-fit:cover;border:1.5px solid #E2E8F0">';
             }).join('') +
           '</div>'
         : '') +
-      (c.attachments && c.attachments.some(function(a){ return !a.isImg; })
+      /* Document : jamais de nom de fichier dans la liste publique (les
+         métadonnées ne le contiennent plus) — juste un indicateur générique */
+      (c.hasDocument
         ? '<div style="display:inline-flex;align-items:center;gap:5px;padding:4px 8px;background:#F1F5F9;border-radius:6px;font-size:11px;color:#6366F1;margin-bottom:4px">' +
-            '<i class="fas fa-file-alt"></i> ' + escHtml(c.attachments.find(function(a){ return !a.isImg; }).name.slice(0,20)) +
+            '<i class="fas fa-file-alt"></i> Document joint' +
           '</div>'
         : '') +
       '<div class="collab-card-footer">' +
@@ -38357,7 +41992,7 @@ function _collabRender() {
               : '<span class="collab-badge-cta">Voir</span>')) +
         '</div>' +
       '</div>' +
-      '<div class="collab-card-applicants"><i class="fas fa-users" style="margin-right:4px;color:#94A3B8"></i>' + (c.applicants || []).length + ' candidat(s)</div>';
+      '<div class="collab-card-applicants"><i class="fas fa-users" style="margin-right:4px;color:#94A3B8"></i>' + Object.keys(c.applicants || {}).length + ' candidat(s)</div>';
 
     wrap.appendChild(card);
   });
@@ -38594,25 +42229,83 @@ function _jobApplyFeatureVisibility() {
   }
 }
 
+/* Phase 8E : aplatit une structure imbriquée {ownerUid: {id: item}} en
+   tableau — même principe que _mkFlattenListings() (Phase 7E), gardé
+   séparé pour ne jamais coupler Emploi à Marketplace. */
+function _jobFlattenNested(nested) {
+  var out = [];
+  if (!nested || typeof nested !== 'object') return out;
+  Object.keys(nested).forEach(function(ownerUid) {
+    var byId = nested[ownerUid];
+    if (!byId || typeof byId !== 'object') return;
+    Object.keys(byId).forEach(function(id) { if (byId[id]) out.push(byId[id]); });
+  });
+  return out;
+}
+
+/* _jobGetAll() reste inchangée — lit toujours localStorage.gw_jobs.
+   Phase 8E : la source réelle derrière ce cache devient gw/jobs_v2
+   (structure par recruteur, Firebase-authoritative), aplatie avant
+   stockage — aucun des lecteurs existants (_jobRenderList, etc.) n'a
+   besoin de le savoir. */
 function _jobGetAll() {
   try { return JSON.parse(localStorage.getItem('gw_jobs') || '[]'); } catch(e) { return []; }
 }
-function _jobSaveAll(list) {
-  localStorage.setItem('gw_jobs', JSON.stringify(list));
-  _gwFbSet('jobs', list);
+/* Phase 8G : ancien writer (.set() du tableau complet gw/jobs) supprimé —
+   0 appelant confirmé (remplacé par _jobPublishToFirebaseV2()/
+   _jobUpdateOwnFieldV2() ci-dessous depuis la Phase 8E ; gw/jobs.write
+   est de toute façon fermé côté règles depuis la Phase 8F). */
+function _jobOwnUid() { return _currentUser ? _gwFbKey(_currentUser.email) : null; }
+
+/* ── Écritures ciblées gw/jobs_v2/{ownRecruiterUid}/{jobId} — Phase 8E ── */
+function _jobPublishToFirebaseV2(job) {
+  var uid = _jobOwnUid();
+  if (!uid || !_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/jobs_v2/' + uid + '/' + job.id).set(job).catch(function(){});
+}
+function _jobUpdateOwnFieldV2(jobId, patch) {
+  var uid = _jobOwnUid();
+  if (!uid || !_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/jobs_v2/' + uid + '/' + jobId).update(patch).catch(function(){});
+}
+
+/* ── Listener temps réel dédié — remplace _listen('jobs', 'gw_jobs', cb)
+   (le _listen() générique, partagé par ~14 autres nœuds, n'est pas
+   modifié). Aplatit gw/jobs_v2 avant stockage, même clé localStorage
+   qu'avant. ── */
+function _jobListenAllV2(onSync) {
+  if (!_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/jobs_v2').on('value', function(snap) {
+    if (_gwFbSkip) return;
+    var val = snap.val();
+    if (val === null || val === undefined) return;
+    _gwFbSkip = true;
+    try { localStorage.setItem('gw_jobs', JSON.stringify(_jobFlattenNested(val))); } catch(e){}
+    try { if (typeof onSync === 'function') onSync(); } catch(e){}
+    _gwFbSkip = false;
+  });
 }
 
 /* ══════════════════════════════════════════
    VÉRIFICATION RECRUTEUR — une seule fois, validée par l'admin
    Tant qu'elle n'est pas approuvée, impossible de publier une offre.
 ══════════════════════════════════════════ */
+/* _jobGetVerifs() reste inchangée dans son code — lit toujours
+   localStorage.gw_recruiter_verifs. Phase 8E : ce cache contient soit
+   UNIQUEMENT la propre demande de l'utilisateur courant (peuplé par
+   _jobListenMyVerifV2(), source gw/recruiter_verifs_v2/{ownUid} —
+   auth.uid===$applicantUid, confidentialité imposée par Firebase), soit
+   la liste complète pour un admin qui vient d'ouvrir l'onglet
+   Recruteurs (peuplée par un appel serveur dédié qui écrase
+   temporairement cette même clé — même principe déjà utilisé par ce
+   code avant cette phase, cf. commentaire existant sur la lecture
+   forcée à l'ouverture de l'onglet, inchangé). */
 function _jobGetVerifs() {
   try { return JSON.parse(localStorage.getItem('gw_recruiter_verifs') || '[]'); } catch(e) { return []; }
 }
-function _jobSaveVerifs(list) {
-  localStorage.setItem('gw_recruiter_verifs', JSON.stringify(list));
-  _gwFbSet('recruiter_verifs', list);
-}
+/* Phase 8G : ancien writer (plus jamais appelé pour soumettre/décider
+   depuis la Phase 8E) supprimé — 0 appelant confirmé ; gw/recruiter_verifs.write
+   est de toute façon fermé côté règles depuis la Phase 8F. */
 /* Dernière demande de vérification de cet utilisateur (la plus récente) */
 function _jobGetMyVerif(email) {
   var mine = _jobGetVerifs().filter(function(v) { return v.email === email; });
@@ -38621,25 +42314,122 @@ function _jobGetMyVerif(email) {
   return mine[0];
 }
 
+/* ── Écriture ciblée de la DEMANDE (jamais la décision) —
+   gw/recruiter_verifs_v2/{ownApplicantUid}/{verifId}. La règle Firebase
+   impose status==='pending' à la création et verrouille toute
+   transition ultérieure côté client (cf. rapport Phase 8B/8D). ── */
+function _jobSubmitVerifToFirebaseV2(verif) {
+  var uid = _jobOwnUid();
+  if (!uid || !_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/recruiter_verifs_v2/' + uid + '/' + verif.id).set(verif).catch(function(){});
+}
+
+/* ── Listener dédié — remplace _listen('recruiter_verifs', ...). Ne lit
+   QUE le sous-arbre du propriétaire courant (auth.uid===$applicantUid,
+   imposé par Firebase) — jamais les demandes des autres recruteurs. ── */
+function _jobListenMyVerifV2(onSync) {
+  if (!_gwFbReady || !_gwFbDB || !_currentUser) return;
+  var uid = _jobOwnUid();
+  _gwFbDB.ref('gw/recruiter_verifs_v2/' + uid).on('value', function(snap) {
+    if (_gwFbSkip) return;
+    var val = snap.val();
+    _gwFbSkip = true;
+    var mine = val ? Object.keys(val).map(function(k){ return val[k]; }).filter(Boolean) : [];
+    try { localStorage.setItem('gw_recruiter_verifs', JSON.stringify(mine)); } catch(e){}
+    try { if (typeof onSync === 'function') onSync(); } catch(e){}
+    _gwFbSkip = false;
+  });
+}
+
+/* ── Admin uniquement : liste complète de toutes les demandes, via le
+   compte de service (seul autorisé à voir au-delà de sa propre
+   demande) — appelé explicitement à l'ouverture de l'onglet Recruteurs
+   du panel admin (voir _admRender), jamais automatiquement. ── */
+function _jobAdminFetchAllVerifsV2(callback) {
+  _admApi('moderate', { token: _admSessionToken, action: 'listRecruiterVerifs' }).then(function(res) {
+    var list = (res && res.status === 200 && res.data && res.data.ok && Array.isArray(res.data.verifs)) ? res.data.verifs : [];
+    try { localStorage.setItem('gw_recruiter_verifs', JSON.stringify(list)); } catch(e){}
+    if (typeof callback === 'function') callback(list);
+  }).catch(function() { if (typeof callback === 'function') callback([]); });
+}
+
 /* ══════════════════════════════════════════
    CANDIDATURES SIMPLIFIÉES — CV + motivation + tél, reçues par le recruteur
 ══════════════════════════════════════════ */
+/* Phase 8E : _jobGetApplications() signifie désormais "MES candidatures
+   reçues en tant que recruteur" — le cache localStorage.gw_job_applications
+   n'est plus jamais peuplé depuis le tableau global gw/job_applications,
+   mais depuis gw/job_applications_v2/{ownRecruiterUid} (voir
+   _jobListenMyApplicationsV2 ci-dessous) : Firebase ne renvoie déjà QUE
+   les candidatures des offres de l'utilisateur courant — plus aucune
+   candidature d'un autre recruteur, ni son CV, n'atteint jamais ce
+   navigateur. */
 function _jobGetApplications() {
   try { return JSON.parse(localStorage.getItem('gw_job_applications') || '[]'); } catch(e) { return []; }
 }
-function _jobSaveApplications(list) {
-  localStorage.setItem('gw_job_applications', JSON.stringify(list));
-  _gwFbSet('job_applications', list);
-}
-/* Candidatures reçues pour les offres publiées par ce recruteur */
+/* Phase 8G : ancien writer (.set() du tableau complet gw/job_applications,
+   CV inclus) supprimé — 0 appelant confirmé (remplacé par POST
+   /api/jobs/apply depuis la Phase 8E, voir _jobSubmitSimplifiedApply ;
+   gw/job_applications.write est de toute façon fermé depuis la Phase 8F). */
+/* Candidatures reçues pour les offres publiées par ce recruteur — la
+   confidentialité est déjà garantie par Firebase (source scopée au
+   propre recruteur, voir ci-dessus) ; ce tri reste un simple filtre
+   d'affichage secondaire, plus une frontière de sécurité. */
 function _jobGetApplicationsForRecruiter(email) {
-  var myJobIds = _jobGetAll().filter(function(j) { return j.postedBy === email; }).map(function(j) { return j.id; });
-  return _jobGetApplications().filter(function(a) { return myJobIds.indexOf(a.jobId) !== -1; })
+  return _jobGetApplications()
+    .filter(function(a) { return a.jobOwnerUid === _jobOwnUid() || !email; })
     .sort(function(a, b) { return new Date(b.appliedAt) - new Date(a.appliedAt); });
 }
-/* Nombre de clics reçus sur le lien externe d'une offre */
+/* Nombre de clics reçus sur le lien externe d'une offre (parmi MES
+   candidatures reçues uniquement, déjà scopées à la source). */
 function _jobExternalClickCount(jobId) {
   return _jobGetApplications().filter(function(a) { return a.jobId === jobId && a.mode === 'external'; }).length;
+}
+
+/* ── Écritures ciblées gw/job_applications_v2/{ownJobOwnerUid}/{applicationId}
+   — uniquement pour les actions du RECRUTEUR (archiver). La création
+   d'une candidature passe exclusivement par POST /api/jobs/apply (voir
+   _jobSubmitSimplifiedApply), jamais une écriture directe du client. ── */
+function _jobUpdateOwnApplicationFieldV2(applicationId, patch) {
+  var uid = _jobOwnUid();
+  if (!uid || !_gwFbReady || !_gwFbDB) return;
+  _gwFbDB.ref('gw/job_applications_v2/' + uid + '/' + applicationId).update(patch).catch(function(){});
+}
+
+/* ── Listener dédié — remplace _listen('job_applications', ...). Lit
+   UNIQUEMENT gw/job_applications_v2/{ownUid} (mes candidatures reçues
+   en tant que recruteur, CV inclus) ET gw/candidate_applications/{ownUid}
+   (mon propre index de candidat, léger) — jamais un nœud global. ── */
+function _jobListenMyApplicationsV2(onSync) {
+  if (!_gwFbReady || !_gwFbDB || !_currentUser) return;
+  var uid = _jobOwnUid();
+  _gwFbDB.ref('gw/job_applications_v2/' + uid).on('value', function(snap) {
+    if (_gwFbSkip) return;
+    var val = snap.val();
+    _gwFbSkip = true;
+    var mine = val ? Object.keys(val).map(function(k){ return val[k]; }).filter(Boolean) : [];
+    try { localStorage.setItem('gw_job_applications', JSON.stringify(mine)); } catch(e){}
+    try { if (typeof onSync === 'function') onSync(); } catch(e){}
+    _gwFbSkip = false;
+  });
+  _gwFbDB.ref('gw/candidate_applications/' + uid).on('value', function(snap) {
+    if (_gwFbSkip) return;
+    var val = snap.val();
+    _gwFbSkip = true;
+    var mine = val ? Object.keys(val).map(function(k){ return val[k]; }).filter(Boolean) : [];
+    try { localStorage.setItem('gw_candidate_applications', JSON.stringify(mine)); } catch(e){}
+    try { if (typeof onSync === 'function') onSync(); } catch(e){}
+    _gwFbSkip = false;
+  });
+}
+
+/* Phase 8E : index candidat léger — jobId/jobOwnerUid/jobTitle/appliedAt/
+   mode uniquement, jamais cv/phone/motivation (ces champs ne quittent
+   jamais gw/job_applications_v2, lisible uniquement par le recruteur
+   propriétaire). Remplace, pour l'historique candidat, l'ancienne
+   lecture de gw_job_applications filtrée côté client. */
+function _jobGetMyApplications() {
+  try { return JSON.parse(localStorage.getItem('gw_candidate_applications') || '[]'); } catch(e) { return []; }
 }
 
 /* ══════════════════════════════════════════
@@ -38878,7 +42668,8 @@ function _jobSubmitVerification() {
 
   var all = _jobGetVerifs();
   all.unshift(verif);
-  _jobSaveVerifs(all);
+  try { localStorage.setItem('gw_recruiter_verifs', JSON.stringify(all)); } catch(e){} /* affichage immediat */
+  _jobSubmitVerifToFirebaseV2(verif); /* Phase 8E : ecriture ciblee gw/recruiter_verifs_v2/{ownUid}/{id}, status='pending' impose par la regle */
 
   var bg   = document.getElementById('job-verif-bg');
   var card = document.getElementById('job-verif-card');
@@ -39218,13 +43009,18 @@ function _jobSubmitPost() {
     postedBy:     _currentUser.email,
     postedByNom:  verif.nom,
     date:         new Date().toISOString(),
-    status:       'active', /* entreprise déjà vérifiée — publication immédiate */
-    applicants:   []
+    status:       'active' /* entreprise déjà vérifiée — publication immédiate */
+    /* Phase 8E : plus de applicants[] — ce tableau exposait publiquement
+       (gw/jobs.read:true, aucune authentification requise) l'email de
+       chaque candidat sur l'offre. La règle gw/jobs_v2 interdit
+       désormais explicitement ce champ (.validate:false). L'anti-doublon
+       est géré côté serveur par POST /api/jobs/apply (clé déterministe). */
   };
 
   var all = _jobGetAll();
   all.unshift(job);
-  _jobSaveAll(all);
+  try { localStorage.setItem('gw_jobs', JSON.stringify(all)); } catch(e){} /* affichage immediat */
+  _jobPublishToFirebaseV2(job); /* Phase 8E : ecriture ciblee gw/jobs_v2/{ownUid}/{id}, jamais l'ancien tableau gw/jobs */
 
   /* L'offre n'est volontairement PAS publiée dans le fil — uniquement visible dans la page Emploi */
 
@@ -39399,8 +43195,8 @@ function _jobRenderHistory(wrap) {
   if (!_currentUser) { _jobEmptyState(wrap, 'Connectez-vous', 'pour voir vos candidatures'); return; }
 
   var hidden = _jobGetHistoryHidden(_currentUser.email);
-  var mine = _jobGetApplications()
-    .filter(function(a) { return a.applicantEmail === _currentUser.email && hidden.indexOf(a.id) === -1; })
+  var mine = _jobGetMyApplications() /* Phase 8E : index candidat gw/candidate_applications/{ownUid}, jamais les candidatures d'autrui */
+    .filter(function(a) { return hidden.indexOf(a.id) === -1; })
     .sort(function(a, b) { return new Date(b.appliedAt) - new Date(a.appliedAt); });
 
   if (!mine.length) { _jobEmptyState(wrap, 'Aucune candidature', 'Vos candidatures apparaîtront ici'); return; }
@@ -39442,7 +43238,7 @@ function _jobOpenDetail(id) {
   if (existingCard) existingCard.remove();
 
   var isMine     = _currentUser && j.postedBy === _currentUser.email;
-  var hasApplied = _currentUser && (j.applicants || []).indexOf(_currentUser.email) !== -1;
+  var hasApplied = _currentUser && _jobGetMyApplications().some(function(a) { return a.jobId === id; }); /* Phase 8E : plus de j.applicants[] (retire du schema) — index candidat propre */
 
   var contractLabel = _JOB_CONTRACTS[j.contract] || j.contract || '';
   var locLabel = [j.city, j.country].filter(Boolean).join(', ');
@@ -39511,7 +43307,7 @@ function _jobOpenDetail(id) {
       getAvatarHtml(j.postedBy || null, j.postedByNom || '?', 'md') +
       '<div>' +
         '<div style="font-size:13px;font-weight:700;color:#0F172A">' + escHtml(j.postedByNom) + '</div>' +
-        '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(j.date) + ' · ' + (j.applicants || []).length + ' candidat(s)</div>' +
+        '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(j.date) + (isMine ? ' · ' + _jobGetApplications().filter(function(a) { return a.jobId === id; }).length + ' candidat(s)' : '') + '</div>' + /* Phase 8E : plus de j.applicants[] public (retire du schema) — le compte n'est visible qu'au proprietaire, via son propre index deja scope */
       '</div>' +
     '</div>' +
 
@@ -39523,7 +43319,12 @@ function _jobOpenDetail(id) {
   document.body.appendChild(card);
 }
 
-/* ── Postuler via le site de recrutement externe du recruteur — pas de message direct ── */
+/* ── Postuler via le site de recrutement externe du recruteur — pas de message direct ──
+   Phase 8E : passe par POST /api/jobs/apply (mode:'external', pas de CV/téléphone
+   collecté), même point d'écriture unique que la candidature simplifiée — plus
+   jamais de j.applicants[] ni d'écriture directe de gw_job_applications. Si le
+   candidat a déjà postulé (409, clic répété), le lien externe s'ouvre quand même :
+   seule l'écriture d'un second enregistrement est refusée, jamais l'accès au site. */
 function _jobApplyExternal(id) {
   if (!_currentUser) { showToast('Connectez-vous pour postuler', 'err'); return; }
 
@@ -39535,32 +43336,30 @@ function _jobApplyExternal(id) {
     showToast('Vous ne pouvez pas postuler à votre propre offre', 'err'); return;
   }
 
-  if (!j.applicants) j.applicants = [];
-  if (j.applicants.indexOf(_currentUser.email) === -1) {
-    j.applicants.push(_currentUser.email);
-    _jobSaveAll(all);
-  }
-
-  var profile      = loadUserProfile(_currentUser.email) || {};
-  var applicantNom = profile.nom || _currentUser.nom || 'Un membre';
-  var apps = _jobGetApplications();
-  apps.unshift({
-    id:             'app_' + Date.now(),
-    jobId:          id,
-    jobTitle:       j.title,
-    applicantEmail: _currentUser.email,
-    applicantNom:   applicantNom,
-    mode:           'external',
-    appliedAt:      new Date().toISOString()
-  });
-  _jobSaveApplications(apps);
-
-  window.open(j.applyUrl, '_blank');
-
+  var session = _gwLoadSession();
+  var applyUrl = j.applyUrl;
   var bg   = document.getElementById('job-detail-bg');
   var card = document.getElementById('job-detail-card');
-  if (bg)   bg.remove();
-  if (card) card.remove();
+
+  function openAndClose() {
+    window.open(applyUrl, '_blank');
+    if (bg)   bg.remove();
+    if (card) card.remove();
+  }
+
+  if (!session || !session.authRefresh) { openAndClose(); return; }
+
+  fetch('/api/jobs/apply', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ authRefreshToken: session.authRefresh, jobId: id, mode: 'external' })
+  }).then(function(r) {
+    return r.json().then(function(d) { return { status: r.status, data: d }; });
+  }).then(function() {
+    openAndClose();
+  }).catch(function() {
+    openAndClose(); /* l'accès au site externe ne doit jamais dépendre de l'enregistrement analytique */
+  });
 }
 
 /* ── Candidature simplifiée : CV + motivation + téléphone ── */
@@ -39572,7 +43371,7 @@ function _jobOpenSimplifiedApply(id) {
   var j   = all.find(function(x) { return x.id === id; });
   if (!j) return;
   if (j.postedBy === _currentUser.email) { showToast('Vous ne pouvez pas postuler à votre propre offre', 'err'); return; }
-  if ((j.applicants || []).indexOf(_currentUser.email) !== -1) { showToast('Vous avez déjà postulé', 'err'); return; }
+  if (_jobGetMyApplications().some(function(a) { return a.jobId === id; })) { showToast('Vous avez déjà postulé', 'err'); return; } /* Phase 8E : index candidat propre, plus j.applicants[] */
 
   _jobApplyPendingCV = null;
 
@@ -39619,7 +43418,7 @@ function _jobOpenSimplifiedApply(id) {
         '<textarea id="job-apply-motivation" placeholder="Pourquoi ce poste vous intéresse…" rows="4" style="width:100%;margin-top:5px;padding:11px 12px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:13px;resize:none;box-sizing:border-box;outline:none"></textarea>' +
       '</div>' +
 
-      '<button onclick="_jobSubmitSimplifiedApply(\'' + id + '\')" style="width:100%;padding:14px;background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(22,163,74,.4)">' +
+      '<button id="job-apply-submit-btn" onclick="_jobSubmitSimplifiedApply(\'' + id + '\')" style="width:100%;padding:14px;background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(22,163,74,.4)">' +
         '<i class="fas fa-paper-plane" style="margin-right:8px"></i>Envoyer ma candidature' +
       '</button>' +
     '</div>';
@@ -39643,6 +43442,11 @@ function _jobPickCV(input) {
 }
 
 function _jobSubmitSimplifiedApply(id) {
+  /* Phase 8E : plus d'ecriture directe (applicants[]/gw_job_applications) —
+     passe systematiquement par POST /api/jobs/apply, seul point qui connait
+     jobOwnerUid, verifie le statut de l'offre, l'anti-doublon et la taille
+     du CV cote serveur. Le client n'envoie jamais candidateUid/applicantEmail/
+     jobOwnerUid/postedBy : le serveur les derive de authRefreshToken. */
   if (!_currentUser) return;
   var all = _jobGetAll();
   var j   = all.find(function(x) { return x.id === id; });
@@ -39654,48 +43458,68 @@ function _jobSubmitSimplifiedApply(id) {
   if (!_jobApplyPendingCV) { showToast('Merci de joindre votre CV', 'err'); return; }
   if (!phone.trim())       { showToast('Le numéro de téléphone est requis', 'err'); return; }
 
-  if (!j.applicants) j.applicants = [];
-  if (j.applicants.indexOf(_currentUser.email) === -1) j.applicants.push(_currentUser.email);
-  _jobSaveAll(all);
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) { showToast('Session expirée, reconnectez-vous', 'err'); return; }
 
-  var profile      = loadUserProfile(_currentUser.email) || {};
-  var applicantNom = profile.nom || _currentUser.nom || 'Un membre';
+  var btn = document.getElementById('job-apply-submit-btn');
+  if (btn) { btn.disabled = true; btn.style.opacity = '.6'; btn.style.cursor = 'default'; }
 
-  var apps = _jobGetApplications();
-  apps.unshift({
-    id:              'app_' + Date.now(),
-    jobId:           id,
-    jobTitle:        j.title,
-    applicantEmail:  _currentUser.email,
-    applicantNom:    applicantNom,
-    cv:              _jobApplyPendingCV,
-    phone:           phone.trim(),
-    motivation:      motivation.trim(),
-    mode:            'simplified',
-    archived:        false,
-    appliedAt:       new Date().toISOString()
+  fetch('/api/jobs/apply', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({
+      authRefreshToken: session.authRefresh,
+      jobId:            id,
+      cv:               _jobApplyPendingCV,
+      phone:            phone.trim(),
+      motivation:       motivation.trim(),
+      mode:             'simplified'
+    })
+  }).then(function(r) {
+    return r.json().then(function(d) { return { status: r.status, data: d }; });
+  }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      var msg = 'Impossible d’envoyer votre candidature';
+      if (res.status === 401)      msg = 'Session expirée, reconnectez-vous';
+      else if (res.status === 403) msg = 'Vous ne pouvez pas postuler à votre propre offre';
+      else if (res.status === 404) msg = 'Cette offre n’existe plus';
+      else if (res.status === 409) msg = 'Vous avez déjà postulé à cette offre';
+      else if (res.status === 413) msg = 'Le CV joint est trop volumineux';
+      else if (res.data && res.data.error) msg = res.data.error;
+      showToast(msg, 'err');
+      if (btn) { btn.disabled = false; btn.style.opacity = ''; btn.style.cursor = 'pointer'; }
+      return;
+    }
+
+    var bgA   = document.getElementById('job-apply-bg');
+    var cardA = document.getElementById('job-apply-card');
+    if (bgA)   bgA.remove();
+    if (cardA) cardA.remove();
+    var bg   = document.getElementById('job-detail-bg');
+    var card = document.getElementById('job-detail-card');
+    if (bg)   bg.remove();
+    if (card) card.remove();
+
+    /* Phase 9C.9 : notifie le recruteur — le serveur revérifie
+       intégralement (gw/job_applications_v2 : application existe sous ce
+       recruteur, candidateUid === appelant) avant d'écrire gw/notifs.
+       j.postedBy est une donnée PUBLIQUE de l'offre (gw/jobs_v2), jamais
+       une preuve — seulement la cible déclarée, revérifiée serveur. */
+    if (j.postedBy) {
+      pushNotif(j.postedBy, {
+        id: genNotifId(), type: 'system', eventType: 'job_application',
+        applicationId: res.data.applicationId, jobId: id,
+        title: '💼 Nouvelle candidature',
+        message: 'Vous avez reçu une nouvelle candidature pour l\'offre "' + (j.title || '') + '". Consultez votre tableau de bord recruteur.',
+        date: new Date().toISOString(), read: false
+      });
+    }
+
+    showToast('Candidature envoyée ✓', 'ok');
+  }).catch(function() {
+    showToast('Erreur réseau, réessayez', 'err');
+    if (btn) { btn.disabled = false; btn.style.opacity = ''; btn.style.cursor = 'pointer'; }
   });
-  _jobSaveApplications(apps);
-
-  pushNotif(j.postedBy, {
-    id:      genNotifId(),
-    type:    'system',
-    title:   '💼 Nouvelle candidature simplifiée !',
-    message: applicantNom + ' a postulé à votre offre "' + j.title + '" avec son CV. Consultez votre tableau de bord recruteur.',
-    date:    new Date().toISOString(),
-    read:    false
-  });
-
-  var bgA   = document.getElementById('job-apply-bg');
-  var cardA = document.getElementById('job-apply-card');
-  if (bgA)   bgA.remove();
-  if (cardA) cardA.remove();
-  var bg   = document.getElementById('job-detail-bg');
-  var card = document.getElementById('job-detail-card');
-  if (bg)   bg.remove();
-  if (card) card.remove();
-
-  showToast('Candidature envoyée ✓', 'ok');
 }
 
 /* ── Clôturer une offre (recruteur) ── */
@@ -39704,7 +43528,8 @@ function _jobClose(id) {
   var j   = all.find(function(x) { return x.id === id; });
   if (!j) return;
   j.status = 'closed';
-  _jobSaveAll(all);
+  try { localStorage.setItem('gw_jobs', JSON.stringify(all)); } catch(e){} /* affichage immediat */
+  _jobUpdateOwnFieldV2(id, { status: 'closed' }); /* Phase 8E : ecrit gw/jobs_v2/{ownUid}/{id}/status — la regle Firebase (ownership) est la vraie garde, pas ce check client */
 
   var bg   = document.getElementById('job-detail-bg');
   var card = document.getElementById('job-detail-card');
@@ -39728,7 +43553,8 @@ function _jobArchiveApplication(appId, archived) {
   var a = apps.find(function(x) { return x.id === appId; });
   if (!a) return;
   a.archived = archived;
-  _jobSaveApplications(apps);
+  try { localStorage.setItem('gw_job_applications', JSON.stringify(apps)); } catch(e){} /* affichage immediat */
+  _jobUpdateOwnApplicationFieldV2(appId, { archived: archived }); /* Phase 8E : ecrit gw/job_applications_v2/{ownUid}/{appId}/archived — ownership impose par la regle */
   showToast(archived ? 'Candidature archivée' : 'Candidature restaurée', 'ok');
   _jobOpenRecruiterDashboard();
 }
@@ -39946,58 +43772,76 @@ function _collabSubmitPost() {
   var profile = loadUserProfile(_currentUser.email) || {};
   var nom     = profile.nom || _currentUser.nom || 'Membre';
 
-  var request = {
-    id:          'collab_' + Date.now(),
-    title:       title.trim(),
-    description: desc.trim(),
-    domain:      domain,
-    skills:      skills,
-    duration:    duration,
-    remote:      remote,
-    budget:      { amount: budgetV, type: budgetT },
-    postedBy:    _currentUser.email,
-    postedByNom: nom,
-    date:        new Date().toISOString(),
-    status:      'active',
-    applicants:  [],
-    attachments: _clAttachFiles.slice() /* photos + doc */
-  };
+  /* Phase 9D-ter-bis : la création écrit gw/collab_requests_v2/{ownerUid}/
+     {requestId} (métadonnées publiques) + gw/collab_request_docs_v2/
+     {ownerUid}/{requestId} (document, séparément, jamais dans les
+     métadonnées) — postedBy dérivé du token, jamais fourni par le client
+     comme autorité. */
+  var session = _gwLoadSession();
+  if (!session || !session.authRefresh) { showToast('Connectez-vous pour publier', 'err'); return; }
 
-  var all = _collabGetAll();
-  all.unshift(request);
-  _collabSaveAll(all);
+  fetch('/api/collab', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      authRefreshToken: session.authRefresh, action: 'create',
+      title: title.trim(), description: desc.trim(), domain: domain, skills: skills,
+      duration: duration, remote: remote, budget: { amount: budgetV, type: budgetT },
+      attachments: _clAttachFiles.slice() /* photos + doc */
+    })
+  }).then(function(r) { return r.json().then(function(j) { return { status: r.status, data: j }; }); })
+    .then(function(r) {
+      if (!r.data || !r.data.ok) { showToast((r.data && r.data.error) || 'Échec de la publication', 'err'); return; }
+      var request = r.data.request;
 
-  /* Incrémenter le compteur mensuel */
-  _incMonthlyCount('collab', _currentUser.email);
+      /* Reflet local immédiat (le listener Firebase confirmera juste après) —
+         évite d'attendre l'aller-retour temps réel pour l'affichage. */
+      var myUidForCreate = _gwFbKey(_currentUser.email);
+      try {
+        var tree = JSON.parse(localStorage.getItem('gw_collab_requests_v2') || '{}');
+        if (!tree[myUidForCreate]) tree[myUidForCreate] = {};
+        tree[myUidForCreate][request.id] = request;
+        localStorage.setItem('gw_collab_requests_v2', JSON.stringify(tree));
+      } catch(e) {}
 
-  /* ── Publier aussi dans le feed principal ── */
-  var feedPost = {
-    id:         Date.now() + 1,   /* +1 pour ne pas collisionner avec request.id */
-    type:       'collab',
-    collab:     request,          /* référence complète à la demande */
-    ownerEmail: _currentUser.email,
-    author:     nom,
-    text:       '',
-    images:     [],
-    likers:     [],
-    baseLikes:  0,
-    comments:   [],
-    at:         Date.now(),
-    date:       new Date().toISOString()
-  };
-  persistNewPost(feedPost); /* Firebase child_changed → _gwMergePost → renderFeed automatique */
+      /* Incrémenter le compteur mensuel */
+      _incMonthlyCount('collab', _currentUser.email);
 
-  /* Réinitialiser les pièces jointes */
-  _clAttachFiles = [];
+      /* ── Publier aussi dans le feed principal ──
+         Phase 9D-ter-bis : les métadonnées v2 (`request`) ne contiennent
+         plus jamais le document (déplacé dans gw/collab_request_docs_v2
+         dès la création côté serveur) — la copie dans le feed reste donc
+         intrinsèquement sûre, aucune donnée privée à retirer ici. */
+      var feedCollab = Object.assign({}, request);
+      var feedPost = {
+        id:         Date.now() + 1,   /* +1 pour ne pas collisionner avec request.id */
+        type:       'collab',
+        collab:     feedCollab,
+        ownerEmail: _currentUser.email,
+        author:     nom,
+        text:       '',
+        images:     [],
+        likers:     [],
+        baseLikes:  0,
+        comments:   [],
+        at:         Date.now(),
+        date:       new Date().toISOString()
+      };
+      persistNewPost(feedPost); /* Firebase child_changed → _gwMergePost → renderFeed automatique */
 
-  /* Fermer le formulaire */
-  var bg   = document.getElementById('collab-post-bg');
-  var card = document.getElementById('collab-post-card');
-  if (bg)   bg.remove();
-  if (card) card.remove();
+      /* Réinitialiser les pièces jointes */
+      _clAttachFiles = [];
 
-  showToast('Demande publiée ✓ Les membres peuvent maintenant postuler !', 'ok');
-  _collabRender();
+      /* Fermer le formulaire */
+      var bg   = document.getElementById('collab-post-bg');
+      var card = document.getElementById('collab-post-card');
+      if (bg)   bg.remove();
+      if (card) card.remove();
+
+      showToast('Demande publiée ✓ Les membres peuvent maintenant postuler !', 'ok');
+      _collabRender();
+    })
+    .catch(function() { showToast('Échec de la publication', 'err'); });
 }
 
 /* ── Ouvre le détail d'une demande de collaboration ── */
@@ -40012,7 +43856,7 @@ function _collabOpenDetail(id) {
   if (existingCard) existingCard.remove();
 
   var isMine    = _currentUser && c.postedBy === _currentUser.email;
-  var hasApplied = _currentUser && (c.applicants || []).indexOf(_currentUser.email) !== -1;
+  var hasApplied = _currentUser && !!(c.applicants && c.applicants[_gwFbKey(_currentUser.email)]);
 
   var domLabel = _COLLAB_DOMAINS[c.domain]  || c.domain  || '📦 Autre';
   var durLabel = _COLLAB_DURATIONS[c.duration] || '';
@@ -40082,23 +43926,17 @@ function _collabOpenDetail(id) {
     /* Budget */
     budgetHtml +
 
-    /* Pièces jointes */
-    (c.attachments && c.attachments.length
+    /* Pièces jointes — photos publiques (champ dédié, rendues directement) +
+       emplacement document (rempli après une lecture Firebase AUTORISÉE,
+       jamais depuis le cache public — cf. bloc après l'insertion DOM). */
+    ((c.photos && c.photos.length) || c.hasDocument
       ? '<div style="margin:14px 0">' +
           '<div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Pièces jointes</div>' +
           '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
-            c.attachments.map(function(a) {
-              if (a.isImg) {
-                return '<img src="' + escHtml(a.data) + '" style="width:90px;height:90px;border-radius:10px;object-fit:cover;border:1.5px solid #E2E8F0;cursor:pointer" onclick="window.open(this.src)">';
-              }
-              /* Document : visible et téléchargeable uniquement par le posteur ou après candidature */
-              if (isMine || hasApplied) {
-                return '<a href="' + escHtml(a.data) + '" download="' + escHtml(a.name) + '" style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#EEF2FF;border-radius:10px;text-decoration:none;font-size:12px;color:#6366F1;font-weight:600">' +
-                  '<i class="fas fa-file-arrow-down"></i>' + escHtml(a.name.slice(0, 22)) + '</a>';
-              }
-              return '<div style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#F1F5F9;border-radius:10px;font-size:12px;color:#94A3B8;font-weight:600">' +
-                '<i class="fas fa-lock"></i> ' + escHtml(a.name.slice(0, 18)) + ' — postulez pour y accéder</div>';
+            (c.photos || []).map(function(a) {
+              return '<img src="' + escHtml(a.data) + '" style="width:90px;height:90px;border-radius:10px;object-fit:cover;border:1.5px solid #E2E8F0;cursor:pointer" onclick="window.open(this.src)">';
             }).join('') +
+            (c.hasDocument ? '<div id="collab-doc-slot-' + escHtml(id) + '"><div style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#F1F5F9;border-radius:10px;font-size:12px;color:#94A3B8;font-weight:600"><i class="fas fa-spinner fa-spin"></i> Vérification…</div></div>' : '') +
           '</div>' +
         '</div>'
       : '') +
@@ -40108,7 +43946,7 @@ function _collabOpenDetail(id) {
       getAvatarHtml(c.postedBy || null, c.postedByNom || '?', 'md') +
       '<div>' +
         '<div style="font-size:13px;font-weight:700;color:#0F172A">' + escHtml(c.postedByNom) + '</div>' +
-        '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(c.date) + ' · ' + (c.applicants || []).length + ' candidat(s)</div>' +
+        '<div style="font-size:11px;color:#94A3B8">' + _collabTimeAgo(c.date) + ' · ' + Object.keys(c.applicants || {}).length + ' candidat(s)</div>' +
       '</div>' +
     '</div>' +
 
@@ -40119,6 +43957,30 @@ function _collabOpenDetail(id) {
 
   document.body.appendChild(bg);
   document.body.appendChild(card);
+
+  /* Phase 9D-ter-bis : le document n'est JAMAIS lu depuis le cache public —
+     seule une lecture Firebase RÉELLE de gw/collab_request_docs_v2/{ownerUid}/
+     {requestId} détermine si l'affichage est autorisé (owner ou candidat
+     réel selon les Rules, cf. rapport §8). Échec de lecture = verrou affiché,
+     jamais un simple habillage JS comme avant la bascule. */
+  if (c.hasDocument && _gwFbReady && _gwFbDB) {
+    _gwFbDB.ref('gw/collab_request_docs_v2/' + c.ownerUid + '/' + id).once('value')
+      .then(function(snap) {
+        var doc = snap.val();
+        var slot = document.getElementById('collab-doc-slot-' + id);
+        if (!slot) return;
+        if (doc && doc.data) {
+          slot.innerHTML = '<a href="' + escHtml(doc.data) + '" download="' + escHtml(doc.name || 'document') + '" style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#EEF2FF;border-radius:10px;text-decoration:none;font-size:12px;color:#6366F1;font-weight:600">' +
+            '<i class="fas fa-file-arrow-down"></i>' + escHtml((doc.name || 'document').slice(0, 22)) + '</a>';
+        } else {
+          slot.innerHTML = '<div style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#F1F5F9;border-radius:10px;font-size:12px;color:#94A3B8;font-weight:600"><i class="fas fa-lock"></i> Document — postulez pour y accéder</div>';
+        }
+      })
+      .catch(function() {
+        var slot = document.getElementById('collab-doc-slot-' + id);
+        if (slot) slot.innerHTML = '<div style="display:inline-flex;align-items:center;gap:6px;padding:9px 12px;background:#F1F5F9;border-radius:10px;font-size:12px;color:#94A3B8;font-weight:600"><i class="fas fa-lock"></i> Document — postulez pour y accéder</div>';
+      });
+  }
 }
 
 /* ── Postuler à une demande ── */
@@ -40129,17 +43991,48 @@ function _collabApply(id) {
   var c   = all.find(function(x) { return x.id === id; });
   if (!c) return;
 
-  if ((c.applicants || []).indexOf(_currentUser.email) !== -1) {
+  var myUid = _gwFbKey(_currentUser.email);
+  if (c.applicants && c.applicants[myUid]) {
     showToast('Vous avez déjà postulé', 'err'); return;
   }
   if (c.postedBy === _currentUser.email) {
     showToast('Vous ne pouvez pas postuler à votre propre demande', 'err'); return;
   }
 
-  if (!c.applicants) c.applicants = [];
-  c.applicants.push(_currentUser.email);
-  _collabSaveAll(all);
+  /* Phase 9D-ter-bis : écriture ciblée gw/collab_requests_v2/{ownerUid}/
+     {requestId}/applicants/{uid} — le serveur revérifie la demande réelle
+     (ownerUid+requestId, pas déjà candidat, pas son propre postedBy).
+     Plus besoin d'ETag/retry (chaque candidat écrit sa propre clé). */
+  var _clSession = _gwLoadSession();
+  if (!_clSession || !_clSession.authRefresh) { showToast('Connectez-vous pour postuler', 'err'); return; }
+  fetch('/api/collab', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: _clSession.authRefresh, action: 'apply', ownerUid: c.ownerUid, requestId: id })
+  }).then(function(r) { return r.json().then(function(j) { return { status: r.status, data: j }; }); })
+    .then(function(r) {
+      if (!r.data || !r.data.ok) { showToast((r.data && r.data.error) || 'Échec de la candidature', 'err'); return; }
 
+      /* Reflet local immédiat */
+      if (!c.applicants) c.applicants = {};
+      c.applicants[myUid] = true;
+      try {
+        var tree = JSON.parse(localStorage.getItem('gw_collab_requests_v2') || '{}');
+        if (tree[c.ownerUid] && tree[c.ownerUid][id]) {
+          if (!tree[c.ownerUid][id].applicants) tree[c.ownerUid][id].applicants = {};
+          tree[c.ownerUid][id].applicants[myUid] = true;
+          localStorage.setItem('gw_collab_requests_v2', JSON.stringify(tree));
+        }
+      } catch(e) {}
+
+      _collabApplyFinish(c);
+    })
+    .catch(function() { showToast('Échec de la candidature', 'err'); });
+}
+
+/* Suite de _collabApply() après confirmation serveur : notification +
+   DM (inchangé — c.postedBy provient du cache local, lui-même reflet
+   de gw/collab_requests désormais protégé en écriture côté serveur). */
+function _collabApplyFinish(c) {
   /* Notifie le posteur */
   var profile    = loadUserProfile(_currentUser.email) || {};
   var applicantNom = profile.nom || _currentUser.nom || 'Un membre';
@@ -40147,6 +44040,8 @@ function _collabApply(id) {
   pushNotif(c.postedBy, {
     id:      genNotifId(),
     type:    'system',
+    eventType: 'collab_apply', /* Phase 9D-ter-bis : le serveur revérifie que c.postedBy est bien l'auteur réel de la demande gw/collab_requests_v2/{ownerUid}/{collabId} */
+    collabId: c.id, ownerUid: c.ownerUid,
     title:   '🤝 Nouveau candidat !',
     message: applicantNom + ' souhaite collaborer sur votre projet :\n"' + c.title + '".\nContactez-le dans les messages.',
     date:    new Date().toISOString(),
@@ -40162,7 +44057,7 @@ function _collabApply(id) {
     });
     if (!_existConv) {
       _existConv = {
-        id:       _newConvId(),
+        id:       _dmConversationId(_currentUser.email, c.postedBy),  /* DM v2 */
         name:     _posterNom,
         email:    c.postedBy,
         role:     _posterProfile.domain || 'Membre Geniwork',
@@ -40178,8 +44073,9 @@ function _collabApply(id) {
       };
       DEMO_CONVERSATIONS.unshift(_existConv);
     }
-    /* Message de candidature — carte visuelle écrite dans Firebase */
+    /* Message de candidature — carte visuelle (DM v2) */
     var _cTs = Date.now();
+    var _collabText = '🤝 Candidature pour : "' + c.title + '"';
     var _collabMsg = {
       id:          _cTs,
       from:        _currentUser.email,
@@ -40187,16 +44083,17 @@ function _collabApply(id) {
       collabId:    c.id,
       collabTitle: c.title,
       collabDomain: c.domain || '',
-      text:        '🤝 Candidature pour : "' + c.title + '"',
+      text:        _collabText,
       time:        _nowTime(),
       at:          _cTs
     };
     _existConv.messages.push(_collabMsg);
     _existConv.lastMsg = _collabMsg.text;
     _existConv.lastAt  = _cTs;
-    _saveDMConvList();
-    /* Écriture Firebase → message visible + notification inbox posteur */
-    _dmWriteMsg(_existConv, _collabMsg);
+    /* DM v2 — collabId omis du payload (jamais lu par le renderer, cf. audit) */
+    _dmSendMessage(_existConv.id, c.postedBy, _collabText, undefined, 'collab_apply_card', {
+      collabTitle: c.title, collabDomain: c.domain || ''
+    });
   }
 
   /* Fermer le panel */
@@ -40226,16 +44123,38 @@ function _collabClose(id) {
   if (!c || c.postedBy !== _currentUser.email) return;
 
   if (!confirm('Clôturer cette demande de collaboration ?')) return;
-  c.status = 'closed';
-  _collabSaveAll(all);
 
-  var bg   = document.getElementById('collab-detail-bg');
-  var card = document.getElementById('collab-detail-card');
-  if (bg)   bg.remove();
-  if (card) card.remove();
+  /* Phase 9D-ter-bis : la clôture passe désormais par le serveur
+     (/api/collab, action:'close') sur gw/collab_requests_v2/{ownerUid}/
+     {requestId}/status — ownerUid dérivé du token appelant, jamais du
+     client. Champ ciblé uniquement (photos/document jamais touchés). */
+  var _ccSession = _gwLoadSession();
+  if (!_ccSession || !_ccSession.authRefresh) return;
+  fetch('/api/collab', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authRefreshToken: _ccSession.authRefresh, action: 'close', requestId: id })
+  }).then(function(r) { return r.json().then(function(j) { return { status: r.status, data: j }; }); })
+    .then(function(r) {
+      if (!r.data || !r.data.ok) { showToast((r.data && r.data.error) || 'Échec de la clôture', 'err'); return; }
 
-  showToast('Demande clôturée', 'ok');
-  _collabRender();
+      c.status = 'closed';
+      try {
+        var tree = JSON.parse(localStorage.getItem('gw_collab_requests_v2') || '{}');
+        if (tree[c.ownerUid] && tree[c.ownerUid][id]) {
+          tree[c.ownerUid][id].status = 'closed';
+          localStorage.setItem('gw_collab_requests_v2', JSON.stringify(tree));
+        }
+      } catch(e) {}
+
+      var bg   = document.getElementById('collab-detail-bg');
+      var card = document.getElementById('collab-detail-card');
+      if (bg)   bg.remove();
+      if (card) card.remove();
+
+      showToast('Demande clôturée', 'ok');
+      _collabRender();
+    })
+    .catch(function() { showToast('Échec de la clôture', 'err'); });
 }
 
 /* ── Utilitaire : temps relatif ── */
@@ -40276,12 +44195,12 @@ function _mkRefreshTxBtn(btn) {
     /* Sync transactions + annonces en parallèle */
     Promise.all([
       _gwFbDB.ref('gw/mk_txns').once('value'),
-      _gwFbDB.ref('gw/mk_listings').once('value')
+      _gwFbDB.ref('gw/mk_listings_v2').once('value') /* Phase 7E : structure par vendeur */
     ]).then(function(snaps) {
       var txVal = snaps[0].val();
       var lstVal = snaps[1].val();
       if (txVal  !== null) try { localStorage.setItem('gw_mk_txns',     JSON.stringify(Array.isArray(txVal)  ? txVal  : Object.values(txVal)));  } catch(e){}
-      if (lstVal !== null) try { localStorage.setItem('gw_mk_listings', JSON.stringify(Array.isArray(lstVal) ? lstVal : Object.values(lstVal))); } catch(e){}
+      if (lstVal !== null) try { localStorage.setItem('gw_mk_listings', JSON.stringify(_mkFlattenListings(lstVal))); } catch(e){}
       _done();
     }).catch(function() { _done(); });
   } else {
@@ -40295,13 +44214,20 @@ function _collabRefresh(btn) {
     btn.textContent = '⟳ Chargement…';
     btn.disabled = true;
   }
-  /* Forcer sync Firebase si connecté */
+  /* Forcer sync Firebase si connecté —
+     Phase 9D-ter-bis : gw/collab_requests_v2 (le listener temps réel
+     _collabWatchV2() couvre déjà la plupart des cas, ce bouton force une
+     relecture immédiate). .catch ajouté pour ne jamais bloquer le bouton
+     en "Chargement…" indéfiniment. */
   if (_gwFbReady && _gwFbDB) {
-    _gwFbDB.ref('gw/collab_requests').once('value', function(snap) {
+    _gwFbDB.ref('gw/collab_requests_v2').once('value').then(function(snap) {
       var val = snap.val();
       if (val !== null) {
-        localStorage.setItem('gw_collab_requests', JSON.stringify(val));
+        try { localStorage.setItem('gw_collab_requests_v2', JSON.stringify(val)); } catch(e) {}
       }
+      _collabRender();
+      if (btn) { btn.textContent = 'Actualiser'; btn.disabled = false; }
+    }).catch(function() {
       _collabRender();
       if (btn) { btn.textContent = 'Actualiser'; btn.disabled = false; }
     });
@@ -40332,7 +44258,7 @@ function _mkRefreshAllListings() {
   var screen = document.getElementById('mk-all-screen');
   if (!screen) return;
 
-  _mkCheckExpired();
+  _mkCheckExpiredV2();
   var listings  = _mkGetListings().filter(function(l){ return l.status === 'active'; });
   var collabs   = _collabGetAll().filter(function(c){ return c.status === 'active'; });
 

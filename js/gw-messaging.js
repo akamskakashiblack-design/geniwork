@@ -19,6 +19,27 @@ function renderConversations() {
   var list = document.getElementById('conv-list');
   if (!list) return;
 
+  /* Delegated click listener, lié une seule fois à #conv-list (jamais recréé par
+     list.innerHTML = ...) — remplace l'ancien onclick inline généré sans guillemets
+     autour de c.id (cassait toute ouverture dont l'id est une chaîne, ex: DM v2
+     "gw_dm_..."). Lecture via data-conv-id (toujours une chaîne en HTML), comparaison
+     tolérante au type (String(c.id)) pour retrouver la conv d'origine, puis appel de
+     openChat(conv.id) — définie dans app.js, non touchée ici — avec le type natif
+     préservé (number pour un groupe, string pour un DM), identique à tous les autres
+     points d'appel existants de openChat(). */
+  if (!list._convClickBound) {
+    list.addEventListener('click', function(e) {
+      var item = e.target.closest('.gwm-conv');
+      if (!item || !list.contains(item)) return;
+      var convIdStr = item.getAttribute('data-conv-id');
+      if (convIdStr == null) return;
+      var conv = DEMO_CONVERSATIONS.find(function(c) { return String(c.id) === convIdStr; });
+      if (!conv) return;
+      openChat(conv.id);
+    });
+    list._convClickBound = true;
+  }
+
   var query = ((document.getElementById('msg-search') || {}).value || '').toLowerCase().trim();
 
   var convs = DEMO_CONVERSATIONS.filter(function(c) {
@@ -69,7 +90,7 @@ function renderConversations() {
       '<div class="gwm-conv' +
         (c.unread > 0 ? ' gwm-conv--unread' : '') +
         (isOpen ? ' gwm-conv--active' : '') +
-        '" onclick="openChat(' + c.id + ')" data-conv-id="' + c.id + '">' +
+        '" data-conv-id="' + escHtml(String(c.id)) + '">' +
         '<div class="gwm-av-wrap">' +
           avHtml +
           (!c.isGroup
