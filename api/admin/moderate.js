@@ -620,6 +620,20 @@ module.exports = async function handler(req, res) {
     }
 
     if (action === 'clearAllNotifs') {
+      /* Phase SYNC-49 : contrôle Super Admin serveur — action destructrice
+         de portée globale (vide gw/notifs de TOUS les utilisateurs), même
+         modèle de vérification que certifyUser. Le client (_admIsSA())
+         bloquait déjà ce bouton pour un admin standard, mais rien ne
+         vérifiait ce rôle côté serveur avant cette phase. */
+      let sadmin;
+      try { sadmin = await dbGet('/gw/sadmin'); } catch (e) {
+        res.status(500).json({ error: 'Erreur serveur' });
+        return;
+      }
+      if (!sadmin || !sadmin.email || sadmin.email.toLowerCase() !== session.email.toLowerCase()) {
+        res.status(403).json({ error: 'Action réservée au fondateur' });
+        return;
+      }
       let users;
       try { users = await dbGet('/gw/users_public'); } catch (e) { users = null; }
       const emails = Array.isArray(users) ? users.map((u) => u && u.email).filter(Boolean) : [];
