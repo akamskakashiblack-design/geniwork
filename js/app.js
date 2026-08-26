@@ -25340,19 +25340,13 @@ function _admReplyThread(threadId) {
   thread.unreadAdmin = 0;
   _saveSupportThreads(threads);
 
-  /* Notif à l'utilisateur */
+  /* Notif à l'utilisateur (Phase 9C : via moderate.js — l'admin panel a
+     sa PROPRE session (_admSessionToken), distincte de la session
+     utilisateur normale ; pushNotif()/_gwLoadSession() ne sont donc pas
+     fiables ici, contrairement aux notifications déclenchées par un
+     utilisateur normal connecté au site principal). */
   try {
-    var userNotif = {
-      id:       'adm_reply_' + ts,
-      type:     'system',
-      at:       ts,
-      msg:      '💬 L\'équipe Geniwork a répondu à votre signalement : "' + txt.slice(0, 80) + (txt.length > 80 ? '…' : '') + '"',
-      unread:   true,
-      fromUser: null
-    };
-    var uN = getNotifs(thread.userEmail);
-    uN.unshift(userNotif);
-    saveNotifs(thread.userEmail, uN);
+    _admApi('moderate', { token: _admSessionToken, action: 'notifySupportReply', targetEmail: thread.userEmail, message: txt.slice(0, 80) + (txt.length > 80 ? '…' : '') }).catch(function(){});
   } catch(e) {}
 
   inp.value = '';
@@ -32226,21 +32220,29 @@ function _gwApplyRestriction(email, nom, type, reason, source) {
   list.push(restriction);
   _gwSaveRestrictions(list);
 
-  /* ── Notification à l'utilisateur ── */
+  /* ── Notification à l'utilisateur (Phase 9C) ──
+     Auto-restriction (source 'auto'/'auto_nsfw') : toujours SOI-MÊME,
+     pushNotif() gère nativement l'écriture directe autorisée.
+     Restriction manuelle (déclenchée depuis le panel admin, source =
+     l'email de l'admin) : CROSS-USER — le panel admin a sa PROPRE
+     session (_admSessionToken), distincte de la session utilisateur
+     normale, donc pushNotif()/_gwLoadSession() ne serait pas fiable ici
+     — passe par moderate.js à la place. */
   var typeLabel = type === 'sexual' ? 'contenu à caractère sexuel ou nudité'
                 : type === 'hate'   ? 'discours haineux ou contenu discriminatoire'
                 : 'violation des règles communautaires';
   try {
-    var notif = {
-      id: 'rst_notif_' + Date.now(), type: 'restriction', at: Date.now(),
-      unread: true,
-      msg: '⚠️ Votre compte a été restreint pour ' + typeLabel + '.\n\nVous ne pouvez plus publier, commenter ou envoyer de messages. Vous pouvez faire un recours depuis votre profil.',
-      fromUser: null,
-      restrictionId: restriction.id
-    };
-    var notifs = getNotifs(email);
-    notifs.unshift(notif);
-    saveNotifs(email, notifs);
+    if (_currentUser && email.toLowerCase() === _currentUser.email.toLowerCase()) {
+      pushNotif(email, {
+        id: 'rst_notif_' + Date.now(), type: 'restriction', at: Date.now(),
+        unread: true,
+        msg: '⚠️ Votre compte a été restreint pour ' + typeLabel + '.\n\nVous ne pouvez plus publier, commenter ou envoyer de messages. Vous pouvez faire un recours depuis votre profil.',
+        fromUser: null,
+        restrictionId: restriction.id
+      });
+    } else if (typeof _admSessionToken !== 'undefined' && _admSessionToken) {
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyRestrictionApplied', targetEmail: email, typeLabel: typeLabel, restrictionId: restriction.id }).catch(function(){});
+    }
   } catch(e) {}
 
   /* ── Affiche la bannière si c'est l'utilisateur connecté ── */
@@ -32268,16 +32270,13 @@ function _gwLiftRestriction(email, liftedBy) {
   if (!found) return;
   _gwSaveRestrictions(list);
 
-  /* Notification levée */
+  /* Notification levée (Phase 9C : toujours déclenché depuis le panel
+     admin — cross-user, passe par moderate.js, cf. _gwApplyRestriction
+     ci-dessus pour le même raisonnement). */
   try {
-    var notif = {
-      id: 'rst_lift_' + Date.now(), type: 'restriction_lifted', at: Date.now(), unread: true,
-      msg: '✅ Votre restriction a été levée. Vous pouvez à nouveau publier, commenter et envoyer des messages.',
-      fromUser: null
-    };
-    var notifs = getNotifs(email);
-    notifs.unshift(notif);
-    saveNotifs(email, notifs);
+    if (typeof _admSessionToken !== 'undefined' && _admSessionToken) {
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyRestrictionLifted', targetEmail: email }).catch(function(){});
+    }
   } catch(e) {}
 
   /* Cache la bannière si c'est l'utilisateur courant */
@@ -34024,7 +34023,7 @@ function _admArtisteAlertHtml(pending) {
           '<div style="font-size:11px;color:#64748B">' + escHtml(req.userEmail) + (req.genre ? ' · ' + escHtml(req.genre) : '') + ' · ' + dt + '</div>' +
         '</div>' +
         '<div style="display:flex;gap:6px;flex-shrink:0">' +
-          '<button onclick="_admArtisteReject(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\')" style="background:rgba(239,68,68,.15);color:#EF4444;border:none;border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-times"></i></button>' +
+          '<button onclick="_admArtisteReject(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\',\'' + escHtml(req.userEmail) + '\')" style="background:rgba(239,68,68,.15);color:#EF4444;border:none;border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-times"></i></button>' +
           '<button onclick="_admArtisteApprove(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\',\'' + escHtml(req.userEmail) + '\',\'' + escHtml(req.stageName||'') + '\')" style="background:rgba(22,163,74,.2);color:#16A34A;border:none;border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-check"></i></button>' +
         '</div>' +
       '</div>';
@@ -34577,31 +34576,19 @@ function _admArtisteApprove(reqId, userKey, userEmail, stageName) {
   _gwFbDB.ref('gw/artiste_approved/' + userKey).set({ approvedAt: now, approvedBy: reviewer, stageName: stageName }).catch(function(){});
   /* Marquer également dans le profil pour que _artisteCheckAccess fonctionne sans règles supplémentaires */
   _gwFbDB.ref('gw/profiles/' + userKey).update({ artiste_approved: { approvedAt: now, approvedBy: reviewer, stageName: stageName } }).catch(function(){});
-  /* Notifier l'utilisateur — 2 notifications */
-  try {
-    var notifsRef = _gwFbDB.ref('gw/notifs/' + userKey);
-    /* 1. Message de bienvenue */
-    notifsRef.push({
-      type: 'artiste_approved',
-      msg: '🎉 Félicitations, vous êtes maintenant artiste GeniWork !\n\nVotre demande de vérification a été approuvée par notre équipe. Vous avez désormais accès à l\'espace artiste et pouvez publier vos sons pour toute la communauté.\n\n✅ Ce que vous pouvez faire :\n• Publier vos sons et musiques\n• Apparaître dans le classement des artistes\n• Être découvert par la communauté GeniWork\n• Partager vos liens (Spotify, YouTube, SoundCloud…)\n\nBienvenue dans la famille des artistes GeniWork ! 🎵',
-      at: now,
-      unread: true,
-      read: false,
-    });
-    /* 2. Rappel conditions droits d\'auteur (décalé d\'1 ms pour l\'ordre) */
-    notifsRef.push({
-      type: 'artiste_copyright_notice',
-      msg: '⚖️ Rappel important — Droits d\'auteur\n\nEn tant qu\'artiste GeniWork, vous vous engagez à ne publier que vos propres créations originales.\n\n🚫 Il est strictement interdit de :\n• Publier la musique d\'autres artistes sans autorisation\n• Utiliser des samples sans licence valide\n• Reproduire des œuvres protégées par le droit d\'auteur\n\n✅ Vous devez uniquement publier :\n• Vos compositions 100 % originales\n• Des œuvres pour lesquelles vous détenez tous les droits\n• Des créations libres de droits autorisées à la distribution\n\nTout contenu signalé pour violation sera supprimé et pourra entraîner la révocation de votre accès artiste.\n\nMerci de respecter le travail de vos confrères. 🙏',
-      at: now + 1,
-      unread: true,
-      read: false,
-    });
-  } catch(e) {}
+  /* Phase 9C : notification desormais ecrite cote serveur (compte de
+     service, moderate.js) — l'ancien .push() direct sur gw/notifs/{userKey}
+     etait une ecriture cross-user, fermee cote regles. Le reste de cette
+     fonction (profil/artiste_requests/artiste_approved) est hors perimetre
+     de cette phase (deja client-direct avant, non touche ici). */
+  if (userEmail) {
+    _admApi('moderate', { token: _admSessionToken, action: 'notifyArtisteApproved', targetEmail: userEmail }).catch(function(){});
+  }
   showToast('Artiste approuvé ✓', 'ok');
   _admRender();
 }
 
-function _admArtisteReject(reqId, userKey) {
+function _admArtisteReject(reqId, userKey, userEmail) {
   if (!_gwFbDB) return;
   var reason = prompt ? (prompt('Raison du refus (optionnel) :') || '') : '';
   var now = Date.now();
@@ -34617,15 +34604,10 @@ function _admArtisteReject(reqId, userKey) {
     _gwFbDB.ref(path + '/reviewedBy').set(reviewer).catch(function(){});
     if (reason) _gwFbDB.ref(path + '/rejectReason').set(reason).catch(function(){});
   });
-  /* Notifier */
-  try {
-    _gwFbDB.ref('gw/notifs/' + userKey).push({
-      type: 'artiste_rejected',
-      msg: '⚠️ Votre demande artiste a été refusée.' + (reason ? ' Raison : ' + reason : ' Contactez l\'administrateur pour plus d\'informations.'),
-      at: now,
-      read: false,
-    });
-  } catch(e) {}
+  /* Phase 9C : notification cote serveur (voir _admArtisteApprove ci-dessus). */
+  if (userEmail) {
+    _admApi('moderate', { token: _admSessionToken, action: 'notifyArtisteRejected', targetEmail: userEmail, reason: reason }).catch(function(){});
+  }
   showToast('Demande refusée', 'err');
   _admRender();
 }
@@ -34750,7 +34732,7 @@ function _admBuildArtisteRequests() {
           : '') +
         (isPending
           ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
-              '<button onclick="_admArtisteReject(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\')" style="background:#1E293B;color:#EF4444;border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:9px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-times" style="margin-right:4px"></i>Refuser</button>' +
+              '<button onclick="_admArtisteReject(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\',\'' + escHtml(req.userEmail) + '\')" style="background:#1E293B;color:#EF4444;border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:9px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-times" style="margin-right:4px"></i>Refuser</button>' +
               '<button onclick="_admArtisteApprove(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\',\'' + escHtml(req.userEmail) + '\',\'' + escHtml(req.stageName||'') + '\')" style="background:linear-gradient(135deg,#16A34A,#15803D);color:#fff;border:none;border-radius:10px;padding:9px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-check" style="margin-right:4px"></i>Approuver</button>' +
             '</div>'
           : (req.rejectReason
@@ -34851,7 +34833,7 @@ function _admBuildArtiste() {
             : '') +
           '<div style="font-size:10px;color:#475569;margin-bottom:12px"><i class="fas fa-clock" style="margin-right:4px"></i>Soumise le ' + dt + '</div>' +
           '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
-            '<button onclick="_admArtisteReject(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\')" ' +
+            '<button onclick="_admArtisteReject(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\',\'' + escHtml(req.userEmail) + '\')" ' +
               'style="background:rgba(239,68,68,.1);color:#EF4444;border:1px solid rgba(239,68,68,.3);border-radius:12px;padding:12px;font-size:13px;font-weight:700;cursor:pointer">' +
               '<i class="fas fa-times" style="margin-right:6px"></i>Refuser</button>' +
             '<button onclick="_admArtisteApprove(\'' + req.id + '\',\'' + escHtml(req.userKey) + '\',\'' + escHtml(req.userEmail) + '\',\'' + escHtml(req.stageName||'') + '\')" ' +
@@ -34994,14 +34976,11 @@ function _admArtisteDeleteSongConfirm() {
     _gwFbDB.ref('gw/artiste_stats/' + info.id).remove().catch(function(){});
     _gwFbDB.ref('gw/artiste_likes/' + info.id).remove().catch(function(){});
 
-    /* Notifier l'artiste */
-    if (info.authorKey) {
-      _gwFbDB.ref('gw/notifs/' + info.authorKey).push({
-        type: 'song_deleted',
-        msg:  'Votre son "' + info.title + '" a été supprimé par l\'administrateur. Motif : ' + reason,
-        at:   Date.now(),
-        read: false
-      }).catch(function(){});
+    /* Notifier l'artiste (Phase 9C : via le serveur — l'ancien .push()
+       direct sur gw/notifs/{authorKey} etait une ecriture cross-user,
+       desormais fermee cote regles). */
+    if (info.authorEmail) {
+      _admApi('moderate', { token: _admSessionToken, action: 'notifySongDeleted', targetEmail: info.authorEmail, title: info.title, reason: reason }).catch(function(){});
     }
 
     /* Forcer le rechargement depuis Firebase pour avoir la liste à jour */
@@ -35497,11 +35476,11 @@ function _admClearUserInbox(email) {
   if (!_admHasAction('send_notif')) return showToast('Permission refusée', 'error');
   if (!confirm('Vider la boîte de réception de ' + email + ' ?')) return;
   localStorage.removeItem('gw_notifs_' + email);
-  try {
-    if (!_gwFbSkip && _gwFbDB) _gwFbDB.ref('gw/notifs/' + _gwFbKey(email)).remove().catch(function(){});
-  } catch(e){}
-  showToast('Boîte de réception vidée', 'success');
-  _admSync('notifs');
+  _admApi('moderate', { token: _admSessionToken, action: 'clearUserNotifs', targetEmail: email }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) { showToast('Échec côté serveur', 'error'); return; }
+    showToast('Boîte de réception vidée', 'success');
+    _admSync('notifs');
+  }).catch(function() { showToast('Erreur réseau', 'error'); });
 }
 
 /* ── Vide toutes les boîtes de réception (Super Admin uniquement) ── */
@@ -35509,14 +35488,12 @@ function _admClearAllInboxes() {
   if (!_admIsSA()) return showToast('Réservé au Super Admin', 'error');
   if (!confirm('Vider TOUTES les boîtes de réception utilisateurs ?\nCette action est irréversible.')) return;
   var users = getUsers();
-  users.forEach(function(u) {
-    localStorage.removeItem('gw_notifs_' + u.email);
-    try {
-      if (!_gwFbSkip && _gwFbDB) _gwFbDB.ref('gw/notifs/' + _gwFbKey(u.email)).remove().catch(function(){});
-    } catch(e){}
-  });
-  showToast('Toutes les boîtes ont été vidées', 'success');
-  _admSync('notifs');
+  users.forEach(function(u) { localStorage.removeItem('gw_notifs_' + u.email); });
+  _admApi('moderate', { token: _admSessionToken, action: 'clearAllNotifs' }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) { showToast('Échec côté serveur', 'error'); return; }
+    showToast('Toutes les boîtes ont été vidées', 'success');
+    _admSync('notifs');
+  }).catch(function() { showToast('Erreur réseau', 'error'); });
 }
 
 /* ══════════════════════════════════════════
@@ -36150,16 +36127,10 @@ function _admResolveRstAppeal(id, action) {
     _admLog('REJECT_RST_APPEAL_BAN', appeal.email);
     _admBanUser(appeal.email);  /* ouvre modal de ban */
   } else {
-    /* Rejeter — notifier l'utilisateur */
+    /* Rejeter — notifier l'utilisateur (Phase 9C : via moderate.js, action
+       admin cross-user, panel admin a sa propre session). */
     try {
-      var notif = {
-        id: 'rst_rej_' + Date.now(), type: 'restriction_rejected', at: Date.now(), unread: true,
-        msg: '❌ Votre recours de restriction a été examiné et rejeté. La restriction reste en vigueur. Veuillez respecter les règles de la communauté.',
-        fromUser: null
-      };
-      var notifs = getNotifs(appeal.email);
-      notifs.unshift(notif);
-      saveNotifs(appeal.email, notifs);
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyRestrictionAppealRejected', targetEmail: appeal.email }).catch(function(){});
     } catch(e) {}
     _admLog('REJECT_RST_APPEAL', appeal.email);
     showToast('Recours rejeté', 'ok');
@@ -36195,16 +36166,10 @@ function _admWarnUser(email) {
   if (!_adminUser || !_admHasAction('warn_user')) { showToast('Accès non autorisé', 'err'); return; }
   /* En production : notification push / email. En démo : toast + log */
   _admLog('WARN', email);
-  /* Envoie une notification in-app à l'utilisateur */
+  /* Envoie une notification in-app à l'utilisateur (Phase 9C : via
+     moderate.js, action admin cross-user). */
   try {
-    var warnNotif = {
-      id: 'warn_' + Date.now(), type: 'warning', at: Date.now(), unread: true,
-      msg: '⚠️ Un administrateur a émis un avertissement sur votre compte. Veuillez respecter les règles de la communauté.',
-      fromUser: { nom: 'Geniwork Admin', email: 'admin@geniwork.app' }
-    };
-    var notifs = getNotifs(email);
-    notifs.unshift(warnNotif);
-    saveNotifs(email, notifs);
+    _admApi('moderate', { token: _admSessionToken, action: 'notifyUserWarned', targetEmail: email }).catch(function(){});
   } catch(e) {}
   showToast('Avertissement envoyé à ' + email + ' ✓', 'ok');
 }
@@ -36421,15 +36386,12 @@ function _admConfirmBan(email) {
     var s = JSON.parse(localStorage.getItem('gw_session') || 'null');
     if (s && s.email && s.email.toLowerCase() === email.toLowerCase()) localStorage.removeItem('gw_session');
   } catch(e) {}
-  /* Notification à l'utilisateur */
+  /* Notification à l'utilisateur (Phase 9C : via moderate.js). */
   try {
     var banMsg = type === 'perm'
       ? '🚫 Votre compte a été suspendu définitivement. Motif : ' + reason
       : '⏸️ Votre compte est suspendu pour ' + days + ' jour' + (days > 1 ? 's' : '') + '. Motif : ' + reason;
-    var notifs = getNotifs(email);
-    notifs.unshift({ id:'ban_notice_'+Date.now(), type:'ban',
-      msg: banMsg + (message ? '\n\n' + message : ''), at: Date.now(), time:'À l\'instant', unread:true, fromUser:null });
-    saveNotifs(email, notifs);
+    _admApi('moderate', { token: _admSessionToken, action: 'notifyBanApplied', targetEmail: email, banMsg: banMsg, extraMsg: message }).catch(function(){});
   } catch(e) {}
   _admLog('BAN:' + type.toUpperCase() + (type === 'temp' ? ':' + days + 'j' : ''), email + ' — ' + reason);
   var modal = document.getElementById('adm-ban-modal');
@@ -36443,12 +36405,9 @@ function _admUnbanUser(email, _force) {
   if (!_force && (!_adminUser || !_admHasAction('unban'))) { showToast('Accès non autorisé', 'err'); return; }
   var bans = _admGetBans().filter(function(b){ return b.email.toLowerCase() !== email.toLowerCase(); });
   _admSaveBans(bans);
-  /* Notifier l'utilisateur */
+  /* Notifier l'utilisateur (Phase 9C : via moderate.js). */
   try {
-    var notifs = getNotifs(email);
-    notifs.unshift({ id:'ban_lifted_'+Date.now(), type:'ban_lifted',
-      msg:'✅ Votre suspension a été levée. Vous pouvez vous reconnecter.', at: Date.now(), time:'À l\'instant', unread:true, fromUser:null });
-    saveNotifs(email, notifs);
+    _admApi('moderate', { token: _admSessionToken, action: 'notifyBanLifted', targetEmail: email }).catch(function(){});
   } catch(e) {}
   _admLog('UNBAN', email);
   showToast(email + ' débanni ✓', 'ok');
@@ -36844,39 +36803,22 @@ function _admApproveBadge(id) {
   req.reviewedAt = new Date().toISOString();
   _admSaveBadgeReqs(reqs);
 
-  /* Applique le badge sur le profil utilisateur */
-  var profile = loadUserProfile(req.email) || {};
-  profile.badgeType         = req.type || 'verified';
-  profile.badgeStatus       = 'approved';
-  profile.identityVerified  = true;
-  profile.badgeApprovedAt   = new Date().toISOString();
-  saveUserProfile(req.email, profile);
-
-  /* ── Notifie l'utilisateur ── */
-  var isPrem = req.type === 'premium';
-  var notif = {
-    id:       genNotifId(),
-    type:     'badge_approved',
-    msg:      isPrem
-      ? '👑 Félicitations ! Votre Badge Premium a été approuvé. Profitez de tous vos avantages !'
-      : '✅ Félicitations ! Votre Badge Vérifié a été approuvé par notre équipe.',
-    at: Date.now(), time:     'À l\'instant',
-    unread:   true,
-    fromUser: null
-  };
-  try {
-    var notifs = getNotifs(req.email);
-    notifs.unshift(notif);
-    saveNotifs(req.email, notifs);
-    /* Si l'utilisateur est connecté → refresh immédiat */
-    if (_currentUser && _currentUser.email === req.email) {
-      renderNotifs(); updateNotifBadge();
+  /* Phase 6C-7 : applique le badge via le serveur (compte de service),
+     gw/profiles n'est plus modifiable en cross-user depuis le client. */
+  _admApi('moderate', { token: _admSessionToken, action: 'approveBadge', targetEmail: req.email, badgeType: req.type || 'verified' }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      showToast(res.data && res.data.error ? res.data.error : 'Erreur serveur', 'err');
+      return;
     }
-  } catch(e) {}
 
-  _admLog('APPROVE_BADGE:' + req.type, req.email);
-  showToast('Badge accordé à ' + (req.nom || req.email) + ' ✓', 'ok');
-  _admRender();
+    /* Phase 9C : notification desormais ecrite cote serveur (moderate.js,
+       action approveBadge deja verifiee). */
+    if (_currentUser && _currentUser.email === req.email) { renderNotifs(); updateNotifBadge(); }
+
+    _admLog('APPROVE_BADGE:' + req.type, req.email);
+    showToast('Badge accordé à ' + (req.nom || req.email) + ' ✓', 'ok');
+    _admRender();
+  });
 }
 
 /* ── Retirer un badge d'un utilisateur (avec motif) ── */
@@ -36896,56 +36838,32 @@ function _admRevokeBadge(email) {
 
   var oldBadge = profile.badgeType;
 
-  /* Supprime le badge du profil */
-  delete profile.badgeType;
-  delete profile.badgeApprovedAt;
-  profile.badgeStatus = 'revoked';
-  profile.badgeRevokedAt     = new Date().toISOString();
-  profile.badgeRevokedMotif  = motif.trim();
-  profile.badgeRevokedBy     = _adminUser ? _adminUser.email : 'admin';
-
-  /* Réinitialise aussi le plan si c'était Premium/Business */
-  if (profile.planType === 'premium' || profile.planType === 'business') {
-    profile.planType = 'free';
-  }
-
-  saveUserProfile(email, profile);
-
-  /* Mise à jour de la demande dans gw_badge_requests */
-  var reqs = _admGetBadgeReqs();
-  reqs.forEach(function(r) {
-    if (r.email === email && r.status === 'approved') {
-      r.status      = 'revoked';
-      r.revokedBy   = _adminUser ? _adminUser.email : 'admin';
-      r.revokedAt   = new Date().toISOString();
-      r.revokedMotif = motif.trim();
+  /* Phase 6C-7 : retire le badge via le serveur (compte de service). */
+  _admApi('moderate', { token: _admSessionToken, action: 'revokeBadge', targetEmail: email, motif: motif.trim() }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      showToast(res.data && res.data.error ? res.data.error : 'Erreur serveur', 'err');
+      return;
     }
+
+    /* Mise à jour de la demande dans gw_badge_requests */
+    var reqs = _admGetBadgeReqs();
+    reqs.forEach(function(r) {
+      if (r.email === email && r.status === 'approved') {
+        r.status      = 'revoked';
+        r.revokedBy   = _adminUser ? _adminUser.email : 'admin';
+        r.revokedAt   = new Date().toISOString();
+        r.revokedMotif = motif.trim();
+      }
+    });
+    _admSaveBadgeReqs(reqs);
+
+    /* Phase 9C : notification desormais ecrite cote serveur (moderate.js). */
+    if (_currentUser && _currentUser.email === email) { renderNotifs(); updateNotifBadge(); }
+
+    _admLog('REVOKE_BADGE:' + oldBadge, email + ' — ' + motif.slice(0, 60));
+    showToast('Badge retiré · ' + email + ' notifié ✓', 'ok');
+    _admRender();
   });
-  _admSaveBadgeReqs(reqs);
-
-  /* Notification à l'utilisateur */
-  var notif = {
-    id:       genNotifId(),
-    type:     'badge_revoked',
-    msg:      '⚠️ Votre badge ' + badgeLabel + ' a été retiré par l\'équipe Geniwork.\n' +
-              'Motif : ' + motif.trim().slice(0, 200),
-    at: Date.now(), time:     'À l\'instant',
-    unread:   true,
-    fromUser: null
-  };
-  try {
-    var notifs = getNotifs(email);
-    notifs.unshift(notif);
-    saveNotifs(email, notifs);
-    /* Refresh immédiat si l'utilisateur est connecté */
-    if (_currentUser && _currentUser.email === email) {
-      renderNotifs(); updateNotifBadge();
-    }
-  } catch(e) {}
-
-  _admLog('REVOKE_BADGE:' + oldBadge, email + ' — ' + motif.slice(0, 60));
-  showToast('Badge retiré · ' + email + ' notifié ✓', 'ok');
-  _admRender();
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -36966,35 +36884,21 @@ function _admCertifyUser(email) {
   /* Confirmation */
   if (!confirm('Certifier le compte de ' + nom + ' (' + email + ') ?\n\nUn badge vert Certifié sera affiché sur son profil.')) return;
 
-  /* Applique la certification */
-  profile.badgeType         = 'certified';
-  profile.badgeStatus       = 'approved';
-  profile.badgeCertifiedBy  = _adminUser ? _adminUser.email : 'founder';
-  profile.badgeCertifiedAt  = new Date().toISOString();
-  saveUserProfile(email, profile);
-
-  /* Notification à l'utilisateur */
-  var notif = {
-    id:       genNotifId(),
-    type:     'badge_approved',
-    msg:      '🟢 Félicitations ! Votre compte a été certifié par Geniwork. Un badge vert apparaît maintenant sur votre profil.',
-    at:       Date.now(),
-    time:     'À l\'instant',
-    unread:   true,
-    fromUser: null
-  };
-  try {
-    var notifs = getNotifs(email);
-    notifs.unshift(notif);
-    saveNotifs(email, notifs);
-    if (_currentUser && _currentUser.email === email) {
-      renderNotifs(); updateNotifBadge();
+  /* Phase 6C-7 : applique la certification via le serveur (compte de
+     service, vérifie lui-même que l'appelant est bien gw/sadmin). */
+  _admApi('moderate', { token: _admSessionToken, action: 'certifyUser', targetEmail: email }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      showToast(res.data && res.data.error ? res.data.error : 'Erreur serveur', 'err');
+      return;
     }
-  } catch(e) {}
 
-  _admLog('CERTIFY_USER', email);
-  showToast('🟢 ' + nom + ' est maintenant certifié !', 'ok');
-  _admRender();
+    /* Phase 9C : notification desormais ecrite cote serveur (moderate.js). */
+    if (_currentUser && _currentUser.email === email) { renderNotifs(); updateNotifBadge(); }
+
+    _admLog('CERTIFY_USER', email);
+    showToast('🟢 ' + nom + ' est maintenant certifié !', 'ok');
+    _admRender();
+  });
 }
 
 /* ── Refuser un badge ── */
@@ -37012,34 +36916,21 @@ function _admRejectBadge(id) {
   req.rejectReason = reason;
   _admSaveBadgeReqs(reqs);
 
-  /* Met à jour le statut sur le profil */
-  var profile = loadUserProfile(req.email) || {};
-  profile.badgeStatus = 'rejected';
-  delete profile.badgeType; /* retire un éventuel badge existant */
-  saveUserProfile(req.email, profile);
-
-  /* ── Notifie l'utilisateur ── */
-  var notif = {
-    id:       genNotifId(),
-    type:     'badge_rejected',
-    msg:      '❌ Votre demande de badge a été refusée.' +
-              (reason ? ' Motif : ' + reason.slice(0, 150) : ' Vous pouvez soumettre à nouveau après correction.'),
-    at: Date.now(), time:     'À l\'instant',
-    unread:   true,
-    fromUser: null
-  };
-  try {
-    var notifs = getNotifs(req.email);
-    notifs.unshift(notif);
-    saveNotifs(req.email, notifs);
-    if (_currentUser && _currentUser.email === req.email) {
-      renderNotifs(); updateNotifBadge();
+  /* Phase 6C-7 : met à jour le profil via le serveur (compte de service).
+     Phase 9C : "reason" désormais transmis au serveur, qui écrit lui-même
+     la notification (plus de getNotifs/saveNotifs cross-user côté client). */
+  _admApi('moderate', { token: _admSessionToken, action: 'rejectBadge', targetEmail: req.email, reason: reason }).then(function(res) {
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      showToast(res.data && res.data.error ? res.data.error : 'Erreur serveur', 'err');
+      return;
     }
-  } catch(e) {}
 
-  _admLog('REJECT_BADGE', req.email);
-  showToast('Demande refusée — utilisateur notifié', 'ok');
-  _admRender();
+    if (_currentUser && _currentUser.email === req.email) { renderNotifs(); updateNotifBadge(); }
+
+    _admLog('REJECT_BADGE', req.email);
+    showToast('Demande refusée — utilisateur notifié', 'ok');
+    _admRender();
+  });
 }
 
 /* ══════════════════════════════════════════
@@ -37294,10 +37185,9 @@ function _admSaveDelegate() {
     var admins = _admGetAdmins();
     var m = admins.find(function(a){ return a.email.toLowerCase() === email.toLowerCase(); });
     if (m) {
-      var txt = (tabs.length || actions.length)
-        ? 'Le Super Admin vous a accordé de nouvelles permissions.'
-        : 'Le Super Admin a retiré vos permissions supplémentaires.';
-      pushNotif(m.email, { id: genNotifId(), type:'system', title:'Permissions mises à jour', message: txt, date: new Date().toISOString(), read: false });
+      /* Phase 9C : notification via le serveur (moderate.js verifie que
+         l'appelant est bien un admin reel avant d'ecrire gw/notifs). */
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyPermissionsUpdated', targetEmail: m.email, granted: !!(tabs.length || actions.length) }).catch(function(){});
     }
   } catch(e) {}
 
@@ -37371,23 +37261,11 @@ function _admSaveTask() {
   _admSaveTasks(tasks);
   _admLog('CREATE_TASK', title);
 
-  /* ── Notifier le membre assigné ── */
+  /* ── Notifier le membre assigné (Phase 9C : via le serveur, moderate.js
+     verifie que l'appelant est un admin reel avant d'ecrire gw/notifs) ── */
   if (assign) {
     try {
-      var byNom = _adminUser ? (_adminUser.nom || _adminUser.email) : 'Admin';
-      var msg = '📋 Nouvelle tâche assignée par ' + byNom + ' :\n\n' +
-                '• ' + title + (desc ? '\n' + desc : '') +
-                '\n• Priorité : ' + (priorityLabels[priority] || priority) +
-                (due ? '\n• Échéance : ' + due : '');
-      pushNotif(assign, {
-        id:      genNotifId(),
-        type:    'task_assigned',
-        title:   '📋 Nouvelle tâche',
-        message: msg,
-        taskId:  taskId,
-        date:    new Date().toISOString(),
-        read:    false
-      });
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyTaskAssigned', targetEmail: assign, taskId: taskId, taskTitle: title }).catch(function(){});
     } catch(e) {}
   }
 
@@ -37406,35 +37284,18 @@ function _admMarkTaskDone(id) {
   _admSaveTasks(tasks);
   _admLog('TASK_DONE', t.title);
 
-  /* ── Notifier le SA que la tâche est accomplie ── */
+  /* ── Notifier le SA que la tâche est accomplie (Phase 9C : via le
+     serveur, moderate.js verifie que l'appelant est un admin reel) ── */
   try {
     var sa = _admGetSuperAdmin();
     /* Pas besoin de notifier le SA s'il est lui-même celui qui coche */
     if (sa && _adminUser && sa.email.toLowerCase() !== _adminUser.email.toLowerCase()) {
-      var doerNom = _adminUser.nom || _adminUser.email;
-      pushNotif(sa.email, {
-        id:      genNotifId(),
-        type:    'task_done',
-        title:   '✅ Tâche accomplie',
-        message: '✅ ' + doerNom + ' a accompli la tâche :\n"' + t.title + '"',
-        taskId:  id,
-        date:    new Date().toISOString(),
-        read:    false
-      });
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyTaskDone', targetEmail: sa.email, taskId: id, taskTitle: t.title }).catch(function(){});
     }
     /* Notifier aussi l'assigneur si ce n'est pas le SA ni l'exécuteur */
     if (t.assignedBy && _adminUser && t.assignedBy.toLowerCase() !== _adminUser.email.toLowerCase() &&
         (!sa || t.assignedBy.toLowerCase() !== sa.email.toLowerCase())) {
-      var doerNom2 = _adminUser.nom || _adminUser.email;
-      pushNotif(t.assignedBy, {
-        id:      genNotifId(),
-        type:    'task_done',
-        title:   '✅ Tâche accomplie',
-        message: '✅ ' + doerNom2 + ' a accompli la tâche :\n"' + t.title + '"',
-        taskId:  id,
-        date:    new Date().toISOString(),
-        read:    false
-      });
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyTaskDone', targetEmail: t.assignedBy, taskId: id, taskTitle: t.title }).catch(function(){});
     }
   } catch(e) {}
 
@@ -37683,13 +37544,9 @@ function _admResolveAppeal(id, action) {
     _admUnbanUser(appeal.email, true);
     showToast('Recours accepté — compte réactivé ✓', 'ok');
   } else {
-    /* Notifier le refus */
+    /* Notifier le refus (Phase 9C : via moderate.js). */
     try {
-      var notifs = getNotifs(appeal.email);
-      notifs.unshift({ id:'appeal_rej_'+Date.now(), type:'appeal_rejected',
-        msg:'❌ Votre recours a été examiné et rejeté. La sanction reste en vigueur.',
-        at: Date.now(), time:'À l\'instant', unread:true, fromUser:null });
-      saveNotifs(appeal.email, notifs);
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyBanAppealRejected', targetEmail: appeal.email }).catch(function(){});
     } catch(e) {}
     _admLog('APPEAL_REJECTED', appeal.email);
     showToast('Recours rejeté', 'ok');
@@ -38210,14 +38067,11 @@ function _admPublishOfficial() {
           _offSavePosts(_allP);
           _gwDeleteVideoBlob(videoIdbId); /* SHB-11 : blob IDB nettoyé après persistance réussie */
           _admLog('OFFICIAL_POST', _offText.slice(0, 60));
-          var _notifMsgOff = '📣 Geniwork : ' + (_offText ? _offText.slice(0, 120) : 'Nouvelle publication officielle');
+          /* Phase 9C : diffusion via le serveur (moderate.js, boucle sur
+             gw/users_public côté compte de service) — plus de
+             getNotifs/saveNotifs cross-user en boucle côté client. */
           try {
-            getUsers().forEach(function(u) {
-              var notifs = getNotifs(u.email);
-              notifs.unshift({ id: genNotifId(), type: 'official', msg: _notifMsgOff,
-                at: Date.now(), time: "À l'instant", unread: true, fromUser: null });
-              saveNotifs(u.email, notifs);
-            });
+            _admApi('moderate', { token: _admSessionToken, action: 'notifyOfficialPost', message: _offText ? _offText.slice(0, 120) : '' }).catch(function(){});
           } catch(e2) {}
           if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
           if (_currentUser) {
@@ -38841,14 +38695,9 @@ function _admPublishOfficialShort() {
           /* SR-02 : blob IDB nettoyé après persistance réussie */
           _gwDeleteVideoBlob(idbId);
           _admLog('OFFICIAL_POST', text.slice(0, 60));
-          var _notifMsgSh = '📣 Geniwork : ' + (text ? text.slice(0, 120) : 'Nouvelle publication officielle');
+          /* Phase 9C : diffusion via le serveur (moderate.js). */
           try {
-            getUsers().forEach(function(u) {
-              var notifs = getNotifs(u.email);
-              notifs.unshift({ id: genNotifId(), type: 'official', msg: _notifMsgSh,
-                at: Date.now(), time: "À l'instant", unread: true, fromUser: null });
-              saveNotifs(u.email, notifs);
-            });
+            _admApi('moderate', { token: _admSessionToken, action: 'notifyOfficialPost', message: text ? text.slice(0, 120) : '' }).catch(function(){});
           } catch(e2) {}
           if (document.getElementById('feed-list')) renderFeed(_getFeedPosts());
           if (_currentUser) {
