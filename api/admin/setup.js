@@ -56,6 +56,6 @@ module.exports = async function handler(req, res) {
     res.status(200).json({ ok: true, token, adminFirebaseToken, user });
   } catch (err) {
     console.error('[Geniwork Admin] erreur setup:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erreur serveur' });
   }
 };

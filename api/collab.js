@@ -16,7 +16,7 @@
    nouveau.
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbGet, dbSet, emailKey } = require('./admin/_lib/fbrest');
+const { dbGet, dbSet, emailKey, checkRateLimit } = require('./admin/_lib/fbrest');
 const { verify: verifyRefreshToken } = require('./auth/_lib/refreshToken');
 
 var MAX_TITLE = 200, MAX_DESC = 3000, MAX_SKILLS = 20, MAX_SKILL_LEN = 40;
@@ -49,6 +49,15 @@ module.exports = async function handler(req, res) {
   var callerUid = emailKey(callerEmail);
 
   if (body.action === 'create') {
+    /* Phase SYNC-64 : rate-limit fail-closed — jusqu'à 4 photos + 1 document
+       en base64 (MAX_ATTACH_B64=7 Mo par pièce jointe), un profil de charge
+       au moins équivalent à groups/cover-upload.js (seul précédent upload
+       du projet, 10/h fail-closed) ; seuil aligné sur ce précédent plutôt
+       qu'inventé, avant tout traitement des pièces jointes ci-dessous. */
+    var rl = await checkRateLimit('collab:create:' + callerUid, 10, 60 * 60 * 1000);
+    if (rl.ok === false) { res.status(429).json({ error: 'Trop de demandes de collaboration récentes. Réessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+    if (rl.ok === null) { res.status(503).json({ error: 'Service de protection anti-abus temporairement indisponible.' }); return; }
+
     var title = typeof body.title === 'string' ? body.title.trim().slice(0, MAX_TITLE) : '';
     var description = typeof body.description === 'string' ? body.description.trim().slice(0, MAX_DESC) : '';
     if (!title || !description) { res.status(400).json({ error: 'Titre et description requis' }); return; }

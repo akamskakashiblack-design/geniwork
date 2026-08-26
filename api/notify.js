@@ -232,7 +232,7 @@ module.exports = async function handler(req, res) {
 
   } catch (err) {
     console.error('[Geniwork] ❌ Erreur notify:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erreur serveur' });
   }
 };
 

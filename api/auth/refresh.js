@@ -61,6 +61,6 @@ module.exports = async function handler(req, res) {
     res.status(200).json({ ok: true, token: token, uid: uid, refreshToken: refreshToken });
   } catch (err) {
     console.error('[Geniwork Auth] erreur refresh:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erreur serveur' });
   }
 };

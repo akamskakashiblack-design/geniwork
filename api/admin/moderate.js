@@ -658,6 +658,6 @@ module.exports = async function handler(req, res) {
     res.status(400).json({ error: 'Action inconnue: ' + action });
   } catch (err) {
     console.error('[Geniwork Admin] erreur moderate:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erreur serveur' });
   }
 };

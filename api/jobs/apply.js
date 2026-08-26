@@ -29,7 +29,7 @@
    Reponse : { ok:true, applicationId } ou { ok:false, error }
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbGet, dbUpdate, emailKey } = require('../admin/_lib/fbrest');
+const { dbGet, dbUpdate, emailKey, checkRateLimit } = require('../admin/_lib/fbrest');
 const { verify: verifyRefreshToken } = require('../auth/_lib/refreshToken');
 
 /* Identique a la limite cote client (_jobPickCV, js/app.js :
@@ -78,6 +78,17 @@ module.exports = async function handler(req, res) {
     }
     const candidateEmail = ticketData.email;
     const candidateUid = emailKey(candidateEmail);
+
+    /* Phase SYNC-64 : rate-limit fail-closed, avant toute résolution
+       coûteuse (resolveJob() scanne gw/jobs_v2 en entier) — l'anti-doublon
+       existant (applicationId=jobId_candidateUid) ne bloque qu'une même
+       offre, pas des candidatures répétées sur des offres distinctes. CV
+       jusqu'à ~7 Mo (MAX_CV_DATA_LENGTH) : seuil aligné sur le précédent
+       upload le plus proche du projet (groups/cover-upload.js, 10/h
+       fail-closed), plutôt qu'une valeur inventée. */
+    const rl = await checkRateLimit('jobs:apply:' + candidateUid, 10, 60 * 60 * 1000);
+    if (rl.ok === false) { res.status(429).json({ ok: false, error: 'Trop de candidatures récentes. Réessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+    if (rl.ok === null) { res.status(503).json({ ok: false, error: 'Service de protection anti-abus temporairement indisponible.' }); return; }
 
     if (!isValidJobId(body.jobId)) {
       res.status(400).json({ ok: false, error: 'jobId invalide' });
