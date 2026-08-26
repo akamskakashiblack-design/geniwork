@@ -241,4 +241,49 @@ async function mutateArrayAtPath(path, mutateFn) {
   return { ok: false, reason: 'conflict' };
 }
 
-module.exports = { dbGet, dbSet, dbUpdate, dbRemove, emailKey, dbGetWithETag, dbSetIfMatch, appendNotification, mutateArrayAtPath };
+/* ── Phase SYNC-55 : rate limiter distribué, même primitives ETag
+   qu'appendNotification/mutateArrayAtPath ci-dessus — jamais de compteur
+   mémoire local (inefficace entre instances/régions Vercel serverless ;
+   c'est exactement le piège déjà évité par login.js/token.js/chat.js en
+   choisissant Firebase plutôt qu'une variable locale, mais ces 3
+   précédents utilisent un dbGet/dbSet simple, sans ETag — ce helper
+   apporte la protection atomique réelle qui leur manquait).
+
+   `key` doit déjà être construite par l'appelant à partir de l'identité
+   vérifiée par le token (jamais depuis body.email/body.uid/body.userId) —
+   ce helper ne dérive jamais l'identité lui-même, il ne fait que
+   compter/limiter sur la clé qu'on lui fournit.
+
+   Retour :
+     { ok:true }                    — autorisé, comptabilisé
+     { ok:false, retryAfterSec:N }  — seuil atteint, requête à refuser
+     { ok:null, unavailable:true }  — Firebase indisponible ou conflits
+                                       épuisés ; c'est à l'appelant de
+                                       décider fail-open ou fail-closed
+                                       selon sa catégorie — ce helper ne
+                                       transforme jamais un échec en succès. */
+async function checkRateLimit(key, max, windowMs) {
+  const path = '/gw/rate_limits/' + key;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    let current;
+    try { current = await dbGetWithETag(path); } catch (e) { return { ok: null, unavailable: true }; }
+    const now = Date.now();
+    const rec = (current.value && typeof current.value === 'object') ? current.value : null;
+    let next;
+    if (!rec || !rec.windowStartedAt || (now - rec.windowStartedAt) >= windowMs) {
+      next = { count: 1, windowStartedAt: now };
+    } else if (rec.count >= max) {
+      const retryAfterSec = Math.max(1, Math.ceil((rec.windowStartedAt + windowMs - now) / 1000));
+      return { ok: false, retryAfterSec: retryAfterSec };
+    } else {
+      next = { count: rec.count + 1, windowStartedAt: rec.windowStartedAt };
+    }
+    let result;
+    try { result = await dbSetIfMatch(path, next, current.etag); } catch (e) { return { ok: null, unavailable: true }; }
+    if (result.ok) return { ok: true };
+    /* conflit (412) : quelqu'un d'autre a écrit entre-temps, on relit et retente */
+  }
+  return { ok: null, unavailable: true };
+}
+
+module.exports = { dbGet, dbSet, dbUpdate, dbRemove, emailKey, dbGetWithETag, dbSetIfMatch, appendNotification, mutateArrayAtPath, checkRateLimit };

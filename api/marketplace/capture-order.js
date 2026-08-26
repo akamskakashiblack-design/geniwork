@@ -31,7 +31,7 @@
           ou { ok:false, error }
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbGet, dbSet, dbGetWithETag, dbSetIfMatch } = require('../admin/_lib/fbrest');
+const { dbGet, dbSet, dbGetWithETag, dbSetIfMatch, checkRateLimit } = require('../admin/_lib/fbrest');
 const { verify: verifyRefreshToken } = require('../auth/_lib/refreshToken');
 const { captureOrder: paypalCaptureOrder } = require('./_lib/paypal');
 
@@ -70,6 +70,11 @@ module.exports = async function handler(req, res) {
       return;
     }
     const callerEmail = ticketData.email;
+
+    /* Phase SYNC-55 : rate-limit fail-closed — capture de paiement. */
+    const rl = await checkRateLimit('marketplace:capture-order:' + emailKey(callerEmail), 20, 60 * 60 * 1000);
+    if (rl.ok === false) { res.status(429).json({ ok: false, error: 'Trop de tentatives récentes. Réessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+    if (rl.ok === null) { res.status(503).json({ ok: false, error: 'Service de protection anti-abus temporairement indisponible.' }); return; }
 
     if (!isValidOrderId(body.orderID)) {
       res.status(400).json({ ok: false, error: 'orderID invalide' });

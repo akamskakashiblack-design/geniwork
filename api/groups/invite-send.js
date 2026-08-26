@@ -21,7 +21,7 @@
 ═══════════════════════════════════════════════════════════════ */
 
 const crypto = require('crypto');
-const { dbGet, dbUpdate, emailKey, appendNotification } = require('../admin/_lib/fbrest');
+const { dbGet, dbUpdate, emailKey, appendNotification, checkRateLimit } = require('../admin/_lib/fbrest');
 const { verify: verifyRefreshToken } = require('../auth/_lib/refreshToken');
 
 const MAX_TARGETS = 20;
@@ -54,6 +54,13 @@ module.exports = async function handler(req, res) {
     }
     const callerEmail = ticketData.email;
     const myUid = emailKey(callerEmail);
+
+    /* Phase SYNC-55 : rate-limit fail-open — social/faible risque, un
+       incident d'indisponibilité Firebase ne doit pas bloquer une
+       invitation legitime (deja borne a MAX_TARGETS=20/requete). */
+    const rl = await checkRateLimit('groups:invite-send:' + myUid, 20, 60 * 60 * 1000);
+    if (rl.ok === false) { res.status(429).json({ ok: false, error: 'Trop d\'invitations recentes. Reessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+    /* rl.ok === null (indisponible) : fail-open, on continue normalement. */
 
     if (!isValidGroupId(body.groupId)) {
       res.status(400).json({ ok: false, error: 'groupId invalide' });

@@ -18,7 +18,7 @@
    Réponse : { ok:true, refundStatus:'refunded', refundAt } ou { ok:false, error }
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbGet, dbSet, dbUpdate, dbGetWithETag, dbSetIfMatch, emailKey } = require('../admin/_lib/fbrest');
+const { dbGet, dbSet, dbUpdate, dbGetWithETag, dbSetIfMatch, emailKey, checkRateLimit } = require('../admin/_lib/fbrest');
 const { verify: verifyRefreshToken } = require('../auth/_lib/refreshToken');
 const { refundCapture: paypalRefundCapture } = require('../marketplace/_lib/paypal');
 
@@ -50,6 +50,11 @@ module.exports = async function handler(req, res) {
       return;
     }
     const callerEmail = ticketData.email;
+
+    /* Phase SYNC-55 : rate-limit fail-closed — remboursement, opération financière. */
+    const rl = await checkRateLimit('subscriptions:refund:' + emailKey(callerEmail), 5, 60 * 60 * 1000);
+    if (rl.ok === false) { res.status(429).json({ ok: false, error: 'Trop de tentatives récentes. Réessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+    if (rl.ok === null) { res.status(503).json({ ok: false, error: 'Service de protection anti-abus temporairement indisponible.' }); return; }
 
     if (!isValidOrderId(body.orderID)) {
       res.status(400).json({ ok: false, error: 'orderID invalide' });

@@ -29,7 +29,7 @@
    presente uniquement dans le legacy).
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbGet, dbSet } = require('../admin/_lib/fbrest');
+const { dbGet, dbSet, emailKey, checkRateLimit } = require('../admin/_lib/fbrest');
 const { verify: verifyRefreshToken } = require('../auth/_lib/refreshToken');
 const { createOrder: paypalCreateOrder } = require('./_lib/paypal');
 const { convertToEUR } = require('./_lib/currency');
@@ -78,6 +78,12 @@ module.exports = async function handler(req, res) {
       return;
     }
     const buyerEmail = ticketData.email;
+
+    /* Phase SYNC-55 : rate-limit fail-closed — création de commande,
+       potentiellement financière. Clé sur l'identité déjà vérifiée. */
+    const rl = await checkRateLimit('marketplace:create-order:' + emailKey(buyerEmail), 20, 60 * 60 * 1000);
+    if (rl.ok === false) { res.status(429).json({ ok: false, error: 'Trop de commandes récentes. Réessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+    if (rl.ok === null) { res.status(503).json({ ok: false, error: 'Service de protection anti-abus temporairement indisponible.' }); return; }
 
     /* ── Forme de la requête : exactement une des deux formes. ── */
     const hasListingId = body.listingId !== undefined;

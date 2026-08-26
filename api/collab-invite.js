@@ -32,7 +32,7 @@
    collaborators correspondant à l'appelant (ETag, mutateArrayAtPath).
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbGet, emailKey, mutateArrayAtPath } = require('./admin/_lib/fbrest');
+const { dbGet, emailKey, mutateArrayAtPath, checkRateLimit } = require('./admin/_lib/fbrest');
 const { verify: verifyRefreshToken } = require('./auth/_lib/refreshToken');
 
 module.exports = async function handler(req, res) {
@@ -52,6 +52,12 @@ module.exports = async function handler(req, res) {
   }
   var callerEmail = ticketData.email;
   var callerUid = emailKey(callerEmail);
+
+  /* Phase SYNC-55 : rate-limit fail-open — social/faible risque, une
+     indisponibilite Firebase ne doit pas bloquer une invitation legitime. */
+  var rl = await checkRateLimit('collab:invite:' + callerUid, 20, 60 * 60 * 1000);
+  if (rl.ok === false) { res.status(429).json({ error: 'Trop d\'invitations recentes. Reessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+  /* rl.ok === null (indisponible) : fail-open, on continue normalement. */
 
   if (body.action === 'accept' || body.action === 'decline') {
     if (typeof body.inviteId !== 'string' || !body.inviteId || body.inviteId.length > 100) {

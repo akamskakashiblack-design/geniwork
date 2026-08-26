@@ -14,7 +14,7 @@
    Reponse : { ok:true, coverUpdatedAt } ou { ok:false, error }
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbSet } = require('../admin/_lib/fbrest');
+const { dbSet, emailKey, checkRateLimit } = require('../admin/_lib/fbrest');
 const { verify: verifyRefreshToken } = require('../auth/_lib/refreshToken');
 const { loadGroupRole, isValidGroupId } = require('./_lib/perm');
 const { gcsUpload, gcsDelete } = require('./_lib/gcsrest');
@@ -39,6 +39,11 @@ module.exports = async function handler(req, res) {
       return;
     }
     const callerEmail = ticketData.email;
+
+    /* Phase SYNC-55 : rate-limit fail-closed — upload (cout bande passante/stockage). */
+    const rl = await checkRateLimit('groups:cover-upload:' + emailKey(callerEmail), 10, 60 * 60 * 1000);
+    if (rl.ok === false) { res.status(429).json({ ok: false, error: 'Trop de televersements recents. Reessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+    if (rl.ok === null) { res.status(503).json({ ok: false, error: 'Service de protection anti-abus temporairement indisponible.' }); return; }
 
     if (!isValidGroupId(body.groupId)) {
       res.status(400).json({ ok: false, error: 'groupId invalide' });

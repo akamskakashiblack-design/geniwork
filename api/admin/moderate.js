@@ -54,7 +54,7 @@
    utilise par ce fichier) peut encore y acceder, pour un rollback
    eventuel. */
 
-const { dbSet, dbGet, dbUpdate, dbRemove, emailKey, appendNotification } = require('./_lib/fbrest');
+const { dbSet, dbGet, dbUpdate, dbRemove, emailKey, appendNotification, checkRateLimit } = require('./_lib/fbrest');
 const { verify } = require('./_lib/session');
 
 module.exports = async function handler(req, res) {
@@ -461,6 +461,12 @@ module.exports = async function handler(req, res) {
     }
 
     if (action === 'notifyOfficialPost') {
+      /* Phase SYNC-55 : rate-limit fail-closed — diffusion de portée
+         globale (tous les utilisateurs), clé sur l'identité admin issue
+         du token deja verifie, jamais un champ client. */
+      const rl = await checkRateLimit('admin:notifyOfficialPost:' + emailKey(session.email), 10, 60 * 60 * 1000);
+      if (rl.ok === false) { res.status(429).json({ error: 'Trop de diffusions officielles recentes. Reessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+      if (rl.ok === null) { res.status(503).json({ error: 'Service de protection anti-abus temporairement indisponible.' }); return; }
       const message = String(body.message || '').slice(0, 500);
       let users;
       try { users = await dbGet('/gw/users_public'); } catch (e) { users = null; }
@@ -485,6 +491,11 @@ module.exports = async function handler(req, res) {
          directement depuis le client, désormais fermé côté règles. Même
          mécanisme que notifyOfficialPost (compte de service, boucle
          gw/users_public pour 'all'). */
+      /* Phase SYNC-55 : rate-limit fail-closed — meme raisonnement que
+         notifyOfficialPost (portee potentiellement globale via target='all'). */
+      const rlBroadcast = await checkRateLimit('admin:notifyBroadcast:' + emailKey(session.email), 10, 60 * 60 * 1000);
+      if (rlBroadcast.ok === false) { res.status(429).json({ error: 'Trop de diffusions recentes. Reessayez dans ' + rlBroadcast.retryAfterSec + 's.' }); return; }
+      if (rlBroadcast.ok === null) { res.status(503).json({ error: 'Service de protection anti-abus temporairement indisponible.' }); return; }
       const title = String(body.title || '').slice(0, 200).trim();
       const bodyText = String(body.body || '').slice(0, 500).trim();
       if (!title) { res.status(400).json({ error: 'Titre requis' }); return; }

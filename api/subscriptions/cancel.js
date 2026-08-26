@@ -21,7 +21,7 @@
    Réponse : { ok:true, planStatus, accessUntil } ou { ok:false, error }
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbGet, dbGetWithETag, dbSetIfMatch, dbUpdate, emailKey } = require('../admin/_lib/fbrest');
+const { dbGet, dbGetWithETag, dbSetIfMatch, dbUpdate, emailKey, checkRateLimit } = require('../admin/_lib/fbrest');
 const { verify: verifyRefreshToken } = require('../auth/_lib/refreshToken');
 
 module.exports = async function handler(req, res) {
@@ -42,6 +42,11 @@ module.exports = async function handler(req, res) {
     }
     const callerEmail = ticketData.email;
     const key = emailKey(callerEmail);
+
+    /* Phase SYNC-55 : rate-limit fail-closed — action destructrice sur l'abonnement. */
+    const rl = await checkRateLimit('subscriptions:cancel:' + key, 5, 60 * 60 * 1000);
+    if (rl.ok === false) { res.status(429).json({ ok: false, error: 'Trop de tentatives récentes. Réessayez dans ' + rl.retryAfterSec + 's.' }); return; }
+    if (rl.ok === null) { res.status(503).json({ ok: false, error: 'Service de protection anti-abus temporairement indisponible.' }); return; }
 
     let profile;
     try { profile = await dbGet('/gw/profiles/' + key); } catch (e) {
