@@ -335,7 +335,23 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
   <script>
     const params = new URLSearchParams(window.location.search);
+    /* userEmail : conservé uniquement pour l'affichage local et le
+       nommage des clés localStorage propres à cette page (historique,
+       export) — n'est plus jamais envoyé au serveur comme preuve
+       d'identité (Phase AI-2). L'identité réelle vient exclusivement
+       de authRefreshToken, lu depuis la même session que le reste de
+       l'app (localStorage["gw_session"], écrit par js/app.js). */
     const userEmail = params.get('email');
+    function _aiGetAuthRefreshToken() {
+      try {
+        var raw = localStorage.getItem('gw_session');
+        if (!raw) return null;
+        var s = JSON.parse(raw);
+        if (!s || !s.authRefresh || !s.expires || Date.now() > s.expires) return null;
+        return s.authRefresh;
+      } catch (e) { return null; }
+    }
+    const authRefreshToken = _aiGetAuthRefreshToken();
 
     const CARD_COLORS = {
       "business-plan": "#7C3AED", "devis-facture": "#EC4899", "bilan": "#0D9488",
@@ -391,7 +407,7 @@
     const PLAN_LABELS = { free: 'Gratuit', premium: 'Premium', business: 'Business Pro' };
 
     async function fetchStatus() {
-      const res = await fetch('/api/ai/status?email=' + encodeURIComponent(userEmail));
+      const res = await fetch('/api/ai/status?authRefreshToken=' + encodeURIComponent(authRefreshToken));
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       creditState = data.creditState;
@@ -614,7 +630,7 @@
         const res = await fetch('/api/ai/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ feature: key, email: userEmail, messages: featureHistory[key] }),
+          body: JSON.stringify({ feature: key, authRefreshToken: authRefreshToken, email: userEmail, messages: featureHistory[key] }),
         });
         const data = await res.json();
         loading.style.display = 'none';
@@ -773,7 +789,10 @@
     }
 
     (async function init() {
-      if (!userEmail) {
+      /* Phase AI-2 : la porte d'entrée dépend désormais d'une session
+         réelle (authRefreshToken), plus seulement de la présence du
+         paramètre d'URL "email" (qui n'a jamais été une preuve). */
+      if (!authRefreshToken) {
         document.getElementById('login-gate').style.display = 'block';
         document.getElementById('app-content').style.display = 'none';
         return;
