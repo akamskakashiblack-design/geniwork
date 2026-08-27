@@ -90,6 +90,35 @@ function dbRequest(method, path, accessToken, body) {
   });
 }
 
+/* ── Phase AI-3 : écriture conditionnelle (ETag / If-Match) ──
+   Additif uniquement — dbRequest()/readProfile()/patchProfile() restent
+   inchangés. Même mécanisme que celui déjà validé pour le Marketplace
+   (api/admin/_lib/fbrest.js, Phase 6B-5) : équivalent REST d'une
+   transaction, utilisé ici pour empêcher que deux requêtes /api/ai/chat
+   concurrentes ne consomment le même crédit deux fois. */
+function dbRequestWithHeaders(method, path, accessToken, body, extraHeaders) {
+  return new Promise((resolve, reject) => {
+    const url = DB_URL + path + '.json?access_token=' + accessToken;
+    const payload = body !== undefined ? JSON.stringify(body) : undefined;
+    const headers = Object.assign(
+      payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {},
+      extraHeaders || {}
+    );
+    const req = https.request(url, { method, headers }, (resp) => {
+      let data = '';
+      resp.on('data', (c) => (data += c));
+      resp.on('end', () => {
+        let parsed = null;
+        try { parsed = data ? JSON.parse(data) : null; } catch (e) { /* laisse parsed=null */ }
+        resolve({ status: resp.statusCode, etag: resp.headers['etag'] || null, value: parsed });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
 function sanitizeEmailKey(email) {
   return String(email).toLowerCase().replace(/\./g, '__d__').replace(/@/g, '__a__');
 }
@@ -118,4 +147,26 @@ async function patchProfile(email, patch) {
   await dbRequest('PATCH', '/gw/profiles/' + key, token, patch);
 }
 
-module.exports = { readProfile, patchProfile, sanitizeEmailKey };
+/* Lit gw/profiles/{key}/aiCredits avec son ETag actuel (nécessaire pour
+   une écriture conditionnelle ultérieure sur ce même chemin exact). */
+async function readAiCreditsWithETag(email) {
+  const token = await getAccessToken();
+  const key = sanitizeEmailKey(email);
+  const r = await dbRequestWithHeaders('GET', '/gw/profiles/' + key + '/aiCredits', token, undefined, { 'X-Firebase-ETag': 'true' });
+  if (r.status < 200 || r.status >= 300) throw new Error('Firebase REST ' + r.status + ' (readAiCreditsWithETag)');
+  return { credits: r.value, etag: r.etag };
+}
+
+/* Écrit gw/profiles/{key}/aiCredits UNIQUEMENT si son ETag actuel
+   correspond encore à celui fourni (sinon 412 — quelqu'un d'autre a
+   modifié ce solde entre-temps). Ne lève jamais pour un conflit, ok:false. */
+async function patchAiCreditsIfMatch(email, newCredits, etag) {
+  const token = await getAccessToken();
+  const key = sanitizeEmailKey(email);
+  const r = await dbRequestWithHeaders('PUT', '/gw/profiles/' + key + '/aiCredits', token, newCredits, { 'if-match': etag });
+  if (r.status === 412) return { ok: false, conflict: true };
+  if (r.status < 200 || r.status >= 300) throw new Error('Firebase REST ' + r.status + ' (patchAiCreditsIfMatch)');
+  return { ok: true };
+}
+
+module.exports = { readProfile, patchProfile, sanitizeEmailKey, readAiCreditsWithETag, patchAiCreditsIfMatch };
