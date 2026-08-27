@@ -8,7 +8,7 @@
 ═══════════════════════════════════════════════════════════════ */
 
 const { dbGet, dbSet, dbUpdate, emailKey } = require('./_lib/fbrest');
-const { verifyPwd } = require('./_lib/pwd');
+const { verifyPwd, hashPwd } = require('./_lib/pwd');
 const { sign } = require('./_lib/session');
 const { signAdminFirebaseToken } = require('./_lib/customToken');
 
@@ -101,7 +101,14 @@ module.exports = async function handler(req, res) {
     await dbSet(attemptsPath, null);
 
     if (!secret || !secret.pwHash) {
-      await dbSet(secretPath, { pwHash: effectiveHash });
+      /* Étape 5A : le mot de passe vient d'être vérifié avec succès (ligne
+         ci-dessus) — s'il n'est pas déjà au format PBKDF2 (legacy en clair,
+         quelle que soit sa source : gw/sadmin.pwHash, gw/admins[].pwHash, ou
+         repli gw/users[].password), il est rehaché ici à partir du mot de
+         passe fourni (déjà vérifié correct) avant d'être stocké — jamais le
+         texte brut. Si déjà PBKDF2, aucune double migration inutile. */
+      const pwHashToStore = effectiveHash.indexOf('pbkdf2:') === 0 ? effectiveHash : hashPwd(password);
+      await dbSet(secretPath, { pwHash: pwHashToStore });
       if (target.role === 'Super Admin') {
         await dbUpdate('/gw/sadmin', { pwHash: null });
       } else {
@@ -131,6 +138,6 @@ module.exports = async function handler(req, res) {
     res.status(200).json({ ok: true, token, adminFirebaseToken, user: target });
   } catch (err) {
     console.error('[Geniwork Admin] erreur login:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erreur serveur' });
   }
 };

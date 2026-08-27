@@ -9,7 +9,7 @@
              changeRole, revoke
 ═══════════════════════════════════════════════════════════════ */
 
-const { dbGet, dbSet, dbRemove, emailKey } = require('./_lib/fbrest');
+const { dbGet, dbSet, dbRemove, emailKey, appendNotification, checkRateLimit } = require('./_lib/fbrest');
 const { hashPwd } = require('./_lib/pwd');
 const { verify } = require('./_lib/session');
 
@@ -39,6 +39,17 @@ module.exports = async function handler(req, res) {
     const action = body.action;
 
     if (action === 'promote') {
+      const rl = await checkRateLimit(
+        'admin:manage:promote:' + emailKey(session.email),
+        10,
+        60 * 60 * 1000
+      );
+      if (!rl.ok) {
+        return res.status(rl.unavailable ? 503 : 429).json({
+          error: rl.unavailable ? 'Service temporairement indisponible' : 'Trop de tentatives'
+        });
+      }
+
       const email = String(body.email || '').trim().toLowerCase();
       const nom = String(body.nom || '').trim().slice(0, 100);
       const role = String(body.role || 'Administrateur').slice(0, 40);
@@ -77,6 +88,17 @@ module.exports = async function handler(req, res) {
         : r));
       await dbSet('/gw/admin_requests', updatedRequests);
 
+      /* Phase 9C : notification ecrite ici (compte de service) plutot que
+         par un getNotifs/saveNotifs cross-user cote client, desormais
+         ferme cote regles. */
+      try {
+        await appendNotification(emailKey(reqEntry.email), {
+          id: 'srv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), type: 'system',
+          msg: '✅ Votre demande d\'accès admin a été approuvée ! Rôle : ' + reqEntry.role + '. Vous pouvez maintenant vous connecter.',
+          at: Date.now(), unread: true, read: false, proofTier: 'real',
+        });
+      } catch (e) {}
+
       res.status(200).json({ ok: true, admins, requests: updatedRequests, approvedEmail: reqEntry.email, approvedRole: reqEntry.role });
       return;
     }
@@ -91,11 +113,31 @@ module.exports = async function handler(req, res) {
         ? Object.assign({}, r, { status: 'rejected', resolvedAt: new Date().toISOString() })
         : r));
       await dbSet('/gw/admin_requests', updatedRequests);
+
+      try {
+        await appendNotification(emailKey(reqEntry.email), {
+          id: 'srv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), type: 'system',
+          msg: '❌ Votre demande d\'accès admin a été refusée. Contactez le Super Admin pour plus d\'informations.',
+          at: Date.now(), unread: true, read: false, proofTier: 'real',
+        });
+      } catch (e) {}
+
       res.status(200).json({ ok: true, requests: updatedRequests, rejectedEmail: reqEntry.email });
       return;
     }
 
     if (action === 'resetPassword') {
+      const rl = await checkRateLimit(
+        'admin:manage:resetPassword:' + emailKey(session.email),
+        10,
+        60 * 60 * 1000
+      );
+      if (!rl.ok) {
+        return res.status(rl.unavailable ? 503 : 429).json({
+          error: rl.unavailable ? 'Service temporairement indisponible' : 'Trop de tentatives'
+        });
+      }
+
       const email = String(body.email || '').trim().toLowerCase();
       const newPassword = String(body.newPassword || '');
       if (!email) { res.status(400).json({ error: 'Email requis' }); return; }
@@ -116,11 +158,35 @@ module.exports = async function handler(req, res) {
         await dbSet('/gw/users', users);
       }
 
+      /* Phase 9C : notification ecrite ici (compte de service). NOTE (hors
+         perimetre de cette phase, signale au rapport) : ce message inclut
+         le mot de passe en clair, comportement deja existant avant cette
+         phase — non modifie ici, seul le MECANISME D'ECRITURE est
+         securise (la donnee transmise reste identique a avant). */
+      try {
+        await appendNotification(emailKey(email), {
+          id: 'srv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), type: 'system',
+          msg: '🔑 Votre mot de passe admin a été réinitialisé par le Super Admin. Nouveau mot de passe : ' + newPassword,
+          at: Date.now(), unread: true, read: false, proofTier: 'real',
+        });
+      } catch (e) {}
+
       res.status(200).json({ ok: true });
       return;
     }
 
     if (action === 'changeRole') {
+      const rl = await checkRateLimit(
+        'admin:manage:changeRole:' + emailKey(session.email),
+        10,
+        60 * 60 * 1000
+      );
+      if (!rl.ok) {
+        return res.status(rl.unavailable ? 503 : 429).json({
+          error: rl.unavailable ? 'Service temporairement indisponible' : 'Trop de tentatives'
+        });
+      }
+
       const email = String(body.email || '').trim().toLowerCase();
       const newRole = String(body.role || '').trim().slice(0, 40);
       if (!email || !newRole) { res.status(400).json({ error: 'Email et role requis' }); return; }
@@ -132,11 +198,31 @@ module.exports = async function handler(req, res) {
       const oldRole = admins[idx].role;
       admins[idx] = Object.assign({}, admins[idx], { role: newRole });
       await dbSet('/gw/admins', admins);
+
+      try {
+        await appendNotification(emailKey(email), {
+          id: 'srv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), type: 'system',
+          msg: '👤 Votre rôle admin a été modifié : ' + oldRole + ' → ' + newRole,
+          at: Date.now(), unread: true, read: false, proofTier: 'real',
+        });
+      } catch (e) {}
+
       res.status(200).json({ ok: true, admins, oldRole, newRole });
       return;
     }
 
     if (action === 'revoke') {
+      const rl = await checkRateLimit(
+        'admin:manage:revoke:' + emailKey(session.email),
+        10,
+        60 * 60 * 1000
+      );
+      if (!rl.ok) {
+        return res.status(rl.unavailable ? 503 : 429).json({
+          error: rl.unavailable ? 'Service temporairement indisponible' : 'Trop de tentatives'
+        });
+      }
+
       const email = String(body.email || '').trim().toLowerCase();
       if (!email) { res.status(400).json({ error: 'Email requis' }); return; }
       if (email === session.email.toLowerCase()) { res.status(400).json({ error: 'Impossible de se retirer soi-meme' }); return; }
@@ -152,6 +238,6 @@ module.exports = async function handler(req, res) {
     res.status(400).json({ error: 'Action inconnue: ' + action });
   } catch (err) {
     console.error('[Geniwork Admin] erreur manage:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erreur serveur' });
   }
 };

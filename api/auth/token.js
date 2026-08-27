@@ -18,9 +18,20 @@
 ═══════════════════════════════════════════════════════════════ */
 
 const crypto = require('crypto');
-const { dbGet, emailKey } = require('../admin/_lib/fbrest');
-const { verifyPwd } = require('../admin/_lib/pwd');
+const { dbGet, dbSet, emailKey } = require('../admin/_lib/fbrest');
+const { verifyPwd, hashPwd } = require('../admin/_lib/pwd');
 const { sign: signRefreshToken } = require('./_lib/refreshToken');
+
+/* Phase 6 : rate limiting anti brute-force/credential-stuffing — même
+   mécanisme déjà en production pour api/admin/login.js (stockage
+   Firebase via le compte de service : partagé entre toutes les
+   instances/régions Vercel, contrairement à une variable mémoire
+   locale qui ne le serait pas). Chemin gw/auth_secrets/* absent de
+   database.rules.json → refusé par défaut pour toute requête cliente,
+   accessible uniquement via le compte de service, comme
+   gw/admin_secrets déjà protégé de la même façon. */
+const MAX_ATTEMPTS = 5;
+const LOCK_MS = 60 * 1000;
 
 function toArray(v) {
   if (Array.isArray(v)) return v;
@@ -72,12 +83,52 @@ module.exports = async function handler(req, res) {
 
     if (!email || !password) { res.status(400).json({ error: 'Email et mot de passe requis' }); return; }
 
+    const attemptsPath = '/gw/auth_secrets/login_attempts/' + emailKey(email);
+    const attempts = (await dbGet(attemptsPath)) || { count: 0, lockedUntil: 0 };
+
+    if (attempts.lockedUntil && attempts.lockedUntil > Date.now()) {
+      const wait = Math.ceil((attempts.lockedUntil - Date.now()) / 1000);
+      res.status(429).json({ error: 'Trop de tentatives. Réessayez dans ' + wait + 's.' });
+      return;
+    }
+
+    async function recordFail() {
+      const count = (attempts.count || 0) + 1;
+      const lockedUntil = count >= MAX_ATTEMPTS ? Date.now() + LOCK_MS : 0;
+      await dbSet(attemptsPath, { count: count >= MAX_ATTEMPTS ? 0 : count, lockedUntil });
+    }
+
     const users = toArray(await dbGet('/gw/users'));
-    const u = users.find((x) => x && x.email && x.email.toLowerCase() === email);
+    const idx = users.findIndex((x) => x && x.email && x.email.toLowerCase() === email);
+    const u = idx !== -1 ? users[idx] : null;
 
     if (!u || !u.password || !verifyPwd(password, u.password)) {
+      await recordFail();
       res.status(401).json({ error: 'Email ou mot de passe incorrect' });
       return;
+    }
+    if (!u.verified) {
+      res.status(401).json({ error: 'Compte non vérifié', code: 'unverified' });
+      return;
+    }
+
+    /* Succès : réinitialise le compteur (même schéma que admin/login.js). */
+    await dbSet(attemptsPath, null);
+
+    /* Étape 5B — migration cote serveur : si le mot de passe est encore au
+       format legacy (verifyPwd() vient de le confirmer correct via la
+       comparaison directe), on le rehache en PBKDF2 et on écrit UNIQUEMENT
+       ce champ (pas tout le tableau gw/users) via le compte de service.
+       Non bloquant : si l'écriture échoue, le login reussit quand même
+       (nouvelle tentative de migration au prochain login). */
+    if (u.password.indexOf('pbkdf2:') !== 0) {
+      try {
+        const newHash = hashPwd(password);
+        await dbSet('/gw/users/' + idx + '/password', newHash);
+        console.log('[Geniwork Auth] compte migré vers PBKDF2 (login legacy réussi)');
+      } catch (migErr) {
+        console.error('[Geniwork Auth] échec migration PBKDF2 (non bloquant):', migErr.message);
+      }
     }
 
     const sa = getServiceAccount();
@@ -85,9 +136,9 @@ module.exports = async function handler(req, res) {
     const token = signCustomToken(uid, sa);
     const refreshToken = signRefreshToken(email);
 
-    res.status(200).json({ ok: true, token: token, uid: uid, refreshToken: refreshToken });
+    res.status(200).json({ ok: true, token: token, uid: uid, nom: u.nom || null, loginMethod: u.loginMethod || 'email', refreshToken: refreshToken });
   } catch (err) {
     console.error('[Geniwork Auth] erreur token:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erreur serveur' });
   }
 };

@@ -18,6 +18,17 @@ const crypto = require('crypto');
 const { emailKey } = require('../admin/_lib/fbrest');
 const { sign: signRefreshToken } = require('./_lib/refreshToken');
 
+/* Phase 6 : Client ID OAuth Geniwork — même valeur publique déjà
+   présente côté client (js/app.js, GW_GOOGLE_CLIENT_ID), les Client ID
+   OAuth ne sont pas des secrets. Utilisé pour vérifier que le jeton
+   Google fourni a bien été émis POUR Geniwork (claim "aud"), et non
+   pour une autre application tierce utilisant aussi "Se connecter avec
+   Google" — sans cette vérification, un jeton Google valide mais émis
+   pour un site tiers pourrait être rejoué ici tant qu'il correspond au
+   même email, car tokeninfo confirme seulement que Google l'a signé et
+   qu'il n'est pas expiré, jamais à quelle application il était destiné. */
+const GOOGLE_CLIENT_ID = '180664489098-gljui5ih2883jv3f6744c6t65ce650kh.apps.googleusercontent.com';
+
 function getServiceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (!raw) throw new Error('FIREBASE_SERVICE_ACCOUNT non configuree dans Vercel');
@@ -52,12 +63,20 @@ async function verifyIdToken(idToken) {
   if (!resp.ok) return null;
   const data = await resp.json();
   if (!data || !data.email) return null;
+  if (data.aud !== GOOGLE_CLIENT_ID) return null; /* jeton emis pour une autre application */
   return { email: String(data.email).toLowerCase(), verified: data.email_verified === 'true' || data.email_verified === true };
 }
 
 /* Verifie un access token Google en recuperant le profil associe —
-   si Google repond avec un profil valide, le jeton est authentique. */
+   si Google repond avec un profil valide, le jeton est authentique.
+   Vérifie aussi séparément "aud" via tokeninfo (userinfo ne l'expose
+   pas) pour confirmer que ce jeton a bien été émis pour Geniwork. */
 async function verifyAccessToken(accessToken) {
+  const infoResp = await fetch('https://oauth2.googleapis.com/tokeninfo?access_token=' + encodeURIComponent(accessToken));
+  if (!infoResp.ok) return null;
+  const info = await infoResp.json();
+  if (!info || info.aud !== GOOGLE_CLIENT_ID) return null;
+
   const resp = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
     headers: { Authorization: 'Bearer ' + accessToken },
   });
@@ -98,6 +117,6 @@ module.exports = async function handler(req, res) {
     res.status(200).json({ ok: true, token: token, uid: uid, email: verified.email, refreshToken: refreshToken });
   } catch (err) {
     console.error('[Geniwork Auth] erreur google-token:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erreur serveur' });
   }
 };
