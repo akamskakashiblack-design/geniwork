@@ -1,18 +1,19 @@
 /* ═══════════════════════════════════════════════════════════════
-   GENIWORK — Envoi du code de vérification / réinitialisation
+   GENIWORK — Envoi du code de vérification (inscription)
    POST /api/send-code  { email, code, type }
    type = "register" | "reset"
 
-   Méthode principale : Gmail SMTP (gratuit, sans domaine requis)
-   → Variables Vercel requises : GMAIL_USER, GMAIL_APP_PASSWORD
-   → Mot de passe d'application : myaccount.google.com/apppasswords
-
-   Repli automatique : Resend.com si GMAIL_USER absent
-   → Variable Vercel : RESEND_API_KEY (nécessite un domaine vérifié
-     pour envoyer à des destinataires autres que le propriétaire du compte)
+   Étape 5D : la logique d'envoi est partagée avec api/auth/reset-request.js
+   via api/_lib/mailer.js (aucun changement de comportement ici).
+   Le flux "reset" (type='reset') n'est plus appelé directement par le
+   client depuis l'étape 5D — remplacé par /api/auth/reset-request, qui
+   génère et stocke le code côté serveur avant d'envoyer l'email via ce
+   même module partagé. Cet endpoint reste utilisé tel quel pour
+   "register" (hors périmètre de cette étape), et reste fonctionnel pour
+   "reset" si jamais appelé directement (aucune régression introduite).
 ═══════════════════════════════════════════════════════════════ */
 
-var nodemailer = require('nodemailer');
+var { sendCodeEmail } = require('./_lib/mailer');
 
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -30,153 +31,27 @@ module.exports = async function handler(req, res) {
   if (!email || !code) {
     return res.status(400).json({ error: 'email et code requis' });
   }
-
-  var isReset  = type === 'reset';
-  var subject  = isReset
-    ? 'Geniwork — Réinitialisation de mot de passe'
-    : 'Geniwork — Code de vérification de votre compte';
-  var html = isReset ? buildResetHtml(code, email) : buildRegisterHtml(code, email);
-  var text = isReset
-    ? 'Geniwork — Réinitialisation\n\nCode : ' + code + '\n\nExpire dans 10 minutes.'
-    : 'Geniwork — Vérification\n\nCode : ' + code + '\n\nExpire dans 10 minutes.';
-
-  var gmailUser = process.env.GMAIL_USER;
-  var gmailPass = process.env.GMAIL_APP_PASSWORD;
-
-  if (gmailUser && gmailPass) {
-    try {
-      var transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: { user: gmailUser, pass: gmailPass }
-      });
-      var info = await transporter.sendMail({
-        from:    'Geniwork <' + gmailUser + '>',
-        to:      email,
-        subject: subject,
-        html:    html,
-        text:    text
-      });
-      console.log('[Geniwork] ✅ Email envoyé via Gmail:', info.messageId);
-      return res.status(200).json({ ok: true, via: 'gmail', id: info.messageId });
-    } catch (err) {
-      console.error('[Geniwork] Erreur Gmail SMTP:', err.message);
-      return res.status(500).json({ error: 'Erreur envoi Gmail : ' + err.message });
-    }
+  /* Phase 6 : `code` est injecté sans échappement dans le HTML de l'email
+     (api/_lib/mailer.js) — sans validation de format, ce endpoint devient
+     un relais permettant d'envoyer un contenu HTML arbitraire (au nom de
+     Geniwork) à n'importe quelle adresse. Le code n'a jamais été autre
+     chose qu'une chaîne de chiffres (voir generateCode() côté client,
+     désormais orpheline, et la génération serveur de register-request.js/
+     reset-request.js) : on impose ce même format ici, sans changer le
+     comportement pour tout appelant légitime. */
+  if (!/^\d{4,8}$/.test(code)) {
+    return res.status(400).json({ error: 'Format de code invalide' });
   }
-
-  var apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    console.error('[Geniwork] Aucun service email configuré (ni GMAIL_USER, ni RESEND_API_KEY).');
-    return res.status(500).json({ error: 'Service email non configuré. Ajoutez GMAIL_USER + GMAIL_APP_PASSWORD dans Vercel.' });
+  if (email.length > 320 || !email.includes('@')) {
+    return res.status(400).json({ error: 'Email invalide' });
   }
 
   try {
-    var resp = await fetch('https://api.resend.com/emails', {
-      method:  'POST',
-      headers: {
-        'Authorization': 'Bearer ' + apiKey,
-        'Content-Type':  'application/json'
-      },
-      body: JSON.stringify({
-        from:    'Geniwork <onboarding@resend.dev>',
-        to:      [email],
-        subject: subject,
-        html:    html,
-        text:    text
-      })
-    });
-
-    var data = await resp.json();
-
-    if (resp.ok && data.id) {
-      console.log('[Geniwork] ✅ Email envoyé via Resend:', data.id);
-      return res.status(200).json({ ok: true, via: 'resend', id: data.id });
-    }
-
-    console.error('[Geniwork] Resend erreur:', JSON.stringify(data));
-    return res.status(500).json({ error: data.message || 'Erreur Resend', detail: data });
-
+    var result = await sendCodeEmail(email, code, type);
+    console.log('[Geniwork] ✅ Email envoyé via ' + result.via + ':', result.id);
+    return res.status(200).json(result);
   } catch (err) {
-    console.error('[Geniwork] Erreur fetch Resend:', err.message);
-    return res.status(500).json({ error: 'Erreur réseau : ' + err.message });
+    console.error('[Geniwork] Erreur envoi email:', err.message);
+    return res.status(500).json({ error: err.message });
   }
 };
-
-/* ════════════════════════════════════
-   TEMPLATES HTML
-════════════════════════════════════ */
-function buildRegisterHtml(code, email) {
-  return `<!DOCTYPE html>
-<html lang="fr">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vérification Geniwork</title></head>
-<body style="margin:0;padding:0;background:#f0f2f5;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f2f5;padding:32px 0;">
-    <tr><td align="center">
-      <table width="480" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08);">
-        <tr><td style="background:linear-gradient(135deg,#060D1F 0%,#1a2a5e 100%);padding:32px 40px;text-align:center;">
-          <h1 style="color:#ffffff;margin:0;font-size:26px;letter-spacing:1px;">GENIWORK</h1>
-          <p style="color:#8ba3d9;margin:6px 0 0;font-size:13px;">Réseau professionnel &amp; créatif</p>
-        </td></tr>
-        <tr><td style="padding:40px 40px 24px;">
-          <p style="color:#1a1a2e;font-size:16px;margin:0 0 8px;">Bonjour,</p>
-          <p style="color:#555;font-size:15px;margin:0 0 28px;line-height:1.6;">
-            Merci de rejoindre <strong>Geniwork</strong> !<br>
-            Pour activer votre compte <strong style="color:#1a2a5e;">${email}</strong>, entrez ce code :
-          </p>
-          <table width="100%" cellpadding="0" cellspacing="0">
-            <tr><td align="center" style="padding:8px 0 32px;">
-              <div style="display:inline-block;background:#f0f4ff;border:2px solid #3b5bdb;border-radius:14px;padding:20px 48px;">
-                <span style="font-size:44px;font-weight:700;letter-spacing:16px;color:#1a2a5e;">${code}</span>
-              </div>
-            </td></tr>
-          </table>
-          <p style="color:#888;font-size:13px;margin:0 0 8px;">⏱ Ce code expire dans <strong>10 minutes</strong>.</p>
-          <p style="color:#888;font-size:13px;margin:0;">Si vous n'avez pas créé ce compte, ignorez cet e-mail.</p>
-        </td></tr>
-        <tr><td style="background:#f7f8fc;padding:20px 40px;text-align:center;border-top:1px solid #e8ecf4;">
-          <p style="color:#aaa;font-size:12px;margin:0;">© 2026 Geniwork · Email automatique, merci de ne pas répondre.</p>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
-}
-
-function buildResetHtml(code, email) {
-  return `<!DOCTYPE html>
-<html lang="fr">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Réinitialisation Geniwork</title></head>
-<body style="margin:0;padding:0;background:#f0f2f5;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f2f5;padding:32px 0;">
-    <tr><td align="center">
-      <table width="480" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08);">
-        <tr><td style="background:linear-gradient(135deg,#060D1F 0%,#1a2a5e 100%);padding:32px 40px;text-align:center;">
-          <h1 style="color:#ffffff;margin:0;font-size:26px;letter-spacing:1px;">GENIWORK</h1>
-          <p style="color:#8ba3d9;margin:6px 0 0;font-size:13px;">Réseau professionnel &amp; créatif</p>
-        </td></tr>
-        <tr><td style="padding:40px 40px 24px;">
-          <p style="color:#1a1a2e;font-size:16px;margin:0 0 8px;">Bonjour,</p>
-          <p style="color:#555;font-size:15px;margin:0 0 28px;line-height:1.6;">
-            Demande de réinitialisation pour <strong style="color:#1a2a5e;">${email}</strong>.<br>
-            Entrez ce code dans l'application :
-          </p>
-          <table width="100%" cellpadding="0" cellspacing="0">
-            <tr><td align="center" style="padding:8px 0 32px;">
-              <div style="display:inline-block;background:#fff4ed;border:2px solid #f97316;border-radius:14px;padding:20px 48px;">
-                <span style="font-size:44px;font-weight:700;letter-spacing:16px;color:#c2410c;">${code}</span>
-              </div>
-            </td></tr>
-          </table>
-          <p style="color:#888;font-size:13px;margin:0 0 8px;">⏱ Ce code expire dans <strong>10 minutes</strong>.</p>
-          <p style="color:#888;font-size:13px;margin:0;">Si vous n'avez pas fait cette demande, ignorez cet e-mail.</p>
-        </td></tr>
-        <tr><td style="background:#f7f8fc;padding:20px 40px;text-align:center;border-top:1px solid #e8ecf4;">
-          <p style="color:#aaa;font-size:12px;margin:0;">© 2026 Geniwork · Email automatique, merci de ne pas répondre.</p>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
-}

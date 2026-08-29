@@ -4044,8 +4044,9 @@ var _verifyEmail = '';      // email en attente de vérification
 var _verifyData  = null;    // données utilisateur temporaires
 var _verifyPlainPwd = '';   // mot de passe en clair, gardé le temps d'établir la session Firebase réelle après acceptCGU()
 
-var _resetCode  = '';       // code reset
+var _resetCode  = '';       // conservé pour compatibilité, plus jamais comparé (Phase SYNC-95)
 var _resetEmail = '';       // email en cours de reset
+var _resetTicket = '';      // jeton de reset signé (5 min), reçu après vérification serveur du code — Phase SYNC-95
 
 /* ══════════════════════════════════════════
    INSCRIPTION
@@ -4103,14 +4104,25 @@ function doRegister() {
 
   /* Vérifie aussi dans Firebase (au cas où localStorage pas encore chargé) */
   function _proceedRegister() {
-    _verifyCode  = generateCode();
     _verifyEmail = email;
     _verifyData  = { nom: nom, email: email, password: pwd, verified: false };
     document.getElementById('verify-email-display').textContent = email;
     clearCodeInputs(['c1','c2','c3','c4']);
     goTo('screen-verify');
-    /* Envoie le code par email (le code n'est plus affiché à l'écran) */
-    _gwMailCode(email, _verifyCode, 'register');
+    /* Phase SYNC-95 : le code est désormais généré, haché, stocké et
+       vérifié entièrement côté serveur (api/auth/register-request.js /
+       register-verify.js) — remplace generateCode()/_gwMailCode() qui ne
+       faisaient qu'envoyer un code jamais vérifié par le serveur. */
+    fetch('/api/auth/register-request', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ nom: nom, email: email, password: pwd })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data || !data.ok) showToast((data && data.error) || 'Erreur lors de l\'envoi du code', 'err');
+    })
+    .catch(function() { showToast('Erreur réseau. Réessayez.', 'err'); });
   }
 
   if (_gwFbReady && _gwFbDB) {
@@ -4153,54 +4165,75 @@ function doVerify() {
   if (entered.length < 4) {
     showToast('Entrez les 4 chiffres du code', 'err'); return;
   }
-  if (entered !== _verifyCode) {
-    showToast('Code incorrect. Vérifiez et réessayez.', 'err');
-    shakeCodeInputs(['c1','c2','c3','c4']); return;
-  }
 
-  /* ─ Code correct : hache le mot de passe et enregistre ─ */
-  _verifyData.verified = true;
-  var pwdToHash = _verifyData.password;
-  _verifyPlainPwd = pwdToHash; /* gardé temporairement pour _gwSignInRealIdentity() après acceptCGU() */
-  var salt = _gwSalt();
-  _gwHashPwd(pwdToHash, salt).then(function(hashed) {
-    _verifyData.password = hashed;
-    var users = getUsers();
-    /* Double vérification : email toujours libre au moment de l'écriture */
-    if (users.some(function(u) { return u.email.toLowerCase() === _verifyData.email.toLowerCase(); })) {
-      showToast('Cette adresse e-mail est déjà utilisée', 'err');
-      goTo('screen-login'); return;
+  /* Phase SYNC-95 : le code n'est plus jamais comparé côté client — entered
+     est transmis tel quel au serveur, seule source de vérité désormais
+     (api/auth/register-verify.js : hachage SHA-256, comparaison timing-safe,
+     5 tentatives max, code à usage unique, création du compte côté serveur). */
+  fetch('/api/auth/register-verify', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ nom: _verifyData.nom, email: _verifyData.email, password: _verifyData.password, code: entered })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (!data || !data.ok) {
+      showToast((data && data.error) || 'Code incorrect. Vérifiez et réessayez.', 'err');
+      shakeCodeInputs(['c1','c2','c3','c4']);
+      return;
     }
-    users.push(_verifyData);
-    saveUsers(users);
 
+    /* Compte déjà créé côté serveur. Session réelle établie immédiatement à
+       partir du token déjà reçu (évite un aller-retour supplémentaire vers
+       /api/auth/token avec le mot de passe en clair). */
+    if (data.refreshToken) _gwSaveAuthRefresh(data.refreshToken);
+    if (data.token && typeof firebase !== 'undefined' && firebase.auth) {
+      firebase.auth().signInWithCustomToken(data.token).catch(function(e) {
+        console.warn('[GW Firebase] signInWithCustomToken (register) ignoré :', e.message);
+      });
+    }
+
+    /* Synchronise le cache local (getUsers()) avec le compte déjà créé côté
+       serveur — copie locale de confort pour acceptCGU()/doLogin() (non
+       modifiés, lisent exclusivement ce cache), jamais la preuve de
+       création du compte (déjà faite côté serveur ci-dessus). */
+    var salt = _gwSalt();
+    _gwHashPwd(_verifyData.password, salt).then(function(localHash) {
+      var usersCache = getUsers();
+      if (!usersCache.some(function(u) { return u.email.toLowerCase() === _verifyData.email.toLowerCase(); })) {
+        usersCache.push({ nom: _verifyData.nom, email: _verifyData.email, password: localHash, verified: true });
+        saveUsers(usersCache);
+      }
+    }).catch(function() { /* best-effort, n'affecte jamais la session déjà établie */ });
+
+    _verifyPlainPwd = _verifyData.password; /* gardé temporairement pour _gwSignInRealIdentity() après acceptCGU() */
     _verifyCode = '';
-    /* On garde _verifyData.nom pour l'accueil — on le vide après CGU */
 
     showToast('Compte vérifié ✓ Lisez les CGU pour continuer', 'ok');
     setTimeout(function() {
       openCGU();
     }, 1000);
-  }).catch(function() {
-    /* Fallback si crypto non disponible (rare) */
-    var users = getUsers();
-    if (users.some(function(u) { return u.email.toLowerCase() === _verifyData.email.toLowerCase(); })) {
-      showToast('Cette adresse e-mail est déjà utilisée', 'err');
-      goTo('screen-login'); return;
-    }
-    users.push(_verifyData);
-    saveUsers(users);
-    _verifyCode = '';
-    showToast('Compte vérifié ✓ Lisez les CGU pour continuer', 'ok');
-    setTimeout(function() { openCGU(); }, 1000);
+  })
+  .catch(function() {
+    showToast('Erreur réseau. Réessayez.', 'err');
   });
 }
 
 function resendCode() {
-  if (!_verifyEmail) return;
-  _verifyCode = generateCode();
+  if (!_verifyEmail || !_verifyData) return;
   clearCodeInputs(['c1','c2','c3','c4']);
-  _gwMailCode(_verifyEmail, _verifyCode, 'register');
+  /* Phase SYNC-95 : renvoi via le même endpoint serveur — génération,
+     hachage, stockage et throttle anti-spam gérés côté serveur. */
+  fetch('/api/auth/register-request', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ nom: _verifyData.nom, email: _verifyEmail, password: _verifyData.password })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (!data || !data.ok) showToast((data && data.error) || 'Erreur lors du renvoi du code', 'err');
+  })
+  .catch(function() { showToast('Erreur réseau. Réessayez.', 'err'); });
 }
 
 /* ══════════════════════════════════════════
@@ -4451,34 +4484,23 @@ function doForgot() {
     showToast('Adresse e-mail invalide', 'err'); return;
   }
 
-  /* ── Compte banni → impossible de réinitialiser ── */
-  var banInfo = _admGetBanInfo(email);
-  if (banInfo) {
-    goTo('screen-login');
-    setTimeout(function() { _gwShowLoginBanScreen(email, banInfo); }, 150);
-    return;
-  }
-
-  var user = findUser(email);
-
-  /* Email non enregistré — message générique (sécurité) */
-  if (!user) {
-    showToast('Si ce compte existe, un code a été envoyé.', '');
-    /* On simule quand même pour ne pas révéler si l'email existe */
-    setTimeout(function() { goTo('screen-login'); }, 2000);
-    return;
-  }
-
-  /* Génère le code de réinitialisation */
-  _resetCode  = generateCode();
+  /* Phase SYNC-95 : plus de vérification locale d'existence/statut banni —
+     api/auth/reset-request.js gère déjà tout ceci côté serveur et renvoie
+     TOUJOURS une réponse générique (ok:true), sans jamais révéler si le
+     compte existe, est banni, ou si l'email a réellement été envoyé. On
+     poursuit donc systématiquement vers l'écran de saisie du code. */
   _resetEmail = email;
 
   document.getElementById('reset-email-display').textContent = email;
   clearCodeInputs(['r1','r2','r3','r4']);
 
   goTo('screen-reset-verify');
-  /* Envoie le code par e-mail */
-  _gwMailCode(email, _resetCode, 'reset');
+
+  fetch('/api/auth/reset-request', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ email: email })
+  }).catch(function() { /* réponse toujours générique côté serveur, rien à afficher de plus */ });
 }
 
 /* ══════════════════════════════════════════
@@ -4490,24 +4512,45 @@ function doResetVerify() {
   if (entered.length < 4) {
     showToast('Entrez les 4 chiffres du code', 'err'); return;
   }
-  if (entered !== _resetCode) {
-    showToast('Code incorrect. Vérifiez et réessayez.', 'err');
-    shakeCodeInputs(['r1','r2','r3','r4']); return;
-  }
 
-  /* Réinitialise les champs du nouveau mot de passe */
-  document.getElementById('new-pwd').value  = '';
-  document.getElementById('new-pwd2').value = '';
-  updateRules('', 'rule2');
+  /* Phase SYNC-95 : le code n'est plus jamais comparé côté client —
+     api/auth/reset-check-code.js vérifie (hachage SHA-256, timing-safe,
+     5 tentatives max) et émet un jeton de reset signé à courte durée de
+     vie (5 min), seule preuve désormais transmise à l'étape suivante. */
+  fetch('/api/auth/reset-check-code', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ email: _resetEmail, code: entered })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (!data || !data.ok) {
+      showToast((data && data.error) || 'Code incorrect. Vérifiez et réessayez.', 'err');
+      shakeCodeInputs(['r1','r2','r3','r4']);
+      return;
+    }
+    _resetTicket = data.resetTicket;
 
-  goTo('screen-new-pwd');
+    /* Réinitialise les champs du nouveau mot de passe */
+    document.getElementById('new-pwd').value  = '';
+    document.getElementById('new-pwd2').value = '';
+    updateRules('', 'rule2');
+
+    goTo('screen-new-pwd');
+  })
+  .catch(function() {
+    showToast('Erreur réseau. Réessayez.', 'err');
+  });
 }
 
 function resendResetCode() {
   if (!_resetEmail) return;
-  _resetCode = generateCode();
   clearCodeInputs(['r1','r2','r3','r4']);
-  _gwMailCode(_resetEmail, _resetCode, 'reset');
+  fetch('/api/auth/reset-request', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ email: _resetEmail })
+  }).catch(function() { /* réponse toujours générique côté serveur */ });
 }
 
 /* ══════════════════════════════════════════
@@ -4524,40 +4567,47 @@ function doSaveNewPwd() {
     showToast('Les mots de passe ne correspondent pas', 'err'); return;
   }
 
-  /* ── Compte banni → bloquer même si le code était valide ── */
-  if (_resetEmail) {
-    var banInfo = _admGetBanInfo(_resetEmail);
-    if (banInfo) {
-      var e = _resetEmail; _resetCode = ''; _resetEmail = '';
-      goTo('screen-login');
-      setTimeout(function() { _gwShowLoginBanScreen(e, banInfo); }, 150);
+  /* Phase SYNC-95 : plus aucune écriture directe de gw/users depuis le
+     client — le jeton signé (émis par reset-check-code.js après
+     vérification serveur du code) est la seule preuve transmise ;
+     api/auth/reset-apply.js revérifie le statut banni et écrit le nouveau
+     mot de passe (PATCH ciblé, PBKDF2) entièrement côté serveur. */
+  fetch('/api/auth/reset-apply', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ resetTicket: _resetTicket, newPassword: pwd })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (!data || !data.ok) {
+      showToast((data && data.error) || 'Erreur lors de la mise à jour. Réessayez.', 'err');
       return;
     }
-  }
 
-  /* ── Hache le nouveau mot de passe avant de sauvegarder ── */
-  var salt = _gwSalt();
-  _gwHashPwd(pwd, salt).then(function(hashed) {
-    var users = getUsers();
-    var idx   = users.findIndex(function(u) {
-      return u.email.toLowerCase() === _resetEmail.toLowerCase();
-    });
-    if (idx !== -1) {
-      users[idx].password = hashed;
-      saveUsers(users);
-    }
+    /* Synchronise le cache local (getUsers()) avec le mot de passe déjà
+       changé côté serveur — copie locale de confort pour doLogin() (non
+       modifié, lit exclusivement ce cache sur ce même navigateur), jamais
+       la preuve du changement (déjà fait côté serveur ci-dessus). */
+    var salt = _gwSalt();
+    _gwHashPwd(pwd, salt).then(function(localHash) {
+      var usersCache = getUsers();
+      var idx = usersCache.findIndex(function(u) { return u.email.toLowerCase() === _resetEmail.toLowerCase(); });
+      if (idx !== -1) { usersCache[idx].password = localHash; saveUsers(usersCache); }
+    }).catch(function() { /* best-effort */ });
 
     /* Réinitialise aussi le brute-force pour cet email */
-    _gwResetBrute('login:' + _resetEmail.toLowerCase());
+    if (_resetEmail) _gwResetBrute('login:' + _resetEmail.toLowerCase());
 
-    _resetCode  = '';
-    _resetEmail = '';
+    _resetCode   = '';
+    _resetEmail  = '';
+    _resetTicket = '';
 
     showToast('Mot de passe mis à jour ✓', 'ok');
     setTimeout(function() {
       goTo('screen-login');
     }, 1200);
-  }).catch(function() {
+  })
+  .catch(function() {
     showToast('Erreur lors de la mise à jour. Réessayez.', 'err');
   });
 }
