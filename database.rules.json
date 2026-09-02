@@ -517,6 +517,19 @@
         ".read":  "auth != null",
         ".write": "auth != null"
       },
+      "artiste_requests": {
+        ".read":  "auth.token.gw_admin === true",
+        ".indexOn": ["userKey", "status"],
+        "$reqId": {
+          ".write": "auth.token.gw_admin === true || (auth != null && auth.uid === newData.child('userKey').val())"
+        }
+      },
+      "artiste_approved": {
+        "$userFbKey": {
+          ".read":  "auth != null && (auth.uid === $userFbKey || auth.token.gw_admin === true)",
+          ".write": "auth.token.gw_admin === true"
+        }
+      },
       "deleted_posts": {
         ".read":  "auth != null",
         ".write": "auth != null"

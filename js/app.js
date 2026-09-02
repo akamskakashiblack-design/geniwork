@@ -16685,22 +16685,32 @@ function _artisteOpenPost() {
   /* Vérifier dans le profil utilisateur (chemin garanti, toujours accessible) */
   _gwFbDB.ref('gw/profiles/' + uKey + '/artiste_request').once('value', function(snap) {
     var req = snap.val();
-    if (req && req.status === 'pending')  { _artisteShowPendingScreen('pending',  req); return; }
-    if (req && req.status === 'rejected') { _artisteShowPendingScreen('rejected', req); return; }
     if (req && req.status === 'approved') {
       /* Demande approuvée via profil → ouvrir formulaire */
       _artisteOpenPublishForm(); return;
     }
-    /* Aussi vérifier le chemin dédié si accessible */
-    _gwFbDB.ref('gw/artiste_requests').orderByChild('userKey').equalTo(uKey).limitToLast(1).once('value', function(snap2) {
-      var val2 = snap2.val();
-      if (val2) {
-        var r2 = Object.values(val2)[0];
-        if (r2 && r2.status === 'pending')  { _artisteShowPendingScreen('pending',  r2); return; }
-        if (r2 && r2.status === 'rejected') { _artisteShowPendingScreen('rejected', r2); return; }
-      }
-      _checkLocalReq();
-    }, function() { _checkLocalReq(); });
+    /* SYNC-181 : req.status peut rester bloqué à "pending" indéfiniment dans
+       le profil — l'admin ne peut pas l'y modifier (gw/profiles n'est
+       inscriptible que par son propriétaire, cf. Rules). gw/artiste_approved
+       (écrit par l'admin, désormais avec Rules dédiées) fait foi : vérifié
+       avant de faire confiance à un statut de profil potentiellement
+       obsolète, sinon l'écran "en attente" ne se débloquait jamais après
+       une approbation réelle. */
+    _artisteCheckAccess(function(approved) {
+      if (approved) { _artisteOpenPublishForm(); return; }
+      if (req && req.status === 'pending')  { _artisteShowPendingScreen('pending',  req); return; }
+      if (req && req.status === 'rejected') { _artisteShowPendingScreen('rejected', req); return; }
+      /* Aussi vérifier le chemin dédié si accessible */
+      _gwFbDB.ref('gw/artiste_requests').orderByChild('userKey').equalTo(uKey).limitToLast(1).once('value', function(snap2) {
+        var val2 = snap2.val();
+        if (val2) {
+          var r2 = Object.values(val2)[0];
+          if (r2 && r2.status === 'pending')  { _artisteShowPendingScreen('pending',  r2); return; }
+          if (r2 && r2.status === 'rejected') { _artisteShowPendingScreen('rejected', r2); return; }
+        }
+        _checkLocalReq();
+      }, function() { _checkLocalReq(); });
+    });
   }, function() { _checkLocalReq(); });
 }
 
@@ -34613,29 +34623,44 @@ function _admArtisteApprove(reqId, userKey, userEmail, stageName) {
   if (!_gwFbDB) return;
   var now = Date.now();
   var reviewer = _currentUser ? _currentUser.email : 'admin';
-  /* Mettre à jour dans le profil utilisateur (chemin garanti) */
+  /* Best-effort : chemin profil, refusé pour l'admin par les Rules
+     (gw/profiles/$userFbKey n'est inscriptible que par son propriétaire) —
+     conservé sans bloquer sur son échec, au cas où un jour ce chemin
+     redevienne accessible. La confirmation ci-dessous ne dépend plus de
+     cette écriture. */
   _gwFbDB.ref('gw/profiles/' + userKey + '/artiste_request').update({
     status: 'approved', reviewedAt: now, reviewedBy: reviewer
   }).catch(function(){});
-  /* Aussi mettre à jour le chemin dédié si accessible */
-  ['gw/artiste_requests/' + reqId].forEach(function(path) {
-    _gwFbDB.ref(path + '/status').set('approved').catch(function(){});
-    _gwFbDB.ref(path + '/reviewedAt').set(now).catch(function(){});
-    _gwFbDB.ref(path + '/reviewedBy').set(reviewer).catch(function(){});
+  /* SYNC-182 : fallback historique consulté par _artisteCheckAccess() en
+     repli (gw/artiste_approved inaccessible → gw/profiles/{uKey}/
+     artiste_approved) — conservé en best-effort, comme l'écriture
+     ci-dessus, pour ne rien retirer dont l'utilité n'est pas prouvée
+     nulle. Reste bloqué par la Rule générale des profils pour un admin
+     (non modifiée ici, hors périmètre de cette correction), mais son
+     échec ne doit plus jamais conditionner le résultat affiché. */
+  _gwFbDB.ref('gw/profiles/' + userKey).update({
+    artiste_approved: { approvedAt: now, approvedBy: reviewer, stageName: stageName }
+  }).catch(function(){});
+  /* SYNC-181 : écritures réellement décisives — gw/artiste_requests et
+     gw/artiste_approved disposent désormais de Rules admin dédiées
+     (corrigées SYNC-181, database.rules.json). Attendues explicitement :
+     le toast de succès ne s'affiche que si elles réussissent vraiment,
+     au lieu d'être affiché inconditionnellement comme avant (cause du
+     bug "approbation sans effet réel" diagnostiqué en SYNC-181). */
+  Promise.all([
+    _gwFbDB.ref('gw/artiste_requests/' + reqId).update({ status: 'approved', reviewedAt: now, reviewedBy: reviewer }),
+    _gwFbDB.ref('gw/artiste_approved/' + userKey).set({ approvedAt: now, approvedBy: reviewer, stageName: stageName })
+  ]).then(function() {
+    if (userEmail) {
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyArtisteApproved', targetEmail: userEmail }).then(function(res) {
+        if (!_admApiOk(res)) showToast('Artiste approuvé, mais non notifié : ' + _admApiErrMsg(res), 'err');
+      }).catch(function() { showToast('Artiste approuvé, mais non notifié (erreur réseau)', 'err'); });
+    }
+    showToast('Artiste approuvé ✓', 'ok');
+    _admRender();
+  }).catch(function(err) {
+    showToast('Échec de l\'approbation : ' + (err && err.message ? err.message : 'permission refusée'), 'err');
   });
-  _gwFbDB.ref('gw/artiste_approved/' + userKey).set({ approvedAt: now, approvedBy: reviewer, stageName: stageName }).catch(function(){});
-  /* Marquer également dans le profil pour que _artisteCheckAccess fonctionne sans règles supplémentaires */
-  _gwFbDB.ref('gw/profiles/' + userKey).update({ artiste_approved: { approvedAt: now, approvedBy: reviewer, stageName: stageName } }).catch(function(){});
-  /* Phase 9C : notification desormais ecrite cote serveur (compte de
-     service, moderate.js) — l'ancien .push() direct sur gw/notifs/{userKey}
-     etait une ecriture cross-user, fermee cote regles. Le reste de cette
-     fonction (profil/artiste_requests/artiste_approved) est hors perimetre
-     de cette phase (deja client-direct avant, non touche ici). */
-  if (userEmail) {
-    _admApi('moderate', { token: _admSessionToken, action: 'notifyArtisteApproved', targetEmail: userEmail }).catch(function(){});
-  }
-  showToast('Artiste approuvé ✓', 'ok');
-  _admRender();
 }
 
 function _admArtisteReject(reqId, userKey, userEmail) {
@@ -34643,23 +34668,22 @@ function _admArtisteReject(reqId, userKey, userEmail) {
   var reason = prompt ? (prompt('Raison du refus (optionnel) :') || '') : '';
   var now = Date.now();
   var reviewer = _currentUser ? _currentUser.email : 'admin';
-  /* Mettre à jour dans le profil utilisateur (chemin garanti) */
   var rejUpdate = { status: 'rejected', reviewedAt: now, reviewedBy: reviewer };
   if (reason) rejUpdate.rejectReason = reason;
+  /* Best-effort, voir commentaire équivalent dans _admArtisteApprove(). */
   _gwFbDB.ref('gw/profiles/' + userKey + '/artiste_request').update(rejUpdate).catch(function(){});
-  /* Aussi mettre à jour le chemin dédié si accessible */
-  ['gw/artiste_requests/' + reqId].forEach(function(path) {
-    _gwFbDB.ref(path + '/status').set('rejected').catch(function(){});
-    _gwFbDB.ref(path + '/reviewedAt').set(now).catch(function(){});
-    _gwFbDB.ref(path + '/reviewedBy').set(reviewer).catch(function(){});
-    if (reason) _gwFbDB.ref(path + '/rejectReason').set(reason).catch(function(){});
+  /* SYNC-181 : écriture décisive, désormais attendue — voir _admArtisteApprove(). */
+  _gwFbDB.ref('gw/artiste_requests/' + reqId).update(rejUpdate).then(function() {
+    if (userEmail) {
+      _admApi('moderate', { token: _admSessionToken, action: 'notifyArtisteRejected', targetEmail: userEmail, reason: reason }).then(function(res) {
+        if (!_admApiOk(res)) console.error('[Admin] Notification de refus artiste non envoyée :', _admApiErrMsg(res));
+      }).catch(function() { console.error('[Admin] Notification de refus artiste non envoyée (réseau)'); });
+    }
+    showToast('Demande refusée', 'err');
+    _admRender();
+  }).catch(function(err) {
+    showToast('Échec du refus : ' + (err && err.message ? err.message : 'permission refusée'), 'err');
   });
-  /* Phase 9C : notification cote serveur (voir _admArtisteApprove ci-dessus). */
-  if (userEmail) {
-    _admApi('moderate', { token: _admSessionToken, action: 'notifyArtisteRejected', targetEmail: userEmail, reason: reason }).catch(function(){});
-  }
-  showToast('Demande refusée', 'err');
-  _admRender();
 }
 
 var _admArtisteRequests  = null; /* cache pour les demandes chargées */
