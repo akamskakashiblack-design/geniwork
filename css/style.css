@@ -1626,6 +1626,10 @@ mark.srch-mark {
   background: rgba(217,119,6,0.25);
   border: 1px solid rgba(217,119,6,0.4);
 }
+.feed-cat-expenses {
+  background: rgba(5,150,105,0.25);
+  border: 1px solid rgba(5,150,105,0.4);
+}
 
 .feed-cat-ai-badge {
   background: #0D9488;

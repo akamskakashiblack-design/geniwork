@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GENIWORK — Suivi des dépenses</title>
+<style>
+  :root {
+    --accent: #7C3AED;
+    --accent-dark: #6D28D9;
+    --bg-app: #F5F7FB;
+    --bg-card: #FFFFFF;
+    --bg-card-soft: #F1F5F9;
+    --border: #E2E8F0;
+    --text: #1E293B;
+    --text-muted: #64748B;
+    --error-bg: #FEF2F2;
+    --error-border: #FCA5A5;
+    --error-text: #B91C1C;
+    --ok-bg: #F0FDF4;
+    --ok-border: #86EFAC;
+    --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
+  }
+  [data-theme="dark"] {
+    --bg-app: #05050F;
+    --bg-card: #12111F;
+    --bg-card-soft: #1A1930;
+    --border: #262445;
+    --text: #F1F5F9;
+    --text-muted: #94A3B8;
+    --error-bg: #3B0D0D;
+    --error-border: #7F1D1D;
+    --error-text: #FCA5A5;
+    --ok-bg: #0D2818;
+    --ok-border: #14532D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg-app: #05050F;
+      --bg-card: #12111F;
+      --bg-card-soft: #1A1930;
+      --border: #262445;
+      --text: #F1F5F9;
+      --text-muted: #94A3B8;
+      --error-bg: #3B0D0D;
+      --error-border: #7F1D1D;
+      --error-text: #FCA5A5;
+      --ok-bg: #0D2818;
+      --ok-border: #14532D;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg-app); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  .back-link { color: var(--accent); text-decoration: none; font-size: 14px; font-weight: 600; }
+  .theme-toggle { border: 1px solid var(--border); background: var(--bg-card); color: var(--text); border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--text-muted); font-size: 14px; margin: 0 0 20px; }
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 18px; box-shadow: var(--shadow-card); }
+  .card h2 { font-size: 15px; margin: 0 0 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+  input, select, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card-soft); color: var(--text); font-size: 14px; font-family: inherit; }
+  textarea { resize: vertical; min-height: 40px; }
+  .field { margin-bottom: 0; }
+  .actions { display: flex; gap: 10px; margin-top: 14px; }
+  button.primary { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 9px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button.primary:hover { background: var(--accent-dark); }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 9px 14px; font-size: 13px; cursor: pointer; }
+  button.small { padding: 5px 10px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-card-soft); color: var(--text); cursor: pointer; }
+  button.small.danger { border-color: var(--error-border); color: var(--error-text); }
+  .msg { padding: 10px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; display: none; }
+  .msg.err { display: block; background: var(--error-bg); border: 1px solid var(--error-border); color: var(--error-text); }
+  .msg.ok { display: block; background: var(--ok-bg); border: 1px solid var(--ok-border); color: var(--text); }
+  .totals-row { display: flex; flex-wrap: wrap; gap: 12px; }
+  .total-pill { background: var(--bg-card-soft); border-radius: 10px; padding: 10px 16px; min-width: 140px; }
+  .total-pill .val { font-size: 18px; font-weight: 700; }
+  .total-pill .lbl { font-size: 12px; color: var(--text-muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-muted); font-weight: 600; font-size: 12px; }
+  td.amount { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .empty { color: var(--text-muted); font-size: 14px; padding: 20px 0; text-align: center; }
+  .table-wrap { overflow-x: auto; }
+  #login-gate { max-width: 480px; margin: 80px auto; text-align: center; padding: 24px; color: var(--text-muted); font-size: 15px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 640px) {
+    .grid { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+  <div id="login-gate" hidden>
+    <p>Connecte-toi depuis l'application GENIWORK pour utiliser le suivi des dépenses.</p>
+  </div>
+
+  <div class="wrap" id="app-content" hidden>
+    <div class="topbar">
+      <a class="back-link" href="/">&larr; Retour à GENIWORK</a>
+      <button class="theme-toggle" id="theme-btn" onclick="_expToggleTheme()">🌓</button>
+    </div>
+    <h1>Suivi des dépenses</h1>
+    <p class="sub">Enregistrez et suivez vos dépenses professionnelles au fil du temps.</p>
+
+    <div id="msg-box" class="msg"></div>
+
+    <div class="card">
+      <h2>Ajouter une dépense</h2>
+      <form id="add-form" onsubmit="return _expSubmitAdd(event)">
+        <div class="grid">
+          <div class="field"><label>Date *</label><input type="date" id="f-date" required /></div>
+          <div class="field"><label>Montant *</label><input type="number" id="f-amount" step="0.01" min="0.01" required /></div>
+          <div class="field"><label>Devise</label><input type="text" id="f-currency" placeholder="EUR" maxlength="10" /></div>
+          <div class="field"><label>Catégorie *</label><select id="f-category" required></select></div>
+          <div class="field"><label>Libellé *</label><input type="text" id="f-label" maxlength="200" required /></div>
+          <div class="field"><label>Moyen de paiement</label><input type="text" id="f-payment" maxlength="100" /></div>
+        </div>
+        <div class="field" style="margin-top:10px"><label>Description</label><textarea id="f-description" maxlength="1000"></textarea></div>
+        <div class="actions">
+          <button type="submit" class="primary">Ajouter</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Filtres</h2>
+      <div class="grid">
+        <div class="field"><label>Du</label><input type="date" id="flt-from" onchange="_expLoad()" /></div>
+        <div class="field"><label>Au</label><input type="date" id="flt-to" onchange="_expLoad()" /></div>
+        <div class="field"><label>Catégorie</label><select id="flt-category" onchange="_expLoad()"><option value="">Toutes</option></select></div>
+      </div>
+      <div class="actions"><button class="ghost" onclick="_expResetFilters()">Réinitialiser les filtres</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Totaux</h2>
+      <div class="totals-row" id="totals-row"></div>
+    </div>
+
+    <div class="card">
+      <h2>Historique</h2>
+      <div class="table-wrap">
+        <table id="exp-table">
+          <thead>
+            <tr><th>Date</th><th>Catégorie</th><th>Libellé</th><th style="text-align:right">Montant</th><th></th></tr>
+          </thead>
+          <tbody id="exp-tbody"></tbody>
+        </table>
+        <div class="empty" id="exp-empty" hidden>Aucune dépense enregistrée.</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  /* mirroir de api/expenses/_lib/expensesConfig.js — meme convention
+     que FEATURES/CATALOG dans business-ai.html (source serveur =
+     verite, copie client pour l'UI, AI-TOOL-32 §5). */
+  const EXPENSE_CATEGORIES = [
+    'Logiciels / abonnements', 'Transport', 'Communication', 'Marketing / publicité',
+    'Fournitures', 'Sous-traitance', 'Locaux', 'Frais bancaires', 'Formation', 'Autres',
+  ];
+
+  function _expGetAuthRefreshToken() {
+    try {
+      const raw = localStorage.getItem('gw_session');
+      if (!raw) return null;
+      const s = JSON.parse(raw);
+      if (!s || !s.authRefresh || !s.expires || Date.now() > s.expires) return null;
+      return s.authRefresh;
+    } catch (e) { return null; }
+  }
+  const _expToken = _expGetAuthRefreshToken();
+
+  function _expApplyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+  }
+  function _expToggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    const next = current === 'dark' ? 'light' : 'dark';
+    _expApplyTheme(next);
+    try { localStorage.setItem('geniwork-ai-theme', next); } catch (e) {}
+  }
+  (function () {
+    try {
+      const saved = localStorage.getItem('geniwork-ai-theme');
+      if (saved) _expApplyTheme(saved);
+    } catch (e) {}
+  })();
+
+  function _expShowMsg(text, type) {
+    const box = document.getElementById('msg-box');
+    box.textContent = text;
+    box.className = 'msg ' + (type || 'err');
+  }
+  function _expClearMsg() {
+    const box = document.getElementById('msg-box');
+    box.className = 'msg';
+    box.textContent = '';
+  }
+
+  async function _expApi(method, query, body) {
+    const qs = Object.assign({}, query || {});
+    if (method === 'GET' || method === 'DELETE') qs.authRefreshToken = _expToken;
+    const params = new URLSearchParams(qs).toString();
+    const url = '/api/expenses' + (params ? '?' + params : '');
+    const opts = { method, headers: {} };
+    if (method === 'POST' || method === 'PATCH') {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(Object.assign({ authRefreshToken: _expToken }, body || {}));
+    }
+    const res = await fetch(url, opts);
+    let json;
+    try { json = await res.json(); } catch (e) { json = null; }
+    if (!res.ok || !json || json.ok === false) {
+      const errText = (json && json.error) || ('Erreur ' + res.status);
+      throw new Error(errText);
+    }
+    return json;
+  }
+
+  function _expFillCategorySelects() {
+    const add = document.getElementById('f-category');
+    const flt = document.getElementById('flt-category');
+    EXPENSE_CATEGORIES.forEach((c) => {
+      const o1 = document.createElement('option'); o1.value = c; o1.textContent = c; add.appendChild(o1);
+      const o2 = document.createElement('option'); o2.value = c; o2.textContent = c; flt.appendChild(o2);
+    });
+  }
+
+  function _expFormatAmount(n, currency) {
+    return (typeof n === 'number' ? n.toFixed(2) : '0.00') + ' ' + (currency || 'EUR');
+  }
+
+  function _expRenderTotals(data) {
+    const row = document.getElementById('totals-row');
+    row.innerHTML = '';
+    if (data.multiCurrency) {
+      Object.keys(data.totalsByCurrency).forEach((cur) => {
+        const t = data.totalsByCurrency[cur];
+        const pill = document.createElement('div');
+        pill.className = 'total-pill';
+        pill.innerHTML = '<div class="val">' + _expFormatAmount(t.total, cur) + '</div><div class="lbl">Total (' + cur + ')</div>';
+        row.appendChild(pill);
+      });
+      const note = document.createElement('div');
+      note.className = 'total-pill';
+      note.innerHTML = '<div class="lbl">Plusieurs devises présentes — totaux affichés séparément, jamais additionnés entre eux.</div>';
+      row.appendChild(note);
+      return;
+    }
+    const currency = data.expenses[0] ? data.expenses[0].currency : 'EUR';
+    const totalPill = document.createElement('div');
+    totalPill.className = 'total-pill';
+    totalPill.innerHTML = '<div class="val">' + _expFormatAmount(data.total, currency) + '</div><div class="lbl">Total général</div>';
+    row.appendChild(totalPill);
+    Object.keys(data.byCategory || {}).forEach((cat) => {
+      const pill = document.createElement('div');
+      pill.className = 'total-pill';
+      pill.innerHTML = '<div class="val">' + _expFormatAmount(data.byCategory[cat], currency) + '</div><div class="lbl">' + cat + '</div>';
+      row.appendChild(pill);
+    });
+  }
+
+  function _expRenderList(expenses) {
+    const tbody = document.getElementById('exp-tbody');
+    const empty = document.getElementById('exp-empty');
+    tbody.innerHTML = '';
+    if (!expenses.length) { empty.hidden = false; return; }
+    empty.hidden = true;
+    expenses.forEach((e) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + e.date + '</td>'
+        + '<td>' + e.category + '</td>'
+        + '<td>' + _expEscape(e.label) + (e.description ? '<br><span style="color:var(--text-muted);font-size:12px">' + _expEscape(e.description) + '</span>' : '') + '</td>'
+        + '<td class="amount">' + _expFormatAmount(e.amount, e.currency) + '</td>'
+        + '<td style="white-space:nowrap"><button class="small" onclick="_expStartEdit(\'' + e.expenseId + '\')">Modifier</button> '
+        + '<button class="small danger" onclick="_expDelete(\'' + e.expenseId + '\')">Supprimer</button></td>';
+      tbody.appendChild(tr);
+    });
+  }
+  function _expEscape(s) { return String(s || '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  async function _expLoad() {
+    _expClearMsg();
+    const query = {};
+    const from = document.getElementById('flt-from').value;
+    const to = document.getElementById('flt-to').value;
+    const category = document.getElementById('flt-category').value;
+    if (from) query.from = from;
+    if (to) query.to = to;
+    if (category) query.category = category;
+    try {
+      const data = await _expApi('GET', query);
+      _expRenderList(data.expenses);
+      _expRenderTotals(data);
+    } catch (e) {
+      _expShowMsg('Erreur de chargement : ' + e.message, 'err');
+    }
+  }
+  function _expResetFilters() {
+    document.getElementById('flt-from').value = '';
+    document.getElementById('flt-to').value = '';
+    document.getElementById('flt-category').value = '';
+    _expLoad();
+  }
+
+  async function _expSubmitAdd(evt) {
+    evt.preventDefault();
+    _expClearMsg();
+    const payload = {
+      date: document.getElementById('f-date').value,
+      amount: parseFloat(document.getElementById('f-amount').value),
+      category: document.getElementById('f-category').value,
+      label: document.getElementById('f-label').value,
+      currency: document.getElementById('f-currency').value || undefined,
+      paymentMethod: document.getElementById('f-payment').value || undefined,
+      description: document.getElementById('f-description').value || undefined,
+    };
+    try {
+      await _expApi('POST', {}, payload);
+      document.getElementById('add-form').reset();
+      _expShowMsg('Dépense ajoutée.', 'ok');
+      _expLoad();
+    } catch (e) {
+      _expShowMsg('Erreur : ' + e.message, 'err');
+    }
+    return false;
+  }
+
+  async function _expStartEdit(expenseId) {
+    const newAmountStr = prompt('Nouveau montant (laisser vide pour ne pas changer) :');
+    if (newAmountStr === null) return;
+    const patch = {};
+    if (newAmountStr.trim()) {
+      const n = parseFloat(newAmountStr);
+      if (!Number.isFinite(n) || n <= 0) { _expShowMsg('Montant invalide.', 'err'); return; }
+      patch.amount = n;
+    }
+    const newLabel = prompt('Nouveau libellé (laisser vide pour ne pas changer) :');
+    if (newLabel && newLabel.trim()) patch.label = newLabel.trim();
+    if (!Object.keys(patch).length) return;
+    try {
+      await _expApi('PATCH', { expenseId }, patch);
+      _expShowMsg('Dépense modifiée.', 'ok');
+      _expLoad();
+    } catch (e) {
+      _expShowMsg('Erreur : ' + e.message, 'err');
+    }
+  }
+
+  async function _expDelete(expenseId) {
+    if (!confirm('Supprimer définitivement cette dépense ?')) return;
+    try {
+      await _expApi('DELETE', { expenseId });
+      _expShowMsg('Dépense supprimée.', 'ok');
+      _expLoad();
+    } catch (e) {
+      _expShowMsg('Erreur : ' + e.message, 'err');
+    }
+  }
+
+  (function init() {
+    if (!_expToken) {
+      document.getElementById('login-gate').hidden = false;
+      document.getElementById('app-content').hidden = true;
+      return;
+    }
+    document.getElementById('login-gate').hidden = true;
+    document.getElementById('app-content').hidden = false;
+    _expFillCategorySelects();
+    _expLoad();
+  })();
+</script>
+</body>
+</html>

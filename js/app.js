@@ -32648,6 +32648,25 @@ function openBusinessAI() {
   window.open(url, '_blank');
 }
 
+/* AI-TOOL-32 : point d'entree du suivi des depenses — meme mecanisme
+   que openBusinessAI() (page HTML autonome, auth via gw_session cote
+   client), volontairement PAS un outil du catalogue FEATURES/CATALOG
+   (fonctionnalite applicative persistante, pas un outil conversationnel). */
+function openExpenseTracking() {
+  if (!_currentUser || !_currentUser.email) {
+    alert('Connecte-toi pour utiliser le suivi des dépenses.');
+    return;
+  }
+  var url = window.location.origin + '/expenses.html?email=' + encodeURIComponent(_currentUser.email);
+  if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+    if (window.Capacitor.Plugins && window.Capacitor.Plugins.Browser) {
+      window.Capacitor.Plugins.Browser.open({ url: url });
+      return;
+    }
+  }
+  window.open(url, '_blank');
+}
+
 /* ── Helpers : paiements ── */
 function _admGetPayments() {
   try {
