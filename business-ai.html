@@ -9,10 +9,12 @@
     --accent: #7C3AED;
     --accent-dark: #6D28D9;
     --accent-blue: #3B82F6;
-    --bg-app: #F8FAFC;
+    --accent-cyan: #22D3EE;
+    --bg-app: #F5F7FB;
     --bg-sidebar: #FFFFFF;
     --bg-card: #FFFFFF;
     --bg-card-soft: #F1F5F9;
+    --bg-hero: linear-gradient(135deg, #EEF2FF, #F5F3FF);
     --border: #E2E8F0;
     --text: #1E293B;
     --text-muted: #64748B;
@@ -20,21 +22,29 @@
     --error-border: #FCA5A5;
     --pill-bg: #EDE9FE;
     --pill-text: #6D28D9;
+    --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
   }
   [data-theme="dark"] {
-    --bg-app: #05050D;
-    --bg-sidebar: #0A0A1A;
-    --bg-card: #12101F;
+    --bg-app: #05050F;
+    --bg-sidebar: #0A0A1C;
+    --bg-card: #12111F;
     --bg-card-soft: #181530;
-    --border: #221F38;
+    --bg-hero: linear-gradient(135deg, #140E33 0%, #0B1030 55%, #050514 100%);
+    --border: #221F3C;
     --text: #F1F5F9;
     --text-muted: #94A3B8;
     --error-bg: #2A1416;
     --error-border: #7F1D1D;
     --pill-bg: #241B40;
     --pill-text: #C4B5FD;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
   }
   * { box-sizing: border-box; }
+  /* Reset des <button> : sans ça, le navigateur leur applique sa propre couleur de
+     texte par défaut (souvent noire) au lieu d'hériter de --text — invisible en
+     mode sombre sur les cartes/boutons qui ne fixent pas leur "color" eux-mêmes
+     (ex: .card, .tool-row). */
+  button { color: inherit; font: inherit; }
   body {
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -44,39 +54,49 @@
   }
   .app { display: flex; min-height: 100vh; }
 
+  /* ── Icon system (Lucide) — voir <script src="lucide">, fonction icon() ──
+     Une seule famille d'icônes SVG dans toute la page. Taille/poids de trait
+     centralisés ici ; deux classes utilitaires (défaut 16px, .ic-lg 20px)
+     couvrent tous les contextes plutôt que des règles par composant. */
+  svg.lucide { width: 16px; height: 16px; stroke-width: 2; display: inline-block; vertical-align: middle; flex-shrink: 0; }
+  svg.lucide.ic-lg { width: 20px; height: 20px; }
+
   .sidebar {
-    width: 320px;
+    width: 300px;
     flex-shrink: 0;
     background: var(--bg-sidebar);
     border-right: 1px solid var(--border);
-    padding: 18px 24px 30px;
+    padding: 22px 24px 30px;
   }
-  .brand-logo { max-width: 190px; height: auto; margin: 0 0 22px; display: block; }
-  .mascot-img { max-width: 230px; width: 100%; height: auto; display: block; margin: 0 auto; }
-  .sidebar h1 { font-size: 34px; margin: 0 0 12px; line-height: 1.1; font-weight: 800; }
+  .brand-row { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+  .brand-logo { max-width: 40px; height: auto; display: block; }
+  .brand-name { font-size: 15px; font-weight: 800; letter-spacing: 0.2px; }
+  .brand-name .accent { color: var(--accent-blue); }
+  .sidebar h1 { font-size: 26px; margin: 0 0 10px; line-height: 1.15; font-weight: 800; }
   .sidebar h1 .accent { color: var(--accent-blue); }
-  .sidebar-desc { font-size: 13px; color: var(--text-muted); line-height: 1.55; margin-bottom: 16px; }
-  .mascot { text-align: center; margin: 14px 0 20px; }
+  .sidebar-desc { font-size: 13px; color: var(--text-muted); line-height: 1.55; margin-bottom: 18px; }
+  .sidebar-mascot { display: block; margin: 0 auto 18px; width: 156px; height: auto; }
+  .chat-sidebar-mascot { display: block; margin: 4px auto 14px; width: 104px; height: auto; }
   .checklist { list-style: none; padding: 0; margin: 0 0 20px; font-size: 13px; }
   .checklist li { margin-bottom: 10px; display: flex; align-items: center; gap: 9px; font-weight: 500; }
-  .checklist li::before {
-    content: "✓"; color: var(--accent-blue); font-weight: 700; font-size: 11px;
+  .check-badge {
     width: 19px; height: 19px; border-radius: 50%; border: 1.5px solid var(--accent-blue);
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    color: var(--accent-blue); display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   }
+  .check-badge svg.lucide { width: 11px; height: 11px; stroke-width: 3; }
   .benefits-box {
     background: var(--bg-card-soft); border: 1px solid var(--border); border-radius: 14px;
     padding: 16px; margin-bottom: 18px;
   }
-  .benefits-title { font-weight: 700; font-size: 13px; margin-bottom: 12px; }
+  .benefits-title { font-weight: 700; font-size: 13px; margin-bottom: 12px; display: flex; align-items: center; gap: 7px; }
   .benefits-box ul { list-style: none; padding: 0; margin: 0; font-size: 12px; color: var(--text-muted); }
-  .benefits-box li { margin-bottom: 8px; }
+  .benefits-box li { margin-bottom: 8px; display: flex; align-items: center; gap: 7px; }
   blockquote {
     font-size: 13px; color: var(--text-muted); font-style: italic; line-height: 1.5;
     border-left: 2px solid var(--accent); padding-left: 12px; margin: 0;
   }
 
-  main { flex: 1; padding: 28px 30px 60px; max-width: 1200px; }
+  main { flex: 1; padding: 28px 30px 60px; max-width: 1280px; }
   .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
   .topbar-title { font-size: 21px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
   .badge {
@@ -87,77 +107,116 @@
   .credit-badge {
     font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 999px;
     background: var(--pill-bg); color: var(--pill-text); white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 5px;
   }
   .credit-badge.low { background: #FEF3C7; color: #92400E; }
   [data-theme="dark"] .credit-badge.low { background: #422006; color: #FCD34D; }
   .credit-badge.empty { background: var(--error-bg); color: #DC2626; }
-  .history-wrap { position: relative; }
   .history-btn {
     background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
     border-radius: 999px; padding: 8px 16px; font-size: 13px; cursor: pointer; font-family: inherit;
+    white-space: nowrap; display: inline-flex; align-items: center; gap: 6px;
   }
   .history-btn:hover { border-color: var(--accent); }
-  .history-panel {
-    display: none; position: absolute; top: calc(100% + 8px); left: 0; z-index: 20;
-    width: 300px; max-height: 360px; overflow-y: auto; background: var(--bg-card);
-    border: 1px solid var(--border); border-radius: 14px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.18);
-  }
-  .history-panel.visible { display: block; }
-  .history-empty { color: var(--text-muted); font-size: 13px; padding: 14px; text-align: center; }
-  .history-item {
-    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-    background: none; border: none; border-radius: 10px; padding: 10px; cursor: pointer; font-family: inherit;
-  }
-  .history-item:hover { background: var(--bg-app); }
-  .history-item .hi-icon { font-size: 18px; }
-  .history-item .hi-label { font-weight: 600; font-size: 13px; color: var(--text); }
-  .history-item .hi-meta { font-size: 11px; color: var(--text-muted); }
   #theme-toggle {
     margin-left: auto;
     background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
     border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 6px;
   }
   #theme-toggle:hover { border-color: var(--accent); }
 
+  /* ── Hero ── */
+  .hero-banner {
+    position: relative; overflow: hidden; border-radius: 22px; padding: 32px 34px;
+    background: var(--bg-hero); border: 1px solid var(--border); margin-bottom: 26px;
+    display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  }
+  .hero-glow {
+    position: absolute; top: -60px; right: -60px; width: 260px; height: 260px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(124,58,237,0.35), transparent 70%); pointer-events: none;
+  }
+  [data-theme="dark"] .hero-glow { background: radial-gradient(circle, rgba(59,130,246,0.35), transparent 70%); }
+  .hero-content { position: relative; z-index: 1; max-width: 640px; }
+  .hero-title { font-size: 32px; font-weight: 800; margin: 0 0 10px; }
+  .hero-title .accent { color: var(--accent-blue); }
+  .hero-sub { font-size: 14px; color: var(--text-muted); line-height: 1.6; margin: 0 0 18px; max-width: 480px; }
+  .hero-points { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-bottom: 20px; }
+  .hero-points span { font-size: 12.5px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 6px; }
+  .hero-cta {
+    background: linear-gradient(135deg, var(--accent), var(--accent-blue)); color: white; border: none;
+    padding: 12px 22px; border-radius: 12px; font-weight: 700; font-size: 13.5px; cursor: pointer; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .hero-cta:hover { opacity: 0.92; }
+  .hero-mascot { position: relative; z-index: 1; max-width: 220px; height: auto; flex-shrink: 0; filter: drop-shadow(0 12px 24px rgba(124,58,237,0.25)); }
+
+  /* ── Search bar ── */
   .search-bar {
     display: flex; align-items: center; gap: 10px; background: var(--bg-card);
     border: 1px solid var(--border); border-radius: 14px; padding: 8px 8px 8px 18px; margin-bottom: 26px;
   }
-  .search-bar .search-icon { color: var(--text-muted); }
+  .search-bar .search-icon { color: var(--text-muted); display: flex; align-items: center; }
   .search-bar input {
     flex: 1; border: none; background: transparent; font-size: 14px; padding: 11px 0; color: var(--text); font-family: inherit;
   }
   .search-bar input:focus { outline: none; }
+  .search-hint { font-size: 11px; color: var(--text-muted); padding-right: 6px; white-space: nowrap; }
   .search-btn {
     background: linear-gradient(135deg, var(--accent), var(--accent-blue)); border: none; color: white;
-    width: 40px; height: 40px; border-radius: 10px; cursor: pointer; font-size: 16px; flex-shrink: 0;
+    width: 40px; height: 40px; border-radius: 10px; cursor: pointer; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
   }
 
-  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-bottom: 26px; }
+  /* ── Section headers ── */
+  .section-header { display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 14px; }
+  .section-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .section-count { font-size: 12px; color: var(--text-muted); font-weight: 600; }
+  section.cat-section { margin-bottom: 30px; }
+
+  /* ── Category pills ── */
+  .cat-pills { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 30px; }
+  .cat-pill {
+    display: flex; align-items: center; gap: 7px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 10px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: inherit; color: var(--text); transition: border-color 0.15s, background 0.15s;
+  }
+  .cat-pill:hover { border-color: var(--accent); }
+  .cat-pill.active { border-color: var(--accent); background: var(--pill-bg); color: var(--pill-text); }
+  .cat-pill .cp-count { font-size: 11px; color: var(--text-muted); font-weight: 700; }
+  .cat-pill.active .cp-count { color: var(--pill-text); }
+
+  /* ── Cards ── */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-bottom: 8px; }
   .card {
     display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
     background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px;
     padding: 20px; cursor: pointer; text-align: left; transition: border-color 0.15s, transform 0.1s;
-    font-family: inherit;
+    font-family: inherit; box-shadow: var(--shadow-card); position: relative; width: 100%;
   }
   .card:hover { border-color: var(--accent); transform: translateY(-2px); }
-  .card.active { border-color: var(--accent); }
+  .card.card-soon { cursor: default; opacity: 0.72; }
+  .card.card-soon:hover { transform: none; border-color: var(--border); }
+  .card-top { display: flex; align-items: center; justify-content: space-between; width: 100%; margin-bottom: 2px; }
   .card-icon {
-    width: 42px; height: 42px; border-radius: 12px; font-size: 19px;
-    display: flex; align-items: center; justify-content: center; color: white; margin-bottom: 4px;
+    width: 42px; height: 42px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center; color: white;
   }
+  .card-badge { font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+  .card-badge.soon { background: var(--bg-card-soft); color: var(--text-muted); border: 1px solid var(--border); }
   .card-label { font-weight: 700; font-size: 15px; }
   .card-desc { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+  .card-cta { margin-top: 8px; font-size: 12px; font-weight: 700; color: var(--accent-blue); display: inline-flex; align-items: center; gap: 4px; }
 
-  .bottom-row { display: grid; grid-template-columns: 2fr 1fr; gap: 18px; align-items: stretch; }
+  .bottom-row { display: grid; grid-template-columns: 2fr 1fr; gap: 18px; align-items: stretch; margin-top: 10px; }
   .how { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 22px; }
   .how-title { font-weight: 700; font-size: 16px; margin: 0 0 18px; }
   .how-steps { display: flex; gap: 8px; align-items: flex-start; }
   .how-step { flex: 1; text-align: center; }
-  .how-arrow { color: var(--text-muted); font-size: 16px; padding-top: 13px; }
+  .how-arrow { color: var(--text-muted); padding-top: 13px; display: flex; justify-content: center; }
   .how-circle {
     width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-blue));
-    color: white; display: flex; align-items: center; justify-content: center; margin: 0 auto 10px; font-size: 16px;
+    color: white; display: flex; align-items: center; justify-content: center; margin: 0 auto 10px;
   }
   .how-step-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; }
   .how-step-desc { font-size: 11px; color: var(--text-muted); line-height: 1.3; }
@@ -166,7 +225,7 @@
     background: linear-gradient(160deg, var(--accent), var(--accent-blue));
     border-radius: 16px; padding: 22px; color: white; display: flex; flex-direction: column;
   }
-  .cta-box .cta-icon { font-size: 22px; margin-bottom: 10px; }
+  .cta-box .cta-icon { margin-bottom: 10px; }
   .cta-box h3 { font-size: 17px; margin: 0 0 10px; }
   .cta-box p { font-size: 12px; opacity: 0.9; line-height: 1.5; margin: 0 0 16px; flex-grow: 1; }
   .cta-box a.cta-btn, .cta-box button {
@@ -175,28 +234,47 @@
     text-decoration: none; display: inline-block; text-align: center;
   }
 
+  /* ── Toast ── */
+  .ai-toast {
+    position: fixed; bottom: 26px; left: 50%; transform: translate(-50%, 20px); z-index: 200;
+    background: var(--text); color: var(--bg-app); padding: 12px 20px; border-radius: 12px; font-size: 13px;
+    font-weight: 600; opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s; max-width: 90vw; text-align: center;
+  }
+  .ai-toast.visible { opacity: 1; transform: translate(-50%, 0); }
+
   #login-gate {
     margin-top: 60px; text-align: center; color: var(--text-muted); font-size: 15px;
   }
 
-  #workspace {
-    display: none; margin-top: 20px; background: var(--bg-card);
-    border: 1px solid var(--border); border-radius: 16px; padding: 20px;
-  }
-  #workspace.visible { display: block; }
-  #workspace h3 { margin: 0 0 4px; }
-  #workspace .ws-desc { color: var(--text-muted); font-size: 13px; margin: 0 0 14px; }
-  .transcript { display: none; flex-direction: column; gap: 12px; margin-bottom: 14px; max-height: 500px; overflow-y: auto; }
+  /* ── Chat bubbles (réutilisées Dashboard + Chat Screen) ── */
+  .transcript { display: flex; flex-direction: column; gap: 12px; }
   .chat-bubble { max-width: 85%; padding: 12px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; }
   .chat-bubble.user { align-self: flex-end; background: linear-gradient(135deg, var(--accent), var(--accent-blue)); color: white; }
-  .chat-bubble.assistant { align-self: flex-start; background: var(--bg-app); border: 1px solid var(--border); max-width: 95%; }
+  .chat-bubble.assistant { align-self: flex-start; background: var(--bg-card); border: 1px solid var(--border); max-width: 95%; }
   .chat-bubble.assistant p:first-child { margin-top: 0; }
   .chat-bubble.assistant p:last-child { margin-bottom: 0; }
   .chat-bubble img.attached-preview { max-width: 160px; border-radius: 8px; display: block; margin-top: 8px; }
+  .chat-bubble .attached-tag { display: flex; align-items: center; gap: 5px; }
   .chat-file-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .search-toggle-btn {
+    display: inline-flex; align-items: center; gap: 6px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 999px; padding: 7px 12px; font-size: 12px; font-weight: 600; color: var(--text-muted);
+    cursor: pointer; font-family: inherit; margin-bottom: 10px;
+  }
+  .search-toggle-btn:hover { border-color: var(--accent); }
+  .search-toggle-btn.active { background: var(--pill-bg); color: var(--pill-text); border-color: var(--accent); }
+  .search-toggle-btn.disabled { opacity: 0.5; cursor: default; }
+  .search-toggle-btn.disabled:hover { border-color: var(--border); }
+  .search-toggle-cost { font-size: 10px; opacity: 0.75; }
+  .sources-block { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .sources-title { font-size: 12px; font-weight: 700; color: var(--text-muted); display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .sources-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+  .sources-list a { font-size: 12px; color: var(--accent-blue); text-decoration: none; word-break: break-all; }
+  .sources-list a:hover { text-decoration: underline; }
   .file-label {
     background: var(--bg-app); border: 1px dashed var(--border); border-radius: 10px;
     padding: 9px 14px; font-size: 13px; cursor: pointer; color: var(--text-muted);
+    display: inline-flex; align-items: center; gap: 6px;
   }
   .file-label:hover { border-color: var(--accent); color: var(--accent); }
   #chat-file { display: none; }
@@ -210,13 +288,15 @@
   button.primary {
     background: linear-gradient(135deg, var(--accent), var(--accent-blue)); color: white; border: none;
     padding: 11px 22px; border-radius: 10px; font-weight: 600; font-size: 14px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
   }
   button.primary:hover { opacity: 0.92; }
   button.primary:disabled { opacity: 0.6; cursor: default; }
-  #loading { color: var(--text-muted); font-size: 13px; display: none; margin-top: 8px; }
+  #chat-loading { color: var(--text-muted); font-size: 13px; display: none; margin-top: 8px; }
   .reset-btn {
     background: none; border: none; color: var(--text-muted); font-size: 12px;
     cursor: pointer; margin-top: 10px; padding: 0; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 5px;
   }
   .reset-btn:hover { color: var(--accent); }
 
@@ -225,114 +305,381 @@
   .result-box table { border-collapse: collapse; width: 100%; font-size: 13px; }
   .result-box th, .result-box td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
   .error-box { color: #DC2626; background: var(--error-bg); border: 1px solid var(--error-border); padding: 14px; border-radius: 10px; }
+  .error-box-head { display: flex; align-items: flex-start; gap: 8px; }
   iframe.preview { width: 100%; height: 480px; border: 1px solid var(--border); border-radius: 10px; background: white; }
   img.generated { max-width: 100%; border-radius: 10px; }
   .export-bar { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
   .export-bar button {
     background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
     padding: 9px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; font-family: inherit; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px;
   }
   .export-bar button:hover { border-color: var(--accent); color: var(--accent); }
 
+  /* ══════════════════ PHASE 2 — Espace de discussion AI ══════════════════ */
+  .chat-screen { display: none; height: 100vh; overflow: hidden; }
+
+  .chat-sidebar {
+    width: 280px; flex-shrink: 0; background: var(--bg-sidebar); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; padding: 20px; gap: 14px; overflow-y: auto;
+  }
+  .new-thread-btn {
+    background: linear-gradient(135deg, var(--accent), var(--accent-blue)); color: white; border: none;
+    border-radius: 12px; padding: 12px; font-weight: 700; font-size: 13.5px; cursor: pointer; font-family: inherit;
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+  }
+  .chat-nav { display: flex; flex-direction: column; gap: 3px; }
+  .chat-nav-item {
+    display: flex; align-items: center; gap: 10px; background: none; border: none; text-align: left;
+    padding: 9px 10px; border-radius: 10px; font-size: 13.5px; font-weight: 600; color: var(--text);
+    cursor: pointer; font-family: inherit;
+  }
+  .chat-nav-item:hover { background: var(--bg-card-soft); }
+  .chat-nav-item.active { background: var(--pill-bg); color: var(--pill-text); cursor: default; }
+  .chat-threads-head { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin-top: 2px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .chat-threads-list { display: flex; flex-direction: column; gap: 3px; flex: 1; overflow-y: auto; min-height: 160px; }
+  .thread-item {
+    display: flex; align-items: center; gap: 10px; background: none; border: none; text-align: left;
+    padding: 10px; border-radius: 10px; cursor: pointer; font-family: inherit; width: 100%;
+  }
+  .thread-item:hover { background: var(--bg-card-soft); }
+  .thread-item.active { background: var(--pill-bg); }
+  .thread-item .ti-icon { flex-shrink: 0; color: var(--text-muted); }
+  .thread-item .ti-body { display: flex; flex-direction: column; min-width: 0; }
+  .thread-item .ti-title { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 190px; }
+  .thread-item .ti-meta { font-size: 10.5px; color: var(--text-muted); }
+  .chat-sidebar-footer { margin-top: auto; display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; }
+  .chat-sidebar-footer .cta-box { padding: 14px; }
+  .chat-sidebar-footer .cta-box .cta-icon { margin-bottom: 6px; }
+  .chat-sidebar-footer .cta-box h3 { font-size: 14px; margin-bottom: 5px; }
+  .chat-sidebar-footer .cta-box p { font-size: 11px; margin-bottom: 10px; line-height: 1.4; }
+  .chat-sidebar-footer .cta-box .cta-btn { padding: 8px 12px; font-size: 12px; }
+  .chat-user-email { font-size: 11.5px; color: var(--text-muted); font-weight: 600; word-break: break-all; display: flex; align-items: center; gap: 5px; }
+
+  .chat-center { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 0 26px 20px; }
+  .chat-header { display: flex; align-items: center; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .chat-header-tool { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+  .chat-tool-icon { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; flex-shrink: 0; }
+  .chat-header-title { font-weight: 700; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat-header-sub { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat-header-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .mobile-icon-btn { display: none; background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; width: 36px; height: 36px; cursor: pointer; flex-shrink: 0; }
+  .chat-back-btn { background: var(--bg-card); border: 1px solid var(--border); color: var(--text); border-radius: 10px; width: 36px; height: 36px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  .chat-back-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ── Mémoire persistante V1 — panneau de contrôle ── */
+  .memory-panel-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 60; display: none; align-items: center; justify-content: center; padding: 20px; }
+  .memory-panel-overlay.visible { display: flex; }
+  .memory-panel { width: 100%; max-width: 460px; max-height: 82vh; overflow-y: auto; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 22px; }
+  .memory-panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .memory-panel-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .memory-panel-close { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; }
+  .memory-panel-close:hover { color: var(--text); }
+  .memory-panel-sub { font-size: 12px; color: var(--text-muted); margin: 0 0 18px; line-height: 1.5; }
+  .memory-section { margin-bottom: 18px; }
+  .memory-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .memory-section-title { font-size: 13px; font-weight: 700; }
+  .memory-toggle { position: relative; display: inline-block; width: 36px; height: 21px; flex-shrink: 0; }
+  .memory-toggle input { opacity: 0; width: 0; height: 0; }
+  .memory-toggle-track { position: absolute; inset: 0; background: var(--border); border-radius: 999px; cursor: pointer; transition: background 0.15s; }
+  .memory-toggle-track::before { content: ""; position: absolute; width: 15px; height: 15px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: transform 0.15s; }
+  .memory-toggle input:checked + .memory-toggle-track { background: var(--accent); }
+  .memory-toggle input:checked + .memory-toggle-track::before { transform: translateX(15px); }
+  .memory-fact-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .memory-fact-row:last-child { border-bottom: none; }
+  .memory-fact-key { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  .memory-fact-value { font-size: 13px; color: var(--text); margin-top: 2px; }
+  .memory-fact-del { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; flex-shrink: 0; }
+  .memory-fact-del:hover { color: #DC2626; }
+  .memory-empty { font-size: 12px; color: var(--text-muted); font-style: italic; padding: 6px 0; }
+
+  .chat-transcript { flex: 1; overflow-y: auto; padding: 20px 0; }
+  .chat-transcript.empty { display: flex; align-items: center; justify-content: center; }
+  .chat-empty { text-align: center; max-width: 380px; margin: 0 auto; color: var(--text-muted); }
+  .chat-empty-mascot { width: 210px; margin-bottom: 14px; }
+  .chat-empty h3 { margin: 0 0 8px; color: var(--text); font-size: 16px; }
+  .chat-empty p { font-size: 13px; margin: 0 0 6px; line-height: 1.5; }
+  .chat-empty-hint { font-style: italic; font-size: 12px; opacity: 0.8; }
+
+  .chat-result-actions { display: flex; gap: 18px; padding: 4px 0 8px; flex-shrink: 0; }
+  .quick-actions { display: flex; gap: 8px; flex-wrap: wrap; padding-bottom: 10px; flex-shrink: 0; }
+  .qa-btn {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px; padding: 8px 14px;
+    font-size: 12.5px; font-weight: 600; cursor: pointer; color: var(--text); font-family: inherit;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .qa-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .chat-tools {
+    width: 280px; flex-shrink: 0; background: var(--bg-sidebar); border-left: 1px solid var(--border);
+    padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+  }
+  .chat-tools-head { font-size: 13px; font-weight: 700; }
+  .chat-tools-list { display: flex; flex-direction: column; gap: 6px; }
+  .tool-row {
+    display: flex; align-items: center; gap: 10px; background: none; border: 1px solid transparent;
+    border-radius: 12px; padding: 10px; cursor: pointer; text-align: left; font-family: inherit; width: 100%;
+  }
+  .tool-row:hover { background: var(--bg-card-soft); border-color: var(--border); }
+  .tool-row.soon { opacity: 0.65; cursor: default; }
+  .tool-row.soon:hover { background: none; border-color: transparent; }
+  .tr-icon { width: 32px; height: 32px; border-radius: 9px; display: flex; align-items: center; justify-content: center; color: white; flex-shrink: 0; }
+  .tr-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .tr-title { font-size: 12.5px; font-weight: 700; display: block; }
+  .tr-desc { font-size: 11px; color: var(--text-muted); display: block; }
+  .chat-tools-seeall { background: none; border: none; color: var(--accent-blue); font-size: 12.5px; font-weight: 700; cursor: pointer; text-align: left; padding: 0; font-family: inherit; display: inline-flex; align-items: center; gap: 5px; }
+  .chat-promo { background: linear-gradient(160deg, var(--accent), var(--accent-blue)); border-radius: 16px; padding: 18px; color: white; text-align: center; margin-top: auto; }
+  .chat-promo-mascot { width: 124px; margin-bottom: 8px; }
+  .chat-promo h4 { font-size: 13px; margin: 0 0 6px; display: flex; align-items: center; justify-content: center; gap: 6px; }
+  .chat-promo p { font-size: 11.5px; opacity: 0.9; margin: 0; line-height: 1.4; }
+
+  .chat-drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 30; display: none; }
+
+  @media (max-width: 1150px) {
+    .chat-tools {
+      position: fixed; right: 0; top: 0; bottom: 0; z-index: 40;
+      transform: translateX(100%); transition: transform 0.2s; box-shadow: -8px 0 24px rgba(0,0,0,0.2);
+    }
+    .chat-tools.drawer-open { transform: translateX(0); }
+    #chat-tools-toggle { display: inline-flex; align-items: center; justify-content: center; }
+  }
   @media (max-width: 900px) {
     .app { flex-direction: column; }
     .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
     .bottom-row { grid-template-columns: 1fr; }
+    .hero-banner { flex-direction: column; text-align: left; }
+    .hero-mascot { max-width: 150px; }
+
+    .chat-sidebar {
+      position: fixed; left: 0; top: 0; bottom: 0; z-index: 40; width: 82vw; max-width: 320px;
+      transform: translateX(-100%); transition: transform 0.2s; box-shadow: 8px 0 24px rgba(0,0,0,0.2);
+    }
+    .chat-sidebar.drawer-open { transform: translateX(0); }
+    .chat-center { padding: 0 14px 14px; }
+    #chat-threads-toggle { display: inline-flex; align-items: center; justify-content: center; }
+    .chat-header { gap: 8px; }
+    .chat-header-title, .chat-header-sub { max-width: 34vw; }
+    #chat-credit-badge { font-size: 11px; padding: 5px 9px; }
+    .chat-header-actions .btn-label { display: none; }
   }
   @media (max-width: 480px) {
     .card-grid { grid-template-columns: repeat(2, 1fr); }
     .how-steps { flex-direction: column; }
     .how-arrow { display: none; }
+    .hero-title { font-size: 26px; }
+    .search-hint { display: none; }
   }
 </style>
 </head>
 <body>
-  <div class="app">
+  <div id="login-gate" style="display:none;">
+    <p>Connecte-toi depuis l'application GENIWORK pour utiliser Business AI.</p>
+  </div>
+
+  <div class="app" id="dashboard-screen">
     <aside class="sidebar">
-      <img src="/img/business-ai/logo.png" alt="Geniwork" class="brand-logo" />
+      <div class="brand-row">
+        <span class="brand-name">Geni<strong>work</strong></span>
+      </div>
       <h1>Business <span class="accent">AI</span></h1>
       <p class="sidebar-desc">Votre assistant intelligent pour développer votre business. Gagnez du temps, prenez de meilleures décisions et passez à l'action plus rapidement.</p>
-      <div class="mascot"><img src="/img/business-ai/mascot.png" alt="Assistant IA" class="mascot-img" /></div>
+      <img src="/img/business-ai/mascot.png" alt="Assistant IA" class="sidebar-mascot" />
       <ul class="checklist">
-        <li>Simple</li>
-        <li>Rapide</li>
-        <li>Intelligent</li>
-        <li>Efficace</li>
+        <li><span class="check-badge"><i data-lucide="check"></i></span> Simple</li>
+        <li><span class="check-badge"><i data-lucide="check"></i></span> Rapide</li>
+        <li><span class="check-badge"><i data-lucide="check"></i></span> Intelligent</li>
+        <li><span class="check-badge"><i data-lucide="check"></i></span> Efficace</li>
       </ul>
       <div class="benefits-box">
-        <div class="benefits-title">👑 Gagnez plus avec l'IA</div>
+        <div class="benefits-title"><i data-lucide="crown"></i> Gagnez plus avec l'IA</div>
         <ul>
-          <li>↑ Productivité x10</li>
-          <li>⚡ Décisions plus rapides</li>
-          <li>✓ Moins d'erreurs</li>
-          <li>🕐 Plus de temps pour l'essentiel</li>
+          <li><i data-lucide="trending-up"></i> Productivité x10</li>
+          <li><i data-lucide="zap"></i> Décisions plus rapides</li>
+          <li><i data-lucide="check"></i> Moins d'erreurs</li>
+          <li><i data-lucide="clock"></i> Plus de temps pour l'essentiel</li>
         </ul>
       </div>
       <blockquote>"L'IA ne remplace pas les entrepreneurs, elle les rend plus puissants."</blockquote>
     </aside>
 
     <main>
-      <div id="login-gate" style="display:none;">
-        <p>Connecte-toi depuis l'application GENIWORK pour utiliser Business AI.</p>
-      </div>
-
       <div id="app-content">
         <div class="topbar">
-          <div class="topbar-title">✨ Business AI <span class="badge">Propulsé par l'IA</span></div>
+          <div class="topbar-title"><i data-lucide="sparkles"></i> Business AI <span class="badge">Propulsé par l'IA</span></div>
           <div class="plan-wrap">
             <span class="credit-badge" id="credit-badge">…</span>
           </div>
-          <div class="history-wrap">
-            <button class="history-btn" onclick="toggleHistoryPanel(event)">🕐 Historique</button>
-            <div class="history-panel" id="history-panel"></div>
+          <button class="history-btn" onclick="openHistoryScreen()"><i data-lucide="history"></i> Historique</button>
+          <button id="theme-toggle" onclick="toggleTheme()"><i data-lucide="moon"></i> Sombre</button>
+        </div>
+
+        <div class="hero-banner">
+          <div class="hero-glow"></div>
+          <div class="hero-content">
+            <h2 class="hero-title">GeniWork <span class="accent">AI</span></h2>
+            <p class="hero-sub">Votre assistant intelligent pour développer votre business et prendre de meilleures décisions.</p>
+            <div class="hero-points">
+              <span><i data-lucide="clock"></i> Gagnez du temps</span>
+              <span><i data-lucide="lightbulb"></i> Prenez de meilleures décisions</span>
+              <span><i data-lucide="rocket"></i> Développez votre activité</span>
+            </div>
+            <button class="hero-cta" onclick="document.getElementById('all-tools-section').scrollIntoView({behavior:'smooth',block:'start'})">Découvrir tous les outils <i data-lucide="arrow-right"></i></button>
           </div>
-          <button id="theme-toggle" onclick="toggleTheme()">🌙 Sombre</button>
+          <img src="/img/business-ai/mascot.png" alt="Assistant IA" class="hero-mascot" />
         </div>
 
         <div class="search-bar">
-          <span class="search-icon">🔍</span>
-          <input id="quick-search" placeholder="Que souhaitez-vous créer aujourd'hui ?" onkeydown="if(event.key==='Enter') quickAsk()">
-          <button class="search-btn" onclick="quickAsk()">✨</button>
+          <span class="search-icon"><i data-lucide="search"></i></span>
+          <input id="quick-search" placeholder="Que souhaitez-vous créer avec l'IA ?" oninput="filterCatalog()" onkeydown="if(event.key==='Enter') quickAsk()">
+          <span class="search-hint">Entrée = demander à l'assistant</span>
+          <button class="search-btn" onclick="quickAsk()"><i data-lucide="sparkles"></i></button>
         </div>
 
-        <div class="card-grid" id="card-grid"></div>
+        <section class="cat-section">
+          <div class="section-header"><span class="section-title">Explorer par catégorie</span></div>
+          <div class="cat-pills" id="cat-pills"></div>
+        </section>
+
+        <section class="cat-section">
+          <div class="section-header"><span class="section-title"><i data-lucide="star"></i> Outils populaires</span></div>
+          <div class="card-grid" id="popular-grid"></div>
+        </section>
+
+        <section class="cat-section">
+          <div class="section-header">
+            <span class="section-title"><i data-lucide="bar-chart-3"></i> Comptabilité &amp; Finance</span>
+            <span class="section-count" id="accounting-count"></span>
+          </div>
+          <div class="card-grid" id="accounting-grid"></div>
+        </section>
+
+        <section class="cat-section">
+          <div class="section-header"><span class="section-title"><i data-lucide="sparkles"></i> Nouveaux outils</span></div>
+          <div class="card-grid" id="new-grid"></div>
+        </section>
+
+        <section class="cat-section" id="all-tools-section">
+          <div class="section-header">
+            <span class="section-title" id="all-tools-title">Tous les outils</span>
+            <span class="section-count"><span id="all-tools-count">0</span> outil(s)</span>
+          </div>
+          <div class="card-grid" id="all-tools-grid"></div>
+        </section>
 
         <div class="bottom-row">
           <div class="how">
             <div class="how-title">Comment ça marche ?</div>
             <div class="how-steps">
-              <div class="how-step"><div class="how-circle">🧩</div><div class="how-step-title">1. Choisissez un outil</div><div class="how-step-desc">Sélectionnez l'outil IA dont vous avez besoin.</div></div>
-              <div class="how-arrow">→</div>
-              <div class="how-step"><div class="how-circle">✏️</div><div class="how-step-title">2. Donnez les informations</div><div class="how-step-desc">Renseignez les détails nécessaires.</div></div>
-              <div class="how-arrow">→</div>
-              <div class="how-step"><div class="how-circle">✨</div><div class="how-step-title">3. L'IA génère le résultat</div><div class="how-step-desc">Notre IA analyse et crée pour vous.</div></div>
-              <div class="how-arrow">→</div>
-              <div class="how-step"><div class="how-circle">🚀</div><div class="how-step-title">4. Utilisez et passez à l'action</div><div class="how-step-desc">Téléchargez, partagez et développez votre business.</div></div>
+              <div class="how-step"><div class="how-circle"><i data-lucide="puzzle" class="ic-lg"></i></div><div class="how-step-title">1. Choisissez un outil</div><div class="how-step-desc">Sélectionnez l'outil IA dont vous avez besoin.</div></div>
+              <div class="how-arrow"><i data-lucide="arrow-right"></i></div>
+              <div class="how-step"><div class="how-circle"><i data-lucide="message-circle" class="ic-lg"></i></div><div class="how-step-title">2. Discutez avec l'IA</div><div class="how-step-desc">Donnez le contexte, précisez, échangez.</div></div>
+              <div class="how-arrow"><i data-lucide="arrow-right"></i></div>
+              <div class="how-step"><div class="how-circle"><i data-lucide="sparkles" class="ic-lg"></i></div><div class="how-step-title">3. L'IA génère le résultat</div><div class="how-step-desc">Notre IA analyse et crée pour vous.</div></div>
+              <div class="how-arrow"><i data-lucide="arrow-right"></i></div>
+              <div class="how-step"><div class="how-circle"><i data-lucide="rocket" class="ic-lg"></i></div><div class="how-step-title">4. Utilisez et passez à l'action</div><div class="how-step-desc">Copiez, exportez et développez votre business.</div></div>
             </div>
           </div>
           <div class="cta-box" id="cta-box"></div>
-        </div>
-
-        <div id="workspace">
-          <h3 id="ws-title"></h3>
-          <p class="ws-desc" id="ws-desc"></p>
-          <div id="transcripts"></div>
-          <div class="chat-file-row">
-            <label class="file-label" id="file-label" for="chat-file">📎 Joindre un document/image (optionnel)</label>
-            <input type="file" id="chat-file" accept="image/*,.pdf" onchange="onFilePicked()" />
-          </div>
-          <div class="chat-input-row">
-            <textarea id="message" placeholder="" onkeydown="onMessageKeydown(event)"></textarea>
-            <button class="primary" id="send-btn" onclick="sendMessage()">Envoyer</button>
-          </div>
-          <span id="loading">L'IA réfléchit...</span>
-          <button class="reset-btn" onclick="resetConversation()">↺ Nouvelle conversation</button>
         </div>
       </div>
     </main>
   </div>
 
+  <!-- ══════════════════ PHASE 2 — Espace de discussion AI ══════════════════ -->
+  <div class="chat-screen" id="chat-screen">
+    <aside class="chat-sidebar" id="chat-sidebar">
+      <div class="brand-row">
+        <span class="brand-name">Geni<strong>work</strong> <span style="color:var(--accent-blue)">AI</span></span>
+      </div>
+      <img src="/img/business-ai/mascot.png" alt="Assistant IA" class="chat-sidebar-mascot" />
+      <button class="new-thread-btn" onclick="openToolChat('chat')"><i data-lucide="plus"></i> Nouvelle discussion</button>
+      <nav class="chat-nav">
+        <button class="chat-nav-item" onclick="closeChatScreen()"><i data-lucide="layout-dashboard"></i> Tableau de bord</button>
+        <button class="chat-nav-item active"><i data-lucide="sparkles"></i> Business AI</button>
+      </nav>
+      <div class="chat-threads-head">
+        Conversations récentes
+        <button id="thread-filter-btn" onclick="toggleThreadFilter()" style="background:none;border:none;cursor:pointer;font-size:11px;font-weight:700;color:var(--accent-blue);padding:0"></button>
+      </div>
+      <div class="chat-threads-list" id="thread-list"></div>
+      <div class="chat-sidebar-footer">
+        <div class="cta-box" id="chat-cta-box"></div>
+        <div class="chat-user-email" id="chat-user-email"></div>
+      </div>
+    </aside>
+
+    <div class="chat-center">
+      <div class="chat-header">
+        <button class="chat-back-btn" onclick="closeChatScreen()" title="Retour au tableau de bord"><i data-lucide="arrow-left"></i></button>
+        <button class="mobile-icon-btn" id="chat-threads-toggle" onclick="toggleThreadsDrawer()"><i data-lucide="menu"></i></button>
+        <div class="chat-header-tool">
+          <span class="chat-tool-icon" id="chat-tool-icon"></span>
+          <div>
+            <div class="chat-header-title">Discussion avec l'IA</div>
+            <div class="chat-header-sub" id="chat-tool-name"></div>
+          </div>
+        </div>
+        <div class="chat-header-actions">
+          <span class="credit-badge" id="chat-credit-badge">…</span>
+          <button class="mobile-icon-btn" style="display:inline-flex" onclick="openMemoryPanel()" title="Mémoire"><i data-lucide="brain-circuit"></i></button>
+          <button class="history-btn" onclick="shareNotice()"><i data-lucide="share-2"></i> <span class="btn-label">Partager</span></button>
+          <button class="mobile-icon-btn" id="chat-tools-toggle" onclick="toggleToolsDrawer()"><i data-lucide="wrench"></i></button>
+        </div>
+      </div>
+
+      <div class="chat-transcript transcript" id="chat-transcript"></div>
+
+      <div class="chat-result-actions" id="chat-result-actions" style="display:none">
+        <button class="reset-btn" onclick="focusModify()"><i data-lucide="pencil"></i> Modifier le dernier résultat</button>
+        <button class="reset-btn" onclick="regenerateLast()"><i data-lucide="refresh-cw"></i> Régénérer</button>
+      </div>
+
+      <div class="quick-actions" id="quick-actions"></div>
+
+      <button id="web-search-toggle" class="search-toggle-btn" onclick="toggleWebSearch()"></button>
+
+      <div class="chat-file-row" id="chat-file-row">
+        <label class="file-label" id="chat-file-label" for="chat-file"><i data-lucide="paperclip"></i> Joindre un document/image</label>
+        <input type="file" id="chat-file" accept="image/*,.pdf" onchange="onFilePicked()" />
+      </div>
+      <div class="chat-input-row">
+        <textarea id="chat-message" placeholder="Écrivez votre message ici..." onkeydown="onMessageKeydown(event)"></textarea>
+        <button class="primary" id="chat-send-btn" onclick="sendMessage()"><i data-lucide="send" class="ic-lg"></i></button>
+      </div>
+      <span id="chat-loading">GeniWork AI réfléchit...</span>
+    </div>
+
+    <aside class="chat-tools" id="chat-tools">
+      <div class="chat-tools-head">Outils AI</div>
+      <div class="chat-tools-list" id="chat-tools-list"></div>
+      <button class="chat-tools-seeall" onclick="closeChatScreen();document.getElementById('all-tools-section').scrollIntoView({behavior:'smooth'})">Voir tous les outils <i data-lucide="arrow-right"></i></button>
+      <div class="chat-promo">
+        <div id="chat-promo-mascot-slot"></div>
+        <h4><i data-lucide="sparkles"></i> Boostez votre productivité avec l'IA</h4>
+        <p>Posez toutes vos questions business et obtenez des réponses précises et personnalisées.</p>
+      </div>
+    </aside>
+
+    <div class="chat-drawer-overlay" id="chat-drawer-overlay" onclick="closeMobileDrawers()"></div>
+  </div>
+
+  <div class="memory-panel-overlay" id="memory-panel-overlay" onclick="if(event.target===this) closeMemoryPanel()">
+    <div class="memory-panel">
+      <div class="memory-panel-head">
+        <span class="memory-panel-title"><i data-lucide="brain-circuit"></i> Mémoire</span>
+        <button class="memory-panel-close" onclick="closeMemoryPanel()"><i data-lucide="x"></i></button>
+      </div>
+      <p class="memory-panel-sub">GeniWork AI retient certaines informations utiles (secteur, devise, préférences...) pour éviter de tout redemander. Tu peux tout voir, désactiver ou supprimer ici.</p>
+      <div id="memory-panel-body">
+        <p class="memory-empty">Chargement...</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="ai-toast" id="ai-toast"></div>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <script src="https://unpkg.com/lucide@1.39.0/dist/umd/lucide.js"></script>
   <script>
     const params = new URLSearchParams(window.location.search);
     /* userEmail : conservé uniquement pour l'affichage local et le
@@ -353,44 +700,361 @@
     }
     const authRefreshToken = _aiGetAuthRefreshToken();
 
+    /* ══════════════════ Icon system (GENIWORK ICON SYSTEM — OFFICIAL) ══════════════════
+       Une seule famille d'icônes SVG (Lucide, chargée via CDN) pour toute la page —
+       plus aucun emoji utilisé comme icône. icon(name, cls) est le point d'entrée
+       unique : ajouter un outil = une ligne dans FEATURES/CATALOG, jamais besoin de
+       toucher plusieurs composants. refreshIcons() convertit les placeholders
+       <i data-lucide="..."> injectés dynamiquement en SVG réels — appelé après
+       chaque rendu qui insère de nouvelles icônes. Protégé (try/catch + vérif
+       window.lucide) pour qu'un échec du CDN dégrade proprement (icônes absentes)
+       plutôt que de casser toute la page. */
+    function icon(name, cls) {
+      return '<i data-lucide="' + name + '"' + (cls ? ' class="' + cls + '"' : '') + '></i>';
+    }
+    function refreshIcons() {
+      try { if (window.lucide && typeof lucide.createIcons === 'function') lucide.createIcons(); } catch (e) {}
+    }
+
+    /* ══════════════════ Mascot system (identité visuelle GeniWork AI) ══════════════════
+       Un seul asset existe réellement aujourd'hui : /img/business-ai/mascot.png (variante
+       "primary", la mascotte principale souriante). Les ~15 autres variantes officielles
+       (couleurs par contexte + expressions) n'ont pas encore de fichier dédié dans le
+       projet — mapping préparé pour les recevoir sans toucher au reste du code : il
+       suffira de déposer le fichier au chemin attendu (MASCOT_BASE + <variant>.png),
+       aucune ligne de code à changer. Tant qu'un fichier n'existe pas, l'attribut
+       onerror replie automatiquement sur la mascotte principale (jamais d'image cassée,
+       jamais de mascotte générée/modifiée pour combler le vide). Ne PAS ajouter de
+       nouvelles variantes ici sans fichier réel correspondant. */
+    const MASCOT_BASE = '/img/business-ai/mascots/';
+    const MASCOT_PRIMARY = '/img/business-ai/mascot.png';
+    const MASCOT_VARIANTS = {
+      primary:   { file: null, alt: 'Assistant GeniWork AI' },
+      blue:      { file: 'blue.png', alt: 'Assistant GeniWork AI' },       // IA générale, analyse, productivité
+      green:     { file: 'green.png', alt: 'Assistant GeniWork AI' },      // comptabilité, finance, budget
+      purple:    { file: 'purple.png', alt: 'Assistant GeniWork AI' },     // business, stratégie, IA
+      orange:    { file: 'orange.png', alt: 'Assistant GeniWork AI' },     // marketing, vente, communication
+      dark:      { file: 'dark.png', alt: 'Assistant GeniWork AI' },       // premium/expert, avec parcimonie
+      thinking:  { file: 'thinking.png', alt: 'L\'IA réfléchit' },         // génération en cours
+      happy:     { file: 'happy.png', alt: 'Action terminée avec succès' },
+      greeting:  { file: 'greeting.png', alt: 'Assistant GeniWork AI' },   // onboarding, découverte d'un outil
+      success:   { file: 'success.png', alt: 'Action réussie' },          // pouce levé, après validation
+      surprised: { file: 'surprised.png', alt: 'Astuce GeniWork' },       // conseil, nouveauté (jamais une erreur)
+      magic:     { file: 'magic.png', alt: 'Génération IA' },             // génération, idées, suggestions
+      chat:      { file: 'chat.png', alt: 'GeniWork AI' },                // avatar assistant dans le chat
+      talking:   { file: 'talking.png', alt: 'Aide contextuelle' },       // bulle de discussion, tutoriels
+      sleeping:  { file: 'sleeping.png', alt: 'Aucune donnée pour le moment' }, // empty states
+      premium:   { file: 'premium.png', alt: 'GeniWork AI' },             // mascotte sur socle, zones premium
+    };
+    function mascotImg(variant, cls, opts) {
+      opts = opts || {};
+      const v = MASCOT_VARIANTS[variant] || MASCOT_VARIANTS.primary;
+      const src = v.file ? (MASCOT_BASE + v.file) : MASCOT_PRIMARY;
+      const alt = opts.decorative ? '' : v.alt;
+      const fallback = v.file ? ' onerror="this.onerror=null;this.src=\'' + MASCOT_PRIMARY + '\'"' : '';
+      return '<img src="' + src + '" alt="' + alt + '" class="' + (cls || '') + '"' + fallback + ' loading="lazy" />';
+    }
+
     const CARD_COLORS = {
       "business-plan": "#7C3AED", "devis-facture": "#EC4899", "bilan": "#0D9488",
       "budget": "#10B981", "strategie": "#EF4444", "idees-projet": "#F59E0B",
       "marketing": "#EC4899", "mini-site": "#3B82F6", "image": "#06B6D4",
       "document": "#64748B", "matching": "#F97316", "moderation": "#3B82F6",
-      "chat": "#8B5CF6", "feed": "#22C55E",
+      "chat": "#8B5CF6", "feed": "#22C55E", "tva": "#1E3A8A", "email": "#0891B2", "facture-recue": "#6366F1", "marge": "#CA8A04", "cv": "#0EA5E9", "description": "#DB2777", "comptable": "#059669", "tresorerie": "#4F46E5", "budget-realise": "#0369A1", "publication": "#C026D3", "marche": "#65A30D", "concurrents": "#B91C1C", "cs-financial-analysis": "#1E293B",
     };
 
+    /* Ces 15 features sont la copie client du catalogue serveur
+       (api/ai/_lib/features.js) — creditCost synchronisé avec le
+       serveur (source de vérité pour le coût et les prompts), labels
+       et descriptions reformulés côté client pour l'UX de cette page.
+       icon = nom Lucide (kebab-case), mappé au Design System GeniWork AI. */
     const FEATURES = {
-      "business-plan": { label: "Business Plan", description: "Génère un business plan complet, étape par étape.", icon: "📋", outputType: "markdown", creditCost: 3, placeholder: "Décrivez votre projet d'entreprise..." },
-      "devis-facture": { label: "Devis / Facture", description: "Crée un devis ou une facture professionnelle.", icon: "🧾", outputType: "json", creditCost: 2, placeholder: "Décrivez la prestation, le client, les montants..." },
-      "bilan": { label: "Bilan / Mini-comptabilité", description: "Analyse vos finances et produit un mini-bilan.", icon: "📊", outputType: "markdown", creditCost: 2, placeholder: "Donnez vos revenus, dépenses, dates..." },
-      "budget": { label: "Budget", description: "Construit un budget prévisionnel détaillé.", icon: "💰", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos besoins budgétaires..." },
-      "strategie": { label: "Stratégie business", description: "Conseille une stratégie de développement.", icon: "🎯", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos objectifs..." },
-      "idees-projet": { label: "Idées de projet", description: "Propose des idées de projets localisées.", icon: "💡", outputType: "markdown", creditCost: 2, placeholder: "Votre ville/région, vos compétences, votre budget..." },
-      "marketing": { label: "Marketing", description: "Construit une stratégie marketing complète.", icon: "📣", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre offre et votre cible..." },
-      "mini-site": { label: "Mini-site web", description: "Génère une page web complète prête à l'emploi.", icon: "🌐", outputType: "html", creditCost: 4, placeholder: "Décrivez le site souhaité (activité, sections, ton)..." },
-      "image": { label: "Génération d'image", description: "Crée une image (logo, visuel, illustration).", icon: "🖼️", outputType: "image", creditCost: 5, placeholder: "Décrivez l'image souhaitée..." },
-      "document": { label: "Assistant document", description: "Analyse un document/image et répond à vos questions.", icon: "📎", outputType: "markdown", creditCost: 2, placeholder: "Posez votre question ou joignez un fichier..." },
-      "matching": { label: "Matching freelance", description: "Aide à trouver le bon profil ou la bonne mission.", icon: "🤝", outputType: "markdown", creditCost: 2, placeholder: "Décrivez le profil ou la mission recherchée..." },
-      "moderation": { label: "Modération de contenu", description: "Vérifie un contenu avant publication.", icon: "🛡️", outputType: "markdown", creditCost: 1, placeholder: "Collez le texte à vérifier..." },
-      "chat": { label: "Assistant business", description: "Posez n'importe quelle question business.", icon: "💬", outputType: "markdown", creditCost: 1, placeholder: "Posez votre question..." },
-      "feed": { label: "Recommandation", description: "Suggère du contenu pertinent pour votre activité.", icon: "✨", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos centres d'intérêt..." },
+      "business-plan": { label: "Business Plan", description: "Génère un business plan complet, étape par étape.", icon: "clipboard-list", outputType: "markdown", creditCost: 3, placeholder: "Décrivez votre projet d'entreprise..." },
+      "devis-facture": { label: "Devis / Facture", description: "Crée un devis ou une facture professionnelle.", icon: "receipt", outputType: "json", creditCost: 2, placeholder: "Décrivez la prestation, le client, les montants..." },
+      "bilan": { label: "Bilan / Mini-comptabilité", description: "Analyse vos finances et produit un mini-bilan.", icon: "scale", outputType: "markdown", creditCost: 2, placeholder: "Donnez vos revenus, dépenses, dates..." },
+      "budget": { label: "Budget prévisionnel", description: "Construit un budget prévisionnel détaillé.", icon: "wallet", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos besoins budgétaires..." },
+      "strategie": { label: "Stratégie business", description: "Conseille une stratégie de développement.", icon: "target", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos objectifs..." },
+      "idees-projet": { label: "Idées de projet", description: "Propose des idées de projets localisées.", icon: "lightbulb", outputType: "markdown", creditCost: 2, placeholder: "Votre ville/région, vos compétences, votre budget..." },
+      "marketing": { label: "Assistant marketing", description: "Construit une stratégie marketing complète.", icon: "megaphone", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre offre et votre cible..." },
+      "mini-site": { label: "Mini-site web", description: "Génère une page web complète prête à l'emploi.", icon: "globe", outputType: "html", creditCost: 4, placeholder: "Décrivez le site souhaité (activité, sections, ton)..." },
+      "image": { label: "Génération d'image", description: "Crée une image (logo, visuel, illustration).", icon: "image", outputType: "image", creditCost: 5, placeholder: "Décrivez l'image souhaitée..." },
+      "document": { label: "Assistant document", description: "Analyse un document/image et répond à vos questions.", icon: "file-search", outputType: "markdown", creditCost: 2, placeholder: "Posez votre question ou joignez un fichier..." },
+      "matching": { label: "Matching freelance", description: "Aide à trouver le bon profil ou la bonne mission.", icon: "handshake", outputType: "markdown", creditCost: 2, placeholder: "Décrivez le profil ou la mission recherchée..." },
+      "moderation": { label: "Modération de contenu", description: "Vérifie un contenu avant publication.", icon: "shield-check", outputType: "json", creditCost: 1, placeholder: "Collez le texte à vérifier..." },
+      "chat": { label: "Assistant business", description: "Posez n'importe quelle question business.", icon: "bot", outputType: "markdown", creditCost: 1, placeholder: "Posez votre question..." },
+      "feed": { label: "Recommandation", description: "Suggère du contenu pertinent pour votre activité.", icon: "sparkles", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos centres d'intérêt..." },
+      "tva": { label: "Assistant TVA", description: "TVA et fiscalité indirecte adaptées à votre pays.", icon: "landmark", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre pays et votre situation (opération, client, montants)..." },
+      "email": { label: "Rédaction d'e-mails", description: "Rédige, améliore ou traduit vos e-mails professionnels.", icon: "mail", outputType: "markdown", creditCost: 2, placeholder: "Décrivez la situation ou collez le texte à améliorer..." },
+      "facture-recue": { label: "Analyse de facture", description: "Extrait et vérifie les données d'une facture reçue.", icon: "file-search", outputType: "markdown", creditCost: 2, placeholder: "Joignez une photo ou un PDF de la facture reçue..." },
+      "marge": { label: "Analyse des marges", description: "Calcule et analyse la rentabilité d'un produit ou service.", icon: "percent", outputType: "markdown", creditCost: 2, placeholder: "Produit : prix de vente 100 €, coût d'achat 60 €, coûts variables 10 €..." },
+      "cv": { label: "Générateur de CV", description: "Crée, structure et améliore un CV professionnel.", icon: "contact", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre expérience, formation, compétences..." },
+      "description": { label: "Générateur de descriptions", description: "Rédige, améliore et adapte des descriptions de produits ou services.", icon: "pen-line", outputType: "markdown", creditCost: 2, placeholder: "Décrivez le produit ou service et sa cible..." },
+      "comptable": { label: "Assistant comptable", description: "Explique et aide à traiter une question de comptabilité générale.", icon: "calculator", outputType: "markdown", creditCost: 2, placeholder: "Décrivez l'opération à comptabiliser ou la notion à expliquer..." },
+      "tresorerie": { label: "Prévision de trésorerie", description: "Anticipe vos encaissements, décaissements et soldes de trésorerie.", icon: "trending-up", outputType: "markdown", creditCost: 2, placeholder: "Solde initial, encaissements et décaissements prévus par période..." },
+      "budget-realise": { label: "Analyse budgétaire", description: "Compare votre budget prévisionnel au réalisé.", icon: "bar-chart-3", outputType: "markdown", creditCost: 2, placeholder: "Budget par poste et montants réellement dépensés/encaissés..." },
+      "publication": { label: "Générateur de publications", description: "Rédige des publications prêtes à publier sur les réseaux sociaux.", icon: "share-2", outputType: "markdown", creditCost: 2, placeholder: "Décrivez le sujet, la plateforme cible et le ton souhaité..." },
+      "marche": { label: "Analyse de marché", description: "Étude autonome des tendances, de la demande et des opportunités de votre marché.", icon: "compass", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre secteur, votre ville et votre cible..." },
+      "concurrents": { label: "Analyse des concurrents", description: "Identifie les forces et faiblesses de vos concurrents.", icon: "binoculars", outputType: "markdown", creditCost: 2, placeholder: "Décrivez votre activité et vos principaux concurrents..." },
+      "cs-financial-analysis": { label: "Diagnostic financier avancé", description: "Analyse la santé financière de votre activité avec indicateurs avancés et comparaison multi-périodes.", icon: "line-chart", outputType: "markdown", creditCost: 3, placeholder: "Chiffre d'affaires, charges, amortissements, immobilisations, capitaux propres, créances clients, dettes fournisseurs..." },
     };
 
-    function renderCards() {
-      const grid = document.getElementById('card-grid');
-      grid.innerHTML = Object.entries(FEATURES).map(([key, f]) => `
-        <button class="card" data-key="${key}" data-placeholder="${f.placeholder.replace(/"/g, '&quot;')}" onclick="selectFeature('${key}', this)">
-          <span class="card-icon" style="background:${CARD_COLORS[key] || '#7C3AED'}">${f.icon}</span>
+    /* ── Catalogue affiché (Dashboard + colonne "Outils AI" du chat) ──
+       Chaque entrée référence soit un outil réel (id présent dans
+       FEATURES, status implicite "available"), soit un outil pas
+       encore implémenté côté backend (status:"coming_soon" — UI
+       uniquement, aucune route /api/ai correspondante, non cliquable). */
+    const CATEGORIES = [
+      { id: "all", label: "Tous les outils", icon: "layout-grid" },
+      { id: "business", label: "Business", icon: "briefcase" },
+      { id: "comptabilite", label: "Comptabilité & Finance", icon: "bar-chart-3" },
+      { id: "marketing", label: "Marketing", icon: "megaphone" },
+      { id: "documents", label: "Documents", icon: "file-text" },
+      { id: "analyse", label: "Analyse", icon: "line-chart" },
+      { id: "creation", label: "Création", icon: "palette" },
+      { id: "productivite", label: "Productivité", icon: "zap" },
+    ];
+
+    const CATALOG = [
+      { id: "business-plan", category: "business" },
+      { id: "strategie", category: "business" },
+      { id: "idees-projet", category: "business" },
+      { id: "marche", category: "analyse" },
+      { id: "concurrents", category: "analyse" },
+      { id: "chat", category: "productivite" },
+      { id: "feed", category: "productivite" },
+      { id: "matching", category: "productivite" },
+      { id: "moderation", category: "productivite" },
+      { id: "devis-facture", category: "comptabilite" },
+      { id: "bilan", category: "comptabilite" },
+      { id: "budget", category: "comptabilite" },
+      { id: "tva", category: "comptabilite" },
+      { id: "facture-recue", category: "comptabilite" },
+      { id: "marge", category: "comptabilite" },
+      { id: "comptable", category: "comptabilite" },
+      { id: "tresorerie", category: "comptabilite" },
+      { id: "budget-realise", category: "comptabilite" },
+      { id: "cs-financial-analysis", category: "comptabilite" },
+      { id: "marketing", category: "marketing" },
+      { id: "publication", category: "marketing" },
+      { id: "mini-site", category: "creation" },
+      { id: "image", category: "creation" },
+      { id: "document", category: "documents" },
+      { id: "email", category: "documents" },
+      { id: "cv", category: "documents" },
+      { id: "description", category: "documents" },
+
+      { id: "cs-expense-tracking", category: "comptabilite", status: "coming_soon", label: "Suivi des dépenses", description: "Catégorise et suit vos dépenses professionnelles au fil de l'eau.", icon: "credit-card" },
+      { id: "cs-income-statement", category: "comptabilite", status: "coming_soon", label: "Compte de résultat", description: "Génère un compte de résultat détaillé sur la période choisie.", icon: "file-text" },
+      { id: "cs-financial-report", category: "comptabilite", status: "coming_soon", label: "Rapport financier", description: "Produit un rapport financier complet, prêt à partager.", icon: "file-spreadsheet" },
+
+      { id: "cs-ad-creator", category: "marketing", status: "coming_soon", label: "Création de publicités", description: "Génère des visuels et textes publicitaires Facebook/Google.", icon: "image-plus" },
+
+
+    ];
+
+    const POPULAR_IDS = ["business-plan", "devis-facture", "bilan", "budget", "marketing", "mini-site", "image", "chat"];
+    const CHAT_TOOL_IDS = ["business-plan", "devis-facture", "bilan", "marketing", "mini-site", "marche"];
+    const QUICK_ACTION_IDS = ["devis-facture", "bilan", "email"];
+
+    function entryData(entry) {
+      return entry.status === "coming_soon" ? entry : Object.assign({ id: entry.id }, FEATURES[entry.id], entry);
+    }
+
+    function buildCard(entry) {
+      const isSoon = entry.status === "coming_soon";
+      const f = entryData(entry);
+      const color = CARD_COLORS[entry.id] || "#7C3AED";
+      const searchText = (f.label + " " + f.description).toLowerCase().replace(/"/g, '');
+      const action = isSoon ? 'onclick="comingSoonNotice()"' : `onclick="openToolChat('${entry.id}')"`;
+      return `<button class="card${isSoon ? ' card-soon' : ''}" data-category="${entry.category}" data-search="${searchText}" ${action}>
+          <div class="card-top">
+            <span class="card-icon" style="background:${color}">${icon(f.icon, 'ic-lg')}</span>
+            ${isSoon ? '<span class="card-badge soon">Bientôt disponible</span>' : ''}
+          </div>
           <span class="card-label">${f.label}</span>
           <span class="card-desc">${f.description}</span>
-        </button>`).join('');
+          ${isSoon ? '' : '<span class="card-cta">Utiliser ' + icon('arrow-right') + '</span>'}
+        </button>`;
+    }
+
+    let activeCategory = "all";
+
+    function renderCategoryPills() {
+      const wrap = document.getElementById('cat-pills');
+      wrap.innerHTML = CATEGORIES.map((cat) => {
+        const count = cat.id === "all" ? CATALOG.length : CATALOG.filter((e) => e.category === cat.id).length;
+        return `<button class="cat-pill${cat.id === activeCategory ? ' active' : ''}" data-cat="${cat.id}" onclick="setCategory('${cat.id}')">${icon(cat.icon)} ${cat.label} <span class="cp-count">${count}</span></button>`;
+      }).join('');
+    }
+
+    function renderCatalog() {
+      renderCategoryPills();
+      document.getElementById('popular-grid').innerHTML = POPULAR_IDS
+        .map((id) => CATALOG.find((e) => e.id === id))
+        .filter(Boolean)
+        .map(buildCard).join('');
+
+      const accountingEntries = CATALOG.filter((e) => e.category === "comptabilite");
+      document.getElementById('accounting-grid').innerHTML = accountingEntries.map(buildCard).join('');
+      document.getElementById('accounting-count').textContent = accountingEntries.length + ' outil(s)';
+
+      const newEntries = CATALOG.filter((e) => e.status === "coming_soon" && e.category !== "comptabilite");
+      document.getElementById('new-grid').innerHTML = newEntries.map(buildCard).join('');
+
+      document.getElementById('all-tools-grid').innerHTML = CATALOG.map(buildCard).join('');
+      filterCatalog();
+      refreshIcons();
+    }
+
+    function setCategory(catId) {
+      activeCategory = catId;
+      document.querySelectorAll('.cat-pill').forEach((p) => p.classList.toggle('active', p.dataset.cat === catId));
+      filterCatalog();
+      document.getElementById('all-tools-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function filterCatalog() {
+      const cat = CATEGORIES.find((c) => c.id === activeCategory);
+      document.getElementById('all-tools-title').textContent = activeCategory === 'all' ? 'Tous les outils' : cat.label;
+      const q = document.getElementById('quick-search').value.trim().toLowerCase();
+      const cards = document.querySelectorAll('#all-tools-grid .card');
+      let visible = 0;
+      cards.forEach((c) => {
+        const matchesCat = activeCategory === 'all' || c.dataset.category === activeCategory;
+        const matchesSearch = !q || c.dataset.search.includes(q);
+        const show = matchesCat && matchesSearch;
+        c.style.display = show ? '' : 'none';
+        if (show) visible++;
+      });
+      document.getElementById('all-tools-count').textContent = visible;
+    }
+
+    function comingSoonNotice() {
+      showAiToast('Bientôt disponible — cette fonctionnalité arrive prochainement sur GeniWork AI.');
+    }
+    function shareNotice() {
+      showAiToast('Le partage de discussion arrive bientôt sur GeniWork AI.');
+    }
+
+    /* ══════════════════ Mémoire persistante V1 — panneau de contrôle ══════════════════
+       Miroir client de MEMORY_CAPABLE (api/ai/_lib/memoryConfig.js) — sert uniquement
+       à savoir quelle section "outil" afficher, l'application réelle (lecture/écriture/
+       filtrage des catégories) reste entièrement côté serveur. */
+    const MEMORY_CAPABLE_CLIENT = ['business-plan', 'bilan', 'budget', 'strategie', 'idees-projet', 'marketing', 'document', 'chat', 'tva', 'email'];
+    let memoryData = null;
+
+    function openMemoryPanel() {
+      document.getElementById('memory-panel-overlay').classList.add('visible');
+      loadMemoryPanel();
+    }
+    function closeMemoryPanel() {
+      document.getElementById('memory-panel-overlay').classList.remove('visible');
+    }
+
+    async function loadMemoryPanel() {
+      const body = document.getElementById('memory-panel-body');
+      body.innerHTML = '<p class="memory-empty">Chargement...</p>';
+      try {
+        const res = await fetch('/api/ai/memory?authRefreshToken=' + encodeURIComponent(authRefreshToken));
+        const data = await res.json();
+        if (data.error) { body.innerHTML = '<p class="memory-empty">' + data.error + '</p>'; return; }
+        memoryData = data;
+        renderMemoryPanel();
+      } catch (e) {
+        body.innerHTML = '<p class="memory-empty">Impossible de charger la mémoire pour le moment.</p>';
+      }
+    }
+
+    function buildFactRows(scope, facts) {
+      const keys = Object.keys(facts || {});
+      if (!keys.length) return '<p class="memory-empty">Rien de mémorisé pour l\'instant.</p>';
+      return keys.map((k) => {
+        const f = facts[k];
+        return '<div class="memory-fact-row">'
+          + '<div><div class="memory-fact-key">' + k.replace(/</g, '&lt;') + '</div><div class="memory-fact-value">' + String(f.value || '').replace(/</g, '&lt;') + '</div></div>'
+          + '<button class="memory-fact-del" onclick="deleteMemoryFact(\'' + scope + '\',\'' + k + '\')" title="Supprimer">' + icon('trash-2') + '</button>'
+          + '</div>';
+      }).join('');
+    }
+
+    function renderMemoryPanel() {
+      const body = document.getElementById('memory-panel-body');
+      if (!memoryData) { body.innerHTML = '<p class="memory-empty">Mémoire indisponible.</p>'; return; }
+      const thread = threads[activeThreadId];
+      const activeToolId = thread ? thread.toolId : null;
+      const toolCapable = activeToolId && MEMORY_CAPABLE_CLIENT.includes(activeToolId);
+
+      let html = '';
+      html += '<div class="memory-section">'
+        + '<div class="memory-section-head"><span class="memory-section-title">Globale (tous les outils)</span>'
+        + '<label class="memory-toggle"><input type="checkbox" ' + (memoryData.global.enabled ? 'checked' : '') + ' onchange="toggleMemoryScope(\'global\', this.checked)"><span class="memory-toggle-track"></span></label>'
+        + '</div>'
+        + buildFactRows('global', memoryData.global.facts)
+        + '</div>';
+
+      if (toolCapable) {
+        const toolNode = memoryData.tools[activeToolId] || { enabled: true, facts: {} };
+        const toolLabel = (FEATURES[activeToolId] || {}).label || activeToolId;
+        html += '<div class="memory-section">'
+          + '<div class="memory-section-head"><span class="memory-section-title">' + toolLabel.replace(/</g, '&lt;') + '</span>'
+          + '<label class="memory-toggle"><input type="checkbox" ' + (toolNode.enabled ? 'checked' : '') + ' onchange="toggleMemoryScope(\'' + activeToolId + '\', this.checked)"><span class="memory-toggle-track"></span></label>'
+          + '</div>'
+          + buildFactRows(activeToolId, toolNode.facts)
+          + '</div>';
+      } else if (activeToolId) {
+        html += '<p class="memory-empty">Cet outil n\'utilise pas la mémoire spécialisée.</p>';
+      }
+
+      body.innerHTML = html;
+      refreshIcons();
+    }
+
+    async function toggleMemoryScope(scope, enabled) {
+      try {
+        const res = await fetch('/api/ai/memory/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ authRefreshToken, scope, enabled }),
+        });
+        const data = await res.json();
+        if (data.error) { showAiToast(data.error); loadMemoryPanel(); return; }
+        if (scope === 'global') memoryData.global.enabled = enabled;
+        else if (memoryData.tools[scope]) memoryData.tools[scope].enabled = enabled;
+        showAiToast(enabled ? 'Mémoire activée.' : 'Mémoire désactivée (les souvenirs existants sont conservés).');
+      } catch (e) {
+        showAiToast('Échec de la mise à jour.');
+        loadMemoryPanel();
+      }
+    }
+
+    async function deleteMemoryFact(scope, key) {
+      try {
+        const res = await fetch('/api/ai/memory/' + encodeURIComponent(scope) + '/' + encodeURIComponent(key) + '?authRefreshToken=' + encodeURIComponent(authRefreshToken), { method: 'DELETE' });
+        const data = await res.json();
+        if (data.error) { showAiToast(data.error); return; }
+        if (scope === 'global') delete memoryData.global.facts[key];
+        else if (memoryData.tools[scope]) delete memoryData.tools[scope].facts[key];
+        renderMemoryPanel();
+        showAiToast('Souvenir supprimé.');
+      } catch (e) {
+        showAiToast('Échec de la suppression.');
+      }
+    }
+
+    let _toastTimer = null;
+    function showAiToast(msg) {
+      const t = document.getElementById('ai-toast');
+      t.textContent = msg;
+      t.classList.add('visible');
+      clearTimeout(_toastTimer);
+      _toastTimer = setTimeout(() => t.classList.remove('visible'), 2600);
     }
 
     function applyTheme(theme) {
       document.documentElement.setAttribute('data-theme', theme);
-      document.getElementById('theme-toggle').textContent = theme === 'dark' ? '☀️ Clair' : '🌙 Sombre';
+      const btn = document.getElementById('theme-toggle');
+      btn.innerHTML = theme === 'dark' ? (icon('sun') + ' Clair') : (icon('moon') + ' Sombre');
+      refreshIcons();
       localStorage.setItem('geniwork-ai-theme', theme);
     }
     function toggleTheme() {
@@ -415,66 +1079,160 @@
     }
 
     function renderPlanWidget() {
-      const badge = document.getElementById('credit-badge');
-      if (!creditState) { badge.textContent = '…'; return; }
-      badge.textContent = '💳 ' + creditState.credits + (creditState.renews ? '/' + creditState.planCredits : '') + ' crédits · ' + (PLAN_LABELS[creditState.plan] || creditState.plan);
-      badge.className = 'credit-badge' + (creditState.credits === 0 ? ' empty' : creditState.credits <= Math.ceil(creditState.planCredits * 0.15) ? ' low' : '');
+      const targets = [document.getElementById('credit-badge'), document.getElementById('chat-credit-badge')].filter(Boolean);
+      if (!creditState) { targets.forEach((t) => { t.textContent = '…'; }); return; }
+      const text = creditState.credits + (creditState.renews ? '/' + creditState.planCredits : '') + ' crédits · ' + (PLAN_LABELS[creditState.plan] || creditState.plan);
+      const cls = 'credit-badge' + (creditState.credits === 0 ? ' empty' : creditState.credits <= Math.ceil(creditState.planCredits * 0.15) ? ' low' : '');
+      targets.forEach((t) => { t.innerHTML = icon('credit-card') + ' ' + text; t.className = cls; });
       renderCTABox();
     }
 
     function renderCTABox() {
-      const box = document.getElementById('cta-box');
-      if (!creditState) return;
-      if (creditState.credits > 0) {
-        box.innerHTML = '<div class="cta-icon">💎</div>'
-          + '<h3>' + creditState.credits + ' crédits disponibles</h3>'
-          + '<p>Plan ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + (creditState.renews ? ' · crédits renouvelés chaque mois' : ' · crédit unique, non renouvelable') + '. Chaque génération coûte 1 à 5 crédits selon l\'outil.</p>'
-          + '<a class="cta-btn" href="/">Retour à l\'app →</a>';
+      const boxes = [document.getElementById('cta-box'), document.getElementById('chat-cta-box')].filter(Boolean);
+      if (!boxes.length) return;
+      let html;
+      if (!creditState) {
+        /* Crédits pas (encore) chargés — ex: API indisponible en local. On
+           n'affiche jamais un carré vide : le lien "Retour à l'app" reste
+           utile même sans info crédits. */
+        html = '<div class="cta-icon">' + icon('gem', 'ic-lg') + '</div>'
+          + '<h3>Crédits</h3>'
+          + '<p>Impossible de charger vos crédits pour le moment. Réessayez, ou retournez à l\'app pour voir votre solde.</p>'
+          + '<a class="cta-btn" href="/">Retour à l\'app <i data-lucide="arrow-right"></i></a>';
+        boxes.forEach((b) => { b.innerHTML = html; });
+        refreshIcons();
         return;
       }
-      box.innerHTML = '<div class="cta-icon">⚠️</div>'
-        + '<h3>Crédits épuisés</h3>'
-        + '<p>' + (creditState.plan === 'free'
-          ? 'Votre crédit gratuit a été utilisé. Passez à un abonnement Premium ou Business Pro depuis l\'app pour continuer.'
-          : 'Vos crédits ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + ' sont épuisés ce mois-ci. Ils reviendront le mois prochain, ou achetez un pack de crédits depuis l\'app.')
-        + '</p>'
-        + '<a class="cta-btn" href="/">Voir les abonnements →</a>';
+      if (creditState.credits > 0) {
+        html = '<div class="cta-icon">' + icon('gem', 'ic-lg') + '</div>'
+          + '<h3>' + creditState.credits + ' crédits disponibles</h3>'
+          + '<p>Plan ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + (creditState.renews ? ' · crédits renouvelés chaque mois' : ' · crédit unique, non renouvelable') + '. Chaque génération coûte 1 à 5 crédits selon l\'outil.</p>'
+          + '<a class="cta-btn" href="/">Retour à l\'app <i data-lucide="arrow-right"></i></a>';
+      } else {
+        html = '<div class="cta-icon">' + icon('alert-triangle', 'ic-lg') + '</div>'
+          + '<h3>Crédits épuisés</h3>'
+          + '<p>' + (creditState.plan === 'free'
+            ? 'Votre crédit gratuit a été utilisé. Passez à un abonnement Premium ou Business Pro depuis l\'app pour continuer.'
+            : 'Vos crédits ' + (PLAN_LABELS[creditState.plan] || creditState.plan) + ' sont épuisés ce mois-ci. Ils reviendront le mois prochain, ou achetez un pack de crédits depuis l\'app.')
+          + '</p>'
+          + '<a class="cta-btn" href="/">Voir les abonnements <i data-lucide="arrow-right"></i></a>';
+      }
+      boxes.forEach((b) => { b.innerHTML = html; });
+      refreshIcons();
     }
 
-    let activeFeature = null;
-    let featureHistory = {};
+    /* ══════════════════ Modèle de données — conversations (threads) ══════════════════
+       Chaque outil peut désormais avoir PLUSIEURS discussions (pas un seul historique
+       fixe comme avant) : threads = { [id]: {id, toolId, title, messages, html,
+       createdAt, updatedAt} }. 100% local (localStorage, par utilisateur), aucun
+       backend de conversation n'existe côté serveur — cohérent avec l'API actuelle
+       qui ne fait que generer une reponse a partir des `messages` envoyés à chaque
+       appel, sans les persister. */
+    let threads = {};
+    let activeThreadId = null;
     let pendingFile = null;
-    let historyMeta = {};
+    let exportStore = [];
 
-    function saveHistory() {
+    /* Mode Recherche (§4) — miroir client de SEARCH_CAPABLE côté serveur
+       (api/ai/chat.js) : sert uniquement à afficher/désactiver le bouton,
+       l'application réelle du coût et de la restriction reste côté serveur. */
+    const SEARCH_CAPABLE = ['business-plan', 'bilan', 'budget', 'strategie', 'idees-projet', 'marketing', 'document', 'chat', 'tva', 'marche', 'concurrents'];
+    const WEB_SEARCH_SURCHARGE_CLIENT = 2;
+    let webSearchEnabled = false;
+
+    /* Mission AI-TOOL-02, Étape 3 : seul le system prompt de "document"
+       (api/ai/_lib/features.js) instruit réellement le modèle à analyser une
+       pièce jointe — c'est le seul cas où le backend "sait l'exploiter" au
+       sens de la mission. Les 13 autres outils continuent d'accepter
+       silencieusement un bloc image/document dans "messages" (rien n'a été
+       changé côté backend — hors périmètre de cette étape, volontairement),
+       mais leur prompt ne l'attend pas : on ne montre donc plus le bouton
+       pour ne pas laisser croire à une capacité non exploitée, sans pour
+       autant inventer une restriction serveur qui n'existe pas. */
+    const ATTACH_CAPABLE = ['document', 'facture-recue'];
+
+    function toggleWebSearch() {
+      const thread = threads[activeThreadId];
+      if (!thread || !SEARCH_CAPABLE.includes(thread.toolId)) {
+        showAiToast('Mode recherche non disponible pour cet outil.');
+        return;
+      }
+      webSearchEnabled = !webSearchEnabled;
+      renderWebSearchToggle();
+    }
+    function renderWebSearchToggle() {
+      const btn = document.getElementById('web-search-toggle');
+      if (!btn) return;
+      const thread = threads[activeThreadId];
+      const capable = !!(thread && SEARCH_CAPABLE.includes(thread.toolId));
+      btn.classList.toggle('active', webSearchEnabled && capable);
+      btn.classList.toggle('disabled', !capable);
+      btn.innerHTML = icon('globe') + ' Mode recherche'
+        + (capable ? ' <span class="search-toggle-cost">+' + WEB_SEARCH_SURCHARGE_CLIENT + ' crédits</span>' : ' <span class="search-toggle-cost">indisponible pour cet outil</span>');
+      refreshIcons();
+    }
+
+    function saveThreads() {
       try {
-        const data = {};
-        for (const key in featureHistory) {
-          if (!featureHistory[key].length) continue;
-          const el = document.getElementById('transcript-' + key);
-          data[key] = { messages: featureHistory[key], html: el ? el.innerHTML : '', updated: historyMeta[key] ? historyMeta[key].updated : Date.now() };
-        }
-        localStorage.setItem('geniwork-ai-history-' + userEmail, JSON.stringify(data));
-        // exportStore alimente les boutons PDF/Word/Excel via data-idx : sans le
-        // persister, ces boutons pointent vers un tableau vide apres rechargement
-        // et les telechargements ne font plus rien (silencieusement).
+        localStorage.setItem('geniwork-ai-threads-' + userEmail, JSON.stringify(threads));
         localStorage.setItem('geniwork-ai-exportstore-' + userEmail, JSON.stringify(exportStore));
       } catch (e) {}
     }
-    function loadHistory() {
+    function loadThreads() {
       try {
-        const raw = localStorage.getItem('geniwork-ai-history-' + userEmail);
-        if (!raw) return;
-        const data = JSON.parse(raw);
-        for (const key in data) {
-          featureHistory[key] = data[key].messages || [];
-          historyMeta[key] = { updated: data[key].updated };
-          const el = getOrCreateTranscript(key);
-          el.innerHTML = data[key].html || '';
-        }
-        const savedStore = localStorage.getItem('geniwork-ai-exportstore-' + userEmail);
-        if (savedStore) exportStore = JSON.parse(savedStore);
+        const raw = localStorage.getItem('geniwork-ai-threads-' + userEmail);
+        if (raw) threads = JSON.parse(raw) || {};
+        const storeRaw = localStorage.getItem('geniwork-ai-exportstore-' + userEmail);
+        if (storeRaw) exportStore = JSON.parse(storeRaw) || [];
       } catch (e) {}
+    }
+    /* Migration unique depuis l'ancien modèle (Phase 2 initiale) : un seul fil par
+       outil, stocké sous "geniwork-ai-history-<email>". On la convertit en thread
+       pour ne PAS faire disparaître les conversations déjà existantes des
+       utilisateurs (règle "ne pas casser l'historique"). Ne tourne qu'une fois. */
+    function migrateOldHistoryIfNeeded() {
+      const migratedFlag = 'geniwork-ai-migrated-' + userEmail;
+      if (localStorage.getItem(migratedFlag)) return;
+      try {
+        const oldRaw = localStorage.getItem('geniwork-ai-history-' + userEmail);
+        if (oldRaw) {
+          const old = JSON.parse(oldRaw);
+          if (!exportStore.length) {
+            const oldStoreRaw = localStorage.getItem('geniwork-ai-exportstore-' + userEmail);
+            if (oldStoreRaw) { try { exportStore = JSON.parse(oldStoreRaw) || []; } catch (e2) {} }
+          }
+          Object.keys(old).forEach((toolId) => {
+            if (!FEATURES[toolId]) return;
+            const entry = old[toolId];
+            if (!entry || !entry.messages || !entry.messages.length) return;
+            const id = 'thr_migrated_' + toolId;
+            if (threads[id]) return;
+            const firstUserMsg = entry.messages.find((m) => m.role === 'user');
+            let titleText = null;
+            if (firstUserMsg) {
+              const c = firstUserMsg.content;
+              const t = typeof c === 'string' ? c : (Array.isArray(c) ? ((c.find((b) => b.type === 'text') || {}).text || '') : '');
+              if (t) titleText = deriveTitle(t, null);
+            }
+            threads[id] = {
+              id, toolId,
+              title: titleText || FEATURES[toolId].label,
+              messages: entry.messages,
+              html: entry.html || '',
+              createdAt: entry.updated || Date.now(),
+              updatedAt: entry.updated || Date.now(),
+            };
+          });
+          saveThreads();
+        }
+      } catch (e) {}
+      localStorage.setItem(migratedFlag, '1');
+    }
+
+    function deriveTitle(message, file) {
+      if (message) return message.length > 46 ? message.slice(0, 46).trim() + '…' : message;
+      if (file) return 'Fichier : ' + file.name;
+      return null;
     }
     function timeAgo(ts) {
       const diffMin = Math.round((Date.now() - ts) / 60000);
@@ -484,90 +1242,197 @@
       if (diffH < 24) return 'il y a ' + diffH + 'h';
       return 'il y a ' + Math.round(diffH / 24) + 'j';
     }
-    function renderHistoryPanel() {
-      const panel = document.getElementById('history-panel');
-      const keys = Object.keys(featureHistory).filter((k) => featureHistory[k].length);
-      if (!keys.length) { panel.innerHTML = '<div class="history-empty">Aucune conversation pour l\'instant.</div>'; return; }
-      keys.sort((a, b) => (historyMeta[b] ? historyMeta[b].updated : 0) - (historyMeta[a] ? historyMeta[a].updated : 0));
-      panel.innerHTML = keys.map((key) => {
-        const f = FEATURES[key];
-        const count = featureHistory[key].length;
-        const updated = historyMeta[key] ? timeAgo(historyMeta[key].updated) : '';
-        return '<button class="history-item" onclick="openHistoryItem(\'' + key + '\')">'
-          + '<span class="hi-icon">' + f.icon + '</span>'
-          + '<span><span class="hi-label">' + f.label + '</span><br><span class="hi-meta">' + count + ' message(s) · ' + updated + '</span></span>'
+
+    function newThread(toolId) {
+      const id = 'thr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      threads[id] = { id, toolId, title: null, messages: [], html: '', createdAt: Date.now(), updatedAt: Date.now() };
+      activeThreadId = id;
+      saveThreads();
+      return threads[id];
+    }
+
+    function openToolChat(toolId, opts) {
+      opts = opts || {};
+      newThread(toolId);
+      showChatScreen();
+      renderChatScreen();
+      if (opts.prefill) {
+        document.getElementById('chat-message').value = opts.prefill;
+        if (opts.autoSend) setTimeout(sendMessage, 0);
+      }
+    }
+    function openThread(id) {
+      if (!threads[id]) return;
+      activeThreadId = id;
+      showChatScreen();
+      renderChatScreen();
+      closeMobileDrawers();
+    }
+    function openHistoryScreen() {
+      const ids = Object.keys(threads);
+      if (!ids.length) { openToolChat('chat'); return; }
+      ids.sort((a, b) => threads[b].updatedAt - threads[a].updatedAt);
+      openThread(ids[0]);
+    }
+
+    function showChatScreen() {
+      document.getElementById('dashboard-screen').style.display = 'none';
+      document.getElementById('chat-screen').style.display = 'flex';
+    }
+    function closeChatScreen() {
+      document.getElementById('chat-screen').style.display = 'none';
+      document.getElementById('dashboard-screen').style.display = 'flex';
+      closeMobileDrawers();
+    }
+
+    function toggleThreadsDrawer() { document.getElementById('chat-sidebar').classList.toggle('drawer-open'); syncDrawerOverlay(); }
+    function toggleToolsDrawer() { document.getElementById('chat-tools').classList.toggle('drawer-open'); syncDrawerOverlay(); }
+    function closeMobileDrawers() {
+      document.getElementById('chat-sidebar').classList.remove('drawer-open');
+      document.getElementById('chat-tools').classList.remove('drawer-open');
+      syncDrawerOverlay();
+    }
+    function syncDrawerOverlay() {
+      const open = document.getElementById('chat-sidebar').classList.contains('drawer-open') || document.getElementById('chat-tools').classList.contains('drawer-open');
+      document.getElementById('chat-drawer-overlay').style.display = open ? 'block' : 'none';
+    }
+
+    function buildEmptyState(f) {
+      return '<div class="chat-empty">'
+        + mascotImg('primary', 'chat-empty-mascot', { decorative: true })
+        + '<h3>' + f.label + '</h3>'
+        + '<p>' + f.description + '</p>'
+        + '<p class="chat-empty-hint">' + (f.placeholder || 'Décrivez votre demande...') + '</p>'
+        + '</div>';
+    }
+
+    function buildToolRow(entry) {
+      const isSoon = entry.status === 'coming_soon';
+      const f = entryData(entry);
+      const color = CARD_COLORS[entry.id] || '#7C3AED';
+      const action = isSoon ? 'onclick="comingSoonNotice()"' : `onclick="openToolChat('${entry.id}')"`;
+      return `<button class="tool-row${isSoon ? ' soon' : ''}" ${action}>
+          <span class="tr-icon" style="background:${color}">${icon(f.icon)}</span>
+          <span class="tr-body"><span class="tr-title">${f.label}</span><span class="tr-desc">${f.description}</span></span>
+          ${isSoon ? '<span class="card-badge soon">Bientôt</span>' : ''}
+        </button>`;
+    }
+    function renderChatTools() {
+      const wrap = document.getElementById('chat-tools-list');
+      wrap.innerHTML = CHAT_TOOL_IDS.map((id) => CATALOG.find((e) => e.id === id)).filter(Boolean).map(buildToolRow).join('');
+      refreshIcons();
+    }
+
+    function renderQuickActions() {
+      const wrap = document.getElementById('quick-actions');
+      const entries = QUICK_ACTION_IDS.map((id) => CATALOG.find((e) => e.id === id)).filter(Boolean);
+      wrap.innerHTML = entries.map((entry) => {
+        const isSoon = entry.status === 'coming_soon';
+        const f = entryData(entry);
+        const action = isSoon ? 'onclick="comingSoonNotice()"' : `onclick="openToolChat('${entry.id}')"`;
+        return `<button class="qa-btn" ${action}>${icon(f.icon)} ${f.label}</button>`;
+      }).join('') + '<button class="qa-btn" onclick="toggleToolsDrawer()">' + icon('ellipsis') + ' Plus</button>';
+      refreshIcons();
+    }
+
+    /* Mission AI-TOOL-02, Étape 4 : filtre UI uniquement — aucun thread
+       n'est supprimé, aucune donnée Firebase/localStorage modifiée, le
+       schéma des threads (toolId déjà présent depuis l'origine) est
+       inchangé. Par défaut on affiche seulement les conversations de
+       l'outil actif ("il doit principalement voir les conversations
+       correspondant à cet outil") ; "Tous" reste un clic pour retrouver
+       l'historique complet, jamais supprimé. */
+    let threadFilterMode = 'tool';
+    function toggleThreadFilter() {
+      threadFilterMode = threadFilterMode === 'tool' ? 'all' : 'tool';
+      renderThreadList();
+    }
+    function renderThreadList() {
+      const list = document.getElementById('thread-list');
+      const filterBtn = document.getElementById('thread-filter-btn');
+      const activeThread = threads[activeThreadId];
+      const activeToolId = activeThread ? activeThread.toolId : null;
+
+      if (filterBtn) {
+        filterBtn.textContent = threadFilterMode === 'tool' ? 'Tous' : 'Cet outil';
+        filterBtn.title = threadFilterMode === 'tool' ? 'Voir toutes les conversations, tous outils confondus' : 'Voir uniquement les conversations de l\'outil actif';
+      }
+
+      let ids = Object.keys(threads).sort((a, b) => threads[b].updatedAt - threads[a].updatedAt);
+      if (threadFilterMode === 'tool' && activeToolId) {
+        ids = ids.filter((id) => threads[id].toolId === activeToolId);
+      }
+
+      if (!ids.length) {
+        const emptyMsg = (threadFilterMode === 'tool' && activeToolId)
+          ? 'Aucune conversation pour cet outil pour l\'instant.'
+          : 'Aucune conversation pour l\'instant.';
+        list.innerHTML = '<div class="history-empty" style="font-size:12px;color:var(--text-muted);padding:10px 4px;">' + emptyMsg + '</div>';
+        return;
+      }
+      list.innerHTML = ids.map((id) => {
+        const t = threads[id];
+        const f = FEATURES[t.toolId] || FEATURES['chat'];
+        const title = t.title || ('Nouvelle discussion · ' + f.label);
+        return '<button class="thread-item' + (id === activeThreadId ? ' active' : '') + '" onclick="openThread(\'' + id + '\')">'
+          + '<span class="ti-icon">' + icon(f.icon) + '</span>'
+          + '<span class="ti-body"><span class="ti-title">' + title.replace(/</g, '&lt;') + '</span><span class="ti-meta">' + timeAgo(t.updatedAt) + '</span></span>'
           + '</button>';
       }).join('');
+      refreshIcons();
     }
-    function toggleHistoryPanel(event) {
-      event.stopPropagation();
-      const panel = document.getElementById('history-panel');
-      if (panel.classList.contains('visible')) { panel.classList.remove('visible'); return; }
-      renderHistoryPanel();
-      panel.classList.add('visible');
-    }
-    function openHistoryItem(key) {
-      const card = document.querySelector('.card[data-key="' + key + '"]');
-      if (card) selectFeature(key, card);
-      document.getElementById('history-panel').classList.remove('visible');
-    }
-    document.addEventListener('click', () => { document.getElementById('history-panel').classList.remove('visible'); });
 
-    function getOrCreateTranscript(key) {
-      let el = document.getElementById('transcript-' + key);
-      if (!el) {
-        el = document.createElement('div');
-        el.id = 'transcript-' + key;
-        el.className = 'transcript';
-        document.getElementById('transcripts').appendChild(el);
+    function updateResultActionsVisibility() {
+      const thread = threads[activeThreadId];
+      const has = !!(thread && thread.messages.some((m) => m.role === 'assistant'));
+      document.getElementById('chat-result-actions').style.display = has ? 'flex' : 'none';
+    }
+
+    function renderChatScreen() {
+      const thread = threads[activeThreadId];
+      if (!thread) return;
+      const f = FEATURES[thread.toolId] || FEATURES['chat'];
+      const iconEl = document.getElementById('chat-tool-icon');
+      iconEl.innerHTML = icon(f.icon, 'ic-lg');
+      iconEl.style.background = CARD_COLORS[thread.toolId] || '#7C3AED';
+      document.getElementById('chat-tool-name').textContent = 'Outil actif : ' + f.label;
+      document.getElementById('chat-message').placeholder = f.placeholder || 'Écrivez votre message ici...';
+      document.getElementById('chat-user-email').innerHTML = userEmail ? (icon('user') + ' ' + userEmail) : '';
+
+      const transcript = document.getElementById('chat-transcript');
+      if (thread.html) {
+        transcript.innerHTML = thread.html;
+        transcript.classList.remove('empty');
+      } else {
+        transcript.innerHTML = buildEmptyState(f);
+        transcript.classList.add('empty');
       }
-      return el;
+      transcript.scrollTop = transcript.scrollHeight;
+
+      renderThreadList();
+      renderChatTools();
+      updateResultActionsVisibility();
+      webSearchEnabled = false;
+      renderWebSearchToggle();
+
+      /* Étape 3 : bouton pièce jointe visible uniquement pour les outils qui
+         savent réellement l'exploiter — et on ne garde jamais un fichier en
+         attente d'un outil précédent en changeant de thread (il serait
+         autrement silencieusement envoyé au nouvel outil, non attendu par
+         son prompt). */
+      const attachCapable = ATTACH_CAPABLE.includes(thread.toolId);
+      document.getElementById('chat-file-row').style.display = attachCapable ? '' : 'none';
+      if (!attachCapable && pendingFile) {
+        pendingFile = null;
+        document.getElementById('chat-file-label').innerHTML = icon('paperclip') + ' Joindre un document/image';
+        document.getElementById('chat-file').value = '';
+      }
+
+      refreshIcons();
     }
 
-    function selectFeature(key, el) {
-      document.querySelectorAll('.card').forEach((c) => c.classList.remove('active'));
-      el.classList.add('active');
-      activeFeature = key;
-      const f = FEATURES[key];
-      document.getElementById('workspace').classList.add('visible');
-      document.getElementById('ws-title').textContent = f.label;
-      document.getElementById('ws-desc').textContent = f.description;
-      document.querySelectorAll('.transcript').forEach((t) => { t.style.display = 'none'; });
-      getOrCreateTranscript(key).style.display = 'flex';
-      const textarea = document.getElementById('message');
-      textarea.value = '';
-      textarea.placeholder = el.dataset.placeholder;
-      document.getElementById('workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
-      textarea.focus();
-    }
-
-    function quickAsk() {
-      const input = document.getElementById('quick-search');
-      const value = input.value.trim();
-      if (!value) return;
-      const chatCard = document.querySelector('.card[data-key="chat"]');
-      selectFeature('chat', chatCard);
-      document.getElementById('message').value = value;
-      input.value = '';
-      sendMessage();
-    }
-
-    function onFilePicked() {
-      const input = document.getElementById('chat-file');
-      const label = document.getElementById('file-label');
-      const file = input.files[0];
-      if (!file) { pendingFile = null; label.textContent = '📎 Joindre un document/image (optionnel)'; return; }
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64 = reader.result.split(',')[1];
-        pendingFile = { mediaType: file.type, base64, name: file.name };
-        label.textContent = '📎 ' + file.name;
-      };
-      reader.readAsDataURL(file);
-    }
-
-    function appendBubble(key, role, htmlContent, attachedFile) {
-      const transcript = getOrCreateTranscript(key);
+    function appendChatBubble(role, htmlContent, attachedFile) {
+      const transcript = document.getElementById('chat-transcript');
       const bubble = document.createElement('div');
       bubble.className = 'chat-bubble ' + role;
       bubble.innerHTML = htmlContent;
@@ -578,13 +1443,24 @@
         bubble.appendChild(img);
       } else if (attachedFile) {
         const tag = document.createElement('div');
+        tag.className = 'attached-tag';
         tag.style.fontSize = '12px'; tag.style.opacity = '0.8'; tag.style.marginTop = '6px';
-        tag.textContent = '📎 ' + attachedFile.name;
+        tag.innerHTML = icon('paperclip') + ' <span></span>';
+        tag.querySelector('span').textContent = attachedFile.name;
         bubble.appendChild(tag);
       }
       transcript.appendChild(bubble);
       transcript.scrollTop = transcript.scrollHeight;
+      updateResultActionsVisibility();
+      refreshIcons();
       return bubble;
+    }
+
+    function persistThread(thread) {
+      thread.updatedAt = Date.now();
+      thread.html = document.getElementById('chat-transcript').innerHTML;
+      saveThreads();
+      renderThreadList();
     }
 
     const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
@@ -596,17 +1472,79 @@
       sendMessage();
     }
 
+    function quickAsk() {
+      const input = document.getElementById('quick-search');
+      const value = input.value.trim();
+      if (!value) return;
+      input.value = '';
+      filterCatalog();
+      openToolChat('chat', { prefill: value, autoSend: true });
+    }
+
+    function onFilePicked() {
+      const input = document.getElementById('chat-file');
+      const label = document.getElementById('chat-file-label');
+      const file = input.files[0];
+      if (!file) { pendingFile = null; label.innerHTML = icon('paperclip') + ' Joindre un document/image'; refreshIcons(); return; }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = reader.result.split(',')[1];
+        pendingFile = { mediaType: file.type, base64, name: file.name };
+        label.innerHTML = icon('paperclip') + ' <span></span>';
+        label.querySelector('span').textContent = file.name;
+        refreshIcons();
+      };
+      reader.readAsDataURL(file);
+    }
+
+    /* ── Appel API + rendu réponse — partagé par sendMessage() et
+       retryLastTurn()/regenerateLast() pour ne pas dupliquer la logique. ── */
+    async function callAssistant(thread) {
+      const loading = document.getElementById('chat-loading');
+      const sendBtn = document.getElementById('chat-send-btn');
+      loading.style.display = 'inline';
+      sendBtn.disabled = true;
+      try {
+        const useSearch = webSearchEnabled && SEARCH_CAPABLE.includes(thread.toolId);
+        const res = await fetch('/api/ai/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feature: thread.toolId, authRefreshToken: authRefreshToken, email: userEmail, messages: thread.messages, webSearch: useSearch }),
+        });
+        const data = await res.json();
+        if (data.creditState) { creditState = data.creditState; renderPlanWidget(); }
+
+        if (data.error) {
+          appendChatBubble('assistant', '<div class="error-box"><div class="error-box-head">' + icon('alert-triangle') + ' ' + data.error + '</div></div>');
+          persistThread(thread);
+          return;
+        }
+
+        thread.messages.push({ role: 'assistant', content: data.assistantText });
+        const filenameBase = (FEATURES[thread.toolId].label || 'geniwork-ia').toLowerCase()
+          .normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-') + '-' + thread.messages.length;
+        appendChatBubble('assistant', buildResultBlock(thread.toolId, data.outputType, data, filenameBase));
+        persistThread(thread);
+      } catch (err) {
+        appendChatBubble('assistant', '<div class="error-box"><div class="error-box-head">' + icon('alert-triangle') + ' Une erreur est survenue lors de la génération.</div><button class="reset-btn" onclick="retryLastTurn()">' + icon('refresh-cw') + ' Réessayer</button></div>');
+        persistThread(thread);
+      } finally {
+        loading.style.display = 'none';
+        sendBtn.disabled = false;
+      }
+    }
+
     async function sendMessage() {
-      const key = activeFeature;
-      const textarea = document.getElementById('message');
+      const thread = threads[activeThreadId];
+      if (!thread) return;
+      /* Étape 3, garde en profondeur : le bouton est déjà masqué pour les
+         outils non compatibles (renderChatScreen), mais on ne fait jamais
+         confiance uniquement à l'UI — un pendingFile qui aurait quand même
+         survécu n'est jamais envoyé à un outil hors ATTACH_CAPABLE. */
+      if (pendingFile && !ATTACH_CAPABLE.includes(thread.toolId)) pendingFile = null;
+      const textarea = document.getElementById('chat-message');
       const message = textarea.value.trim();
-      const loading = document.getElementById('loading');
-      const sendBtn = document.getElementById('send-btn');
-
-      if (!key) { alert('Choisissez une fonctionnalité ci-dessus.'); return; }
       if (!message && !pendingFile) { alert('Décrivez votre demande avant d\'envoyer.'); return; }
-
-      if (!featureHistory[key]) featureHistory[key] = [];
 
       const userContent = [];
       if (message) userContent.push({ type: 'text', text: message });
@@ -615,62 +1553,130 @@
         userContent.push({ type: blockType, source: { type: 'base64', media_type: pendingFile.mediaType, data: pendingFile.base64 } });
       }
 
-      appendBubble(key, 'user', '<p>' + (message ? message.replace(/</g, '&lt;') : '<em>(fichier joint)</em>') + '</p>', pendingFile);
-      featureHistory[key].push({ role: 'user', content: userContent });
+      const transcript = document.getElementById('chat-transcript');
+      if (!thread.messages.length) { transcript.innerHTML = ''; transcript.classList.remove('empty'); }
+
+      appendChatBubble('user', '<p>' + (message ? message.replace(/</g, '&lt;') : '<em>(fichier joint)</em>') + '</p>', pendingFile);
+      thread.messages.push({ role: 'user', content: userContent });
+      if (!thread.title) thread.title = deriveTitle(message, pendingFile);
 
       textarea.value = '';
       pendingFile = null;
-      document.getElementById('file-label').textContent = '📎 Joindre un document/image (optionnel)';
+      document.getElementById('chat-file-label').innerHTML = icon('paperclip') + ' Joindre un document/image';
       document.getElementById('chat-file').value = '';
+      refreshIcons();
 
-      loading.style.display = 'inline';
-      sendBtn.disabled = true;
+      await callAssistant(thread);
+    }
 
-      try {
-        const res = await fetch('/api/ai/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ feature: key, authRefreshToken: authRefreshToken, email: userEmail, messages: featureHistory[key] }),
-        });
-        const data = await res.json();
-        loading.style.display = 'none';
-        sendBtn.disabled = false;
+    function retryLastTurn() {
+      const thread = threads[activeThreadId];
+      if (thread) callAssistant(thread);
+    }
 
-        if (data.creditState) { creditState = data.creditState; renderPlanWidget(); }
+    function regenerateLast() {
+      const thread = threads[activeThreadId];
+      if (!thread || !thread.messages.length) return;
+      const last = thread.messages[thread.messages.length - 1];
+      if (last.role !== 'assistant') return;
+      const cost = (FEATURES[thread.toolId] || {}).creditCost || 1;
+      if (!confirm('Régénérer va consommer à nouveau des crédits (' + cost + ') pour produire une nouvelle réponse. Continuer ?')) return;
+      thread.messages.pop();
+      const transcript = document.getElementById('chat-transcript');
+      const bubbles = transcript.querySelectorAll('.chat-bubble.assistant');
+      if (bubbles.length) bubbles[bubbles.length - 1].remove();
+      callAssistant(thread);
+    }
 
-        if (data.error) {
-          appendBubble(key, 'assistant', '<div class="error-box">' + data.error + '</div>');
-          document.getElementById('cta-box').scrollIntoView({ behavior: 'smooth', block: 'center' });
-          return;
-        }
+    function focusModify() {
+      const textarea = document.getElementById('chat-message');
+      textarea.focus();
+      if (!textarea.value) textarea.placeholder = 'Ex : Modifie la partie financière, ajoute une analyse de marché...';
+    }
 
-        featureHistory[key].push({ role: 'assistant', content: data.assistantText });
-        historyMeta[key] = { updated: Date.now() };
-
-        const filenameBase = (FEATURES[key].label || 'geniwork-ia').toLowerCase()
-          .normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-') + '-' + featureHistory[key].length;
-
-        const block = buildResultBlock(data.outputType, data, filenameBase);
-        appendBubble(key, 'assistant', block);
-        saveHistory();
-      } catch (err) {
-        loading.style.display = 'none';
-        sendBtn.disabled = false;
-        appendBubble(key, 'assistant', '<div class="error-box">Erreur: ' + err.message + '</div>');
+    function copyResult(idx) {
+      const data = exportStore[idx];
+      if (!data) return;
+      const text = data.assistantText || data.text || '';
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => showAiToast('Copié dans le presse-papiers ✓')).catch(() => showAiToast('Copie impossible sur ce navigateur.'));
+      } else {
+        showAiToast('Copie impossible sur ce navigateur.');
       }
     }
 
-    function resetConversation() {
-      const key = activeFeature;
-      if (!key) return;
-      featureHistory[key] = [];
-      delete historyMeta[key];
-      getOrCreateTranscript(key).innerHTML = '';
-      saveHistory();
-    }
-
-    let exportStore = [];
-    function buildResultBlock(outputType, payload, filenameBase) {
+    /* Mission AI-TOOL-02, Étape 2 : formats réellement pertinents par outil —
+       remplace l'ancienne barre générique (identique pour les 12 outils hors
+       html/image) qui proposait Excel même à moderation/matching/feed/chat.
+       'chat' et 'moderation' : Copier uniquement (réponse conversationnelle
+       courte / décision JSON d'une ligne, aucun document à exporter).
+       'matching'/'feed' : PDF seul, jamais Excel (classement structuré court,
+       pas un jeu de données tabulaire). 'strategie'/'idees-projet' : PDF/Word,
+       pas d'Excel (contenu narratif, pas de tableau chiffré significatif dans
+       le format de sortie attendu). Les autres gardent PDF/Word/Excel, déjà
+       pertinent (tableaux chiffrés réels dans leurs prompts). toolId absent
+       de cette liste (ne devrait pas arriver pour les 14 outils réels) →
+       repli sur l'ancien comportement complet, jamais un export manquant. */
+    const EXPORT_FORMATS = {
+      'business-plan': ['pdf', 'word', 'excel'],
+      'devis-facture': ['pdf', 'word', 'excel'],
+      'bilan': ['pdf', 'word', 'excel'],
+      'budget': ['pdf', 'word', 'excel'],
+      'marketing': ['pdf', 'word', 'excel'],
+      'document': ['pdf', 'word', 'excel'],
+      'strategie': ['pdf', 'word'],
+      'idees-projet': ['pdf', 'word'],
+      /* AI-TOOL-03 : contenu principalement explicatif (regle/taux/calcul
+         court), jamais un jeu de donnees tabulaire — pas d'Excel, Word utile
+         pour partager l'explication a un comptable. */
+      'tva': ['pdf', 'word'],
+      /* AI-TOOL-04 : texte continu pret a copier dans un client mail, pas
+         un rapport — Copier deja inclus par defaut, PDF/Word "si pertinent"
+         (specification d'origine), jamais Excel. */
+      'email': ['pdf', 'word'],
+      /* AI-TOOL-05 : extraction d'une facture unique, pas un jeu de donnees
+         tabulaire multi-lignes — pas d'Excel, Word/PDF pour garder une trace
+         de l'analyse. */
+      'facture-recue': ['pdf', 'word'],
+      /* AI-TOOL-06 : contrairement a tva/email/facture-recue, cet outil peut
+         produire un vrai tableau comparatif multi-produits — Excel justifie
+         par la presence d'un jeu de donnees tabulaire reel. */
+      'marge': ['pdf', 'word', 'excel'],
+      /* AI-TOOL-07 : document destine a etre telecharge et envoye tel quel
+         (Word souvent exige pour une candidature) — pas d'Excel, aucune
+         donnee tabulaire. */
+      'cv': ['pdf', 'word'],
+      /* AI-TOOL-08 : texte court destine a etre copie dans une fiche
+         produit/annonce — pas d'Excel, PDF/Word pour garder une version. */
+      'description': ['pdf', 'word'],
+      /* AI-TOOL-09 : contenu explicatif + eventuel tableau d'ecriture court,
+         pas un jeu de donnees — pas d'Excel, meme tier que tva/marge. */
+      'comptable': ['pdf', 'word'],
+      /* AI-TOOL-10 : tableau multi-periodes + comparaison multi-scenarios =
+         vraie donnee tabulaire, meme justification que marge/budget/bilan. */
+      'tresorerie': ['pdf', 'word', 'excel'],
+      /* AI-TOOL-14 : tableau Poste/Budget/Realise/Ecart = vraie donnee
+         tabulaire, meme justification que marge/tresorerie/budget/bilan. */
+      'budget-realise': ['pdf', 'word', 'excel'],
+      /* AI-TOOL-16 : texte court pret a copier dans un reseau social, pas
+         un rapport — pas d'Excel, meme tier que email/description/cv. */
+      'publication': ['pdf', 'word'],
+      /* AI-TOOL-18/19 : marche = analyse narrative (tendances/opportunites),
+         pas d'Excel. concurrents = comparaison structuree multi-concurrents,
+         vraie donnee tabulaire des que 2+ concurrents sont fournis, meme
+         justification que marge. */
+      'marche': ['pdf', 'word'],
+      'concurrents': ['pdf', 'word', 'excel'],
+      /* AI-TOOL-28 : cascade SIG + tableau d'evolution multi-periodes =
+         vraie donnee tabulaire, meme justification que marge/tresorerie/
+         budget-realise/bilan. */
+      'cs-financial-analysis': ['pdf', 'word', 'excel'],
+      'matching': ['pdf'],
+      'feed': ['pdf'],
+      'chat': [],
+      'moderation': [],
+    };
+    function buildResultBlock(toolId, outputType, payload, filenameBase) {
       const idx = exportStore.push(Object.assign({ outputType, filenameBase }, payload)) - 1;
       let inner;
       if (outputType === 'image') {
@@ -682,12 +1688,26 @@
       } else {
         inner = '<div class="result-box export-source">' + payload.html + '</div>';
       }
-      return '<div class="export-wrap" data-idx="' + idx + '">' + inner + buildExportBar(outputType) + '</div>';
+      return '<div class="export-wrap" data-idx="' + idx + '">' + inner + buildSourcesBlock(payload.sources) + buildExportBar(toolId, outputType, idx) + '</div>';
     }
-    function buildExportBar(outputType) {
-      if (outputType === 'html') return '<div class="export-bar"><button onclick="downloadHTML(this)">🌐 Télécharger le HTML</button></div>';
-      if (outputType === 'image') return '<div class="export-bar"><button onclick="downloadImage(this)">🖼️ Télécharger le PNG</button></div>';
-      return '<div class="export-bar"><button onclick="downloadPDF(this)">📄 PDF</button><button onclick="downloadWord(this)">📝 Word</button><button onclick="downloadExcel(this)">📊 Excel</button></div>';
+    function buildSourcesBlock(sources) {
+      if (!sources || !sources.length) return '';
+      return '<div class="sources-block"><div class="sources-title">' + icon('globe') + ' Sources</div><ul class="sources-list">'
+        + sources.map((s) => '<li><a href="' + s.url.replace(/"/g, '&quot;') + '" target="_blank" rel="noopener noreferrer">' + (s.title || s.url).replace(/</g, '&lt;') + '</a></li>').join('')
+        + '</ul></div>';
+    }
+    function buildExportBar(toolId, outputType, idx) {
+      const copyBtn = '<button onclick="copyResult(' + idx + ')">' + icon('copy') + ' Copier</button>';
+      if (outputType === 'html') return '<div class="export-bar">' + copyBtn + '<button onclick="downloadHTML(this)">' + icon('download') + ' Télécharger le HTML</button></div>';
+      if (outputType === 'image') return '<div class="export-bar"><button onclick="downloadImage(this)">' + icon('download') + ' Télécharger le PNG</button></div>';
+      const formats = EXPORT_FORMATS[toolId] || ['pdf', 'word', 'excel'];
+      const fmtBtns = formats.map((fmt) => {
+        if (fmt === 'pdf') return '<button onclick="downloadPDF(this)">' + icon('download') + ' PDF</button>';
+        if (fmt === 'word') return '<button onclick="downloadWord(this)">' + icon('download') + ' Word</button>';
+        if (fmt === 'excel') return '<button onclick="downloadExcel(this)">' + icon('download') + ' Excel</button>';
+        return '';
+      }).join('');
+      return '<div class="export-bar">' + copyBtn + fmtBtns + '</div>';
     }
     function getExportData(btn) { return exportStore[Number(btn.closest('.export-wrap').dataset.idx)]; }
 
@@ -797,8 +1817,13 @@
         document.getElementById('app-content').style.display = 'none';
         return;
       }
-      renderCards();
-      loadHistory();
+      document.getElementById('chat-promo-mascot-slot').innerHTML = mascotImg('primary', 'chat-promo-mascot', { decorative: true });
+      renderCatalog();
+      loadThreads();
+      migrateOldHistoryIfNeeded();
+      renderThreadList();
+      renderQuickActions();
+      renderCTABox();
       try {
         await fetchStatus();
       } catch (e) {

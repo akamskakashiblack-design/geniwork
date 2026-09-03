@@ -30,6 +30,11 @@ const { generateImage } = require('./_lib/imageClient');
 const { marked } = require('marked');
 const { verify: verifyRefreshToken } = require('../auth/_lib/refreshToken');
 const { dbGet, dbSet, emailKey } = require('../admin/_lib/fbrest');
+const { MEMORY_CAPABLE } = require('./_lib/memoryConfig');
+const { readMemoryContext, buildMemoryPromptBlock, buildMemorySystemNote, extractMemoryBlock, writeExtractedFacts } = require('./_lib/memory');
+const { SEARCH_CAPABLE, WEB_SEARCH_SURCHARGE, WEB_SEARCH_SYSTEM_NOTE } = require('./_lib/webSearchConfig');
+const { recordUsage } = require('./_lib/usageStats');
+const crypto = require('crypto');
 
 /* Phase AI-3 : rate limiting anti-abus — meme mecanisme deja en
    production pour api/auth/token.js/api/admin/login.js (stockage
@@ -43,6 +48,10 @@ const RATE_LIMIT_MAX = 20;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const MAX_MESSAGES = 30;
 const MAX_PAYLOAD_CHARS = 60000;
+
+/* SEARCH_CAPABLE / WEB_SEARCH_SURCHARGE / WEB_SEARCH_SYSTEM_NOTE : déplacés
+   dans _lib/webSearchConfig.js (source unique, réutilisée par l'Admin AI
+   Agent pour afficher la config réelle sans dupliquer cette liste). */
 
 async function checkRateLimit(email) {
   const path = '/gw/ai_secrets/rate_limit/' + emailKey(email);
@@ -107,6 +116,8 @@ module.exports = async function handler(req, res) {
   }
 
   const f = FEATURES[feature];
+  const useSearch = !!body.webSearch && SEARCH_CAPABLE.includes(feature);
+  const cost = f.creditCost + (useSearch ? WEB_SEARCH_SURCHARGE : 0);
 
   try {
     const rate = await checkRateLimit(email);
@@ -117,9 +128,9 @@ module.exports = async function handler(req, res) {
 
     const state = await getCreditState(email);
 
-    if (state.credits < f.creditCost) {
+    if (state.credits < cost) {
       res.status(200).json({
-        error: 'Credits insuffisants (cout: ' + f.creditCost + ', restant: ' + state.credits + ').',
+        error: 'Credits insuffisants (cout: ' + cost + ', restant: ' + state.credits + ').',
         creditState: state,
       });
       return;
@@ -127,20 +138,30 @@ module.exports = async function handler(req, res) {
 
     /* ── Reservation ATOMIQUE du cout AVANT tout appel fournisseur
        (Phase AI-3) — plus jamais "generer puis deduire". ── */
-    const reservation = await reserveCredits(email, f.creditCost);
+    const reservation = await reserveCredits(email, cost);
     if (!reservation.ok) {
       res.status(200).json({
-        error: 'Credits insuffisants (cout: ' + f.creditCost + ', restant: ' + reservation.credits + ').',
+        error: 'Credits insuffisants (cout: ' + cost + ', restant: ' + reservation.credits + ').',
         creditState: Object.assign({}, state, { credits: reservation.credits != null ? reservation.credits : state.credits }),
       });
       return;
     }
     const newState = Object.assign({}, state, { credits: reservation.credits });
 
+    const requestId = crypto.randomUUID();
+    const startedAt = Date.now();
+
     try {
       if (feature === 'image') {
         const promptText = extractLastUserText(messages);
         const b64 = await generateImage({ prompt: promptText });
+        /* usage (tokens) non disponible ici — imageClient.js ne capture pas
+           encore la reponse OpenAI, voir _lib/pricing.js pour le detail. */
+        await recordUsage({
+          requestId, toolId: feature, model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
+          status: 'ok', durationMs: Date.now() - startedAt, creditsCost: cost,
+          webSearchUsed: false, webSearchRequests: 0, inputTokens: null, outputTokens: null,
+        }).catch(() => {});
         res.status(200).json({
           outputType: 'image',
           image: b64,
@@ -150,7 +171,39 @@ module.exports = async function handler(req, res) {
         return;
       }
 
-      const raw = await callLLMChat({ systemPrompt: f.systemPrompt, messages, maxTokens: f.maxTokens });
+      /* Mémoire persistante V1 : lecture jamais bloquante (échec Firebase →
+         memoryCtx=null → mémoire simplement ignorée pour ce tour, la
+         génération continue normalement). Le toggle global ET le toggle
+         par outil doivent tous les deux être actifs (effectiveEnabled)
+         pour lire OU écrire quoi que ce soit — §11. */
+      const memoryCapable = MEMORY_CAPABLE.includes(feature);
+      const memoryCtx = memoryCapable ? await readMemoryContext(email, feature).catch(() => null) : null;
+      const memoryActive = !!(memoryCtx && memoryCtx.effectiveEnabled);
+
+      let systemPrompt = f.systemPrompt;
+      if (useSearch) systemPrompt += WEB_SEARCH_SYSTEM_NOTE;
+      if (memoryActive) {
+        systemPrompt += buildMemoryPromptBlock(memoryCtx.globalFacts, memoryCtx.toolFacts);
+        systemPrompt += buildMemorySystemNote(feature);
+      }
+
+      const { text: rawWithMemory, sources, usage } = await callLLMChat({ systemPrompt, messages, maxTokens: f.maxTokens, webSearch: useSearch });
+
+      /* Le bloc <!--MEMORY:{...}--> (s'il existe) est retiré AVANT tout
+         traitement ultérieur — il ne doit jamais atteindre l'utilisateur
+         ni être compté dans le HTML/JSON renvoyé. Écriture éventuelle
+         best-effort : un échec ici (conflit ETag, Firebase indisponible)
+         ne doit jamais transformer une génération réussie en erreur. */
+      let raw = rawWithMemory;
+      if (memoryActive) {
+        const { text, extracted } = extractMemoryBlock(rawWithMemory);
+        raw = text;
+        if (extracted) {
+          await writeExtractedFacts(email, feature, extracted).catch((e) => {
+            console.error('[Geniwork AI] memoire: echec ecriture (non bloquant):', e.message);
+          });
+        }
+      }
       const cleaned = stripCodeFence(raw.trim());
 
       let payload;
@@ -161,12 +214,29 @@ module.exports = async function handler(req, res) {
       } else {
         payload = { outputType: 'markdown', html: marked.parse(cleaned), assistantText: cleaned };
       }
+      if (sources && sources.length) payload.sources = sources;
+
+      await recordUsage({
+        requestId, toolId: feature, model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+        status: 'ok', durationMs: Date.now() - startedAt, creditsCost: cost,
+        webSearchUsed: useSearch, webSearchRequests: usage ? usage.webSearchRequests : 0,
+        inputTokens: usage ? usage.inputTokens : null, outputTokens: usage ? usage.outputTokens : null,
+      }).catch(() => {});
 
       res.status(200).json(Object.assign(payload, { creditState: newState }));
     } catch (genErr) {
       /* Generation echouee APRES reservation : rembourse (best-effort)
          pour ne jamais facturer un appel qui a echoue. */
-      await refundCredits(email, f.creditCost);
+      await refundCredits(email, cost);
+      /* errorCode : code court et technique (jamais le message complet,
+         qui pourrait a l'occasion contenir un fragment du payload) —
+         voir usageStats.js, ALLOWED_LOG_FIELDS. */
+      await recordUsage({
+        requestId, toolId: feature, model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+        status: 'error', durationMs: Date.now() - startedAt, creditsCost: cost,
+        webSearchUsed: useSearch, webSearchRequests: 0, inputTokens: null, outputTokens: null,
+        errorCode: (genErr && genErr.message ? genErr.message : 'unknown').slice(0, 60),
+      }).catch(() => {});
       throw genErr;
     }
   } catch (err) {

@@ -241,6 +241,25 @@ async function mutateArrayAtPath(path, mutateFn) {
   return { ok: false, reason: 'conflict' };
 }
 
+/* ── Mission "Consommation + Coûts" (AI Agent) : équivalent OBJET de
+   mutateArrayAtPath ci-dessus — même garantie (lire ETag → muter une
+   COPIE → réécrire conditionnel → retry sur 412), pour un chemin qui
+   stocke un objet (compteurs agrégés) plutôt qu'un tableau. Généralisé
+   ici plutôt que dupliqué dans _lib/memory.js et _lib/usageStats.js. */
+async function mutateObjectAtPath(path, mutateFn) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    let current;
+    try { current = await dbGetWithETag(path); } catch (e) { return { ok: false, reason: 'read_failed' }; }
+    const existing = (current.value && typeof current.value === 'object') ? current.value : {};
+    const next = mutateFn(existing);
+    if (next === null) return { ok: false, reason: 'aborted' };
+    let result;
+    try { result = await dbSetIfMatch(path, next, current.etag); } catch (e) { return { ok: false, reason: 'write_failed' }; }
+    if (result.ok) return { ok: true, value: next };
+  }
+  return { ok: false, reason: 'conflict' };
+}
+
 /* ── Phase SYNC-55 : rate limiter distribué, même primitives ETag
    qu'appendNotification/mutateArrayAtPath ci-dessus — jamais de compteur
    mémoire local (inefficace entre instances/régions Vercel serverless ;
@@ -286,4 +305,4 @@ async function checkRateLimit(key, max, windowMs) {
   return { ok: null, unavailable: true };
 }
 
-module.exports = { dbGet, dbSet, dbUpdate, dbRemove, emailKey, dbGetWithETag, dbSetIfMatch, appendNotification, mutateArrayAtPath, checkRateLimit };
+module.exports = { dbGet, dbSet, dbUpdate, dbRemove, emailKey, dbGetWithETag, dbSetIfMatch, appendNotification, mutateArrayAtPath, mutateObjectAtPath, checkRateLimit };
