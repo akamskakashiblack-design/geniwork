@@ -227,7 +227,9 @@
       "comments": {
         ".read":  true,
         "$postId": {
-          ".write": "auth != null"
+          "$commentId": {
+            ".write": "auth != null && ((!data.exists() && newData.child('authorFbKey').exists() && newData.child('authorFbKey').val() === auth.uid) || (data.exists() && data.child('authorFbKey').exists() && (data.child('authorFbKey').val() === auth.uid || auth.token.gw_admin === true) && (!newData.exists() || newData.child('authorFbKey').val() === data.child('authorFbKey').val())) || (data.exists() && !data.child('authorFbKey').exists() && auth.token.gw_admin === true))"
+          }
         }
       },
       "rcounts": {

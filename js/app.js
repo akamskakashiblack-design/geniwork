@@ -11104,6 +11104,12 @@ function submitComment() {
     id:          'c_' + genNotifId(),
     postId:      _currentPostId,
     parentId:    parentId,
+    /* SYNC-189 : identité fiable — auth.uid === _gwFbKey(email) (prouvé
+       SYNC-188 via api/auth/token.js). Calculée localement, jamais fournie
+       par un champ UI. Sert de future preuve de propriété pour la Rule
+       sécurisée de SYNC-190 ; authorEmail/authorName restent pour l'affichage
+       uniquement et ne sont plus la source de vérité de propriété. */
+    authorFbKey: _gwFbKey(_currentUser.email),
     authorEmail: _currentUser.email,
     authorName:  _currentUser.nom,
     text:        text,
@@ -11182,22 +11188,43 @@ function saveEditComment(cid, postId) {
   var newText = ta.value.trim();
   if (!newText) return;
 
-  var comments = loadUserComments(postId);
-  var c = comments.find(function(x) { return x.id === cid; });
-  if (c) { c.text = newText; c.edited = true; saveUserComments(postId, comments); }
-
-  var textEl = document.getElementById('ctxt-' + cid);
-  if (textEl) textEl.innerHTML = escHtml(newText);
-
-  /* Ajoute label "modifié" si pas déjà là */
-  var header = document.querySelector('#comment-' + cid + ' .comment-header');
-  if (header && !header.querySelector('.edited-label')) {
-    var lbl = document.createElement('span');
-    lbl.className = 'edited-label';
-    lbl.textContent = '(modifié)';
-    header.insertBefore(lbl, header.querySelector('.comment-own-actions'));
+  /* SYNC-189 : l'édition était jusqu'ici purement locale (localStorage/DOM),
+     jamais persistée dans Firebase — diagnostiqué SYNC-187, conçu SYNC-188.
+     Écriture Firebase désormais réelle, en update() partiel (jamais set()),
+     ne touchant que text/edited/editedAt — id/postId/parentId/authorFbKey/
+     authorEmail/authorName/at/isDemo restent immuables. Même principe que le
+     correctif artiste SYNC-181/182 : le succès n'est affiché qu'après
+     confirmation réelle de l'écriture, jamais avant ; le cache local et le
+     DOM ne sont mis à jour qu'après ce succès, pour ne jamais présenter comme
+     enregistrée une modification qui a en réalité échoué. */
+  if (!_gwFbReady || !_gwFbDB) {
+    showToast('Modification impossible : connexion indisponible', 'err');
+    return;
   }
-  showToast('Commentaire modifié ✓', 'ok');
+
+  var editedAt = Date.now();
+  _gwFbDB.ref('gw/comments/' + postId + '/' + cid).update({
+    text: newText, edited: true, editedAt: editedAt
+  }).then(function() {
+    var comments = loadUserComments(postId);
+    var c = comments.find(function(x) { return x.id === cid; });
+    if (c) { c.text = newText; c.edited = true; c.editedAt = editedAt; saveUserComments(postId, comments); }
+
+    var textEl = document.getElementById('ctxt-' + cid);
+    if (textEl) textEl.innerHTML = escHtml(newText);
+
+    /* Ajoute label "modifié" si pas déjà là */
+    var header = document.querySelector('#comment-' + cid + ' .comment-header');
+    if (header && !header.querySelector('.edited-label')) {
+      var lbl = document.createElement('span');
+      lbl.className = 'edited-label';
+      lbl.textContent = '(modifié)';
+      header.insertBefore(lbl, header.querySelector('.comment-own-actions'));
+    }
+    showToast('Commentaire modifié ✓', 'ok');
+  }).catch(function(err) {
+    showToast('Échec de la modification : ' + (err && err.message ? err.message : 'permission refusée'), 'err');
+  });
 }
 
 /* ── SUPPRIMER UN COMMENTAIRE ── */
