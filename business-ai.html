@@ -640,7 +640,7 @@
 
       <div class="chat-file-row" id="chat-file-row">
         <label class="file-label" id="chat-file-label" for="chat-file"><i data-lucide="paperclip"></i> Joindre un document/image</label>
-        <input type="file" id="chat-file" accept="image/*,.pdf" onchange="onFilePicked()" />
+        <input type="file" id="chat-file" accept="image/jpeg,image/png,image/webp,application/pdf" onchange="onFilePicked()" />
       </div>
       <div class="chat-input-row">
         <textarea id="chat-message" placeholder="Écrivez votre message ici..." onkeydown="onMessageKeydown(event)"></textarea>
@@ -1143,13 +1143,30 @@
     /* Mission AI-TOOL-02, Étape 3 : seul le system prompt de "document"
        (api/ai/_lib/features.js) instruit réellement le modèle à analyser une
        pièce jointe — c'est le seul cas où le backend "sait l'exploiter" au
-       sens de la mission. Les 13 autres outils continuent d'accepter
-       silencieusement un bloc image/document dans "messages" (rien n'a été
-       changé côté backend — hors périmètre de cette étape, volontairement),
-       mais leur prompt ne l'attend pas : on ne montre donc plus le bouton
-       pour ne pas laisser croire à une capacité non exploitée, sans pour
-       autant inventer une restriction serveur qui n'existe pas. */
+       sens de la mission. Les 25 autres outils n'attendent pas de pièce
+       jointe dans leur prompt : le bouton reste masqué pour eux pour ne pas
+       laisser croire à une capacité non exploitée.
+       SYNC-135 : cette restriction est désormais également appliquée côté
+       serveur (api/ai/_lib/attachConfig.js, importé par api/ai/chat.js) —
+       ce mirror client reste une commodité UI (masquer le bouton), plus la
+       seule protection. Garder ATTACH_MAX_BASE64_CHARS ci-dessous
+       numériquement identique à celui du fichier serveur. */
     const ATTACH_CAPABLE = ['document', 'facture-recue'];
+    const ATTACH_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+    const ATTACH_PDF_TYPE = 'application/pdf';
+    const ATTACH_ALLOWED_TYPES = ATTACH_IMAGE_TYPES.concat([ATTACH_PDF_TYPE]);
+    /* Budget final (apres compression eventuelle) — doit rester coherent
+       avec ATTACH_MAX_BASE64_CHARS dans api/ai/_lib/attachConfig.js. */
+    const ATTACH_MAX_BASE64_CHARS = 300000;
+    /* Rejet immediat avant toute lecture/tentative de compression — evite
+       de charger un fichier enorme en memoire pour rien (§9). Genereux car
+       les images seront de toute facon recompressees ; les PDF (non
+       compressibles ici) ont leur propre plafond, plus strict, ci-dessous. */
+    const ATTACH_MAX_RAW_INPUT_BYTES = 15 * 1024 * 1024;
+    /* Un PDF n'est jamais recompresse cote client (§5) : son poids brut doit
+       directement tenir sous le budget base64 final. base64 ~ taille x 4/3,
+       donc plafond brut = budget base64 x 3/4. */
+    const ATTACH_MAX_PDF_RAW_BYTES = Math.floor(ATTACH_MAX_BASE64_CHARS * 3 / 4);
 
     function toggleWebSearch() {
       const thread = threads[activeThreadId];
@@ -1481,20 +1498,110 @@
       openToolChat('chat', { prefill: value, autoSend: true });
     }
 
-    function onFilePicked() {
+    /* SYNC-135 : lecture brute (PDF — jamais recompresse, §5) via Promise
+       plutot que le callback reader.onload direct, pour pouvoir l'attendre
+       depuis onFilePicked() sans imbriquer les deux chemins fichier. */
+    function readFileAsBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = () => reject(reader.error || new Error('lecture fichier echouee'));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    /* SYNC-135 : redimensionne (max 1800px sur le plus grand cote — marge
+       suffisante pour rester lisible : texte, montants, dates, tableaux)
+       puis compresse en JPEG avec qualite decroissante, jusqu'a tenir sous
+       maxBase64Chars. Repart toujours de l'image source (jamais d'une
+       recompression en cascade d'un JPEG deja degrade) pour ne pas cumuler
+       les pertes. Pas de compression destructive au-dela d'un plancher
+       raisonnable (qualite 0.4, 900px) : au-dela, on rejette plutot que de
+       livrer une image illisible. */
+    function compressImageToBudget(file, maxBase64Chars) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          const MAX_DIM = 1800;
+          const MIN_DIM = 900;
+          const MIN_QUALITY = 0.4;
+          let scale = Math.min(1, MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight));
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          let quality = 0.85;
+          let base64 = null;
+          for (let attempt = 0; attempt < 12; attempt++) {
+            const w = Math.max(1, Math.round(img.naturalWidth * scale));
+            const h = Math.max(1, Math.round(img.naturalHeight * scale));
+            canvas.width = w; canvas.height = h;
+            ctx.clearRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+            const dataUrl = canvas.toDataURL('image/jpeg', quality);
+            base64 = dataUrl.split(',')[1];
+            if (base64.length <= maxBase64Chars) break;
+            if (quality > MIN_QUALITY) {
+              quality = Math.max(MIN_QUALITY, quality - 0.15);
+            } else if (Math.max(w, h) > MIN_DIM) {
+              scale = Math.max(MIN_DIM / Math.max(img.naturalWidth, img.naturalHeight), scale * 0.85);
+            } else {
+              break;
+            }
+          }
+          resolve({ base64, mediaType: 'image/jpeg', tooLarge: !base64 || base64.length > maxBase64Chars });
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image illisible')); };
+        img.src = url;
+      });
+    }
+
+    async function onFilePicked() {
       const input = document.getElementById('chat-file');
       const label = document.getElementById('chat-file-label');
       const file = input.files[0];
-      if (!file) { pendingFile = null; label.innerHTML = icon('paperclip') + ' Joindre un document/image'; refreshIcons(); return; }
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64 = reader.result.split(',')[1];
-        pendingFile = { mediaType: file.type, base64, name: file.name };
+      const resetLabel = () => { label.innerHTML = icon('paperclip') + ' Joindre un document/image'; refreshIcons(); };
+      if (!file) { pendingFile = null; resetLabel(); return; }
+
+      if (!ATTACH_ALLOWED_TYPES.includes(file.type)) {
+        alert('Type de fichier non supporté. Formats acceptés : JPEG, PNG, WEBP, PDF.');
+        input.value = ''; pendingFile = null; resetLabel();
+        return;
+      }
+      if (file.size > ATTACH_MAX_RAW_INPUT_BYTES) {
+        alert('Ce fichier est trop volumineux (max ' + Math.round(ATTACH_MAX_RAW_INPUT_BYTES / (1024 * 1024)) + ' Mo). Réduis sa taille ou sélectionne un fichier plus léger.');
+        input.value = ''; pendingFile = null; resetLabel();
+        return;
+      }
+
+      label.innerHTML = icon('paperclip') + ' Traitement du fichier…';
+      refreshIcons();
+
+      try {
+        if (file.type === ATTACH_PDF_TYPE) {
+          if (file.size > ATTACH_MAX_PDF_RAW_BYTES) {
+            alert('Ce fichier est trop volumineux pour être analysé directement. Réduis sa taille ou sélectionne un document plus léger.');
+            input.value = ''; pendingFile = null; resetLabel();
+            return;
+          }
+          const base64 = await readFileAsBase64(file);
+          pendingFile = { mediaType: file.type, base64, name: file.name };
+        } else {
+          const result = await compressImageToBudget(file, ATTACH_MAX_BASE64_CHARS);
+          if (result.tooLarge) {
+            alert('Cette image ne peut pas être compressée sous la limite autorisée. Essaie une photo moins détaillée ou recadrée sur la partie utile.');
+            input.value = ''; pendingFile = null; resetLabel();
+            return;
+          }
+          pendingFile = { mediaType: result.mediaType, base64: result.base64, name: file.name };
+        }
         label.innerHTML = icon('paperclip') + ' <span></span>';
         label.querySelector('span').textContent = file.name;
         refreshIcons();
-      };
-      reader.readAsDataURL(file);
+      } catch (e) {
+        alert('Impossible de lire ce fichier. Vérifie qu\'il n\'est pas corrompu et réessaie.');
+        input.value = ''; pendingFile = null; resetLabel();
+      }
     }
 
     /* ── Appel API + rendu réponse — partagé par sendMessage() et

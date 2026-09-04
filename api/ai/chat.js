@@ -34,6 +34,7 @@ const { MEMORY_CAPABLE } = require('./_lib/memoryConfig');
 const { readMemoryContext, buildMemoryPromptBlock, buildMemorySystemNote, extractMemoryBlock, writeExtractedFacts } = require('./_lib/memory');
 const { SEARCH_CAPABLE, WEB_SEARCH_SURCHARGE, WEB_SEARCH_SYSTEM_NOTE } = require('./_lib/webSearchConfig');
 const { recordUsage } = require('./_lib/usageStats');
+const { ATTACH_CAPABLE, ATTACH_ALLOWED_TYPES, ATTACH_MAX_BASE64_CHARS, verifyAttachmentMagicBytes } = require('./_lib/attachConfig');
 const crypto = require('crypto');
 
 /* Phase AI-3 : rate limiting anti-abus — meme mecanisme deja en
@@ -47,7 +48,15 @@ const crypto = require('crypto');
 const RATE_LIMIT_MAX = 20;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const MAX_MESSAGES = 30;
-const MAX_PAYLOAD_CHARS = 60000;
+/* SYNC-135 : 60000 etait dimensionne pour du texte pur et rejetait
+   systematiquement toute piece jointe reelle (une image/PDF encode en
+   base64 depasse presque toujours ce seuil). Releve a 350000 pour
+   absorber ATTACH_MAX_BASE64_CHARS (voir _lib/attachConfig.js, 300000
+   caracteres ~ 225 Ko de fichier source) plus une marge de 50000
+   caracteres pour le texte utilisateur, l'historique de conversation
+   et la structure JSON — pas "plusieurs Mo", une augmentation ciblee
+   et justifiee par le budget piece jointe reel. */
+const MAX_PAYLOAD_CHARS = 350000;
 
 /* SEARCH_CAPABLE / WEB_SEARCH_SURCHARGE / WEB_SEARCH_SYSTEM_NOTE : déplacés
    dans _lib/webSearchConfig.js (source unique, réutilisée par l'Admin AI
@@ -71,6 +80,52 @@ async function checkRateLimit(email) {
 
 function stripCodeFence(text) {
   return text.replace(/^```[a-z]*\n/i, '').replace(/\n```$/, '');
+}
+
+/* SYNC-135 : collecte tous les blocs piece-jointe (type 'image'/'document')
+   presents dans l'historique complet envoye par le client — pas seulement
+   le dernier message, un thread avec piece jointe la reenvoie a chaque
+   tour suivant (voir business-ai.html, thread.messages accumule). */
+function collectAttachmentBlocks(messages) {
+  const blocks = [];
+  for (const msg of messages) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block && (block.type === 'image' || block.type === 'document')) blocks.push(block);
+    }
+  }
+  return blocks;
+}
+
+/* SYNC-135 : ATTACH_CAPABLE n'etait applique que cote client (UI) — un
+   appel direct a l'API pouvait donc, en theorie, transmettre une piece
+   jointe a n'importe quel outil. Validation serveur obligatoire, executee
+   AVANT rate limit/credits (aucun cout reserve pour une requete rejetee
+   ici). Renvoie un message d'erreur precis (jamais "Erreur serveur"
+   generique) pour une cause utilisateur previsible, jamais un 500. */
+function validateAttachments(feature, messages) {
+  const blocks = collectAttachmentBlocks(messages);
+  if (!blocks.length) return null;
+  if (!ATTACH_CAPABLE.includes(feature)) {
+    return 'Piece jointe non prise en charge pour cet outil.';
+  }
+  for (const block of blocks) {
+    const mediaType = block.source && block.source.media_type;
+    const data = block.source && block.source.data;
+    if (!mediaType || !ATTACH_ALLOWED_TYPES.includes(mediaType)) {
+      return 'Type de fichier non supporte. Formats acceptes : JPEG, PNG, WEBP, PDF.';
+    }
+    if (!data || typeof data !== 'string' || !data.length) {
+      return 'Contenu de piece jointe invalide.';
+    }
+    if (data.length > ATTACH_MAX_BASE64_CHARS) {
+      return 'Ce fichier est trop volumineux pour etre analyse. Reduis sa taille ou selectionne un fichier plus leger.';
+    }
+    if (!verifyAttachmentMagicBytes(data, mediaType)) {
+      return 'Contenu de piece jointe invalide ou type de fichier incorrect.';
+    }
+  }
+  return null;
 }
 
 function extractLastUserText(messages) {
@@ -112,6 +167,11 @@ module.exports = async function handler(req, res) {
   }
   if (JSON.stringify(messages).length > MAX_PAYLOAD_CHARS) {
     res.status(400).json({ error: 'Contenu trop volumineux' });
+    return;
+  }
+  const attachError = validateAttachments(feature, messages);
+  if (attachError) {
+    res.status(400).json({ error: attachError });
     return;
   }
 
