@@ -3605,6 +3605,38 @@
             <i class="fas fa-database"></i><span>Sauvegarde</span>
           </button>
 
+          <div class="adm-sidebar-nav-label">🤖 AI Agent</div>
+          <button class="adm-sidebar-item" id="adm-nav-ai-dashboard" onclick="_admSwitchTab('ai-dashboard')">
+            <i class="fas fa-gauge-high"></i><span>Dashboard</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-ai-tools" onclick="_admSwitchTab('ai-tools')">
+            <i class="fas fa-toolbox"></i><span>Outils IA</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-ai-prompts" onclick="_admSwitchTab('ai-prompts')">
+            <i class="fas fa-file-lines"></i><span>Prompts</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-ai-models" onclick="_admSwitchTab('ai-models')">
+            <i class="fas fa-microchip"></i><span>Modèles IA</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-ai-websearch" onclick="_admSwitchTab('ai-websearch')">
+            <i class="fas fa-magnifying-glass"></i><span>Recherche Web</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-ai-memory" onclick="_admSwitchTab('ai-memory')">
+            <i class="fas fa-brain"></i><span>Mémoire</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-ai-credits" onclick="_admSwitchTab('ai-credits')">
+            <i class="fas fa-coins"></i><span>Crédits IA</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-ai-consumption" onclick="_admSwitchTab('ai-consumption')">
+            <i class="fas fa-chart-column"></i><span>Consommation</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-ai-costs" onclick="_admSwitchTab('ai-costs')">
+            <i class="fas fa-sack-dollar"></i><span>Coûts</span>
+          </button>
+          <button class="adm-sidebar-item" id="adm-nav-ai-logs" onclick="_admSwitchTab('ai-logs')">
+            <i class="fas fa-list-check"></i><span>Logs</span>
+          </button>
+
         </nav>
 
         <!-- Profil admin en bas -->
@@ -3663,6 +3695,8 @@
 
   <!-- hls.js — lecture des vidéos Cloudflare Stream (.m3u8) sur Android/Chrome -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js" crossorigin="anonymous" defer></script>
+  <!-- html2pdf.js — export PDF du panel Admin AI Agent (Dashboard/Consommation/Coûts/Logs) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" defer></script>
   <script src="js/app.js?v=1787171355684" defer></script>
   <script src="js/gw-messaging.js?v=1787171355684" defer></script>
 

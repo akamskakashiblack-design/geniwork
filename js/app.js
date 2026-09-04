@@ -32758,7 +32758,7 @@ function _admApi(pathName, payload) {
 */
 var _ADM_ROLE_PERMS = {
   'Super Admin': {
-    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','artiste','marketplace','recruiters','notifs','settings','security','backup'],
+    tabs:    ['dashboard','analytics','payments','reports','users','badges','team','publi','artiste','marketplace','recruiters','notifs','settings','security','backup','ai-dashboard','ai-tools','ai-prompts','ai-models','ai-websearch','ai-memory','ai-credits','ai-consumption','ai-costs','ai-logs'],
     actions: ['ban','unban','delete_post','delete_user','send_notif','publish','manage_team','manage_payments','change_settings','approve_badge','dismiss_report','warn_user','reset_password','change_role','approve_request']
   },
   'Admin': {
@@ -33412,7 +33412,17 @@ function _admSwitchTab(tab) {
     notifs      : 'Notifications & Communication',
     settings    : 'Paramètres système',
     security    : 'Sécurité & Maintenance',
-    backup      : 'Sauvegarde des données'
+    backup      : 'Sauvegarde des données',
+    'ai-dashboard'   : 'AI Agent — Dashboard',
+    'ai-tools'       : 'AI Agent — Outils IA',
+    'ai-prompts'     : 'AI Agent — Prompts',
+    'ai-models'      : 'AI Agent — Modèles IA',
+    'ai-websearch'   : 'AI Agent — Recherche Web',
+    'ai-memory'      : 'AI Agent — Mémoire',
+    'ai-credits'     : 'AI Agent — Crédits IA',
+    'ai-consumption' : 'AI Agent — Consommation',
+    'ai-costs'       : 'AI Agent — Coûts',
+    'ai-logs'        : 'AI Agent — Logs'
   };
   var titleEl = document.getElementById('adm-topbar-title');
   if (titleEl) titleEl.textContent = titles[tab] || tab;
@@ -33440,6 +33450,13 @@ function _admRefreshAll(btn) {
   var ico = document.getElementById('adm-refresh-ico');
   if (btn)  { btn.disabled = true;  btn.style.opacity = '.6'; }
   if (ico)  { ico.style.animation = 'spin .7s linear infinite'; }
+  /* AI Agent : force une lecture fraîche de /api/admin/ai-agent ET
+     /api/admin/ai-agent-stats au prochain rendu au lieu de resservir les
+     caches mémoire (_admAiFetch/_admAiStatsFetch), pour que "Actualiser"
+     ait un effet réel sur ces onglets aussi (données de config ET
+     statistiques d'usage réelles). */
+  _admAiData = null;
+  _admAiStatsData = null;
 
   function _done() {
     if (btn)  { btn.disabled = false; btn.style.opacity = '1'; }
@@ -33585,6 +33602,16 @@ function _admRender() {
   else if (_adminTab === 'settings')    content.innerHTML = _admBuildSettings();
   else if (_adminTab === 'security')    { content.innerHTML = _admBuildSecurity(); _admSecurityListen(); }
   else if (_adminTab === 'backup')      content.innerHTML = _admBuildBackup();
+  else if (_adminTab === 'ai-dashboard')   { content.innerHTML = _admAiLoadingHtml(); _admAiFetchBoth(function(){ content.innerHTML = _admBuildAiDashboard(); }); }
+  else if (_adminTab === 'ai-tools')       { content.innerHTML = _admAiLoadingHtml(); _admAiFetch(function(){ content.innerHTML = _admBuildAiTools(); }); }
+  else if (_adminTab === 'ai-prompts')     { content.innerHTML = _admAiLoadingHtml(); _admAiFetch(function(){ content.innerHTML = _admBuildAiPrompts(); }); }
+  else if (_adminTab === 'ai-models')      { content.innerHTML = _admAiLoadingHtml(); _admAiFetch(function(){ content.innerHTML = _admBuildAiModels(); }); }
+  else if (_adminTab === 'ai-websearch')   { content.innerHTML = _admAiLoadingHtml(); _admAiFetchBoth(function(){ content.innerHTML = _admBuildAiWebSearch(); }); }
+  else if (_adminTab === 'ai-memory')      { content.innerHTML = _admAiLoadingHtml(); _admAiFetch(function(){ content.innerHTML = _admBuildAiMemory(); }); }
+  else if (_adminTab === 'ai-credits')     { content.innerHTML = _admAiLoadingHtml(); _admAiFetchBoth(function(){ content.innerHTML = _admBuildAiCredits(); }); }
+  else if (_adminTab === 'ai-consumption') { content.innerHTML = _admAiLoadingHtml(); _admAiFetchBoth(function(){ content.innerHTML = _admBuildAiConsumption(); }); }
+  else if (_adminTab === 'ai-costs')       { content.innerHTML = _admAiLoadingHtml(); _admAiFetchBoth(function(){ content.innerHTML = _admBuildAiCosts(); }); }
+  else if (_adminTab === 'ai-logs')        { content.innerHTML = _admAiLoadingHtml(); _admAiFetchBoth(function(){ content.innerHTML = _admBuildAiLogs(); }); }
   _admUpdateNavBadges();
 }
 
@@ -44708,6 +44735,20 @@ function _admBuildBackup() {
       { key:'services',    label:'Services freelance' }
     ]) +
 
+  /* AI Agent — 3 catégories distinctes (config / statistiques / logs),
+     jamais mélangées : chacune vient d'une source serveur différente
+     (catalogue _lib/features.js vs compteurs gw/ai_usage_stats vs
+     gw/ai_logs) et aucune ne contient jamais de contenu de conversation,
+     document ou souvenir utilisateur — uniquement de la configuration
+     technique et des métriques agrégées. */
+  _card('fa-robot', '#6366F1', 'AI Agent',
+    'Configuration des outils IA, statistiques d\'usage réelles, logs techniques',
+    [
+      { key:'ai_config', label:'Configuration' },
+      { key:'ai_stats',  label:'Statistiques' },
+      { key:'ai_logs',   label:'Logs' }
+    ]) +
+
   /* Historique des sauvegardes */
   '<div style="background:#F8FAFC;border-radius:14px;padding:16px;border:1.5px solid #E5E7EB">' +
     '<div style="font-size:13px;font-weight:700;color:#374151;margin-bottom:10px;display:flex;align-items:center;gap:8px">' +
@@ -44719,6 +44760,552 @@ function _admBuildBackup() {
   '</div>' +
 
   '</div>';
+}
+
+/* ══════════════════════════════════════════
+   MODULE AI AGENT — intégration dans le Panel Admin existant
+   ══════════════════════════════════════════
+   Mission "Intégration Admin AI Agent" : structure/navigation d'abord,
+   pas de fonctionnalités métier complètes. Toute donnée affichée est
+   réelle (catalogue _lib/features.js via /api/admin/ai-agent, réservé
+   Super Admin) ou explicitement marquée "Données indisponibles" —
+   jamais un chiffre inventé. Aucune statistique d'usage (requêtes,
+   coûts, erreurs, consommation) n'est encore agrégée nulle part dans
+   ce dépôt : les onglets Crédits IA / Consommation / Coûts / Logs le
+   disent clairement plutôt que d'afficher un mock.
+*/
+var _admAiData = null;      /* cache du dernier /api/admin/ai-agent réussi (config) */
+var _admAiStatsData = null; /* cache du dernier /api/admin/ai-agent-stats réussi (usage réel) */
+
+function _admAiLoadingHtml() {
+  return '<div class="adm-empty" style="padding:60px 20px"><i class="fas fa-circle-notch fa-spin"></i><p>Chargement…</p></div>';
+}
+
+/* Récupère (avec cache mémoire simple) la config réelle du module IA.
+   N'appelle jamais deux fois inutilement — le catalogue ne change qu'au
+   déploiement, pas besoin de le rafraîchir à chaque clic d'onglet. */
+function _admAiFetch(cb) {
+  if (_admAiData) { cb(_admAiData); return; }
+  _admApi('ai-agent', { token: _admSessionToken }).then(function(res) {
+    if (!_admApiOk(res)) { _admAiData = { error: _admApiErrMsg(res) }; cb(_admAiData); return; }
+    _admAiData = res.data;
+    cb(_admAiData);
+  }).catch(function() {
+    _admAiData = { error: 'Erreur réseau — impossible de charger le catalogue IA.' };
+    cb(_admAiData);
+  });
+}
+
+/* Récupère (avec cache mémoire simple, invalidé par "Actualiser" —
+   _admRefreshAll) les statistiques d'usage RÉELLES collectées depuis la
+   mission "Consommation + Coûts". */
+function _admAiStatsFetch(cb) {
+  if (_admAiStatsData) { cb(_admAiStatsData); return; }
+  _admApi('ai-agent-stats', { token: _admSessionToken }).then(function(res) {
+    if (!_admApiOk(res)) { _admAiStatsData = { error: _admApiErrMsg(res) }; cb(_admAiStatsData); return; }
+    _admAiStatsData = res.data;
+    cb(_admAiStatsData);
+  }).catch(function() {
+    _admAiStatsData = { error: 'Erreur réseau — impossible de charger les statistiques IA.' };
+    cb(_admAiStatsData);
+  });
+}
+
+/* Certains onglets (Dashboard, Recherche Web, Crédits, Consommation,
+   Coûts, Logs) ont besoin à la fois du catalogue (config) ET des
+   statistiques réelles (usage) — deux endpoints indépendants, chacun
+   avec son propre cache mémoire déjà géré par _admAiFetch/_admAiStatsFetch.
+   Ce helper se contente de chaîner les deux, sans dupliquer la logique
+   de cache/erreur de chacun. */
+function _admAiFetchBoth(cb) {
+  _admAiFetch(function() { _admAiStatsFetch(function() { cb(); }); });
+}
+
+/* État "aucun système de collecte" — réservé à ce qui n'est vraiment PAS
+   collecté (ex. coût image, stats mémoire — hors périmètre de cette
+   mission). Ne jamais utiliser pour une métrique que le système collecte
+   déjà : dans ce cas, un compteur à 0 réel est correct, voir
+   _admAiNoDataYet ci-dessous (distinction explicitement demandée). */
+function _admAiUnavailable(label, reason) {
+  return '<div style="background:#fff;border-radius:14px;padding:16px;border:1.5px dashed #CBD5E1;display:flex;align-items:center;gap:10px">' +
+    '<i class="fas fa-circle-question" style="color:#94A3B8;font-size:18px"></i>' +
+    '<div><div style="font-size:13px;font-weight:700;color:#475569">' + escHtml(label) + '</div>' +
+      '<div style="font-size:11px;color:#94A3B8">' + escHtml(reason || 'Données indisponibles — aucun système d\'agrégation n\'existe encore pour cette métrique.') + '</div></div>' +
+  '</div>';
+}
+/* État "le système existe, mais rien à afficher pour l'instant" — jamais
+   un zéro inventé, un vrai zéro réel (aucune requête n'a encore été
+   comptabilisée depuis l'activation de la collecte). */
+function _admAiNoDataYet(label) {
+  return '<div style="background:#F8FAFC;border-radius:14px;padding:16px;border:1.5px dashed #E2E8F0;display:flex;align-items:center;gap:10px">' +
+    '<i class="fas fa-hourglass-half" style="color:#94A3B8;font-size:16px"></i>' +
+    '<div><div style="font-size:13px;font-weight:700;color:#475569">' + escHtml(label) + '</div>' +
+      '<div style="font-size:11px;color:#94A3B8">Pas encore de données — la collecte est active, rien n\'a encore été enregistré.</div></div>' +
+  '</div>';
+}
+
+function _admAiHeader(title, sub) {
+  return '<div class="adm-tab-header"><h2><i class="fas fa-robot"></i> ' + escHtml(title) + '</h2><p>' + escHtml(sub) + '</p></div>';
+}
+
+function _admAiErrorState(msg) {
+  return '<div class="adm-empty" style="padding:60px 20px"><i class="fas fa-triangle-exclamation"></i><p>' + escHtml(msg) + '</p></div>';
+}
+
+function _admAiExportBar(buttonsHtml) {
+  return '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:-6px 0 14px">' + buttonsHtml + '</div>';
+}
+function _admAiExportBtn(icon, label, onclick) {
+  return '<button onclick="' + onclick + '" style="display:flex;align-items:center;gap:7px;padding:9px 14px;border-radius:9px;border:1.5px solid #E2E8F0;background:#fff;color:#334155;font-size:12.5px;font-weight:700;cursor:pointer"><i class="fas ' + icon + '"></i>' + label + '</button>';
+}
+
+/* ── Exports génériques réutilisés par Consommation/Coûts/Logs/Dashboard ──
+   Même technique que les exports utilisateur existants (business-ai.html) :
+   CSV/JSON via Blob + <a download>, Excel via Blob + espace de noms MS
+   Office (aucune lib serveur), PDF via html2pdf.js (déjà chargé, voir
+   index.html). Rien de nouveau côté serveur pour l'export lui-même. */
+function _admAiCsvEscape(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; }
+function _admAiExportCSV(filename, headers, rows) {
+  var csv = [headers.map(_admAiCsvEscape).join(',')].concat(rows.map(function(r) { return r.map(_admAiCsvEscape).join(','); })).join('\r\n');
+  _admTriggerDownload(csv, filename + '.csv', 'text/csv;charset=utf-8;');
+  showToast('Export CSV téléchargé ✓', 'ok');
+}
+function _admAiExportExcel(filename, headers, rows) {
+  var table = '<table><tr>' + headers.map(function(h) { return '<th>' + escHtml(h) + '</th>'; }).join('') + '</tr>' +
+    rows.map(function(r) { return '<tr>' + r.map(function(c) { return '<td>' + escHtml(c == null ? '' : String(c)) + '</td>'; }).join('') + '</tr>'; }).join('') + '</table>';
+  var doc = '<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"><title>GeniWork</title></head><body>' + table + '</body></html>';
+  _admTriggerDownload(doc, filename + '.xls', 'application/vnd.ms-excel');
+  showToast('Export Excel téléchargé ✓', 'ok');
+}
+function _admAiExportJSON(filename, obj) {
+  _admTriggerDownload(JSON.stringify(obj, null, 2), filename + '.json', 'application/json');
+  showToast('Export JSON téléchargé ✓', 'ok');
+}
+function _admAiExportPDF(elementId, filename) {
+  var el = document.getElementById(elementId);
+  if (!el || !window.html2pdf) { showToast('Export PDF indisponible sur cette page', 'err'); return; }
+  showToast('Génération du PDF…', 'ok');
+  html2pdf().from(el).set({ filename: filename + '.pdf', margin: 10, html2canvas: { scale: 2 } }).save();
+}
+
+/* ── AI Agent 1/10 — Dashboard ── */
+function _admBuildAiDashboard() {
+  var d = _admAiData, s = _admAiStatsData;
+  if (!d) return _admAiErrorState('Catalogue IA indisponible.');
+  if (d.error) return _admAiErrorState(d.error);
+
+  var toolCount = d.tools.length;
+  var searchCount = d.webSearch.capableToolIds.length;
+  var memoryCount = d.memory.capableToolIds.length;
+
+  var html = _admAiHeader('AI Agent — Dashboard', 'Vue d\'ensemble du module IA GeniWork');
+  html += _admAiExportBar(
+    _admAiExportBtn('fa-file-pdf', 'Exporter PDF', "_admAiExportPDF('ai-dashboard-report','geniwork_ai_dashboard')") +
+    _admAiExportBtn('fa-file-excel', 'Exporter Excel', '_admAiExportDashboardExcel()')
+  );
+  html += '<div id="ai-dashboard-report" style="padding:0 16px 32px;display:flex;flex-direction:column;gap:20px">';
+
+  html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Configuration réelle</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">' +
+      _admKpiCard('fas fa-toolbox', '#EDE9FE', '#7C3AED', toolCount, 'Outils actifs', null, null, "_admSwitchTab('ai-tools')") +
+      _admKpiCard('fas fa-magnifying-glass', '#DBEAFE', '#2563EB', searchCount, 'Outils avec recherche web', null, null, "_admSwitchTab('ai-websearch')") +
+      _admKpiCard('fas fa-brain', '#DCFCE7', '#16A34A', memoryCount, 'Outils avec mémoire', null, null, "_admSwitchTab('ai-memory')") +
+      _admKpiCard('fas fa-microchip', '#FEF3C7', '#B45309', d.models.text, 'Modèle texte', null, null, "_admSwitchTab('ai-models')") +
+    '</div></div>';
+
+  html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Métriques d\'usage réelles (depuis activation de la collecte)</div>';
+  if (!s || s.error) {
+    html += _admAiUnavailable('Requêtes / crédits / coûts', s && s.error ? s.error : 'Statistiques non chargées.');
+  } else if (!s.hasData) {
+    html += '<div style="display:flex;flex-direction:column;gap:8px">' + _admAiNoDataYet('Aucune requête IA comptabilisée pour l\'instant') + '</div>';
+  } else {
+    var t = s.totals;
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">' +
+      _admKpiCard('fas fa-arrow-right-arrow-left', '#DBEAFE', '#2563EB', t.requests, 'Requêtes IA', null, null, "_admSwitchTab('ai-consumption')") +
+      _admKpiCard('fas fa-coins', '#FEF3C7', '#B45309', t.creditsSpent, 'Crédits consommés', null, null, "_admSwitchTab('ai-credits')") +
+      _admKpiCard('fas fa-magnifying-glass', '#EDE9FE', '#7C3AED', t.webSearchRequests, 'Recherches web', null, null, "_admSwitchTab('ai-websearch')") +
+      _admKpiCard('fas fa-triangle-exclamation', '#FEE2E2', '#DC2626', t.errors, 'Erreurs IA', null, null, "_admSwitchTab('ai-logs')") +
+      _admKpiCard('fas fa-sack-dollar', '#DCFCE7', '#16A34A', (t.textCostUsd != null ? '$' + t.textCostUsd.toFixed(2) : '—'), 'Coût estimé (texte)', null, null, "_admSwitchTab('ai-costs')") +
+    '</div>';
+    var topTools = Object.keys(s.byTool).map(function(id) { return { id: id, requests: s.byTool[id].requests }; }).sort(function(a, b) { return b.requests - a.requests; }).slice(0, 5);
+    if (topTools.length) {
+      html += '<div style="margin-top:14px"><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Outils les plus utilisés</div>' +
+        '<div style="display:flex;flex-direction:column;gap:6px">' +
+        topTools.map(function(x) {
+          var tt = d.tools.find(function(z) { return z.id === x.id; });
+          return '<div style="background:#fff;border-radius:10px;padding:10px 14px;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;justify-content:space-between;font-size:12.5px"><span style="font-weight:700;color:#0F172A">' + escHtml(tt ? tt.label : x.id) + '</span><span style="color:#64748B">' + x.requests + ' requête(s)</span></div>';
+        }).join('') + '</div></div>';
+    }
+  }
+  html += '</div>';
+
+  html += '</div>';
+  return html;
+}
+function _admBuildAiDashboardExcelRows() {
+  var s = _admAiStatsData;
+  if (!s || s.error || !s.hasData) return null;
+  var rows = Object.keys(s.byTool).map(function(id) {
+    var b = s.byTool[id];
+    return [id, b.requests, b.errors, b.creditsSpent, b.webSearchRequests, b.inputTokens, b.outputTokens, b.textCostUsd != null ? b.textCostUsd.toFixed(4) : ''];
+  });
+  return rows;
+}
+function _admAiExportDashboardExcel() {
+  var rows = _admBuildAiDashboardExcelRows();
+  if (!rows) { showToast('Pas encore de données à exporter', 'err'); return; }
+  _admAiExportExcel('geniwork_ai_dashboard', ['Outil', 'Requêtes', 'Erreurs', 'Crédits dépensés', 'Recherches web', 'Tokens input', 'Tokens output', 'Coût texte (USD)'], rows);
+}
+
+/* ── AI Agent 2/10 — Outils IA (catalogue réel, _lib/features.js) ── */
+function _admBuildAiTools() {
+  var d = _admAiData;
+  if (!d) return _admAiErrorState('Catalogue IA indisponible.');
+  if (d.error) return _admAiErrorState(d.error);
+
+  var html = _admAiHeader('AI Agent — Outils IA', d.tools.length + ' outil(s) réellement défini(s) dans le catalogue serveur');
+  html += '<div style="padding:0 16px 32px;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px">';
+  d.tools.forEach(function(t) {
+    html += '<div style="background:#fff;border-radius:14px;padding:16px;box-shadow:0 1px 4px rgba(0,0,0,.07)">' +
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+        '<div style="width:38px;height:38px;border-radius:10px;background:#F1F5F9;display:flex;align-items:center;justify-content:center;font-size:17px">' + (t.icon || '🤖') + '</div>' +
+        '<div><div style="font-size:14px;font-weight:800;color:#0F172A">' + escHtml(t.label) + '</div>' +
+        '<div style="font-size:11px;color:#94A3B8">' + escHtml(t.id) + ' · ' + escHtml(t.group || '—') + '</div></div>' +
+      '</div>' +
+      '<div style="font-size:12px;color:#475569;margin-bottom:10px">' + escHtml(t.description) + '</div>' +
+      '<div style="font-size:10.5px;color:#94A3B8;margin-bottom:8px"><i class="fas fa-microchip"></i> ' + escHtml(t.model || '—') + '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+        '<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;background:#DCFCE7;color:#166534">' + escHtml(t.status || 'active') + '</span>' +
+        '<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;background:#F1F5F9;color:#475569">' + escHtml(t.outputType) + '</span>' +
+        '<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;background:#FEF3C7;color:#92400E">' + t.creditCost + ' crédit(s)</span>' +
+        (t.webSearchCapable ? '<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;background:#DBEAFE;color:#1D4ED8"><i class="fas fa-magnifying-glass"></i> Recherche web</span>' : '') +
+        (t.memoryCapable ? '<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;background:#DCFCE7;color:#166534"><i class="fas fa-brain"></i> Mémoire</span>' : '') +
+      '</div>' +
+    '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+/* ── AI Agent 3/10 — Prompts (system prompts réels, lecture seule) ── */
+function _admBuildAiPrompts() {
+  var d = _admAiData;
+  if (!d) return _admAiErrorState('Catalogue IA indisponible.');
+  if (d.error) return _admAiErrorState(d.error);
+
+  var html = _admAiHeader('AI Agent — Prompts', 'System prompts réels de chaque outil (lecture seule pour cette mission)');
+  html += '<div style="padding:0 16px 32px;display:flex;flex-direction:column;gap:10px">';
+  d.tools.forEach(function(t) {
+    var promptId = 'adm-ai-prompt-' + t.id;
+    html += '<div style="background:#fff;border-radius:12px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.06)">' +
+      '<button onclick="var e=document.getElementById(\'' + promptId + '\');e.style.display=(e.style.display===\'none\'?\'block\':\'none\')" ' +
+        'style="width:100%;text-align:left;background:none;border:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:0">' +
+        '<span style="font-size:13px;font-weight:800;color:#0F172A">' + escHtml(t.label) + '</span>' +
+        '<i class="fas fa-chevron-down" style="color:#94A3B8"></i>' +
+      '</button>' +
+      '<pre id="' + promptId + '" style="display:none;white-space:pre-wrap;font-size:11.5px;color:#475569;background:#F8FAFC;border-radius:8px;padding:12px;margin-top:10px;max-height:280px;overflow-y:auto">' +
+        escHtml(t.systemPrompt || '(aucun system prompt — outil géré différemment, ex. génération d\'image)') +
+      '</pre>' +
+    '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+/* ── AI Agent 4/10 — Modèles IA ── */
+function _admBuildAiModels() {
+  var d = _admAiData;
+  if (!d) return _admAiErrorState('Catalogue IA indisponible.');
+  if (d.error) return _admAiErrorState(d.error);
+
+  var html = _admAiHeader('AI Agent — Modèles IA', 'Modèles réellement configurés côté serveur (variables d\'environnement Vercel)');
+  html += '<div style="padding:0 16px 32px;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px">';
+  html += '<div style="background:#fff;border-radius:14px;padding:18px;box-shadow:0 1px 4px rgba(0,0,0,.07)">' +
+    '<div style="font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase">Texte (Anthropic)</div>' +
+    '<div style="font-size:16px;font-weight:800;color:#0F172A;margin-top:4px">' + escHtml(d.models.text) + '</div>' +
+    '<div style="font-size:11px;color:#94A3B8;margin-top:6px">Utilisé par tous les outils texte + recherche web</div>' +
+  '</div>';
+  html += '<div style="background:#fff;border-radius:14px;padding:18px;box-shadow:0 1px 4px rgba(0,0,0,.07)">' +
+    '<div style="font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase">Image (OpenAI)</div>' +
+    '<div style="font-size:16px;font-weight:800;color:#0F172A;margin-top:4px">' + escHtml(d.models.image) + '</div>' +
+    '<div style="font-size:11px;color:#94A3B8;margin-top:6px">Utilisé uniquement par l\'outil "Génération d\'image"</div>' +
+  '</div>';
+  html += '</div>';
+  return html;
+}
+
+/* ── AI Agent 5/10 — Recherche Web ── */
+function _admBuildAiWebSearch() {
+  var d = _admAiData;
+  if (!d) return _admAiErrorState('Catalogue IA indisponible.');
+  if (d.error) return _admAiErrorState(d.error);
+
+  var html = _admAiHeader('AI Agent — Recherche Web', 'Config réelle du Mode Recherche (déjà en production, voir api/ai/_lib/webSearchConfig.js)');
+  html += '<div style="padding:0 16px 32px;display:flex;flex-direction:column;gap:20px">';
+
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">' +
+    _admKpiCard('fas fa-magnifying-glass', '#DBEAFE', '#2563EB', d.webSearch.capableToolIds.length, 'Outils éligibles', null, null, null) +
+    _admKpiCard('fas fa-coins', '#FEF3C7', '#B45309', d.webSearch.surcharge, 'Surcoût en crédits / recherche', null, null, null) +
+  '</div>';
+
+  html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Outils éligibles</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+    d.webSearch.capableToolIds.map(function(id) {
+      var t = d.tools.find(function(x){ return x.id === id; });
+      return '<span style="font-size:12px;font-weight:600;padding:6px 12px;border-radius:999px;background:#F1F5F9;color:#0F172A">' + escHtml(t ? t.label : id) + '</span>';
+    }).join('') +
+    '</div></div>';
+
+  html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Métriques d\'usage réelles</div>';
+  var s = _admAiStatsData;
+  if (!s || s.error) {
+    html += _admAiUnavailable('Recherches effectuées / coût', 'Statistiques non chargées.');
+  } else if (!s.hasData || !s.totals.webSearchRequests) {
+    html += '<div style="display:flex;flex-direction:column;gap:8px">' + _admAiNoDataYet('Aucune recherche web comptabilisée pour l\'instant') + '</div>';
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">' +
+      _admKpiCard('fas fa-magnifying-glass', '#DBEAFE', '#2563EB', s.totals.webSearchRequests, 'Recherches effectuées', null, null, null) +
+      _admKpiCard('fas fa-sack-dollar', '#DCFCE7', '#16A34A', '$' + (s.totals.webSearchCostUsd || 0).toFixed(3), 'Coût réel (Anthropic)', null, null, null) +
+    '</div>';
+  }
+  html += '</div>';
+
+  html += '</div>';
+  return html;
+}
+
+/* ── AI Agent 6/10 — Mémoire ── */
+function _admBuildAiMemory() {
+  var d = _admAiData;
+  if (!d) return _admAiErrorState('Catalogue IA indisponible.');
+  if (d.error) return _admAiErrorState(d.error);
+
+  var html = _admAiHeader('AI Agent — Mémoire', 'Config réelle (gw/ai_memory/{emailKey}) — voir mission "Mémoire persistante V1"');
+  html += '<div style="padding:0 16px 32px;display:flex;flex-direction:column;gap:20px">';
+
+  html += '<div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:12px;padding:14px 16px;display:flex;gap:10px;align-items:flex-start">' +
+    '<i class="fas fa-shield-halved" style="color:#DC2626;margin-top:2px"></i>' +
+    '<div style="font-size:12px;color:#7F1D1D"><strong>Contenu privé non accessible ici.</strong> Cet écran n\'affiche et n\'affichera jamais le contenu des souvenirs des utilisateurs (facts) — uniquement la configuration technique (catégories, état système). Toute consultation de contenu privé nécessite une politique d\'accès séparée, non définie dans cette mission.</div>' +
+  '</div>';
+
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">' +
+    _admKpiCard('fas fa-brain', '#DCFCE7', '#16A34A', d.memory.capableToolIds.length, 'Outils avec mémoire', null, null, null) +
+    _admKpiCard('fas fa-globe', '#EDE9FE', '#7C3AED', d.memory.globalCategories.length, 'Catégories globales', null, null, null) +
+  '</div>';
+
+  html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Catégories globales autorisées</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+    d.memory.globalCategories.map(function(c) { return '<span style="font-size:12px;font-weight:600;padding:6px 12px;border-radius:999px;background:#F1F5F9;color:#0F172A">' + escHtml(c) + '</span>'; }).join('') +
+    '</div></div>';
+
+  html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Contrôle système (préparé, non actif)</div>' +
+    '<div style="background:#fff;border-radius:12px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.06);display:flex;align-items:center;justify-content:space-between;opacity:.6">' +
+      '<div><div style="font-size:13px;font-weight:700;color:#0F172A">Mémoire activée globalement (tous utilisateurs)</div>' +
+      '<div style="font-size:11px;color:#94A3B8">Bientôt disponible — aujourd\'hui la mémoire ne se désactive qu\'utilisateur par utilisateur</div></div>' +
+      '<i class="fas fa-toggle-on" style="font-size:22px;color:#CBD5E1"></i>' +
+    '</div></div>';
+
+  html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Statistiques système</div>' +
+    '<div style="display:flex;flex-direction:column;gap:8px">' +
+      _admAiUnavailable('Nombre d\'utilisateurs avec mémoire active') +
+      _admAiUnavailable('Volume total stocké') +
+      _admAiUnavailable('Erreurs d\'écriture / conflits ETag') +
+    '</div></div>';
+
+  html += '</div>';
+  return html;
+}
+
+/* ── AI Agent 7/10 — Crédits IA ──
+   Réutilise EXCLUSIVEMENT les montants déjà calculés/débités par
+   api/ai/_lib/credits.js (reserveCredits/refundCredits) — les compteurs
+   ci-dessous ne sont qu'une SOMME de ces mêmes montants au fil des
+   requêtes, jamais un deuxième système de calcul de crédits. */
+function _admBuildAiCredits() {
+  var s = _admAiStatsData;
+  var html = _admAiHeader('AI Agent — Crédits IA', 'Somme réelle des réservations/remboursements déjà effectués par api/ai/_lib/credits.js — aucun deuxième système créé');
+  html += '<div style="padding:0 16px 32px;display:flex;flex-direction:column;gap:20px">';
+  if (!s || s.error) {
+    html += _admAiUnavailable('Crédits consommés / remboursés', s && s.error ? s.error : 'Statistiques non chargées.');
+  } else if (!s.hasData) {
+    html += _admAiNoDataYet('Aucun crédit comptabilisé pour l\'instant');
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">' +
+      _admKpiCard('fas fa-coins', '#FEF3C7', '#B45309', s.totals.creditsSpent, 'Crédits consommés (réel)', null, null, null) +
+      _admKpiCard('fas fa-rotate-left', '#DBEAFE', '#2563EB', s.totals.creditsRefunded, 'Crédits remboursés (échecs)', null, null, null) +
+    '</div>';
+    html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin:14px 0 8px">Par outil</div>' +
+      '<div style="display:flex;flex-direction:column;gap:6px">' +
+      Object.keys(s.byTool).sort(function(a, b) { return s.byTool[b].creditsSpent - s.byTool[a].creditsSpent; }).map(function(id) {
+        var b = s.byTool[id];
+        var t = _admAiData && !_admAiData.error ? _admAiData.tools.find(function(x) { return x.id === id; }) : null;
+        return '<div style="background:#fff;border-radius:10px;padding:10px 14px;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;justify-content:space-between;font-size:12.5px"><span style="font-weight:700;color:#0F172A">' + escHtml(t ? t.label : id) + '</span><span style="color:#64748B">' + b.creditsSpent + ' dépensés · ' + b.creditsRefunded + ' remboursés</span></div>';
+      }).join('') + '</div></div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+/* ── AI Agent 8/10 — Consommation ── */
+function _admBuildAiConsumption() {
+  var s = _admAiStatsData;
+  var html = _admAiHeader('AI Agent — Consommation', 'Compteurs réels — gw/ai_usage_stats, alimentés à chaque appel IA depuis l\'activation de la collecte');
+  var canExport = s && !s.error && s.hasData;
+  html += _admAiExportBar(
+    _admAiExportBtn('fa-file-excel', 'Exporter Excel', canExport ? '_admAiExportConsumptionExcel()' : 'showToast(\'Pas encore de données\',\'err\')') +
+    _admAiExportBtn('fa-file-csv', 'Exporter CSV', canExport ? '_admAiExportConsumptionCSV()' : 'showToast(\'Pas encore de données\',\'err\')') +
+    _admAiExportBtn('fa-file-pdf', 'Exporter PDF', "_admAiExportPDF('ai-consumption-report','geniwork_ai_consommation')")
+  );
+  html += '<div id="ai-consumption-report" style="padding:0 16px 32px;display:flex;flex-direction:column;gap:20px">';
+  if (!s || s.error) {
+    html += _admAiUnavailable('Requêtes / tokens / erreurs', s && s.error ? s.error : 'Statistiques non chargées.');
+  } else if (!s.hasData) {
+    html += _admAiNoDataYet('Aucune requête IA comptabilisée pour l\'instant');
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">' +
+      _admKpiCard('fas fa-arrow-right-arrow-left', '#DBEAFE', '#2563EB', s.totals.requests, 'Requêtes totales', null, null, null) +
+      _admKpiCard('fas fa-triangle-exclamation', '#FEE2E2', '#DC2626', s.totals.errors, 'Erreurs', null, null, null) +
+      _admKpiCard('fas fa-magnifying-glass', '#EDE9FE', '#7C3AED', s.totals.webSearchRequests, 'Recherches web', null, null, null) +
+      _admKpiCard('fas fa-arrow-down', '#F1F5F9', '#334155', s.totals.inputTokens, 'Tokens entrée', null, null, null) +
+      _admKpiCard('fas fa-arrow-up', '#F1F5F9', '#334155', s.totals.outputTokens, 'Tokens sortie', null, null, null) +
+    '</div>';
+    html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin:14px 0 8px">Par outil</div>' +
+      '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:12px">' +
+      '<thead><tr style="background:#F8FAFC"><th style="text-align:left;padding:8px 12px">Outil</th><th style="padding:8px 12px">Requêtes</th><th style="padding:8px 12px">Erreurs</th><th style="padding:8px 12px">Recherches web</th><th style="padding:8px 12px">Tokens in</th><th style="padding:8px 12px">Tokens out</th></tr></thead><tbody>' +
+      Object.keys(s.byTool).sort(function(a, b) { return s.byTool[b].requests - s.byTool[a].requests; }).map(function(id) {
+        var b = s.byTool[id];
+        var t = _admAiData && !_admAiData.error ? _admAiData.tools.find(function(x) { return x.id === id; }) : null;
+        return '<tr style="border-top:1px solid #F1F5F9"><td style="padding:8px 12px;font-weight:700">' + escHtml(t ? t.label : id) + '</td><td style="text-align:center;padding:8px 12px">' + b.requests + '</td><td style="text-align:center;padding:8px 12px">' + b.errors + '</td><td style="text-align:center;padding:8px 12px">' + b.webSearchRequests + '</td><td style="text-align:center;padding:8px 12px">' + b.inputTokens + '</td><td style="text-align:center;padding:8px 12px">' + b.outputTokens + '</td></tr>';
+      }).join('') + '</tbody></table></div></div>';
+  }
+  html += '</div>';
+  return html;
+}
+function _admAiExportConsumptionCSV() {
+  var s = _admAiStatsData; if (!s || s.error || !s.hasData) return;
+  var rows = Object.keys(s.byTool).map(function(id) { var b = s.byTool[id]; return [id, b.requests, b.errors, b.webSearchRequests, b.inputTokens, b.outputTokens]; });
+  _admAiExportCSV('geniwork_ai_consommation', ['Outil', 'Requêtes', 'Erreurs', 'Recherches web', 'Tokens input', 'Tokens output'], rows);
+}
+function _admAiExportConsumptionExcel() {
+  var s = _admAiStatsData; if (!s || s.error || !s.hasData) return;
+  var rows = Object.keys(s.byTool).map(function(id) { var b = s.byTool[id]; return [id, b.requests, b.errors, b.webSearchRequests, b.inputTokens, b.outputTokens]; });
+  _admAiExportExcel('geniwork_ai_consommation', ['Outil', 'Requêtes', 'Erreurs', 'Recherches web', 'Tokens input', 'Tokens output'], rows);
+}
+
+/* ── AI Agent 9/10 — Coûts ──
+   Calculé UNIQUEMENT à partir de tokens/recherches réellement mesurés
+   (usage.* capturé par llmClient.js) × tarifs sourcés dans
+   _lib/pricing.js. Jamais un chiffre deviné. */
+function _admBuildAiCosts() {
+  var s = _admAiStatsData;
+  var html = _admAiHeader('AI Agent — Coûts', 'Calculé à partir des tokens réellement mesurés (Anthropic) × tarifs officiels — voir sources dans _lib/pricing.js');
+  var canExport = s && !s.error && s.hasData;
+  html += _admAiExportBar(
+    _admAiExportBtn('fa-file-excel', 'Exporter Excel', canExport ? '_admAiExportCostsExcel()' : 'showToast(\'Pas encore de données\',\'err\')') +
+    _admAiExportBtn('fa-file-csv', 'Exporter CSV', canExport ? '_admAiExportCostsCSV()' : 'showToast(\'Pas encore de données\',\'err\')') +
+    _admAiExportBtn('fa-file-pdf', 'Exporter PDF', "_admAiExportPDF('ai-costs-report','geniwork_ai_couts')")
+  );
+  html += '<div id="ai-costs-report" style="padding:0 16px 32px;display:flex;flex-direction:column;gap:20px">';
+
+  if (!s || s.error) {
+    html += _admAiUnavailable('Coûts', s && s.error ? s.error : 'Statistiques non chargées.');
+  } else if (!s.hasData) {
+    html += _admAiNoDataYet('Aucun coût comptabilisé pour l\'instant');
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">' +
+      _admKpiCard('fas fa-microchip', '#DCFCE7', '#16A34A', '$' + (s.totals.textCostUsd || 0).toFixed(3), 'Coût texte (Claude)', null, null, null) +
+      _admKpiCard('fas fa-magnifying-glass', '#DBEAFE', '#2563EB', '$' + (s.totals.webSearchCostUsd || 0).toFixed(3), 'Coût recherche web', null, null, null) +
+      _admKpiCard('fas fa-sack-dollar', '#FEF3C7', '#B45309', '$' + ((s.totals.textCostUsd || 0) + (s.totals.webSearchCostUsd || 0)).toFixed(3), 'Coût total estimé', null, null, null) +
+    '</div>';
+    html += '<div><div style="font-size:12px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.04em;margin:14px 0 8px">Coût par outil (USD)</div>' +
+      '<div style="display:flex;flex-direction:column;gap:6px">' +
+      Object.keys(s.byTool).sort(function(a, b) { return (s.byTool[b].textCostUsd || 0) - (s.byTool[a].textCostUsd || 0); }).map(function(id) {
+        var b = s.byTool[id];
+        var t = _admAiData && !_admAiData.error ? _admAiData.tools.find(function(x) { return x.id === id; }) : null;
+        var total = (b.textCostUsd || 0) + (b.webSearchCostUsd || 0);
+        return '<div style="background:#fff;border-radius:10px;padding:10px 14px;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;justify-content:space-between;font-size:12.5px"><span style="font-weight:700;color:#0F172A">' + escHtml(t ? t.label : id) + '</span><span style="color:#64748B">$' + total.toFixed(4) + '</span></div>';
+      }).join('') + '</div></div>';
+  }
+
+  html += '<div style="background:#FFFBEB;border:1px solid #FCD34D;border-radius:12px;padding:14px 16px;display:flex;gap:10px;align-items:flex-start">' +
+    '<i class="fas fa-circle-info" style="color:#B45309;margin-top:2px"></i>' +
+    '<div style="font-size:12px;color:#78350F">Coût de la génération d\'image (OpenAI, ' + escHtml((s && s.pricing && s.pricing.image && s.pricing.image.model) || 'gpt-image-1') + ') non inclus : ' + escHtml((s && s.pricing && s.pricing.image && s.pricing.image.reason) || 'usage non capturé') + '.</div>' +
+  '</div>';
+
+  html += '</div>';
+  return html;
+}
+function _admAiExportCostsCSV() {
+  var s = _admAiStatsData; if (!s || s.error || !s.hasData) return;
+  var rows = Object.keys(s.byTool).map(function(id) { var b = s.byTool[id]; return [id, (b.textCostUsd || 0).toFixed(4), (b.webSearchCostUsd || 0).toFixed(4)]; });
+  _admAiExportCSV('geniwork_ai_couts', ['Outil', 'Coût texte USD', 'Coût recherche web USD'], rows);
+}
+function _admAiExportCostsExcel() {
+  var s = _admAiStatsData; if (!s || s.error || !s.hasData) return;
+  var rows = Object.keys(s.byTool).map(function(id) { var b = s.byTool[id]; return [id, (b.textCostUsd || 0).toFixed(4), (b.webSearchCostUsd || 0).toFixed(4)]; });
+  _admAiExportExcel('geniwork_ai_couts', ['Outil', 'Coût texte USD', 'Coût recherche web USD'], rows);
+}
+
+/* ── AI Agent 10/10 — Logs ──
+   gw/ai_logs (≤300 entrées, la plus récente en tête) — jamais de
+   contenu de conversation, voir usageStats.js/ALLOWED_LOG_FIELDS.
+   Pagination CÔTÉ CLIENT (le tableau entier est petit, un vrai curseur
+   serveur serait disproportionné à ce volume). */
+var _admAiLogsPage = 0;
+var _admAiLogsPageSize = 25;
+function _admBuildAiLogs() {
+  var s = _admAiStatsData;
+  var html = _admAiHeader('AI Agent — Logs', 'Événements techniques réels (gw/ai_logs) — jamais de contenu de conversation, document ou souvenir');
+  var canExport = s && !s.error && s.logs && s.logs.length;
+  html += _admAiExportBar(
+    _admAiExportBtn('fa-file-csv', 'Exporter CSV', canExport ? '_admAiExportLogsCSV()' : 'showToast(\'Pas encore de logs\',\'err\')') +
+    _admAiExportBtn('fa-file-code', 'Exporter JSON', canExport ? '_admAiExportLogsJSON()' : 'showToast(\'Pas encore de logs\',\'err\')') +
+    _admAiExportBtn('fa-file-pdf', 'Exporter PDF', "_admAiExportPDF('ai-logs-report','geniwork_ai_logs')")
+  );
+  html += '<div style="padding:0 16px 10px"><div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:12px;padding:12px 16px;font-size:11.5px;color:#1E3A8A"><i class="fas fa-shield-halved"></i> Ces logs sont strictement techniques (outil, statut, tokens, durée) — aucun contenu de message, document ou souvenir n\'est jamais enregistré.</div></div>';
+  html += '<div id="ai-logs-report" style="padding:0 16px 32px">';
+
+  if (!s || s.error) {
+    html += _admAiUnavailable('Logs', s && s.error ? s.error : 'Statistiques non chargées.');
+  } else if (!s.logs || !s.logs.length) {
+    html += _admAiNoDataYet('Aucun événement enregistré pour l\'instant');
+  } else {
+    var pageCount = Math.ceil(s.logs.length / _admAiLogsPageSize);
+    if (_admAiLogsPage >= pageCount) _admAiLogsPage = 0;
+    var pageItems = s.logs.slice(_admAiLogsPage * _admAiLogsPageSize, (_admAiLogsPage + 1) * _admAiLogsPageSize);
+    html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:11.5px">' +
+      '<thead><tr style="background:#F8FAFC"><th style="text-align:left;padding:7px 10px">Horodatage</th><th style="text-align:left;padding:7px 10px">Outil</th><th style="padding:7px 10px">Statut</th><th style="padding:7px 10px">Durée</th><th style="padding:7px 10px">Recherche web</th><th style="padding:7px 10px">Crédits</th><th style="text-align:left;padding:7px 10px">Erreur</th></tr></thead><tbody>' +
+      pageItems.map(function(l) {
+        var statusColor = l.status === 'ok' ? '#166534' : '#DC2626';
+        var statusBg = l.status === 'ok' ? '#DCFCE7' : '#FEE2E2';
+        return '<tr style="border-top:1px solid #F1F5F9">' +
+          '<td style="padding:7px 10px;color:#64748B">' + new Date(l.ts).toLocaleString('fr-FR') + '</td>' +
+          '<td style="padding:7px 10px;font-weight:700">' + escHtml(l.toolId) + '</td>' +
+          '<td style="text-align:center;padding:7px 10px"><span style="background:' + statusBg + ';color:' + statusColor + ';padding:2px 8px;border-radius:999px;font-weight:700">' + escHtml(l.status) + '</span></td>' +
+          '<td style="text-align:center;padding:7px 10px">' + (l.durationMs != null ? l.durationMs + ' ms' : '—') + '</td>' +
+          '<td style="text-align:center;padding:7px 10px">' + (l.webSearchUsed ? '<i class="fas fa-check" style="color:#2563EB"></i>' : '—') + '</td>' +
+          '<td style="text-align:center;padding:7px 10px">' + (l.creditsCost || 0) + '</td>' +
+          '<td style="padding:7px 10px;color:#DC2626">' + (l.errorCode ? escHtml(l.errorCode) : '—') + '</td>' +
+        '</tr>';
+      }).join('') + '</tbody></table></div>';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;font-size:12px;color:#64748B">' +
+      '<span>Page ' + (_admAiLogsPage + 1) + ' / ' + pageCount + ' · ' + s.logs.length + ' entrée(s)</span>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button onclick="_admAiLogsPage=Math.max(0,_admAiLogsPage-1);_admRender()" style="padding:6px 12px;border-radius:8px;border:1px solid #E2E8F0;background:#fff;cursor:pointer" ' + (_admAiLogsPage === 0 ? 'disabled style="opacity:.4"' : '') + '>‹ Précédent</button>' +
+        '<button onclick="_admAiLogsPage=Math.min(' + (pageCount - 1) + ',_admAiLogsPage+1);_admRender()" style="padding:6px 12px;border-radius:8px;border:1px solid #E2E8F0;background:#fff;cursor:pointer" ' + (_admAiLogsPage >= pageCount - 1 ? 'disabled style="opacity:.4"' : '') + '>Suivant ›</button>' +
+      '</div></div>';
+  }
+  html += '</div>';
+  return html;
+}
+function _admAiExportLogsCSV() {
+  var s = _admAiStatsData; if (!s || s.error || !s.logs) return;
+  var rows = s.logs.map(function(l) { return [new Date(l.ts).toISOString(), l.requestId, l.toolId, l.model, l.status, l.durationMs, l.errorCode || '', l.webSearchUsed, l.creditsCost, l.inputTokens, l.outputTokens]; });
+  _admAiExportCSV('geniwork_ai_logs', ['Horodatage', 'RequestId', 'Outil', 'Modèle', 'Statut', 'Durée (ms)', 'Erreur', 'Recherche web', 'Crédits', 'Tokens in', 'Tokens out'], rows);
+}
+function _admAiExportLogsJSON() {
+  var s = _admAiStatsData; if (!s || s.error || !s.logs) return;
+  _admAiExportJSON('geniwork_ai_logs', { exportedAt: new Date().toISOString(), exportedBy: _adminUser ? _adminUser.email : 'unknown', logs: s.logs });
 }
 
 /* ── Historique localStorage ── */
@@ -44749,7 +45336,12 @@ function _admSaveBackupHistory(type, size) {
 }
 
 /* ── Télécharge un fichier JSON ── */
+/* AI Agent : les 3 catégories (config/stats/logs) viennent d'endpoints
+   serveur (pas de localStorage) — traitées à part, en asynchrone, avant
+   le switch synchrone ci-dessous qui suppose des données déjà en mémoire. */
 function _admDownload(key) {
+  if (key === 'ai_config' || key === 'ai_stats' || key === 'ai_logs') { _admDownloadAi(key); return; }
+
   var data = null;
   var filename = 'geniwork_';
   var now = new Date().toISOString().slice(0,10);
@@ -44899,6 +45491,37 @@ function _admDownload(key) {
   /* Rafraîchit l'historique */
   var hist = document.getElementById('adm-backup-history');
   if (hist) hist.innerHTML = _admGetBackupHistory();
+}
+
+/* AI Agent : réutilise le cache mémoire (_admAiData/_admAiStatsData) posé
+   par la visite d'un onglet AI Agent, ou lance une lecture fraîche sinon
+   (_admAiFetchBoth gère déjà le cache + les deux endpoints). Jamais de
+   contenu de conversation/document/souvenir dans aucune des 3 catégories —
+   uniquement la config des outils, les compteurs agrégés, et les logs
+   techniques déjà filtrés par ALLOWED_LOG_FIELDS côté serveur. */
+function _admDownloadAi(key) {
+  var now = new Date().toISOString().slice(0,10);
+  _admAiFetchBoth(function() {
+    var data, filename = 'geniwork_';
+    if (key === 'ai_config') {
+      if (!_admAiData || _admAiData.error) { showToast('Configuration IA indisponible : ' + (_admAiData ? _admAiData.error : 'erreur inconnue'), 'err'); return; }
+      data = { configuration: _admAiData, exportedAt: new Date().toISOString() };
+      filename += 'ai_agent_configuration_' + now;
+    } else if (key === 'ai_stats') {
+      if (!_admAiStatsData || _admAiStatsData.error) { showToast('Statistiques IA indisponibles : ' + (_admAiStatsData ? _admAiStatsData.error : 'erreur inconnue'), 'err'); return; }
+      data = { totals: _admAiStatsData.totals, byTool: _admAiStatsData.byTool, byMonth: _admAiStatsData.byMonth, pricing: _admAiStatsData.pricing, exportedAt: new Date().toISOString() };
+      filename += 'ai_agent_statistiques_' + now;
+    } else {
+      if (!_admAiStatsData || _admAiStatsData.error) { showToast('Logs IA indisponibles : ' + (_admAiStatsData ? _admAiStatsData.error : 'erreur inconnue'), 'err'); return; }
+      data = { logs: _admAiStatsData.logs || [], exportedAt: new Date().toISOString() };
+      filename += 'ai_agent_logs_' + now;
+    }
+    _admTriggerDownload(JSON.stringify(data, null, 2), filename + '.json', 'application/json');
+    _admSaveBackupHistory(filename.replace('geniwork_','').replace(/_\d{4}-\d{2}-\d{2}$/,''), _admFormatSize(JSON.stringify(data).length));
+    showToast('Téléchargement démarré ✓', 'ok');
+    var hist = document.getElementById('adm-backup-history');
+    if (hist) hist.innerHTML = _admGetBackupHistory();
+  });
 }
 
 /* ── Export CSV des utilisateurs ── */
