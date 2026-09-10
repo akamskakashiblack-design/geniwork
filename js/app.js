@@ -14651,6 +14651,42 @@ var _vsKbHandler     = null;
 
 /* ── Cache mémoire des URLs vidéo ── */
 var _gwVidUrlCache = {};
+var _GW_VID_URL_CACHE_MAX = 40;
+var _gwVidUrlCacheOrder = []; /* postId (string), ordre d'accès — le plus récent en dernier */
+
+function _gwSetVidUrlCache(postId, url) {
+  postId = String(postId);
+  var prev = _gwVidUrlCache[postId];
+  if (prev && prev.indexOf('blob:') === 0 && prev !== url) {
+    try { URL.revokeObjectURL(prev); } catch(e) {}
+  }
+  _gwVidUrlCache[postId] = url;
+  var idx = _gwVidUrlCacheOrder.indexOf(postId);
+  if (idx !== -1) _gwVidUrlCacheOrder.splice(idx, 1);
+  if (url && url.indexOf('blob:') === 0) {
+    _gwVidUrlCacheOrder.push(postId);
+    while (_gwVidUrlCacheOrder.length > _GW_VID_URL_CACHE_MAX) {
+      var evictId = _gwVidUrlCacheOrder[0];
+      if (evictId === postId) break; /* jamais évincer l'entrée qu'on vient d'ajouter */
+      _gwVidUrlCacheOrder.shift();
+      var evictUrl = _gwVidUrlCache[evictId];
+      if (evictUrl && evictUrl.indexOf('blob:') === 0) {
+        try { URL.revokeObjectURL(evictUrl); } catch(e) {}
+      }
+      delete _gwVidUrlCache[evictId];
+    }
+  }
+  /* url non-blob : rien à plafonner ici — coût mémoire négligeable. */
+}
+
+function _gwReplaceBlobUrl(obj, prop, newUrl) {
+  if (!obj) return;
+  var prev = obj[prop];
+  if (prev && typeof prev === 'string' && prev.indexOf('blob:') === 0 && prev !== newUrl) {
+    try { URL.revokeObjectURL(prev); } catch(e) {}
+  }
+  obj[prop] = newUrl;
+}
 
 /* ── Cache blob ── */
 var _gwVidBlobCache = {};
@@ -14665,12 +14701,12 @@ function _gwResolveVideoUrl(post, cb) {
     var lsUrl = localStorage.getItem('gw_vurl_' + postId);
     if (lsUrl) {
       if (lsUrl.startsWith('blob:')) { localStorage.removeItem('gw_vurl_' + postId); }
-      else { _gwVidUrlCache[postId] = lsUrl; if (typeof post.video === 'object' && !post.video.url) post.video.url = lsUrl; cb(lsUrl); return; }
+      else { _gwSetVidUrlCache(postId, lsUrl); if (typeof post.video === 'object' && !post.video.url) post.video.url = lsUrl; cb(lsUrl); return; }
     }
   } catch(e) {}
   var url = typeof post.video === 'string' ? post.video : (post.video && post.video.url ? post.video.url : '');
   if (url && !url.startsWith('blob:')) {
-    _gwVidUrlCache[postId] = url;
+    _gwSetVidUrlCache(postId, url);
     try { localStorage.setItem('gw_vurl_' + postId, url); } catch(e) {}
     cb(url); return;
   }
@@ -14680,7 +14716,7 @@ function _gwResolveVideoUrl(post, cb) {
       if (fbUrl) { cb(fbUrl); return; }
       if (idbId) {
         _gwLoadVideoBlob(idbId, function(blob) {
-          if (blob) { var bUrl = URL.createObjectURL(blob); _gwVidUrlCache[postId] = bUrl; cb(bUrl); }
+          if (blob) { var bUrl = URL.createObjectURL(blob); _gwSetVidUrlCache(postId, bUrl); cb(bUrl); }
           else { cb(''); }
         });
       } else { cb(''); }
@@ -14689,7 +14725,7 @@ function _gwResolveVideoUrl(post, cb) {
   }
   if (idbId) {
     _gwLoadVideoBlob(idbId, function(blob) {
-      if (blob) { var bUrl = URL.createObjectURL(blob); _gwVidUrlCache[postId] = bUrl; cb(bUrl); }
+      if (blob) { var bUrl = URL.createObjectURL(blob); _gwSetVidUrlCache(postId, bUrl); cb(bUrl); }
       else { cb(''); }
     });
     return;
@@ -14703,8 +14739,8 @@ function _gwResolveVideoUrlFromFb(post, cb) {
   _gwFbDB.ref('gw/post_videos/' + postId).once('value').then(function(snap) {
     var d = snap.val();
     if (d && d.url) {
-      if (typeof post.video === 'object') post.video.url = d.url;
-      _gwVidUrlCache[postId] = d.url;
+      if (typeof post.video === 'object') _gwReplaceBlobUrl(post.video, 'url', d.url);
+      _gwSetVidUrlCache(postId, d.url);
       try { localStorage.setItem('gw_vurl_' + postId, d.url); } catch(e) {}
       cb(d.url);
     } else { cb(''); }
@@ -15610,7 +15646,11 @@ function closeVideoScroll() {
     var el = document.getElementById(id); if (el) el.remove();
   });
   _vsItems.forEach(function(item) {
+    if (!item || !item.videoEl) return;
     clearTimeout(item._stallTimer);
+    if (item.videoEl.src && item.videoEl.src.indexOf('blob:') === 0) {
+      try { URL.revokeObjectURL(item.videoEl.src); } catch(e) {}
+    }
     try { item.videoEl.pause(); item.videoEl.src = ''; item.videoEl.load(); } catch(e){}
   });
   _vsItems  = [];
