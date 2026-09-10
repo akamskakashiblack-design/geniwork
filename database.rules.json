@@ -173,9 +173,9 @@
       "group_inboxes": {
         "$userFbKey": {
           ".read": "auth != null && (!$userFbKey.matches(/^free_/) || $userFbKey === ('free_' + auth.uid))",
-          ".write": "auth != null && !$userFbKey.matches(/^free_/)",
+          ".write": "auth != null && !$userFbKey.matches(/^free_/) && $userFbKey === auth.uid",
           "$groupId": {
-            ".write": "auth != null && (!$userFbKey.matches(/^free_/) || $userFbKey === ('free_' + auth.uid) || root.child('gw/group_msgs/'+$groupId+'/meta/members/'+auth.uid).exists())"
+            ".write": "auth != null && ((!$userFbKey.matches(/^free_/) && $userFbKey === auth.uid) || $userFbKey === ('free_' + auth.uid) || root.child('gw/group_msgs/'+$groupId+'/meta/members/'+auth.uid).exists())"
           }
         }
       },
