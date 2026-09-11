@@ -5641,10 +5641,9 @@ function _initGroupAndInboxListeners(user) {
     try { _attachFreeGroupRealtimeListeners(c.id); } catch(e) {}
   });
 
-  /* Groupes — messages : sync en temps réel (collab ET libre, dispatch dans
-     _gwMergeGroupMsg selon le préfixe $grpFbKey — cf. GROUPS-FREE-02). */
-  _gwFbDB.ref('gw/group_msgs').on('child_added',   function(snap) { try { _gwMergeGroupMsg(snap); } catch(e){} });
-  _gwFbDB.ref('gw/group_msgs').on('child_changed', function(snap) { try { _gwMergeGroupMsg(snap); } catch(e){} });
+  DEMO_CONVERSATIONS.filter(function(c) { return c.isGroup && !c.isFreeGroup; }).forEach(function(c) {
+    try { _attachCollabGroupRealtimeListeners(c); } catch(e) {}
+  });
   /* GROUPS-FREE-05 : détecte en temps réel un groupe libre supprimé ou une
      exclusion (perte d'accès en lecture à ce noeud). Scope volontairement
      limité aux groupes libres ici (_freeGroupHandleRemoved ignore tout
@@ -22764,6 +22763,78 @@ function _detachFreeGroupRealtimeListeners(groupId) {
   delete _freeGroupRtListeners[groupId];
 }
 
+var _collabGroupRtListeners = {}; /* fbKey -> { messagesRef, projId, projOwnerEmail } */
+
+function _attachCollabGroupRealtimeListeners(conv) {
+  if (!_gwFbDB || !conv || !conv.projId || !conv.projOwnerEmail) return;
+  var fbKey = _collabGroupFbKey(conv.projId, conv.projOwnerEmail);
+  if (_collabGroupRtListeners[fbKey]) return;
+  var messagesRef = _gwFbDB.ref('gw/group_msgs/' + fbKey + '/messages');
+  _collabGroupRtListeners[fbKey] = { messagesRef: messagesRef, projId: conv.projId, projOwnerEmail: conv.projOwnerEmail };
+  messagesRef.on('child_added', function(snap) {
+    try { _gwHandleCollabGroupNewMessage(conv.projId, conv.projOwnerEmail, snap); } catch(e) {}
+  });
+}
+
+function _detachCollabGroupRealtimeListeners(fbKey) {
+  var l = _collabGroupRtListeners[fbKey];
+  if (!l) return;
+  try { l.messagesRef.off('child_added'); } catch(e) {}
+  delete _collabGroupRtListeners[fbKey];
+}
+
+function _gwHandleCollabGroupNewMessage(projId, ownerEmail, snap) {
+  if (!_currentUser || !snap) return;
+  var m = snap.val();
+  if (!m || !m.id) return;
+
+  var conv = DEMO_CONVERSATIONS.find(function(c) {
+    return c.isGroup && !c.isFreeGroup && c.projId === projId && c.projOwnerEmail === ownerEmail;
+  });
+  if (!conv) return;
+
+  if (conv.messages.some(function(x) { return String(x.id) === String(m.id); })) return;
+  conv.messages.push(m);
+
+  var _grpChatBox  = document.getElementById('chat-messages');
+  var _grpChatOpen = _chatConvId === conv.id && _grpChatBox;
+
+  if (_grpChatOpen && m.from !== _currentUser.email) {
+    if (!_grpChatBox.querySelector('[data-msg-id="' + m.id + '"]')) {
+      var _grpRow = document.createElement('div');
+      if (m.from === 'system') {
+        _grpRow.className = 'chat-sys-msg';
+        _grpRow.textContent = m.text || '';
+      } else {
+        var _sProfile = loadUserProfile(m.from) || {};
+        var _sName    = _sProfile.nom || m.from || '';
+        var _sAv = _sProfile.photo
+          ? '<img src="' + _sProfile.photo + '" class="chat-group-av" alt="">'
+          : '<div class="chat-group-av chat-group-av-init">' + escHtml(_sName.charAt(0).toUpperCase()) + '</div>';
+        var _sHdr = '<div class="chat-group-sender-row">' + _sAv +
+          '<span class="chat-group-sender-name">' + escHtml(_sName) + '</span></div>';
+        _grpRow.className = 'chat-msg-row theirs';
+        _grpRow.setAttribute('data-msg-id', m.id);
+        _grpRow.innerHTML = _sHdr + _buildBubbleHtml(m, false);
+      }
+      _grpChatBox.appendChild(_grpRow);
+    }
+    try { _scrollChatToBottom(); } catch(e4) {}
+  } else if (m.from !== _currentUser.email) {
+    conv.unread = (conv.unread || 0) + 1;
+  }
+
+  conv.lastMsg = m.text || conv.lastMsg;
+  conv.lastAt  = Math.max(conv.lastAt || 0, Number(m.at) || 0);
+
+  try {
+    var _lsKey = _getGroupMsgKey(projId, ownerEmail);
+    localStorage.setItem(_lsKey, JSON.stringify({ messages: conv.messages, lastMsg: conv.lastMsg, lastAt: conv.lastAt }));
+  } catch(e) {}
+
+  renderConversations();
+}
+
 /* Taille max du cache localStorage PERSISTÉ par groupe libre (PAS de la
    mémoire vive conv.messages, jamais tronquée en session — seul ce qui est
    écrit sur disque est borné, pour éviter une croissance illimitée entre
@@ -24061,6 +24132,7 @@ function _getOrCreateGroupConv(projId, ownerEmail, projTitle, members) {
     existing.avatar.members = members;
     _saveGroupConvs();
     _syncCollabGroupMembers(projId, ownerEmail, members);
+    try { _attachCollabGroupRealtimeListeners(existing); } catch(e) {}
     return existing;
   }
   var _gTs = Date.now();
@@ -24089,6 +24161,7 @@ function _getOrCreateGroupConv(projId, ownerEmail, projTitle, members) {
     messages:       [_sysMsg]
   };
   DEMO_CONVERSATIONS.unshift(conv);
+  try { _attachCollabGroupRealtimeListeners(conv); } catch(e) {}
   _saveGroupConvs();
   /* Phase 9A : la règle Firebase gw/group_msgs exige l'appartenance
      (meta/members/{auth.uid}) pour écrire un message — synchroniser les
@@ -30351,8 +30424,13 @@ function doLogout() {
       if (_gwFbDB._prevGrpInboxRef) { _gwFbDB._prevGrpInboxRef.off(); _gwFbDB._prevGrpInboxRef = null; }
       _gwFbDB.ref('gw/profiles').off('child_added');
       _gwFbDB.ref('gw/profiles').off('child_changed');
-      _gwFbDB.ref('gw/group_msgs').off('child_added');
-      _gwFbDB.ref('gw/group_msgs').off('child_changed');
+      /* SYNC-225 : plus de listener global gw/group_msgs a detacher ici
+         (retire de _initGroupAndInboxListeners, cf. SYNC-109) — detache a
+         la place chaque listener incremental par groupe de collaboration
+         attache durant la session. */
+      Object.keys(_collabGroupRtListeners).forEach(function(fbKey) {
+        try { _detachCollabGroupRealtimeListeners(fbKey); } catch(e) {}
+      });
       if (_currentUser) {
         _gwFbDB.ref('gw/notifs/' + _gwFbKey(_currentUser.email)).off();
       }
