@@ -57,6 +57,118 @@
 const { dbSet, dbGet, dbUpdate, dbRemove, emailKey, appendNotification, checkRateLimit } = require('./_lib/fbrest');
 const { verify } = require('./_lib/session');
 
+/* ═══════════════════════════════════════════════════════════════
+   SYNC-141 — Granularité de rôle server-side.
+
+   Copie server-side de la liste "actions" de _ADM_ROLE_PERMS (js/app.js) —
+   uniquement les actions, jamais les onglets (non nécessaires ici). Dupliquée
+   faute de module partagé entre js/app.js et api/admin/* ; à maintenir en
+   synchronisation si _ADM_ROLE_PERMS change côté client. Référence exacte :
+   js/app.js, const _ADM_ROLE_PERMS.
+   ═══════════════════════════════════════════════════════════════ */
+const ROLE_ACTIONS = {
+  /* 'manage_settings'/'manage_recruiter_verif'/'manage_artiste'/'manage_tasks'/
+     'reply_support' (SYNC-265) : permissions nouvelles, sans équivalent dans
+     _ADM_ROLE_PERMS (js/app.js) — aucune garde client n'existait pour ces
+     actions (SYNC-143/144), la permission requise a donc été fixée par
+     décision produit explicite (SYNC-265), pas déduite du code. */
+  'Super Admin': ['ban', 'unban', 'delete_post', 'delete_user', 'send_notif', 'publish', 'manage_team', 'manage_payments', 'change_settings', 'approve_badge', 'dismiss_report', 'warn_user', 'reset_password', 'change_role', 'approve_request', 'manage_settings', 'manage_recruiter_verif', 'manage_artiste', 'manage_tasks', 'reply_support'],
+  'Admin':       ['ban', 'unban', 'delete_post', 'send_notif', 'publish', 'approve_badge', 'dismiss_report', 'warn_user'],
+  'Modérateur':  ['ban', 'unban', 'dismiss_report', 'warn_user'],
+  'Éditeur':     ['publish'],
+  'Support':     ['warn_user', 'dismiss_report', 'reply_support'],
+};
+
+/* Mapping action moderate.js -> permission _ADM_ROLE_PERMS requise.
+   UNIQUEMENT les actions pour lesquelles une garde client _admHasAction()
+   démontrée existe (cf. rapport SYNC-141, section "Mapping action →
+   permission → rôle") — jamais inventée. Les actions absentes de cette
+   table n'ont aucune correspondance claire ; elles restent volontairement
+   protégées par la seule session admin valide déjà en vigueur (comportement
+   inchangé), documentées comme résiduelles dans le rapport plutôt que
+   protégées par une supposition. `certifyUser` et `clearAllNotifs`
+   conservent leur propre vérification Super Admin dédiée déjà existante,
+   inchangée, et n'apparaissent donc pas ici. */
+const ACTION_PERMISSION = {
+  setPlansConfig:     'change_settings',
+  setSupportConfig:   'change_settings',
+  approveBadge:       'approve_badge',
+  revokeBadge:        'approve_badge',
+  rejectBadge:        'approve_badge',
+  notifyBanApplied:   'ban',
+  notifyBanLifted:    'unban',
+  notifyUserWarned:   'warn_user',
+  clearUserNotifs:    'send_notif',
+  notifyBroadcast:    'send_notif',
+  notifyOfficialPost: 'publish',
+  /* SYNC-143 — quatre mappings démontrés par relecture complète des
+     fonctions appelantes (cf. rapport SYNC-143), manqués par SYNC-141 qui
+     n'avait vérifié que le voisinage immédiat de l'appel _admApi(), pas le
+     sommet de la fonction englobante :
+     - notifyRestrictionAppealRejected : _admResolveRstAppeal(id,'reject')
+       est gardée par _admHasAction('dismiss_report') (js/app.js).
+     - notifyBanAppealRejected : _admResolveAppeal(id,'reject') est gardée
+       par _admHasAction('dismiss_report') (js/app.js), même pattern exact.
+     - notifyRestrictionApplied : seul appelant MANUEL de la fonction
+       partagée _gwApplyRestriction() est _admApplyManualRestriction(),
+       gardée par _admHasAction('ban'). Les appelants AUTOMATIQUES
+       (source='auto'/'auto_nsfw') appliquent toujours la restriction à
+       _currentUser lui-même : la branche if/else-if de _gwApplyRestriction()
+       les redirige donc structurellement vers un pushNotif() direct
+       (self-notify), jamais vers cet appel serveur — cette action n'est
+       DONC JOIGNABLE QUE depuis le chemin manuel déjà gardé. Vérifié ne
+       jamais pouvoir casser le flux automatique, celui-ci n'atteint jamais
+       ce code.
+     - notifyRestrictionLifted : les DEUX seuls appelants de la fonction
+       partagée _gwLiftRestriction() (_admLiftRestriction() et la branche
+       'accept' de _admResolveRstAppeal()) sont chacun gardés par
+       _admHasAction('unban') — aucun appelant automatique n'existe pour
+       cette fonction. */
+  notifyRestrictionAppealRejected: 'dismiss_report',
+  notifyBanAppealRejected:         'dismiss_report',
+  notifyRestrictionApplied:        'ban',
+  notifyRestrictionLifted:         'unban',
+
+  /* SYNC-265 — 11 des 12 actions restées sans mapping après SYNC-143/144
+     (aucune garde client trouvée, cf. rapport SYNC-144) : décision produit
+     explicite reçue (pas déduite du code) — Super Admin uniquement pour
+     toutes, sauf notifySupportReply également ouverte à Support.
+     notifyTaskDone reste volontairement hors de cette table : sa garde
+     client réelle est fondée sur la propriété de la tâche (assignedTo),
+     pas sur un rôle — non reproductible par ce mécanisme (cf. SYNC-144 §6,
+     SYNC-265 §4), nécessite un mécanisme dédié, pas cette décision. */
+  setSettingsLogo:       'manage_settings',
+  setJobsEnabled:        'manage_settings',
+  listRecruiterVerifs:   'manage_recruiter_verif',
+  approveRecruiterVerif: 'manage_recruiter_verif',
+  rejectRecruiterVerif:  'manage_recruiter_verif',
+  revokeRecruiterVerif:  'manage_recruiter_verif',
+  notifyArtisteApproved: 'manage_artiste',
+  notifyArtisteRejected: 'manage_artiste',
+  notifySongDeleted:     'manage_artiste',
+  notifyTaskAssigned:    'manage_tasks',
+  notifySupportReply:    'reply_support',
+};
+
+/* Vérifie qu'un rôle (+ permissions déléguées éventuelles, gw/admin_extra_perms
+   — même logique OR que _admHasAction() côté client, jamais réduite ici sous
+   peine de casser une délégation légitime déjà active) autorise `permission`.
+   `permission` absente de ROLE_ACTIONS pour ce rôle ET absente des permissions
+   déléguées → refusé. Lecture Firebase seulement si le rôle de base ne suffit
+   pas déjà (chemin rapide sans I/O pour le cas le plus courant). */
+async function hasServerPermission(session, permission) {
+  if (!permission) return true;
+  var base = ROLE_ACTIONS[session.role] || [];
+  if (base.indexOf(permission) !== -1) return true;
+  try {
+    var extra = await dbGet('/gw/admin_extra_perms/' + session.email.toLowerCase());
+    var extraActions = (extra && extra.actions) || [];
+    return extraActions.indexOf(permission) !== -1;
+  } catch (e) {
+    return false; /* fail-closed : une lecture impossible ne doit jamais autoriser par défaut */
+  }
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -71,6 +183,40 @@ module.exports = async function handler(req, res) {
     if (!session) { res.status(401).json({ error: 'Session admin invalide ou expiree, reconnectez-vous.' }); return; }
 
     const action = body.action;
+
+    /* SYNC-141 : contrôle du rôle AVANT toute exécution — voir rapport pour
+       la preuve de chaque mapping. `setBans` sert à la fois l'application
+       (ban) et la levée (unban) d'une sanction (même fonction serveur pour
+       les deux, cf. _admConfirmBan()/_admUnbanUser() côté client) : autorisé
+       si l'appelant a l'une ou l'autre permission. Les actions absentes de
+       ACTION_PERMISSION ne sont pas concernées par ce bloc (comportement
+       inchangé, session admin valide suffisante — cf. rapport). */
+    if (action === 'setBans') {
+      const bansOk = (await hasServerPermission(session, 'ban')) || (await hasServerPermission(session, 'unban'));
+      if (!bansOk) { res.status(403).json({ error: 'Action non autorisée pour votre rôle.' }); return; }
+    } else if (action === 'notifyPermissionsUpdated') {
+      /* SYNC-143 : démontré via _admIsSA() — seul point d'entrée client
+         (_admOpenDelegate(), js/app.js) menant à _admSaveDelegate()/cette
+         action. Vérification dédiée (comparaison directe à gw/sadmin),
+         même mécanisme exact que certifyUser/clearAllNotifs ci-dessous —
+         aucune permission nommée de _ADM_ROLE_PERMS n'est associée à ce
+         flux, donc pas via ACTION_PERMISSION/ROLE_ACTIONS. */
+      let sadminCheck;
+      try { sadminCheck = await dbGet('/gw/sadmin'); } catch (e) {
+        res.status(500).json({ error: 'Erreur serveur' });
+        return;
+      }
+      if (!sadminCheck || !sadminCheck.email || sadminCheck.email.toLowerCase() !== session.email.toLowerCase()) {
+        res.status(403).json({ error: 'Action non autorisée pour votre rôle.' });
+        return;
+      }
+    } else {
+      const requiredPermission = ACTION_PERMISSION[action];
+      if (requiredPermission && !(await hasServerPermission(session, requiredPermission))) {
+        res.status(403).json({ error: 'Action non autorisée pour votre rôle.' });
+        return;
+      }
+    }
 
     if (action === 'setBans') {
       await dbSet('/gw/bans', Array.isArray(body.bans) ? body.bans : []);
