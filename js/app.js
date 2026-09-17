@@ -9372,7 +9372,11 @@ function likePost(postId) {
     count.textContent = total;
   });
 
-  /* Persiste les likes dans localStorage + Firebase per-child */
+  /* Persiste les likes dans localStorage + Firebase per-child (écriture
+     directe, best-effort — fonctionne pour les comptes dont l'identité
+     Firebase réelle est déjà établie ; voir _gwSocialLikeSync ci-dessous
+     pour l'écriture authoritative qui couvre aussi les cas où elle ne
+     l'est pas encore, ex. compte Google fraîchement connecté). */
   savePostLikers(postId, post.likers);
   _fbLikeWrite(postId, email, liked);
 
@@ -9382,22 +9386,33 @@ function likePost(postId) {
     _checkLikeMilestone(postId, post.ownerEmail || null, _totalLikes);
   }
 
-  /* Notification au propriétaire du post (si différent de l'auteur du like) */
-  if (liked && post.ownerEmail && post.ownerEmail !== email) {
-    var _likeType    = post.video ? 'votre vidéo' : (post.images && post.images.length ? 'votre photo' : 'votre publication');
-    var _likePreview = ((post.video && post.video.title) || post.text || '').slice(0, 60);
-    pushNotif(post.ownerEmail, {
-      id:          genNotifId(),
-      type:        'like',
-      title:       '❤️ Nouveau like',
-      body:        _currentUser.nom + ' a aimé ' + _likeType,
-      fromUser:    { nom: _currentUser.nom, email: _currentUser.email, role: 'Membre Geniwork' },
-      postId:      post.id,
-      postPreview: _likePreview + (_likePreview.length >= 60 ? '…' : ''),
-      msg:         'a aimé ' + _likeType,
-      at:          Date.now(), time: 'À l\'instant',
-      unread:      true
-    });
+  /* ── Écriture authoritative + notification — SYNC-130, étendu.
+     L'écriture directe ci-dessus (_fbLikeWrite) échoue silencieusement
+     (PERMISSION_DENIED) tant que l'identité Firebase réelle du compte
+     (auth.uid=emailKey) n'est pas établie — cas notamment d'un compte
+     Google dont la mise à niveau de session (_gwSignInRealIdentityGoogle)
+     est asynchrone et non attendue avant d'activer ce bouton. Sans ce
+     second chemin, côté serveur, via le compte de service, le like
+     resterait local à l'appareil et jamais visible des autres. Appelé
+     pour like ET unlike désormais (plus seulement like). */
+  var _likeType = post.video ? 'votre vidéo' : (post.images && post.images.length ? 'votre photo' : 'votre publication');
+  var _lkSession = _gwLoadSession();
+  if (_lkSession && _lkSession.authRefresh) {
+    fetch('/api/social/like', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ authRefreshToken: _lkSession.authRefresh, postId: String(postId), liked: liked })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      if (!d || !d.ok) { console.warn('[GW Social] synchronisation like serveur échouée :', d && d.error); return; }
+      if (!liked || !d.targetEmail) return;
+      /* FCM best-effort : déclenché uniquement après confirmation
+         serveur, avec le destinataire résolu par le serveur — jamais
+         post.ownerEmail — jamais en double avec l'écriture gw/notifs
+         (désormais côté serveur). */
+      try { _gwSendPushNotif(d.targetEmail, '❤️ Nouveau like', _currentUser.nom + ' a aimé ' + _likeType, 'like-' + postId + '-' + email); } catch(e){}
+    }).catch(function(e) { console.warn('[GW Social] appel /api/social/like échoué :', e.message); });
+  } else {
+    console.warn('[GW Social] pas de jeton de session — like non synchronisé côté serveur pour', postId);
   }
 }
 
