@@ -6133,22 +6133,6 @@ function toggleDarkMode(enabled) {
   }
 }
 
-function openFavorisPage() {
-  /* Ouvre le feed filtré sur les favoris */
-  var homeBtn = document.querySelector('.bnav-item[data-page="p-home"]');
-  navTo(homeBtn, 'p-home');
-  /* Filtre l'affichage sur les posts favoris */
-  var favs = getFavorites();
-  if (!favs.length) {
-    showToast('Aucun favori pour l\'instant', '');
-    return;
-  }
-  var favIds = favs.map(function(f) { return f.postId; });
-  var filtered = _getFeedPosts().filter(function(p) { return favIds.indexOf(p.id) !== -1; });
-  renderFeed(filtered);
-  showToast('Affichage de vos ' + filtered.length + ' favori(s)', 'ok');
-}
-
 /* ══════════════════════════════════════════
    SYSTÈME DE BADGES
 ══════════════════════════════════════════ */
@@ -6332,6 +6316,8 @@ function _refreshSettingsPrivacy() {
 
   var langEl = document.getElementById('s-lang-label');
   if (langEl) langEl.textContent = _getLangLabel();
+
+  _privUpdateSummary();
 }
 
 /* ══════════════════════════════════════════
@@ -7298,11 +7284,6 @@ function _privUpdateSummary() {
   if (data.messagesFrom === 'none')      parts.push('Messages bloqués');
   else if (data.messagesFrom === 'followers') parts.push('Messages : abonnés');
   el.textContent = parts.join(' · ');
-}
-
-/* Initialise le résumé au chargement des paramètres */
-function _refreshSettingsPrivacy() {
-  _privUpdateSummary();
 }
 
 /* ══════════════════════════════════════════
@@ -10734,13 +10715,13 @@ function _toggleEmojiPicker(e) {
   var panel = document.getElementById('emoji-picker-panel');
   if (!panel) return;
   if (panel.classList.contains('hidden')) {
-    _openEmojiPicker();
+    _openCommentEmojiPicker();
   } else {
-    _closeEmojiPicker();
+    _closeCommentEmojiPicker();
   }
 }
 
-function _openEmojiPicker() {
+function _openCommentEmojiPicker() {
   var panel = document.getElementById('emoji-picker-panel');
   if (!panel) return;
   if (!panel._built) {
@@ -10751,13 +10732,13 @@ function _openEmojiPicker() {
   }
   panel.classList.remove('hidden');
   /* Ferme si clic ailleurs — retire l'ancien listener avant d'en ajouter un nouveau */
-  document.removeEventListener('click', _closeEmojiPicker);
+  document.removeEventListener('click', _closeCommentEmojiPicker);
   setTimeout(function() {
-    document.addEventListener('click', _closeEmojiPicker, { once: true });
+    document.addEventListener('click', _closeCommentEmojiPicker, { once: true });
   }, 0);
 }
 
-function _closeEmojiPicker() {
+function _closeCommentEmojiPicker() {
   var panel = document.getElementById('emoji-picker-panel');
   if (panel) panel.classList.add('hidden');
 }

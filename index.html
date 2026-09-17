@@ -3082,8 +3082,8 @@
         <div class="comments-input-wrap">
           <button class="emoji-trigger-btn" onclick="_toggleEmojiPicker(event)" type="button">😊</button>
           <input type="text" id="comment-input" placeholder="Écrire un commentaire..."
-                 onkeydown="if(event.key==='Enter'){_closeEmojiPicker();submitComment()}"/>
-          <button onclick="_closeEmojiPicker();submitComment()"><i class="fas fa-paper-plane"></i></button>
+                 onkeydown="if(event.key==='Enter'){_closeCommentEmojiPicker();submitComment()}"/>
+          <button onclick="_closeCommentEmojiPicker();submitComment()"><i class="fas fa-paper-plane"></i></button>
         </div>
       </div>
     </div>
