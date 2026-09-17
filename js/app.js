@@ -2808,13 +2808,30 @@ function _googleLogin(gUser) {
     }, 600);
   }
 
-  /* Charge les utilisateurs depuis Firebase d'abord */
+  /* Charge les utilisateurs depuis Firebase d'abord — avec timeout : sans
+     lui, une connexion Firebase instable au moment précis du login (juste
+     après l'auth Google, pendant la bascule d'identité) peut laisser cette
+     lecture ne jamais aboutir ni échouer, bloquant indéfiniment l'overlay
+     "Finalisation…" (symptôme : app figée juste après clic Google). Repli
+     sur le cache local getUsers() si Firebase ne répond pas en 6s. */
   if (_gwFbReady && _gwFbDB) {
+    var _glResolved = false;
+    var _glTimeout = setTimeout(function() {
+      if (_glResolved) return;
+      _glResolved = true;
+      _doGoogleLogin(getUsers());
+    }, 6000);
     _gwFbDB.ref('gw/users').once('value').then(function(snap) {
+      if (_glResolved) return;
+      _glResolved = true;
+      clearTimeout(_glTimeout);
       var fbUsers = snap.val();
       var users = Array.isArray(fbUsers) ? fbUsers : getUsers();
       _doGoogleLogin(users);
     }).catch(function() {
+      if (_glResolved) return;
+      _glResolved = true;
+      clearTimeout(_glTimeout);
       _doGoogleLogin(getUsers());
     });
   } else {
@@ -2885,6 +2902,22 @@ function _gwPreloadUserData(user, callback) {
   if (!_gwFbReady || !_gwFbDB || !user || !user.email) {
     callback(); return;
   }
+  /* Garde anti-double-appel + timeout : si UNE seule des 17 lectures ci-
+     dessous reste bloquée (ni résolue ni rejetée — observé en pratique sur
+     une connexion Firebase instable), Promise.all n'aboutit jamais et
+     l'app reste figée indéfiniment sur l'écran de connexion (symptôme :
+     plantage juste après le login). Au-delà de 8s, on ouvre l'app quand
+     même avec les données déjà en cache local — les listeners temps réel
+     (_initGroupAndInboxListeners etc.) rattraperont le reste dès que la
+     connexion se stabilise. */
+  var _puDone = false;
+  var _puCallback = function() {
+    if (_puDone) return;
+    _puDone = true;
+    clearTimeout(_puTimeout);
+    callback();
+  };
+  var _puTimeout = setTimeout(_puCallback, 8000);
   var fbKey = _gwFbKey(user.email);
   Promise.all([
     _gwFbDB.ref('gw/inboxes/' + fbKey).once('value'),         /* 0 */
@@ -3066,8 +3099,8 @@ function _gwPreloadUserData(user, callback) {
       try { localStorage.setItem('gw_viewed_vids_' + user.email, JSON.stringify(viewedFb)); } catch(e){}
     }
 
-    callback();
-  }).catch(function() { callback(); });
+    _puCallback();
+  }).catch(function() { _puCallback(); });
 }
 
 /* Lance l'app après que Firebase a chargé les données critiques */
