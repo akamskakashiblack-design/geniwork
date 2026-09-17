@@ -14227,20 +14227,205 @@ function handleImgPick(input) {
   /* Max 6 photos au total */
   var remaining = 6 - _pickedImages.length;
   files = files.slice(0, remaining);
+  if (!files.length) return;
 
-  var loaded = 0;
-  files.forEach(function(file) {
+  var idx = 0;
+  function next() {
+    if (idx >= files.length) { renderImgPreviews(); return; }
+    var file = files[idx++];
     var reader = new FileReader();
     reader.onload = function(e) {
-      /* Comprimer toutes les photos dès la sélection → petites en mémoire et dans Firebase */
-      _compressImageForChat(e.target.result, 200000, function(compressed) {
-        _pickedImages.push(compressed);
-        loaded++;
-        if (loaded === files.length) renderImgPreviews();
-      });
+      _gwOpenPhotoCropper(e.target.result, function(croppedDataUrl) {
+        /* Comprimer la photo recadrée → petite en mémoire et dans Firebase */
+        _compressImageForChat(croppedDataUrl, 200000, function(compressed) {
+          _pickedImages.push(compressed);
+          next();
+        });
+      }, function() { next(); });
     };
     reader.readAsDataURL(file);
+  }
+  next();
+}
+
+/* ══════════════════════════════════════════
+   RECADRAGE PHOTO (4:5 / 1:1 / 16:9)
+   Même principe que le recadrage vidéo (_gwVedCrop*) : glisser pour
+   repositionner (object-position en %), slider pour zoomer (transform
+   scale), mais avec un choix de format et une "cuisson" finale sur un
+   <canvas> (photo statique → recadrage réellement appliqué aux pixels,
+   contrairement à la vidéo qui applique le cadrage à la lecture).
+   100% local : aucun appel réseau, aucune dépendance serveur.
+══════════════════════════════════════════ */
+var _photoCrop = null;
+var _pcropDrag = null;
+var _PCROP_RATIOS = [['4:5', 4, 5], ['1:1', 1, 1], ['16:9', 16, 9]];
+
+function _gwOpenPhotoCropper(srcDataUrl, onDone, onCancel) {
+  var old = document.getElementById('gw-pcrop-ov');
+  if (old) old.remove();
+
+  _photoCrop = {
+    src: srcDataUrl,
+    ratio: '1:1',
+    zoom: 1,
+    pos: { x: 50, y: 50 },
+    onDone: onDone,
+    onCancel: onCancel
+  };
+
+  var ratioBtns = _PCROP_RATIOS.map(function(r) {
+    var label = r[0];
+    var active = label === _photoCrop.ratio;
+    return '<button class="gw-pcrop-ratio-btn" data-ratio="' + label + '" onclick="_gwPhotoCropSetRatio(\'' + label + '\')" ' +
+      'style="padding:8px 18px;border-radius:20px;border:1.5px solid ' + (active ? '#8B5CF6' : '#3A3A3A') + ';' +
+      'background:' + (active ? 'rgba(139,92,246,.18)' : 'transparent') + ';color:#fff;font-size:13px;font-weight:600;cursor:pointer">' +
+      label + '</button>';
+  }).join('');
+
+  var ov = document.createElement('div');
+  ov.id = 'gw-pcrop-ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:#000;z-index:99999;display:flex;flex-direction:column';
+  ov.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:#0A0A0A;flex-shrink:0">' +
+      '<button onclick="_gwPhotoCropCancel()" style="background:none;border:none;color:#fff;font-size:15px;cursor:pointer;padding:6px">Annuler</button>' +
+      '<span style="color:#fff;font-weight:700;font-size:15px">Recadrer la photo</span>' +
+      '<button onclick="_gwPhotoCropConfirm()" style="background:linear-gradient(135deg,#6366F1,#8B5CF6);border:none;color:#fff;font-weight:700;font-size:14px;padding:8px 18px;border-radius:10px;cursor:pointer">Valider</button>' +
+    '</div>' +
+    '<div id="gw-pcrop-mid" style="flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:16px;min-height:0">' +
+      '<div id="gw-pcrop-frame" style="position:relative;overflow:hidden;background:#111;border-radius:4px;touch-action:none">' +
+        '<img id="gw-pcrop-img" src="' + srcDataUrl + '" draggable="false" ' +
+          'style="width:100%;height:100%;object-fit:cover;object-position:50% 50%;transform:scale(1);display:block;user-select:none;-webkit-user-drag:none"/>' +
+      '</div>' +
+    '</div>' +
+    '<div style="padding:10px 16px 18px;background:#0A0A0A;flex-shrink:0">' +
+      '<div style="display:flex;gap:8px;justify-content:center;margin-bottom:14px">' + ratioBtns + '</div>' +
+      '<div style="display:flex;align-items:center;gap:10px">' +
+        '<i class="fas fa-magnifying-glass-minus" style="color:#666;font-size:13px"></i>' +
+        '<input type="range" id="gw-pcrop-zoom" min="100" max="250" value="100" oninput="_gwPhotoCropZoom(this.value)" style="flex:1"/>' +
+        '<i class="fas fa-magnifying-glass-plus" style="color:#666;font-size:13px"></i>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(ov);
+  _gwPhotoCropApplyFrameSize();
+  window.addEventListener('resize', _gwPhotoCropApplyFrameSize);
+
+  var frame = document.getElementById('gw-pcrop-frame');
+  frame.addEventListener('pointerdown',   _gwPhotoCropDragStart);
+  frame.addEventListener('pointermove',   _gwPhotoCropDragMove);
+  frame.addEventListener('pointerup',     _gwPhotoCropDragEnd);
+  frame.addEventListener('pointercancel', _gwPhotoCropDragEnd);
+}
+
+function _gwPhotoCropApplyFrameSize() {
+  if (!_photoCrop) return;
+  var frame = document.getElementById('gw-pcrop-frame');
+  var mid   = document.getElementById('gw-pcrop-mid');
+  if (!frame || !mid) return;
+  var found = _PCROP_RATIOS.filter(function(r) { return r[0] === _photoCrop.ratio; })[0];
+  var rw = found[1], rh = found[2];
+  var maxW = Math.max(50, mid.clientWidth  - 32);
+  var maxH = Math.max(50, mid.clientHeight - 32);
+  var w = maxW, h = w * (rh / rw);
+  if (h > maxH) { h = maxH; w = h * (rw / rh); }
+  frame.style.width  = w + 'px';
+  frame.style.height = h + 'px';
+}
+
+function _gwPhotoCropSetRatio(r) {
+  if (!_photoCrop) return;
+  _photoCrop.ratio = r;
+  _photoCrop.pos = { x: 50, y: 50 };
+  document.querySelectorAll('.gw-pcrop-ratio-btn').forEach(function(btn) {
+    var active = btn.getAttribute('data-ratio') === r;
+    btn.style.borderColor = active ? '#8B5CF6' : '#3A3A3A';
+    btn.style.background  = active ? 'rgba(139,92,246,.18)' : 'transparent';
   });
+  var img = document.getElementById('gw-pcrop-img');
+  if (img) img.style.objectPosition = '50% 50%';
+  _gwPhotoCropApplyFrameSize();
+}
+
+/* Zoom (slider 100%–250%) — même convention que le recadrage vidéo */
+function _gwPhotoCropZoom(val) {
+  if (!_photoCrop) return;
+  var z = Math.max(1, Math.min(2.5, val / 100));
+  _photoCrop.zoom = z;
+  var img = document.getElementById('gw-pcrop-img');
+  if (img) img.style.transform = 'scale(' + z + ')';
+}
+
+function _gwPhotoCropDragStart(e) {
+  if (!_photoCrop) return;
+  var frame = document.getElementById('gw-pcrop-frame');
+  _pcropDrag = {
+    startX: e.clientX, startY: e.clientY,
+    origX: _photoCrop.pos.x, origY: _photoCrop.pos.y,
+    w: frame.clientWidth, h: frame.clientHeight
+  };
+  try { frame.setPointerCapture(e.pointerId); } catch(err) {}
+}
+function _gwPhotoCropDragMove(e) {
+  if (!_pcropDrag || !_photoCrop) return;
+  var dx = e.clientX - _pcropDrag.startX;
+  var dy = e.clientY - _pcropDrag.startY;
+  var nx = _pcropDrag.origX - (dx / _pcropDrag.w) * 100;
+  var ny = _pcropDrag.origY - (dy / _pcropDrag.h) * 100;
+  nx = Math.max(0, Math.min(100, nx));
+  ny = Math.max(0, Math.min(100, ny));
+  _photoCrop.pos.x = nx;
+  _photoCrop.pos.y = ny;
+  var img = document.getElementById('gw-pcrop-img');
+  if (img) img.style.objectPosition = nx + '% ' + ny + '%';
+}
+function _gwPhotoCropDragEnd() { _pcropDrag = null; }
+
+function _gwPhotoCropClose() {
+  window.removeEventListener('resize', _gwPhotoCropApplyFrameSize);
+  var ov = document.getElementById('gw-pcrop-ov');
+  if (ov) ov.remove();
+  _photoCrop = null;
+  _pcropDrag = null;
+}
+
+function _gwPhotoCropCancel() {
+  var cb = _photoCrop && _photoCrop.onCancel;
+  _gwPhotoCropClose();
+  if (cb) cb();
+}
+
+/* Applique réellement le recadrage aux pixels (canvas) — même formule que
+   CSS object-fit:cover + object-position + transform:scale, mais "cuite"
+   dans une vraie image de sortie de outW×outH pixels (résolution fixe,
+   qualité constante quel que soit l'écran de l'utilisateur). */
+function _gwPhotoCropConfirm() {
+  if (!_photoCrop) return;
+  var state = _photoCrop;
+  var img = new Image();
+  img.onload = function() {
+    var found = _PCROP_RATIOS.filter(function(r) { return r[0] === state.ratio; })[0];
+    var rw = found[1], rh = found[2];
+    var iw = img.naturalWidth, ih = img.naturalHeight;
+
+    var scale = Math.max(rw / iw, rh / ih) * state.zoom;
+    var cropW = Math.min(rw / scale, iw);
+    var cropH = Math.min(rh / scale, ih);
+    var cropX = (iw - cropW) * (state.pos.x / 100);
+    var cropY = (ih - cropH) * (state.pos.y / 100);
+
+    var outW = 1080;
+    var outH = Math.round(outW * (rh / rw));
+    var canvas = document.createElement('canvas');
+    canvas.width = outW; canvas.height = outH;
+    canvas.getContext('2d').drawImage(img, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
+    var dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+
+    var onDone = state.onDone;
+    _gwPhotoCropClose();
+    if (onDone) onDone(dataUrl);
+  };
+  img.src = state.src;
 }
 
 function renderImgPreviews() {

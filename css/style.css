@@ -1820,7 +1820,11 @@ body.dark-mode .feed-end-msg { color: #64748B; }
   cursor: pointer;
 }
 
-.post-images.grid-1 .post-img { aspect-ratio: 16/9; }
+/* Photo unique : respecte le ratio choisi au recadrage (4:5/1:1/16:9) au
+   lieu d'un 16:9 forcé qui recadrerait à nouveau une photo déjà cadrée par
+   l'utilisateur ; max-height en filet de sécurité pour d'anciens posts sans
+   recadrage connu (ratio potentiellement inhabituel). */
+.post-images.grid-1 .post-img { aspect-ratio: auto; max-height: 600px; }
 
 .post-images.grid-4 { grid-template-columns: 1fr 1fr; }
 .post-images.grid-4 .post-img { aspect-ratio: 1; }
