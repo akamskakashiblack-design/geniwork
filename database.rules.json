@@ -84,7 +84,7 @@
           ".read": "auth != null && data.child('participants').child(auth.uid).exists()",
           "participants": {
             "$uid": {
-              ".write": "auth != null && ((!data.parent().exists() && newData.val() === true && newData.parent().child(auth.uid).exists()) || (data.exists() && newData.val() === data.val()))"
+              ".write": "auth != null && ((!data.parent().exists() && newData.val() === true && newData.parent().child(auth.uid).exists() && root.child('gw/plans_config/messagesEnabled').val() !== false) || (data.exists() && newData.val() === data.val()))"
             }
           },
           "lastMessage": {
@@ -104,7 +104,7 @@
         "$conversationId": {
           ".read": "auth != null && root.child('gw/dm_conversations_v2/'+$conversationId+'/participants/'+auth.uid).exists()",
           "$messageId": {
-            ".write": "auth != null && root.child('gw/dm_conversations_v2/'+$conversationId+'/participants/'+auth.uid).exists() && !data.exists() && newData.child('senderId').val() === auth.uid && newData.hasChildren(['senderId','senderEmail','text','createdAt'])"
+            ".write": "auth != null && root.child('gw/dm_conversations_v2/'+$conversationId+'/participants/'+auth.uid).exists() && !data.exists() && newData.child('senderId').val() === auth.uid && newData.hasChildren(['senderId','senderEmail','text','createdAt']) && root.child('gw/plans_config/messagesEnabled').val() !== false"
           }
         }
       },
@@ -113,7 +113,7 @@
           ".read": "auth != null && data.child('meta/members').child(auth.uid).exists()",
           ".write": "auth != null && !newData.exists() && data.child('meta/owner').val() === auth.uid",
           "meta": {
-            ".write": "auth != null && !data.exists() && newData.child('owner').val() === auth.uid && newData.child('members').child(auth.uid).val() === true",
+            ".write": "auth != null && !data.exists() && newData.child('owner').val() === auth.uid && newData.child('members').child(auth.uid).val() === true && root.child('gw/plans_config/messagesEnabled').val() !== false",
             "groupId": {
               ".write": "auth != null && !data.exists()"
             },
@@ -165,7 +165,7 @@
           },
           "messages": {
             "$messageId": {
-              ".write": "auth != null && root.child('gw/group_msgs/'+$grpFbKey+'/meta/members/'+auth.uid).exists() && !data.exists() && (($grpFbKey.matches(/^gw_grp_adhoc_/) && newData.child('senderId').val() === auth.uid && newData.hasChildren(['senderId','senderEmail','text','createdAt'])) || (!($grpFbKey.matches(/^gw_grp_adhoc_/)) && newData.hasChildren(['id','from','text','at']) && (newData.child('from').val() === 'system' || newData.child('from').val() === root.child('gw/group_msgs/'+$grpFbKey+'/meta/memberEmails/'+auth.uid).val())))"
+              ".write": "auth != null && root.child('gw/group_msgs/'+$grpFbKey+'/meta/members/'+auth.uid).exists() && !data.exists() && (($grpFbKey.matches(/^gw_grp_adhoc_/) && newData.child('senderId').val() === auth.uid && newData.hasChildren(['senderId','senderEmail','text','createdAt'])) || (!($grpFbKey.matches(/^gw_grp_adhoc_/)) && newData.hasChildren(['id','from','text','at']) && (newData.child('from').val() === 'system' || newData.child('from').val() === root.child('gw/group_msgs/'+$grpFbKey+'/meta/memberEmails/'+auth.uid).val()))) && root.child('gw/plans_config/messagesEnabled').val() !== false"
             }
           }
         }
@@ -191,7 +191,10 @@
       "posts": {
         ".read":  true,
         "$userFbKey": {
-          ".write": "auth != null && auth.uid === $userFbKey"
+          ".write": "auth != null && auth.uid === $userFbKey",
+          "$postId": {
+            ".validate": "!data.exists() ? ((newData.child('video/videoType').val() !== 'video' || root.child('gw/plans_config/videosEnabled').val() !== false) && (newData.child('video/videoType').val() !== 'short' || root.child('gw/plans_config/shortsEnabled').val() !== false)) : true"
+          }
         }
       },
       "post_imgs": {

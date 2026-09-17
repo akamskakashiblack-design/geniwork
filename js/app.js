@@ -2097,6 +2097,16 @@ function _gwFbSyncStart() {
     _admSync('dashboard');
     /* Appliquer immédiatement les sections activées/désactivées */
     try { _gwApplyMkSections(); } catch(e) {}
+    /* SYNC-262 : ré-applique le filtre vidéos/shorts du fil déjà affiché —
+       UNIQUEMENT ici (changement réel de plans_config), jamais depuis
+       _gwApplyMkSections() elle-même : cette fonction est aussi appelée à
+       chaque navigation Accueil/Le Souk (showPage()), où un rechargement
+       complet du fil (renderFeed détruit/reconstruit tout le DOM, les
+       IntersectionObserver et les lecteurs vidéo) cassait l'optimisation
+       "navigation instantanée" et provoquait des reconstructions inutiles
+       et répétées du fil — cause probable de ralentissements/plantages
+       après plusieurs navigations (corrigé, cf. SYNC-262). */
+    try { if (document.getElementById('feed-list')) renderFeed(_getFeedPosts()); } catch(e) {}
     /* Phase SYNC-OPTIONS-02 : re-rendre le bloc PayPal d'une fiche Marketplace
        deja ouverte si paypalEnabled a reellement change — comparaison a la
        derniere valeur connue pour eviter tout rerender inutile/boucle.
@@ -4260,62 +4270,99 @@ function doLogin() {
     showToast('Trop de tentatives. Réessayez dans ' + secs + ' s.', 'err'); return;
   }
 
-  var user = findUser(email);
-
-  /* Message générique : ne révèle pas si l'email existe */
-  if (!user) {
-    _gwRecordFail(bruteKey);
-    try { _secOnLoginFail(email); } catch(e){}
-    showToast('Email ou mot de passe incorrect', 'err'); return;
-  }
-  /* Compte Google → inviter à utiliser le bouton Google */
-  if (user.loginMethod === 'google' && !user.password) {
+  /* SYNC-236 : localUser n'est plus qu'un raccourci UX best-effort (compte
+     déjà connu sur CET appareil) — jamais l'autorité de connexion. Un
+     appareil qui ne l'a pas en cache (findUser() = undefined) passe
+     directement à la vérification serveur ci-dessous, qui reste valide
+     dans tous les cas. */
+  var localUser = findUser(email);
+  if (localUser && localUser.loginMethod === 'google' && !localUser.password) {
     showToast('Ce compte utilise Google. Cliquez sur "Continuer avec Google".', 'err'); return;
   }
-  /* Compte banni */
-  if (!_gwCheckBanOnLogin(email)) return;
-  /* Compte non vérifié */
-  if (!user.verified) {
-    showToast('Compte non vérifié. Vérifiez votre e-mail.', 'err'); return;
-  }
 
-  /* ── Vérification asynchrone du mot de passe (PBKDF2) ── */
   var loginBtn = document.querySelector('#screen-login .auth-btn') || document.querySelector('#screen-login button[onclick="doLogin()"]');
   if (loginBtn) { loginBtn.disabled = true; loginBtn.textContent = 'Vérification…'; }
 
-  _gwVerifyPwd(pwd, user.password).then(function(ok) {
+  /* SYNC-236 (cause racine prouvée par SYNC-232/234, architecture retenue
+     par SYNC-235) : /api/auth/token — et non plus le cache local
+     localStorage.gw_users — devient l'autorité de la décision de connexion.
+     Il vérifie déjà correctement email+mot de passe contre Firebase
+     /gw/users via le compte de service (hors .read:false), ce qui permet
+     à un compte réel de se connecter même sur un appareil qui ne l'a
+     jamais mis en cache. */
+  fetch('/api/auth/token', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ email: email, password: pwd })
+  })
+  .then(function(r) {
+    return r.json().then(function(data) { return { status: r.status, data: data }; });
+  })
+  .then(function(result) {
     if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = 'Se connecter'; }
+    var status = result.status, data = result.data;
 
-    if (!ok) {
+    if (!data || !data.ok) {
+      /* Message générique : ne révèle jamais si l'e-mail existe (anti-énumération
+         déjà assurée par /api/auth/token, dont la seule branche d'échec
+         "identifiants" renvoie toujours le même 401 générique). */
       _gwRecordFail(bruteKey);
       try { _secOnLoginFail(email); } catch(e){}
+
+      if (data && data.code === 'unverified') {
+        showToast('Compte non vérifié. Vérifiez votre e-mail.', 'err'); return;
+      }
+      if (status === 429) {
+        showToast((data && data.error) || 'Trop de tentatives. Réessayez plus tard.', 'err'); return;
+      }
+      if (status >= 500) {
+        showToast('Erreur serveur. Réessayez.', 'err'); return;
+      }
       var remaining = 5 - ((_gwAttempts[bruteKey] || {}).count || 0);
       showToast('Email ou mot de passe incorrect' + (remaining <= 2 ? ' (' + remaining + ' essai(s) restant)' : ''), 'err');
       return;
     }
 
-    /* ── Connexion réussie ── */
+    /* ── Connexion réussie (identifiants confirmés par le serveur) ── */
     _gwResetBrute(bruteKey);
 
-    /* Migration transparente : si mot de passe en texte clair → rehache maintenant */
-    if (user.password && user.password.indexOf('pbkdf2:') !== 0) {
-      var salt = _gwSalt();
-      _gwHashPwd(pwd, salt).then(function(hashed) {
-        var users = getUsers();
-        var idx = users.findIndex(function(u) { return u.email.toLowerCase() === email; });
-        if (idx !== -1) { users[idx].password = hashed; saveUsers(users); }
+    /* Compte banni : règle métier locale existante, inchangée — vérifiée une
+       fois les identifiants confirmés, avant l'ouverture de session. */
+    if (!_gwCheckBanOnLogin(email)) return;
+
+    var nom         = data.nom || (localUser && localUser.nom) || '';
+    var loginMethod = data.loginMethod || (localUser && localUser.loginMethod) || 'email';
+    var sessionUser = { nom: nom, email: email, loginMethod: loginMethod };
+
+    /* Établit directement la session Firebase réelle à partir du Custom
+       Token déjà reçu (mécanisme existant, inchangé — même principe que
+       register-verify.js côté inscription). */
+    if (data.refreshToken) _gwSaveAuthRefresh(data.refreshToken);
+    if (data.token && typeof firebase !== 'undefined' && firebase.auth) {
+      firebase.auth().signInWithCustomToken(data.token).catch(function(e) {
+        console.warn('[GW Firebase] signInWithCustomToken (login) ignoré :', e.message);
       });
     }
 
-    /* Crée une session sécurisée */
-    var session = _gwCreateSession(user);
-    _currentUser = { nom: user.nom, email: user.email, loginMethod: user.loginMethod || 'email' };
+    /* Crée une session sécurisée (mécanisme existant, inchangé) */
+    var session = _gwCreateSession(sessionUser);
+    _currentUser = sessionUser;
 
-    /* Étape 1 migration auth : obtient une vraie session Firebase liée à
-       l'identité réelle (auth.uid), en plus de la session anonyme actuelle.
-       Best-effort : si ça échoue, la connexion continue normalement
-       (comme avant), rien n'est bloquant. */
-    _gwSignInRealIdentity(email, pwd);
+    /* Synchronise le cache local (getUsers()) EN SECONDAIRE — jamais la
+       preuve de connexion (déjà acquise côté serveur ci-dessus), copie de
+       confort pour les usages non-auth existants ailleurs dans l'app.
+       Best-effort : n'affecte jamais la session déjà établie. */
+    var salt = _gwSalt();
+    _gwHashPwd(pwd, salt).then(function(localHash) {
+      var usersCache = getUsers();
+      var idx = usersCache.findIndex(function(u) { return u.email.toLowerCase() === email; });
+      if (idx !== -1) {
+        usersCache[idx].password = localHash;
+      } else {
+        usersCache.push({ nom: nom, email: email, password: localHash, verified: true, loginMethod: loginMethod });
+      }
+      saveUsers(usersCache);
+    }).catch(function() { /* best-effort */ });
 
     showToast('Connexion réussie ✓', 'ok');
     setTimeout(function() {
@@ -4325,6 +4372,10 @@ function doLogin() {
         goTo('screen-app');
       });
     }, 900);
+  })
+  .catch(function() {
+    if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = 'Se connecter'; }
+    showToast('Erreur réseau. Réessayez.', 'err');
   });
 }
 
@@ -4496,11 +4547,23 @@ function doForgot() {
 
   goTo('screen-reset-verify');
 
+  /* SYNC-228 : distingue une erreur HTTP/réseau RÉELLE d'une réponse serveur
+     normale, sans jamais lire ni révéler le contenu de cette dernière (elle
+     reste volontairement générique — Phase SYNC-95, anti-énumération de
+     comptes). Avant ce correctif, aucune réponse n'était jamais examinée :
+     une vraie panne (infra Vercel, 5xx) était donc silencieuse au même
+     titre qu'un succès, empêchant tout diagnostic depuis l'interface. */
   fetch('/api/auth/reset-request', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify({ email: email })
-  }).catch(function() { /* réponse toujours générique côté serveur, rien à afficher de plus */ });
+  })
+  .then(function(r) {
+    if (!r.ok) showToast('Erreur technique. Réessayez dans quelques instants.', 'err');
+    /* HTTP 200 : ne jamais interpréter le corps de la réponse — reste
+       toujours générique côté serveur, que le compte existe ou non. */
+  })
+  .catch(function() { showToast('Erreur réseau. Réessayez.', 'err'); });
 }
 
 /* ══════════════════════════════════════════
@@ -8176,6 +8239,10 @@ function getAllPosts() {
 /* Posts pour le FEED principal — exclut les Shorts (réservés à la section Short) */
 function _getFeedPosts() {
   var seen = {};
+  /* SYNC-256 : masque les vidéos déjà publiées quand le module est désactivé
+     par l'admin — les Shorts sont de toute façon déjà exclus du fil ci-dessous
+     (ligne suivante), leur propre filtre est fait dans _vsBuildList(). */
+  var videosOff = _admGetPlansConfig().videosEnabled === false;
   return DEMO_POSTS.concat(PENDING_POSTS).filter(function(p) {
     if (!p || !p.id) return false;
     var key = String(p.id);
@@ -8184,7 +8251,8 @@ function _getFeedPosts() {
     /* Les offres d'emploi restent exclusivement dans la page Emploi, jamais dans le fil */
     if (p.type === 'job') return false;
     if (p.video && p.video.videoType === 'short') return false;
-    /* Respecte "Publications visibles" — l'auteur voit toujours ses propres posts */
+    if (videosOff && p.video && p.video.videoType !== 'short') return false;
+    /* Respecte "Publications visibles"" — l'auteur voit toujours ses propres posts */
     if (p.ownerEmail && !(_currentUser && p.ownerEmail === _currentUser.email) && _privLoadForEmail(p.ownerEmail).postsVisible === false) return false;
     return true;
   });
@@ -14733,6 +14801,9 @@ function _gwResolveVideoUrlFromFb(post, cb) {
 
 /* ── Collecte les Shorts, tri plus récent en premier ── */
 function _vsBuildList() {
+  /* SYNC-256 : Shorts désactivés par l'admin → aucun Short affiché (existants
+     compris), tant que la fonction n'est pas réactivée. */
+  if (_admGetPlansConfig().shortsEnabled === false) return [];
   var result = [], seenIds = {};
   getAllPosts().forEach(function(p) {
     if (!p) return;
@@ -17249,6 +17320,9 @@ function vdSetFilter(filter, btn) {
 }
 
 function _vdAllVideos() {
+  /* SYNC-256 : Vidéos désactivées par l'admin → aucune vidéo affichée
+     (existantes comprises), tant que la fonction n'est pas réactivée. */
+  if (_admGetPlansConfig().videosEnabled === false) return [];
   return getAllPosts().filter(function(p) {
     return p && p.video &&
            (p.video.videoType === 'video' || !p.video.videoType) &&
@@ -18097,6 +18171,25 @@ function publierPost() {
 
   if (!text && _pickedImages.length === 0 && !_pickedVideo && !_pickedDoc && !_quotePostRef) {
     showToast('Écrivez quelque chose ou ajoutez un média', 'err'); return;
+  }
+
+  /* ── SYNC-256 : blocage création si Vidéos/Shorts désactivés par l'admin ──
+     Nécessaire en plus du masquage UI (§_gwApplyMkSections) car la capture
+     caméra Short partage son bouton composeur avec Photo (non désactivable
+     séparément) — ce garde-fou couvre donc aussi ce chemin, avant même
+     d'atteindre la validation Firebase (qui reste le blocage réel, cf.
+     database.rules.json). Vérifié ici pour éviter qu'un post "réussisse"
+     localement (écriture optimiste) puis échoue silencieusement en fond lors
+     de la synchronisation Firebase. */
+  if (_pickedVideo) {
+    var _sync256IsShort = _pickedVideo.videoType === 'short';
+    var _sync256Cfg = _admGetPlansConfig();
+    if (_sync256IsShort && _sync256Cfg.shortsEnabled === false) {
+      showToast('Les Shorts sont temporairement désactivés', 'err'); return;
+    }
+    if (!_sync256IsShort && _sync256Cfg.videosEnabled === false) {
+      showToast('Les vidéos sont temporairement désactivées', 'err'); return;
+    }
   }
 
   /* ── Vérification restriction de compte ── */
@@ -21006,6 +21099,17 @@ function renderProfilPosts(email, nom, container) {
 
   function _doRenderPosts(allPosts) {
     container.innerHTML = '';
+
+    /* SYNC-256 : masque les vidéos/Shorts déjà publiés si désactivés par
+       l'admin — appliqué avant le tri par catégorie pour que "Tout" et les
+       compteurs des sous-onglets restent cohérents. */
+    var _sync256Cfg = _admGetPlansConfig();
+    allPosts = allPosts.filter(function(p) {
+      var cat = _postPubCategory(p);
+      if (cat === 'video' && _sync256Cfg.videosEnabled === false) return false;
+      if (cat === 'short' && _sync256Cfg.shortsEnabled === false) return false;
+      return true;
+    });
 
     /* Tri */
     allPosts = allPosts.slice().sort(function(a, b) { return (b.id || 0) - (a.id || 0); });
@@ -32637,6 +32741,10 @@ function _admGetPlansConfig() {
       premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true,
       paymentsEnabled: true, ebookEnabled: true, collabEnabled: true, artisteEnabled: true,
       businessAiEnabled: true,
+      /* SYNC-256 : interrupteurs Vidéos / Shorts / Messagerie */
+      videosEnabled: true, shortsEnabled: true, messagesEnabled: true,
+      /* SYNC-261 : interrupteur Dépenses */
+      expensesEnabled: true,
       paypalEnabled: false, paypalEmail: ''
     };
     var stored = JSON.parse(localStorage.getItem('gw_plans_config') || '{}');
@@ -32647,6 +32755,8 @@ function _admGetPlansConfig() {
       premiumEnabled: true, businessEnabled: true, badgeEnabled: true, bannersEnabled: true,
       paymentsEnabled: true, ebookEnabled: true, collabEnabled: true, artisteEnabled: true,
       businessAiEnabled: true,
+      videosEnabled: true, shortsEnabled: true, messagesEnabled: true,
+      expensesEnabled: true,
       paypalEnabled: false, paypalEmail: ''
     };
   }
@@ -32697,6 +32807,46 @@ function _gwApplyMkSections() {
   if (heroCollab) heroCollab.style.display = (cfg.collabEnabled !== false) ? '' : 'none';
   var heroAI = document.querySelector('.feed-cat-ai');
   if (heroAI) heroAI.style.display = (cfg.businessAiEnabled !== false) ? '' : 'none';
+
+  /* ── SYNC-256 : Vidéos / Shorts / Messagerie ──
+     Masque les points d'entrée UI ET redirige hors d'une page désactivée si
+     elle était ouverte au moment du changement (même principe que
+     _jobApplyFeatureVisibility() pour le module Emploi). Le blocage réel de
+     la création/l'envoi est fait côté Firebase Rules (database.rules.json) —
+     ceci n'est que l'affichage. */
+  var videosOn   = cfg.videosEnabled   !== false;
+  var shortsOn   = cfg.shortsEnabled   !== false;
+  var messagesOn = cfg.messagesEnabled !== false;
+
+  var heroVideo = document.querySelector('.feed-cat-video');
+  if (heroVideo) heroVideo.style.display = videosOn ? '' : 'none';
+  var heroShort = document.querySelector('.feed-cat-short');
+  if (heroShort) heroShort.style.display = shortsOn ? '' : 'none';
+
+  /* SYNC-261 : bouton héro Dépenses */
+  var expensesOn = cfg.expensesEnabled !== false;
+  var heroExpenses = document.querySelector('.feed-cat-expenses');
+  if (heroExpenses) heroExpenses.style.display = expensesOn ? '' : 'none';
+
+  /* Ligne "Vidéo" du composeur (upload galerie) — Shorts (caméra) partage sa
+     ligne avec Photo et ne peut pas être isolée sans casser la capture Photo,
+     le blocage Shorts repose donc sur publierPost() + les Rules Firebase. */
+  var pubRowVideo = document.getElementById('pub-row-video');
+  if (pubRowVideo) pubRowVideo.style.display = videosOn ? '' : 'none';
+
+  /* Entrée de navigation Messages (DM + groupes) — barre mobile ET sidebar desktop
+     (SYNC-261 : la sidebar desktop, #sdb-nav-msg, avait été oubliée en SYNC-256) */
+  var msgNavBtn = document.querySelector('.bnav-item[data-page="p-messages"]');
+  if (msgNavBtn) msgNavBtn.style.display = messagesOn ? '' : 'none';
+  var msgSidebarBtn = document.getElementById('sdb-nav-msg');
+  if (msgSidebarBtn) msgSidebarBtn.style.display = messagesOn ? '' : 'none';
+  if (!messagesOn) {
+    var msgPage = document.getElementById('p-messages');
+    if (msgPage && msgPage.classList.contains('active')) {
+      showPage('p-home');
+      showToast('La messagerie est temporairement désactivée', 'err');
+    }
+  }
 }
 function _admSavePlansConfig(cfg) {
   localStorage.setItem('gw_plans_config', JSON.stringify(cfg));
@@ -35818,6 +35968,14 @@ function _admBuildSettings() {
   html += '<div class="adm-settings-section">';
   html += settingsToggleHtml('badge',   'Système de badges ✅',   '🏅', cfg.badgeEnabled);
   html += settingsToggleHtml('banners', 'Bannières d\'usage 📊',  '🪧', cfg.bannersEnabled);
+  html += '</div>';
+
+  /* ── SYNC-256 : Vidéos, Shorts, Messagerie ── */
+  html += '<div class="adm-dash-title" style="margin-top:20px"><i class="fas fa-video" style="color:#DC2626;margin-right:6px"></i>Vidéos & Messagerie</div>';
+  html += '<div class="adm-settings-section">';
+  html += settingsToggleHtml('videos',   'Vidéos 🎬',                    '🎬', cfg.videosEnabled   !== false);
+  html += settingsToggleHtml('shorts',   'Vidéos courtes (Shorts) 📱',   '📱', cfg.shortsEnabled   !== false);
+  html += settingsToggleHtml('messages', 'Messagerie (DM + groupes) 💬', '💬', cfg.messagesEnabled !== false);
   html += '</div>';
 
   /* ── Sections Marketplace ── */

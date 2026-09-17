@@ -113,6 +113,31 @@ async function sendCodeEmail(email, code, type) {
     ? 'Geniwork — Réinitialisation\n\nCode : ' + code + '\n\nExpire dans 10 minutes.'
     : 'Geniwork — Vérification\n\nCode : ' + code + '\n\nExpire dans 10 minutes.';
 
+  /* Chemin principal : Resend, sur le domaine dédié mail.geniwork.fr
+     (SPF/DKIM vérifiés — voir gw/mission notes). Bien meilleure
+     délivrabilité Outlook/Hotmail/Live qu'un compte Gmail personnel.
+     RESEND_FROM_EMAIL doit être une adresse du domaine vérifié
+     (ex. no-reply@mail.geniwork.fr) ; sans cette variable, on retombe
+     sur Gmail plutôt que d'utiliser le domaine partagé onboarding@resend.dev. */
+  var apiKey = process.env.RESEND_API_KEY;
+  var resendFrom = process.env.RESEND_FROM_EMAIL;
+
+  if (apiKey && resendFrom) {
+    var resp = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: 'Geniwork <' + resendFrom + '>', to: [email], subject: subject, html: html, text: text })
+    });
+    var data = await resp.json();
+    if (resp.ok && data.id) return { ok: true, via: 'resend', id: data.id };
+    /* Échec Resend (config/domaine/destinataire/quota) : on tente le repli
+       Gmail ci-dessous plutôt que d'échouer immédiatement — jamais le
+       message d'erreur du fournisseur dans les logs sans contexte utile. */
+    console.error('[Geniwork Mailer] échec envoi Resend (repli Gmail si configuré) :', data.message || resp.status);
+  }
+
+  /* Repli : compte Gmail personnel (chemin historique, conservé pour
+     compatibilité si Resend n'est pas configuré ou a échoué). */
   var gmailUser = process.env.GMAIL_USER;
   var gmailPass = process.env.GMAIL_APP_PASSWORD;
 
@@ -131,17 +156,19 @@ async function sendCodeEmail(email, code, type) {
     return { ok: true, via: 'gmail', id: info.messageId };
   }
 
-  var apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) throw new Error('Service email non configuré');
 
-  var resp = await fetch('https://api.resend.com/emails', {
+  /* Dernier repli : Resend avec le domaine partagé par défaut (non
+     recommandé en production, seulement si RESEND_FROM_EMAIL est absent
+     ET Gmail n'est pas configuré non plus). */
+  var fallbackResp = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({ from: 'Geniwork <onboarding@resend.dev>', to: [email], subject: subject, html: html, text: text })
   });
-  var data = await resp.json();
-  if (resp.ok && data.id) return { ok: true, via: 'resend', id: data.id };
-  throw new Error(data.message || 'Erreur envoi email');
+  var fallbackData = await fallbackResp.json();
+  if (fallbackResp.ok && fallbackData.id) return { ok: true, via: 'resend-shared', id: fallbackData.id };
+  throw new Error(fallbackData.message || 'Erreur envoi email');
 }
 
 module.exports = { sendCodeEmail, buildRegisterHtml, buildResetHtml };
