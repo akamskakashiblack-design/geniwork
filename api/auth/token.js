@@ -136,7 +136,22 @@ module.exports = async function handler(req, res) {
     const token = signCustomToken(uid, sa);
     const refreshToken = signRefreshToken(email);
 
-    res.status(200).json({ ok: true, token: token, uid: uid, nom: u.nom || null, loginMethod: u.loginMethod || 'email', refreshToken: refreshToken });
+    /* cguAccepted === false explicitement => CGU jamais acceptées (compte créé
+       après l'introduction de ce champ, verifie() encore en attente côté
+       client). Absent (comptes créés avant ce champ) => traité comme accepté,
+       jamais de régression pour les comptes existants. Le jeton est quand
+       même émis : le client en a besoin pour terminer l'écran CGU sans
+       redemander le mot de passe, mais ne doit établir de session tant que
+       cguAccepted n'est pas revenu à true (voir accept-cgu.js). */
+    res.status(200).json({
+      ok: true,
+      token: token,
+      uid: uid,
+      nom: u.nom || null,
+      loginMethod: u.loginMethod || 'email',
+      refreshToken: refreshToken,
+      cguAccepted: u.cguAccepted !== false,
+    });
   } catch (err) {
     console.error('[Geniwork Auth] erreur token:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });

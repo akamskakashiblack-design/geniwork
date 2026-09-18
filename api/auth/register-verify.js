@@ -153,7 +153,7 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    const newUser = { nom: nom, email: email, password: hashPwd(password), verified: true };
+    const newUser = { nom: nom, email: email, password: hashPwd(password), verified: true, cguAccepted: false };
     users.push(newUser);
     await dbSet('/gw/users', users);
 

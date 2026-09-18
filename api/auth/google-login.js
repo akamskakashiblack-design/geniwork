@@ -21,8 +21,14 @@
    classique) et n'est utilisé que pour un tout nouveau compte.
 
    Body: { credential } OU { accessToken }, + { nom } optionnel.
-   Réponse : { ok:true, token, refreshToken, uid, email, nom, isNewAccount }
-   ou { ok:false, error }.
+   Réponse : { ok:true, token, refreshToken, uid, email, nom, isNewAccount,
+   cguAccepted } ou { ok:false, error }. cguAccepted vaut false uniquement
+   si le compte l'a explicitement à false (jamais accepté) — absent (comptes
+   créés avant ce champ) est traité comme accepté, pour ne jamais bloquer
+   les comptes Google déjà existants. Le jeton est émis même si false : le
+   client doit alors rediriger vers l'écran CGU avant d'établir une session
+   (voir accept-cgu.js), jamais accepter cguAccepted comme preuve suffisante
+   côté client seul.
 
    Émet aussi un Firebase Custom Token, exactement comme google-token.js
    (même mécanisme, dupliqué car ce fichier reste indépendant) — le client
@@ -162,11 +168,15 @@ module.exports = async function handler(req, res) {
 
     let nom;
     let isNewAccount = false;
+    let cguAccepted;
 
     if (idx !== -1) {
       /* Cas A (déjà lié) ou Cas B (trouvé par email, googleId absent). */
       const existing = users[idx];
       nom = existing.nom;
+      /* Absent (comptes crees avant ce champ) => traite comme accepte,
+         jamais de regression pour les comptes Google deja existants. */
+      cguAccepted = existing.cguAccepted !== false;
       if (!existing.googleId && googleId) {
         /* Écriture ciblée uniquement — jamais password/email/verified. */
         await dbSet('/gw/users/' + idx + '/googleId', googleId);
@@ -188,8 +198,9 @@ module.exports = async function handler(req, res) {
         suffix++;
       }
       nom = candidateNom;
+      cguAccepted = false;
 
-      const newUser = { nom: nom, email: email, password: null, verified: true, googleId: googleId, loginMethod: 'google' };
+      const newUser = { nom: nom, email: email, password: null, verified: true, googleId: googleId, loginMethod: 'google', cguAccepted: false };
       users.push(newUser);
       await dbSet('/gw/users', users);
 
@@ -206,7 +217,7 @@ module.exports = async function handler(req, res) {
     const token = signCustomToken(uid, sa);
     const refreshToken = signRefreshToken(email);
 
-    res.status(200).json({ ok: true, token: token, refreshToken: refreshToken, uid: uid, email: email, nom: nom, isNewAccount: isNewAccount });
+    res.status(200).json({ ok: true, token: token, refreshToken: refreshToken, uid: uid, email: email, nom: nom, isNewAccount: isNewAccount, cguAccepted: cguAccepted });
   } catch (err) {
     console.error('[Geniwork Auth] erreur google-login:', err.message);
     res.status(500).json({ ok: false, error: 'Erreur serveur' });
