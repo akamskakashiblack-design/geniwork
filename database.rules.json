@@ -172,8 +172,8 @@
       },
       "group_inboxes": {
         "$userFbKey": {
-          ".read": "auth != null && (!$userFbKey.matches(/^free_/) || $userFbKey === ('free_' + auth.uid))",
-          ".write": "auth != null && !$userFbKey.matches(/^free_/) && $userFbKey === auth.uid",
+          ".read": "auth != null && ((!$userFbKey.matches(/^free_/) && $userFbKey === auth.uid) || $userFbKey === ('free_' + auth.uid))",
+          ".write": "auth != null && ((!$userFbKey.matches(/^free_/) && $userFbKey === auth.uid) || $userFbKey === ('free_' + auth.uid))",
           "$groupId": {
             ".write": "auth != null && ((!$userFbKey.matches(/^free_/) && $userFbKey === auth.uid) || $userFbKey === ('free_' + auth.uid) || root.child('gw/group_msgs/'+$groupId+'/meta/members/'+auth.uid).exists())"
           }
@@ -313,8 +313,15 @@
         }
       },
       "mk_txns": {
-        ".read":  "auth != null",
-        ".write": "auth != null"
+        ".read":  "auth.token.gw_admin === true",
+        ".write": false
+      },
+      "mk_txns_v2": {
+        ".read":  "auth.token.gw_admin === true",
+        "$uid": {
+          ".read":  "auth != null && auth.uid === $uid",
+          ".write": false
+        }
       },
       "collab_requests": {
         ".read":  false,
@@ -367,9 +374,9 @@
         ".write": false
       },
       "reports": {
-        ".read":  "auth != null",
+        ".read":  "auth != null && auth.token.gw_admin === true",
         "$userFbKey": {
-          ".write": "auth != null"
+          ".write": "auth != null && (auth.uid === $userFbKey || auth.token.gw_admin === true || $userFbKey.matches(/^nsfw_/))"
         }
       },
       "blocked": {
@@ -411,8 +418,8 @@
         }
       },
       "payments": {
-        ".read":  "auth != null",
-        ".write": "auth != null"
+        ".read":  "auth.token.gw_admin === true",
+        ".write": false
       },
       "plans_config": {
         ".read":  true,
@@ -554,7 +561,7 @@
         "$recruiterUid": {
           ".write": "auth != null && auth.uid === $recruiterUid",
           "$jobId": {
-            ".validate": "newData.hasChildren(['id','title','description','postedBy','status'])",
+            ".validate": "newData.hasChildren(['id','title','description','postedBy','status']) && (!data.exists() ? root.child('gw/settings_jobs_enabled').val() !== 0 : true)",
             "id":         { ".validate": "newData.val() === $jobId" },
             "postedBy":   { ".validate": "!data.exists() || newData.val() === data.val()" },
             "status":     { ".validate": "!data.exists() ? newData.val() === 'active' : (newData.val() === data.val() || newData.val() === 'closed')" },
@@ -645,10 +652,399 @@
         ".write": "auth != null"
       }
     },
+    "gwr": {
+      "profiles": {
+        ".read":  true,
+        ".indexOn": ["nomLower"],
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid",
+          "email": { ".validate": false },
+          "phone": { ".validate": false },
+          "trustBadge": {
+            ".write": "auth != null && root.child('gwr_admin/accounts/'+auth.uid+'/status').val() === 'approved'",
+            ".validate": "auth.uid !== $uid || newData.val() === data.val()"
+          }
+        }
+      },
+      "profiles_private": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      },
+      "presence": {
+        ".read": true,
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      },
+      "feed": {
+        ".read":  true,
+        ".indexOn": ["createdAt"],
+        "$postId": {
+          ".write": "auth != null && (!data.exists() ? newData.child('authorUid').val() === auth.uid : (!newData.exists() ? data.child('authorUid').val() === auth.uid : (auth.uid === data.child('authorUid').val() && newData.child('authorUid').val() === data.child('authorUid').val())))"
+        }
+      },
+      "posts": {
+        ".read":  true,
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      },
+      "projects": {
+        ".read":  true,
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      },
+      "tracks": {
+        ".read":  true,
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      },
+      "music_feed": {
+        ".read":  true,
+        ".indexOn": ["createdAt"],
+        "$trackId": {
+          ".write": "auth != null && (!data.exists() ? newData.child('artistUid').val() === auth.uid : (!newData.exists() ? data.child('artistUid').val() === auth.uid : (auth.uid === data.child('artistUid').val() && newData.child('artistUid').val() === data.child('artistUid').val())))"
+        }
+      },
+      "track_likes": {
+        ".read":  true,
+        "$trackId": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        }
+      },
+      "track_plays": {
+        ".read": true,
+        "$trackId": {
+          "$playId": {
+            ".write": "auth != null && !data.exists()"
+          }
+        }
+      },
+      "track_downloads": {
+        ".read": true,
+        "$trackId": {
+          "$downloadId": {
+            ".write": "auth != null && !data.exists()"
+          }
+        }
+      },
+      "videos": {
+        ".read":  true,
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      },
+      "videos_feed": {
+        ".read":  true,
+        ".indexOn": ["createdAt"],
+        "$videoId": {
+          ".write": "auth != null && (!data.exists() ? newData.child('authorUid').val() === auth.uid : (!newData.exists() ? data.child('authorUid').val() === auth.uid : (auth.uid === data.child('authorUid').val() && newData.child('authorUid').val() === data.child('authorUid').val())))"
+        }
+      },
+      "video_likes": {
+        ".read":  true,
+        "$videoId": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        }
+      },
+      "video_views": {
+        ".read": true,
+        "$videoId": {
+          "$viewId": {
+            ".write": "auth != null && !data.exists()"
+          }
+        }
+      },
+      "video_courses": {
+        ".read": true,
+        ".indexOn": ["createdAt"],
+        "$courseId": {
+          ".write": "auth != null && (!data.exists() ? newData.child('authorUid').val() === auth.uid : (!newData.exists() ? data.child('authorUid').val() === auth.uid : (auth.uid === data.child('authorUid').val() && newData.child('authorUid').val() === data.child('authorUid').val())))"
+        }
+      },
+      "likes": {
+        ".read":  true,
+        "$postId": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        }
+      },
+      "dislikes": {
+        ".read":  true,
+        "$postId": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        }
+      },
+      "comment_likes": {
+        ".read":  true,
+        "$commentId": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        }
+      },
+      "comment_dislikes": {
+        ".read":  true,
+        "$commentId": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        }
+      },
+      "reports": {
+        ".read": "auth != null && root.child('gwr_admin/accounts/'+auth.uid+'/status').val() === 'approved'",
+        "$postId": {
+          "$uid": {
+            ".read": "auth != null && auth.uid === $uid",
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        }
+      },
+      "blocked": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          "$blockedUid": {
+            ".read": "auth != null && auth.uid === $blockedUid",
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        }
+      },
+      "hidden_posts": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          "$postId": {
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        }
+      },
+      "comments": {
+        ".read":  true,
+        "$postId": {
+          "$commentId": {
+            ".write": "auth != null && ((!data.exists() && newData.child('authorFbKey').val() === auth.uid) || (data.exists() && data.child('authorFbKey').val() === auth.uid && (!newData.exists() || newData.child('authorFbKey').val() === data.child('authorFbKey').val())))"
+          }
+        }
+      },
+      "following": {
+        ".read":  true,
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      },
+      "followers": {
+        "$targetUid": {
+          ".read":  true,
+          "$followerUid": {
+            ".write": "auth != null && auth.uid === $followerUid"
+          }
+        }
+      },
+      "dm_conversations": {
+        "$conversationId": {
+          ".read": "auth != null && data.child('participants').child(auth.uid).exists()",
+          "participants": {
+            "$uid": {
+              ".write": "auth != null && ((!data.parent().exists() && newData.val() === true && newData.parent().child(auth.uid).exists()) || (data.exists() && newData.val() === data.val()))"
+            }
+          },
+          "lastMessage": {
+            ".write": "auth != null && data.parent().child('participants').child(auth.uid).exists()"
+          }
+        }
+      },
+      "dm_messages": {
+        "$conversationId": {
+          ".read": "auth != null && root.child('gwr/dm_conversations/'+$conversationId+'/participants/'+auth.uid).exists()",
+          "$messageId": {
+            ".write": "auth != null && root.child('gwr/dm_conversations/'+$conversationId+'/participants/'+auth.uid).exists() && !data.exists() && newData.child('senderId').val() === auth.uid && newData.hasChildren(['senderId','senderEmail','text','createdAt'])"
+          }
+        }
+      },
+      "dm_user_conversations": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          "$conversationId": {
+            ".write": "auth != null && ((newData.exists() && newData.val() === true && root.child('gwr/dm_conversations/'+$conversationId+'/participants/'+$uid).exists() && (auth.uid === $uid || root.child('gwr/dm_conversations/'+$conversationId+'/participants/'+auth.uid).exists())) || (!newData.exists() && auth.uid === $uid))"
+          }
+        }
+      },
+      "group_conversations": {
+        "$groupId": {
+          ".read": "auth != null && data.child('members').child(auth.uid).exists()",
+          ".write": "auth != null && !data.exists() && newData.child('creatorUid').val() === auth.uid && newData.child('members').child(auth.uid).exists() && newData.child('admins').child(auth.uid).exists()",
+          "name": {
+            ".write": "auth != null && root.child('gwr/group_conversations/'+$groupId+'/admins/'+auth.uid).exists()"
+          },
+          "description": {
+            ".write": "auth != null && root.child('gwr/group_conversations/'+$groupId+'/admins/'+auth.uid).exists()"
+          },
+          "photoUrl": {
+            ".write": "auth != null && root.child('gwr/group_conversations/'+$groupId+'/admins/'+auth.uid).exists()"
+          },
+          "bannerUrl": {
+            ".write": "auth != null && root.child('gwr/group_conversations/'+$groupId+'/admins/'+auth.uid).exists()"
+          },
+          "members": {
+            "$uid": {
+              ".write": "auth != null && ((newData.exists() && (root.child('gwr/group_conversations/'+$groupId+'/admins/'+auth.uid).exists() || (auth.uid === $uid && root.child('gwr/group_join_proofs/'+$groupId+'/'+$uid+'/at').val() > now - 120000 && root.child('gwr/group_invite_codes/'+root.child('gwr/group_join_proofs/'+$groupId+'/'+$uid+'/code').val()+'/groupId').val() === $groupId))) || (!newData.exists() && $uid !== root.child('gwr/group_conversations/'+$groupId+'/creatorUid').val() && (auth.uid === $uid || root.child('gwr/group_conversations/'+$groupId+'/admins/'+auth.uid).exists())))"
+            }
+          },
+          "admins": {
+            "$uid": {
+              ".write": "auth != null && root.child('gwr/group_conversations/'+$groupId+'/admins/'+auth.uid).exists() && ($uid !== root.child('gwr/group_conversations/'+$groupId+'/creatorUid').val() || newData.val() === true)"
+            }
+          },
+          "lastMessage": {
+            ".write": "auth != null && data.parent().child('members').child(auth.uid).exists()"
+          }
+        }
+      },
+      "group_user_conversations": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          "$groupId": {
+            ".write": "auth != null && ((newData.exists() && newData.val() === true && root.child('gwr/group_conversations/'+$groupId+'/members/'+$uid).exists() && (auth.uid === $uid || root.child('gwr/group_conversations/'+$groupId+'/admins/'+auth.uid).exists())) || (!newData.exists() && (auth.uid === $uid || root.child('gwr/group_conversations/'+$groupId+'/admins/'+auth.uid).exists())))"
+          }
+        }
+      },
+      "group_invites": {
+        "$groupId": {
+          ".read": "auth != null && root.child('gwr/group_conversations/'+$groupId+'/members/'+auth.uid).exists()",
+          ".write": "auth != null && root.child('gwr/group_conversations/'+$groupId+'/members/'+auth.uid).exists()",
+          ".validate": "newData.hasChildren(['code','createdBy','createdAt'])",
+          "code": { ".validate": "newData.isString() && newData.val().length >= 16 && newData.val().length <= 64" },
+          "createdBy": { ".validate": "newData.val() === auth.uid" },
+          "createdAt": { ".validate": "newData.val() === now" },
+          "$other": { ".validate": false }
+        }
+      },
+      "group_invite_codes": {
+        "$code": {
+          ".read": "auth != null",
+          ".write": "auth != null && ((!data.exists() && root.child('gwr/group_conversations/'+newData.child('groupId').val()+'/members/'+auth.uid).exists()) || (data.exists() && !newData.exists() && root.child('gwr/group_conversations/'+data.child('groupId').val()+'/members/'+auth.uid).exists()))",
+          ".validate": "newData.hasChildren(['groupId','createdBy','createdAt']) && $code.length >= 16",
+          "groupId": { ".validate": "newData.isString() && newData.val().length <= 200" },
+          "groupName": { ".validate": "newData.isString() && newData.val().length <= 200" },
+          "groupPhotoUrl": { ".validate": "newData.isString() && newData.val().length <= 1000 && newData.val().beginsWith('https://')" },
+          "createdBy": { ".validate": "newData.val() === auth.uid" },
+          "createdAt": { ".validate": "newData.val() === now" },
+          "$other": { ".validate": false }
+        }
+      },
+      "group_join_proofs": {
+        "$groupId": {
+          "$uid": {
+            ".read": "auth != null && auth.uid === $uid",
+            ".write": "auth != null && auth.uid === $uid && (!newData.exists() || root.child('gwr/group_invite_codes/'+newData.child('code').val()+'/groupId').val() === $groupId)",
+            ".validate": "newData.hasChildren(['code','at'])",
+            "code": { ".validate": "newData.isString() && newData.val().length <= 64" },
+            "at": { ".validate": "newData.val() === now" },
+            "$other": { ".validate": false }
+          }
+        }
+      },
+      "notifications": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          "$notifId": {
+            ".write": "auth != null && (auth.uid === $uid || (!data.exists() && newData.child('fromUid').val() === auth.uid && !root.child('gwr/blocked/'+$uid+'/'+auth.uid).exists() && $notifId === auth.uid+'__'+newData.child('type').val()+'__'+(newData.child('postId').exists() ? newData.child('postId').val() : (newData.child('groupId').exists() ? newData.child('groupId').val() : '')) && (newData.child('type').val() === 'follow' || ((newData.child('type').val() === 'like' || newData.child('type').val() === 'dislike' || newData.child('type').val() === 'comment' || newData.child('type').val() === 'share') && root.child('gwr/feed/'+newData.child('postId').val()+'/authorUid').val() === $uid) || (newData.child('type').val() === 'mission_applied' && root.child('gwr/missions/'+newData.child('postId').val()+'/posterUid').val() === $uid) || (newData.child('type').val() === 'mission_validated' && root.child('gwr/missions/'+newData.child('postId').val()+'/posterUid').val() === auth.uid) || (newData.child('type').val() === 'group_added' && root.child('gwr/group_conversations/'+newData.child('groupId').val()+'/members/'+$uid).exists() && root.child('gwr/group_conversations/'+newData.child('groupId').val()+'/members/'+auth.uid).exists()))))",
+            ".validate": "newData.hasChildren(['id','type','fromUid','fromNom','createdAt','read'])",
+            "id": { ".validate": "newData.isString() && newData.val() === $notifId" },
+            "type": { ".validate": "newData.isString() && (newData.val() === 'like' || newData.val() === 'dislike' || newData.val() === 'comment' || newData.val() === 'follow' || newData.val() === 'share' || newData.val() === 'mission_applied' || newData.val() === 'mission_validated' || newData.val() === 'group_added')" },
+            "fromUid": { ".validate": "newData.isString() && newData.val().length <= 200 && (!data.exists() || newData.val() === data.val())" },
+            "fromNom": { ".validate": "newData.isString() && newData.val().length <= 100" },
+            "postId": { ".validate": "newData.isString() && newData.val().length <= 200" },
+            "commentText": { ".validate": "newData.isString() && newData.val().length <= 200" },
+            "groupId": { ".validate": "newData.isString() && newData.val().length <= 200" },
+            "groupName": { ".validate": "newData.isString() && newData.val().length <= 200" },
+            "createdAt": { ".validate": "newData.isNumber() && (data.exists() ? newData.val() === data.val() : newData.val() === now)" },
+            "read": { ".validate": "newData.isBoolean()" },
+            "$other": { ".validate": false }
+          }
+        }
+      },
+      "artist_verifications": {
+        ".read": "auth != null && root.child('gwr_admin/accounts/'+auth.uid+'/status').val() === 'approved'",
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": "auth != null && ((auth.uid === $uid && newData.child('status').val() === 'pending') || root.child('gwr_admin/accounts/'+auth.uid+'/status').val() === 'approved')"
+        }
+      },
+      "badge_requests": {
+        ".read": "auth != null && root.child('gwr_admin/accounts/'+auth.uid+'/status').val() === 'approved'",
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": "auth != null && ((auth.uid === $uid && newData.child('status').val() === 'pending') || root.child('gwr_admin/accounts/'+auth.uid+'/status').val() === 'approved')"
+        }
+      },
+      "missions": {
+        ".read": true,
+        ".indexOn": ["createdAt"],
+        "$missionId": {
+          ".write": "auth != null && (!data.exists() ? newData.child('posterUid').val() === auth.uid : (!newData.exists() ? data.child('posterUid').val() === auth.uid : (auth.uid === data.child('posterUid').val() && newData.child('posterUid').val() === data.child('posterUid').val())))"
+        }
+      },
+      "souk_listings": {
+        ".read": true,
+        ".indexOn": ["createdAt"],
+        "$listingId": {
+          ".write": "auth != null && (!data.exists() ? newData.child('authorUid').val() === auth.uid : (!newData.exists() ? data.child('authorUid').val() === auth.uid : (auth.uid === data.child('authorUid').val() && newData.child('authorUid').val() === data.child('authorUid').val())))",
+          ".validate": "newData.hasChildren(['id','title','category','price','image','authorUid','authorName','createdAt'])",
+          "id": { ".validate": "newData.isString() && newData.val() === $listingId" },
+          "title": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 120" },
+          "description": { ".validate": "newData.isString() && newData.val().length <= 2000" },
+          "category": { ".validate": "newData.val() === 'services' || newData.val() === 'products'" },
+          "price": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 50" },
+          "location": { ".validate": "newData.isString() && newData.val().length <= 100" },
+          "image": { ".validate": "newData.isString() && newData.val().length <= 1000 && newData.val().beginsWith('https://')" },
+          "authorUid": { ".validate": "newData.isString()" },
+          "authorName": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 100 && (!root.child('gwr/profiles/'+auth.uid+'/nom').exists() || newData.val() === root.child('gwr/profiles/'+auth.uid+'/nom').val())" },
+          "authorAvatar": { ".validate": "newData.isString() && newData.val().length <= 1000 && newData.val().beginsWith('https://')" },
+          "createdAt": { ".validate": "newData.isNumber() && newData.val() <= now + 60000 && (!data.exists() || newData.val() === data.val())" },
+          "$other": { ".validate": false }
+        }
+      },
+      "mission_applications": {
+        "$missionId": {
+          ".read": "auth != null",
+          "$applicantUid": {
+            ".write": "auth != null && auth.uid === $applicantUid && !data.exists()"
+          }
+        }
+      },
+      "mission_completions": {
+        "$workerUid": {
+          ".read": true,
+          "$missionId": {
+            ".write": "auth != null && !data.exists() && root.child('gwr/missions/'+$missionId+'/posterUid').val() === auth.uid && root.child('gwr/missions/'+$missionId+'/assignedUid').val() === $workerUid"
+          }
+        }
+      }
+    },
     "gw_system": {
       "reset_at": {
         ".read":  "auth != null",
         ".write": "auth != null"
+      }
+    },
+    "gwr_admin": {
+      "accounts": {
+        ".read": "auth != null && root.child('gwr_admin/accounts/'+auth.uid+'/role').val() === 'super_admin' && root.child('gwr_admin/accounts/'+auth.uid+'/status').val() === 'approved'",
+        "$uid": {
+          ".read": "auth != null && (auth.uid === $uid || (root.child('gwr_admin/accounts/'+auth.uid+'/role').val() === 'super_admin' && root.child('gwr_admin/accounts/'+auth.uid+'/status').val() === 'approved'))",
+          ".write": "auth != null && (auth.uid === $uid || (root.child('gwr_admin/accounts/'+auth.uid+'/role').val() === 'super_admin' && root.child('gwr_admin/accounts/'+auth.uid+'/status').val() === 'approved'))"
+        }
       }
     }
   }
